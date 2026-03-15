@@ -1,0 +1,51 @@
+[package]
+name = "octoweb"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "octoweb"
+path = "src/main.rs"
+
+[dependencies]
+# WebView + windowing (Tauri team — must stay in sync)
+wry = { version = "0.54", features = ["transparent", "devtools", "fullscreen"] }
+tao = "0.34"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }
+
+# Global hotkey — CGEventTap intercepts Cmd+K even when WKWebView has focus
+# Must stay on main thread (TSM APIs require it on macOS 15+)
+core-graphics = { version = "0.25", features = ["highsierra"] }
+core-foundation = "0.10"
+
+# Fuzzy search (used server-side to pre-rank before injecting into overlay)
+fuzzy-matcher = "0.3"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Utils
+dirs = "6"
+agent-client-protocol = "0.10.2"
+async-trait = "0.1"
+tokio = { version = "1.50.0", features = ["full"] }
+tokio-util = { version = "0.7.18", features = ["compat"] }
+anyhow = "1.0.102"
+
+# MCP Server for AI assistant control (HTTP JSON-RPC)
+rmcp = { version = "1.2.0", features = ["server", "transport-streamable-http-server"] }
+schemars = "1.0"
+axum = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1  # faster dev builds, still usable perf

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Octoweb</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Octoweb</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>com.muvon.octoweb</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleSignature</key>
+    <string>????</string>
+
+    <key>CFBundleExecutable</key>
+    <string>octoweb</string>
+
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- Retina / high-DPI support -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Required for WKWebView to load http:// and arbitrary URLs (browser use case) -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- Accessibility API — required for CGEventTap global hotkeys -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Octoweb uses accessibility features for global keyboard shortcuts.</string>
+
+    <!-- Minimum macOS version -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+
+    <!-- Suppress dock icon bounce on launch -->
+    <key>LSUIElement</key>
+    <false/>
+</dict>
+</plist>
