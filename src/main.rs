@@ -65,6 +65,8 @@ enum AppEvent {
     QuickSlotSave(usize), // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize), // remove slot (from footer bar ✕ or newtab page)
     AcpWake,            // lightweight wake — ACP thread pokes event loop
+    DownloadStarted(usize), // (tab_id) — navigation became a download, close the tab
+    DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification, // user clicked X on notification toast
     Quit,
 }
@@ -167,6 +169,8 @@ fn main() {
             let p2 = proxy.clone();
             let p3 = proxy.clone();
             let p4 = proxy.clone();
+            let p5 = proxy.clone();
+            let p6 = proxy.clone();
             let sz = browser_win.inner_size();
             let bounds = wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
@@ -248,6 +252,17 @@ fn main() {
                     // Cmd+click or target=_blank — open in a new tab instead of a new window.
                     let _ = p4.send_event(AppEvent::OpenInNewTab(url));
                     wry::NewWindowResponse::Deny
+                })
+                .with_download_started_handler(move |_url, _path| {
+                    // Navigation became a download — tell main loop to close the tab
+                    let _ = p5.send_event(AppEvent::DownloadStarted(tab_id));
+                    true // allow the download
+                })
+                .with_download_completed_handler(move |_url, path, success| {
+                    let filename = path
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .unwrap_or_default();
+                    let _ = p6.send_event(AppEvent::DownloadCompleted(filename, success));
                 })
                 .build_as_child(&*browser_win)
                 .expect("Failed to create tab WebView")
@@ -1623,6 +1638,30 @@ fn main() {
                     let _ = notification_wv.set_visible(false);
                     notification_visible = false;
                 }
+            }
+
+            // ── Download started — close the tab that became a download ──────
+            Event::UserEvent(AppEvent::DownloadStarted(tab_id)) => {
+                tracing::debug!(tab_id, "Download started, closing download tab");
+                let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
+            }
+
+            // ── Download completed — show notification toast ─────────────────
+            Event::UserEvent(AppEvent::DownloadCompleted(filename, success)) => {
+                let msg = if success {
+                    format!("Downloaded: {filename}")
+                } else {
+                    format!("Download failed: {filename}")
+                };
+                tracing::debug!(%msg, "Download completed");
+                let escaped = msg.replace('\\', "\\\\").replace('`', "\\`").replace("</", "<\\/");
+                if !notification_visible {
+                    let _ = notification_wv.set_visible(true);
+                    notification_visible = true;
+                }
+                let _ = notification_wv.evaluate_script(&format!(
+                    "window.__show && window.__show(`{escaped}`)"
+                ));
             }
 
             // ── Quit ──────────────────────────────────────────────────────
