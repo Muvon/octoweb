@@ -47,6 +47,14 @@
     <key>NSAppleEventsUsageDescription</key>
     <string>Octoweb uses accessibility features for global keyboard shortcuts.</string>
 
+    <!-- Camera access for websites (video calls, etc.) -->
+    <key>NSCameraUsageDescription</key>
+    <string>Octoweb needs camera access for websites that request it (e.g. video calls).</string>
+
+    <!-- Microphone access for websites (voice/video calls, etc.) -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Octoweb needs microphone access for websites that request it (e.g. voice/video calls).</string>
+
     <!-- Minimum macOS version -->
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>

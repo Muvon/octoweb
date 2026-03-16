@@ -17,5 +17,13 @@
     <!-- Outbound network access — browser needs this -->
     <key>com.apple.security.network.client</key>
     <true/>
+
+    <!-- Camera device access for getUserMedia() -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- Microphone device access for getUserMedia() -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>
