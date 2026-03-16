@@ -51,6 +51,7 @@ enum AppEvent {
     AcpPrompt(String),                      // user typed a prompt in the sidebar
     AcpCancel,                              // user clicked stop button — cancel current prompt
     AcpRestart(String), // change agent tag (e.g. "octoweb:assistant") and reconnect
+    AcpNewSession,      // restart session with same agent tag (clear chat)
     AskAI(String),      // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,     // Cmd+Shift+I — open devtools for active tab
     OpenInNewTab(String), // Cmd+click / target=_blank — open URL in new tab and switch to it
@@ -416,6 +417,21 @@ fn main() {
                 .into(),
             size: tao::dpi::PhysicalSize::new(sidebar_w, sz0.height).into(),
         })
+        .with_navigation_handler({
+            let p = proxy.clone();
+            move |url: String| {
+                // Allow initial HTML load and internal anchors
+                if url.starts_with("about:") || url.starts_with("data:") {
+                    return true;
+                }
+                // External links → open in a browser tab instead
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    let _ = p.send_event(AppEvent::OpenInNewTab(url));
+                    return false;
+                }
+                true
+            }
+        })
         .with_ipc_handler({
             let p = proxy.clone();
             move |msg| {
@@ -436,6 +452,9 @@ fn main() {
                             if let Some(tag) = v["tag"].as_str() {
                                 let _ = p.send_event(AppEvent::AcpRestart(tag.to_string()));
                             }
+                        }
+                        Some("acp_new_session") => {
+                            let _ = p.send_event(AppEvent::AcpNewSession);
                         }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
@@ -1391,6 +1410,18 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                 "window.__setAgentTag && window.__setAgentTag(`{escaped}`)"
             ));
+            }
+
+            // ── ACP new session (same agent, fresh chat) ────────────────────────
+            Event::UserEvent(AppEvent::AcpNewSession) => {
+                acp_handle = None; // drop old handle (kills subprocess)
+                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+                    let p = acp_proxy.clone();
+                    move || { let _ = p.send_event(AppEvent::AcpWake); }
+                }).ok();
+                let _ = sidebar_wv.evaluate_script(
+                    "window.__setConnecting && window.__setConnecting()"
+                );
             }
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────

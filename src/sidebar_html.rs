@@ -716,10 +716,28 @@ pub fn html() -> &'static str {
     background: var(--input-bg);
     border: 1.5px solid var(--input-border);
     border-radius: 18px;
-    padding: 8px 8px 8px 14px;
+    padding: 8px 8px 8px 10px;
     box-shadow: var(--input-shadow);
     transition: border-color 0.18s, box-shadow 0.18s;
   }
+
+  #new-session-btn {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+    padding: 0;
+  }
+  #new-session-btn:hover {
+    background: var(--input-border);
+    color: var(--text-primary);
+  }
+  #new-session-btn:active { transform: scale(0.88); }
   #input-row:focus-within {
     border-color: var(--input-focus-border);
     box-shadow: var(--input-shadow), 0 0 0 3px rgba(0, 122, 255, 0.11);
@@ -910,6 +928,14 @@ pub fn html() -> &'static str {
   <!-- Input -->
   <div id="input-area">
     <div id="input-row">
+      <button id="new-session-btn" title="New session" aria-label="New session">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <path d="M13.5 3.5L7 10l-2.5-.5L5 7l6.5-6.5a1.4 1.4 0 0 1 2 0v0a1.4 1.4 0 0 1 0 2z"
+                stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M12 6l-2-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          <path d="M2.5 13.5h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+      </button>
       <textarea
         id="prompt-input"
         rows="1"
@@ -946,12 +972,50 @@ pub fn html() -> &'static str {
   const thinking  = document.getElementById('thinking');
   const input     = document.getElementById('prompt-input');
   const sendBtn   = document.getElementById('send-btn');
+  const newSessBtn = document.getElementById('new-session-btn');
   const dot       = document.getElementById('status-dot');
   const statusTxt = document.getElementById('status-text');
 
   let currentAgentBubble = null;
   let currentAgentRaw    = '';   // accumulate raw MD chunks
   let isThinking = false;
+
+  // ── New session ─────────────────────────────────────────────────────────
+  newSessBtn.addEventListener('click', () => {
+    // Clear all messages but keep the thinking div reference intact
+    while (messages.firstChild) {
+      if (messages.firstChild === thinking) break;
+      messages.removeChild(messages.firstChild);
+    }
+    // Remove any nodes after thinking too
+    while (thinking.nextSibling) {
+      messages.removeChild(thinking.nextSibling);
+    }
+    thinking.className = '';
+    thinking.innerHTML = '';
+    currentAgentBubble = null;
+    currentAgentRaw = '';
+    isThinking = false;
+    sendBtn.className = '';
+    input.value = '';
+    input.style.height = 'auto';
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_new_session' }));
+  });
+
+  // Callable from Rust to clear messages (e.g. on agent restart)
+  window.__clearMessages = function() {
+    while (messages.firstChild) {
+      if (messages.firstChild === thinking) break;
+      messages.removeChild(messages.firstChild);
+    }
+    while (thinking.nextSibling) {
+      messages.removeChild(thinking.nextSibling);
+    }
+    thinking.className = '';
+    thinking.innerHTML = '';
+    currentAgentBubble = null;
+    currentAgentRaw = '';
+  };
 
   // ── Status ──────────────────────────────────────────────────────────────
   window.__setConnected = function() {
