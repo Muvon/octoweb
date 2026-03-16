@@ -2,10 +2,12 @@
 //!
 //! - Already has a scheme → pass through
 //! - Looks like localhost / IP / domain → prepend `https://`
-//! - Otherwise → Google search
+//! - Otherwise → search using the configured engine
 
 /// Turn user input into a navigable URL.
-pub fn resolve_url(input: &str) -> String {
+/// `search_engine` is a URL template with `{}` as the query placeholder
+/// (e.g. `"https://www.google.com/search?q={}"`)
+pub fn resolve_url(input: &str, search_engine: &str) -> String {
     let s = input.trim();
     if s.is_empty() {
         return "about:blank".to_string();
@@ -21,7 +23,7 @@ pub fn resolve_url(input: &str) -> String {
         return format!("https://{s}");
     }
 
-    format!("https://www.google.com/search?q={}", encode_uri(s))
+    search_engine.replace("{}", &encode_uri(s))
 }
 
 fn has_url_scheme(s: &str) -> bool {

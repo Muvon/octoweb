@@ -26,7 +26,6 @@ pub struct TabManager {
     next_id: usize,
 }
 
-#[allow(dead_code)]
 impl TabManager {
     pub fn new(max_history: usize) -> Self {
         Self {
@@ -113,10 +112,6 @@ impl TabManager {
 
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
-    }
-
-    pub fn tabs_mut(&mut self) -> &mut [Tab] {
-        &mut self.tabs
     }
 
     /// Set the audio playback state for a tab.

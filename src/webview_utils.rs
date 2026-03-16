@@ -150,6 +150,21 @@ pub fn build_items_json(
     serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
 }
 
+/// Escape a string for safe embedding in a JS template literal (backtick string).
+/// Handles: backslash, backtick, and `${` (template interpolation).
+pub fn escape_js_template(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + s.len() / 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '`' => out.push_str("\\`"),
+            '$' => out.push_str("\\$"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Look up a cached favicon data-URI by domain extracted from the URL.
 pub fn cached_favicon(url: &str, favicons: &HashMap<String, String>) -> Option<String> {
     let after_scheme = url

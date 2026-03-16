@@ -157,6 +157,7 @@ fn main() {
     // Each tab gets its own WebView (build_as_child). Hide/show to switch —
     // no reload, full state (scroll, video, JS) preserved.
     let home = cfg.home_page.clone();
+    let search_engine = cfg.search_engine.clone();
 
     let make_webview = {
         let browser_win = Arc::clone(&browser_win);
@@ -699,6 +700,83 @@ fn main() {
     let mut overlay_visible = false;
     let mut sidebar_visible = false;
     let mut icon_set = false;
+
+    // ── Helper macros (expand in-place, access event-loop locals) ─────────
+
+    /// Create a WebView for a new tab, register nav-error callback, insert into map.
+    /// Returns the tab_id. The WebView starts hidden (shown on PageLoadFinished).
+    macro_rules! spawn_tab_webview {
+        ($tab_id:expr, $url:expr) => {{
+            let id = $tab_id;
+            let wv = make_webview(id, $url);
+            let _ = wv.set_visible(false);
+            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+            let p = proxy.clone();
+            nav_error_patch::register(wv_ptr, move |url, code| {
+                let _ = p.send_event(AppEvent::NavigationError(id, url, code.to_string()));
+            });
+            tab_webviews.insert(id, wv);
+            id
+        }};
+    }
+
+    /// Switch visibility from the current active tab to `target`, handling pending_swap.
+    macro_rules! switch_visible_tab {
+        ($target:expr) => {{
+            let target = $target;
+            tabs.lock().unwrap().switch(target);
+            if let Some((old_id, new_id)) = pending_swap.take() {
+                if let Some(wv) = tab_webviews.get(&old_id) {
+                    let _ = wv.set_visible(false);
+                }
+                if new_id != target {
+                    if let Some(wv) = tab_webviews.get(&new_id) {
+                        let _ = wv.set_visible(false);
+                    }
+                }
+            } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                let _ = wv.set_visible(false);
+            }
+            if let Some(wv) = tab_webviews.get(&target) {
+                let _ = wv.set_visible(true);
+            }
+            active_wv_id = target;
+        }};
+    }
+
+    /// Refresh the overlay item list (if visible).
+    macro_rules! refresh_overlay {
+        () => {
+            if overlay_visible {
+                let json = {
+                    let tm = tabs.lock().unwrap();
+                    webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                };
+                let _ = overlay_wv.evaluate_script(&format!(
+                    "window.__refreshItems && window.__refreshItems({json})"
+                ));
+            }
+        };
+    }
+
+    /// Sync quick-slot UI: footer bar + any about:blank newtab pages.
+    macro_rules! sync_quickslots_ui {
+        () => {{
+            let json = quickslots::to_json(&quick_slots);
+            let _ = footer_wv.evaluate_script(&format!(
+                "window.__updateSlots && window.__updateSlots({json})"
+            ));
+            for (&tid, wv) in &tab_webviews {
+                let tab_url = tabs.lock().unwrap().tabs().iter()
+                    .find(|t| t.id == tid).map(|t| t.url.clone());
+                if tab_url.as_deref() == Some("about:blank") {
+                    let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                    let _ = wv.load_html(&html);
+                }
+            }
+        }};
+    }
+
     // ── Event loop ────────────────────────────────────────────────────────
     event_loop.run(move |event, _, control_flow| {
         // Poll mode when sidebar is open (ACP events) or progress bar is fading out.
@@ -735,7 +813,7 @@ fn main() {
                         );
                     }
                     acp::AgentEvent::Chunk(chunk) => {
-                        let escaped = chunk.replace('\\', "\\\\").replace('`', "\\`");
+                        let escaped = webview_utils::escape_js_template(&chunk);
                         let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__appendChunk && window.__appendChunk(`{escaped}`)"
                     ));
@@ -754,17 +832,17 @@ fn main() {
                         }
                     }
                     acp::AgentEvent::ToolStart { id, title, kind } => {
-                        let eid = id.replace('\\', "\\\\").replace('`', "\\`");
-                        let etitle = title.replace('\\', "\\\\").replace('`', "\\`");
-                        let ekind = kind.replace('\\', "\\\\").replace('`', "\\`");
+                        let eid = webview_utils::escape_js_template(&id);
+                        let etitle = webview_utils::escape_js_template(&title);
+                        let ekind = webview_utils::escape_js_template(&kind);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__toolStart && window.__toolStart(`{eid}`,`{etitle}`,`{ekind}`)"
                         ));
                     }
                     acp::AgentEvent::ToolUpdate { id, title, status } => {
-                        let eid = id.replace('\\', "\\\\").replace('`', "\\`");
-                        let etitle = title.as_deref().unwrap_or("").replace('\\', "\\\\").replace('`', "\\`");
-                        let estatus = status.replace('\\', "\\\\").replace('`', "\\`");
+                        let eid = webview_utils::escape_js_template(&id);
+                        let etitle = webview_utils::escape_js_template(title.as_deref().unwrap_or(""));
+                        let estatus = webview_utils::escape_js_template(&status);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`)"
                         ));
@@ -785,7 +863,7 @@ fn main() {
                         );
                     }
                     acp::AgentEvent::Error(err) => {
-                        let escaped = err.replace('\\', "\\\\").replace('`', "\\`");
+                        let escaped = webview_utils::escape_js_template(&err);
                         let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__appendError && window.__appendError(`{escaped}`)"
                     ));
@@ -817,16 +895,9 @@ fn main() {
 
                         if new_tab {
                             // Open a new tab with its own WebView
-                            let resolved = url::resolve_url(&url);
+                            let resolved = url::resolve_url(&url, &search_engine);
                             let new_id = tabs.lock().unwrap().open(resolved.clone());
-                            let new_wv = make_webview(new_id, &resolved);
-                            let _ = new_wv.set_visible(false);
-                            let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
-                            let p = proxy.clone();
-                            nav_error_patch::register(wv_ptr, move |url, code| {
-                                let _ = p.send_event(AppEvent::NavigationError(new_id, url, code.to_string()));
-                            });
-                            tab_webviews.insert(new_id, new_wv);
+                            spawn_tab_webview!(new_id, &resolved);
 
                             if !background {
                                 // Switch to the new tab (deferred swap)
@@ -841,7 +912,7 @@ fn main() {
                             // Navigate an existing tab in-place
                             let target_id = tab_id.unwrap_or(active_wv_id);
                             if let Some(wv) = tab_webviews.get(&target_id) {
-                                let resolved = url::resolve_url(&url);
+                                let resolved = url::resolve_url(&url, &search_engine);
                                 let escaped = resolved.replace('\\', "\\\\").replace('\'', "\\'");
                                 let _ = wv.evaluate_script(&format!("window.location.href = '{escaped}'"));
                                 tabs.lock().unwrap().update_url(target_id, resolved);
@@ -1129,19 +1200,12 @@ fn main() {
             Event::UserEvent(AppEvent::NavigateTo(raw)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
-                let url = url::resolve_url(&raw);
+                let url = url::resolve_url(&raw, &search_engine);
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently *visible* tab on screen while new one loads.
                 // If a swap is already pending, the visible tab is the old one from that swap.
                 let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
-                let new_wv = make_webview(tab_id, &url);
-                let _ = new_wv.set_visible(false); // hidden until loaded
-                let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
-                let p = proxy.clone();
-                nav_error_patch::register(wv_ptr, move |url, code| {
-                    let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
-                });
-                tab_webviews.insert(tab_id, new_wv);
+                spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
                 macos::mru_push(&mut mru, tab_id);
@@ -1153,14 +1217,7 @@ fn main() {
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently visible tab on screen while new one loads.
                 let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
-                let new_wv = make_webview(tab_id, &url);
-                let _ = new_wv.set_visible(false); // hidden until loaded
-                let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
-                let p = proxy.clone();
-                nav_error_patch::register(wv_ptr, move |url, code| {
-                    let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
-                });
-                tab_webviews.insert(tab_id, new_wv);
+                spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
                 macos::mru_push(&mut mru, tab_id);
@@ -1175,25 +1232,7 @@ fn main() {
                     if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                     return;
                 }
-                tabs.lock().unwrap().switch(tab_id);
-                // If a deferred swap is pending, the old tab is still visible —
-                // hide it (and the hidden new tab) before showing the target.
-                if let Some((old_id, new_id)) = pending_swap.take() {
-                    if let Some(wv) = tab_webviews.get(&old_id) {
-                        let _ = wv.set_visible(false);
-                    }
-                    if new_id != tab_id {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(false);
-                        }
-                    }
-                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
-                }
-                if let Some(wv) = tab_webviews.get(&tab_id) {
-                    let _ = wv.set_visible(true);
-                }
-                active_wv_id = tab_id;
+                switch_visible_tab!(tab_id);
                 macos::mru_push(&mut mru, tab_id);
                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
             }
@@ -1246,15 +1285,7 @@ fn main() {
                         None => *control_flow = ControlFlow::Exit,
                     }
                     // Refresh overlay if it's open so the closed tab disappears
-                    if overlay_visible {
-                        let json = {
-                            let tm = tabs.lock().unwrap();
-                            webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
-                        };
-                        let _ = overlay_wv.evaluate_script(&format!(
-                            "window.__refreshItems && window.__refreshItems({json})"
-                        ));
-                    }
+                    refresh_overlay!();
                 }
             }
 
@@ -1262,15 +1293,7 @@ fn main() {
             Event::UserEvent(AppEvent::RemoveHistory(url)) => {
                 tabs.lock().unwrap().remove_history(&url);
                 // Refresh overlay so the removed entry disappears
-                if overlay_visible {
-                    let json = {
-                        let tm = tabs.lock().unwrap();
-                        webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
-                    };
-                    let _ = overlay_wv.evaluate_script(&format!(
-                        "window.__refreshItems && window.__refreshItems({json})"
-                    ));
-                }
+                refresh_overlay!();
             }
 
             // ── Ctrl+P: switch to previous tab in MRU order ───────────────
@@ -1284,24 +1307,7 @@ fn main() {
                 }
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = mru[(pos + 1) % mru.len()];
-                tabs.lock().unwrap().switch(target);
-                // Cancel deferred swap — hide both old visible and new loading tabs
-                if let Some((old_id, new_id)) = pending_swap.take() {
-                    if let Some(wv) = tab_webviews.get(&old_id) {
-                        let _ = wv.set_visible(false);
-                    }
-                    if new_id != target {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(false);
-                        }
-                    }
-                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
-                }
-                if let Some(wv) = tab_webviews.get(&target) {
-                    let _ = wv.set_visible(true);
-                }
-                active_wv_id = target;
+                switch_visible_tab!(target);
                 browser_win.set_focus();
             }
 
@@ -1316,24 +1322,7 @@ fn main() {
                 }
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = if pos == 0 { *mru.last().unwrap() } else { mru[pos - 1] };
-                tabs.lock().unwrap().switch(target);
-                // Cancel deferred swap — hide both old visible and new loading tabs
-                if let Some((old_id, new_id)) = pending_swap.take() {
-                    if let Some(wv) = tab_webviews.get(&old_id) {
-                        let _ = wv.set_visible(false);
-                    }
-                    if new_id != target {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(false);
-                        }
-                    }
-                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
-                }
-                if let Some(wv) = tab_webviews.get(&target) {
-                    let _ = wv.set_visible(true);
-                }
-                active_wv_id = target;
+                switch_visible_tab!(target);
                 browser_win.set_focus();
             }
 
@@ -1433,7 +1422,7 @@ fn main() {
                     "window.__setConnecting && window.__setConnecting()"
                 );
                 // Update the chip label in the sidebar
-                let escaped = tag.replace('\\', "\\\\").replace('`', "\\`");
+                let escaped = webview_utils::escape_js_template(&tag);
                 let _ = sidebar_wv.evaluate_script(&format!(
                 "window.__setAgentTag && window.__setAgentTag(`{escaped}`)"
             ));
@@ -1458,7 +1447,7 @@ fn main() {
                     let _ = proxy.send_event(AppEvent::ToggleSidebar);
                 }
                 // Inject the prompt into the sidebar and submit it
-                let escaped = text.replace('\\', "\\\\").replace('`', "\\`");
+                let escaped = webview_utils::escape_js_template(&text);
                 let _ = sidebar_wv.evaluate_script(&format!(
                     "window.__injectPrompt && window.__injectPrompt(`{escaped}`)"
                 ));
@@ -1505,20 +1494,7 @@ fn main() {
                         });
                     }
                     quickslots::save(&quick_slots);
-                    // Update footer bar
-                    let json = quickslots::to_json(&quick_slots);
-                    let _ = footer_wv.evaluate_script(&format!(
-                        "window.__updateSlots && window.__updateSlots({json})"
-                    ));
-                    // Update any about:blank newtab pages
-                    for (&tid, wv) in &tab_webviews {
-                        let tab_url = tabs.lock().unwrap().tabs().iter()
-                            .find(|t| t.id == tid).map(|t| t.url.clone());
-                        if tab_url.as_deref() == Some("about:blank") {
-                            let html = newtab_html::html(&quickslots::to_json(&quick_slots));
-                            let _ = wv.load_html(&html);
-                        }
-                    }
+                    sync_quickslots_ui!();
                 }
             }
 
@@ -1526,20 +1502,7 @@ fn main() {
             Event::UserEvent(AppEvent::QuickSlotRemove(slot)) => {
                 quick_slots[slot] = None;
                 quickslots::save(&quick_slots);
-                // Update footer bar
-                let json = quickslots::to_json(&quick_slots);
-                let _ = footer_wv.evaluate_script(&format!(
-                    "window.__updateSlots && window.__updateSlots({json})"
-                ));
-                // Update any about:blank newtab pages
-                for (&tid, wv) in &tab_webviews {
-                    let tab_url = tabs.lock().unwrap().tabs().iter()
-                        .find(|t| t.id == tid).map(|t| t.url.clone());
-                    if tab_url.as_deref() == Some("about:blank") {
-                        let html = newtab_html::html(&quickslots::to_json(&quick_slots));
-                        let _ = wv.load_html(&html);
-                    }
-                }
+                sync_quickslots_ui!();
             }
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
@@ -1761,9 +1724,6 @@ fn main() {
                     let cmd = modifiers.super_key();
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         match key_event.physical_key {
-                            KeyCode::KeyR if cmd => {
-                                let _ = wv.evaluate_script("location.reload()");
-                            }
                             KeyCode::BracketLeft if cmd => {
                                 let _ = wv.evaluate_script("history.back()");
                             }

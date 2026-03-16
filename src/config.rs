@@ -138,12 +138,6 @@ impl Config {
         }
     }
 
-    #[allow(dead_code)]
-    /// Build a search URL for the given query
-    pub fn search_url(&self, query: &str) -> String {
-        let encoded = url_encode(query);
-        self.search_engine.replace("{}", &encoded)
-    }
 }
 
 fn config_path() -> PathBuf {
@@ -151,23 +145,4 @@ fn config_path() -> PathBuf {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
         .join("octoweb")
         .join("config.toml")
-}
-
-/// Minimal percent-encoding for query strings (no external dep needed)
-#[allow(dead_code)]
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push('%');
-                out.push_str(&format!("{b:02X}"));
-            }
-        }
-    }
-    out
 }
