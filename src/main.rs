@@ -6,6 +6,7 @@ mod macos;
 mod mcp;
 mod nav_error_patch;
 mod newtab_html;
+mod notification_html;
 mod overlay_html;
 mod progress_bar_html;
 mod quickslots;
@@ -61,6 +62,7 @@ enum AppEvent {
     QuickSlotOpen(usize), // ⌘1–⌘0 — open saved URL in slot 0–9
     QuickSlotSave(usize), // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize), // remove slot (from footer bar ✕ or newtab page)
+    AcpWake,            // lightweight wake — ACP thread pokes event loop
     Quit,
 }
 fn main() {
@@ -455,6 +457,35 @@ fn main() {
     // Instant when __finish was called — we hide progress_wv after the CSS fade (400ms)
     let mut progress_hide_at: Option<std::time::Instant> = None;
 
+    // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
+    const NOTIF_W_LOGICAL: f64 = 360.0;
+    const NOTIF_H_LOGICAL: f64 = 64.0;
+    let scale = browser_win.scale_factor();
+    let notif_w = (NOTIF_W_LOGICAL * scale) as u32;
+    let notif_h = (NOTIF_H_LOGICAL * scale) as u32;
+    let notification_wv = WebViewBuilder::new()
+        .with_html(notification_html::html())
+        .with_transparent(true)
+        .with_bounds(wry::Rect {
+            position: tao::dpi::PhysicalPosition::new(sz0.width.saturating_sub(notif_w) / 2, 0u32)
+                .into(),
+            size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
+        })
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    if v["type"].as_str() == Some("open_sidebar") {
+                        let _ = p.send_event(AppEvent::ToggleSidebar);
+                    }
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create notification WebView");
+    let _ = notification_wv.set_visible(false);
+    let mut notification_visible = false;
+
     // ── Quick-slots footer bar (thin strip at bottom of browser window) ───
     const FOOTER_H_LOGICAL: f64 = 36.0;
     let footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
@@ -498,7 +529,14 @@ fn main() {
 
     // ── ACP handle — spawns octomind acp subprocess in background ─────────
     let mut acp_tag = "octoweb:assistant".to_string();
-    let mut acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
+    let acp_proxy = proxy.clone();
+    let mut acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+        let p = acp_proxy.clone();
+        move || {
+            let _ = p.send_event(AppEvent::AcpWake);
+        }
+    })
+    .ok();
 
     // ── MCP server — exposes browser control tools on localhost:3434 ───────
     let mut mcp_handle = Some(mcp::spawn_mcp_server());
@@ -645,17 +683,47 @@ fn main() {
                         let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__appendChunk && window.__appendChunk(`{escaped}`)"
                     ));
+                        // Show badge + notification toast when sidebar is hidden
+                        if !sidebar_visible {
+                            let _ = toggle_btn_wv.evaluate_script(
+                                "window.__setBadge && window.__setBadge(true)"
+                            );
+                            if !notification_visible {
+                                let _ = notification_wv.set_visible(true);
+                                notification_visible = true;
+                            }
+                            let _ = notification_wv.evaluate_script(&format!(
+                                "window.__show && window.__show(`{escaped}`)"
+                            ));
+                        }
                     }
                     acp::AgentEvent::Done => {
                         let _ = sidebar_wv.evaluate_script(
                             "window.__setThinking && window.__setThinking(false)"
                         );
+                        if !sidebar_visible {
+                            let _ = toggle_btn_wv.evaluate_script(
+                                "window.__setBadge && window.__setBadge(true)"
+                            );
+                        }
                     }
                     acp::AgentEvent::Error(err) => {
                         let escaped = err.replace('\\', "\\\\").replace('`', "\\`");
                         let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__appendError && window.__appendError(`{escaped}`)"
                     ));
+                        if !sidebar_visible {
+                            let _ = toggle_btn_wv.evaluate_script(
+                                "window.__setBadge && window.__setBadge(true)"
+                            );
+                            if !notification_visible {
+                                let _ = notification_wv.set_visible(true);
+                                notification_visible = true;
+                            }
+                            let _ = notification_wv.evaluate_script(&format!(
+                                "window.__show && window.__show(`{escaped}`)"
+                            ));
+                        }
                     }
                 }
             }
@@ -1097,13 +1165,28 @@ fn main() {
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
+                    // Clear unread badge on toggle button
+                    let _ = toggle_btn_wv.evaluate_script(
+                        "window.__setBadge && window.__setBadge(false)"
+                    );
+                    // Hide notification toast if visible
+                    if notification_visible {
+                        let _ = notification_wv.evaluate_script(
+                            "window.__hide && window.__hide()"
+                        );
+                        let _ = notification_wv.set_visible(false);
+                        notification_visible = false;
+                    }
                     // Defer focus — set_visible is async, DOM needs one render cycle first
                     let _ = sidebar_wv.evaluate_script(
                         "setTimeout(() => document.getElementById('prompt-input').focus(), 50)"
                     );
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
-                        acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
+                        acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+                            let p = acp_proxy.clone();
+                            move || { let _ = p.send_event(AppEvent::AcpWake); }
+                        }).ok();
                     }
                 }
             }
@@ -1130,7 +1213,10 @@ fn main() {
             Event::UserEvent(AppEvent::AcpRestart(tag)) => {
                 acp_tag = tag.clone();
                 acp_handle = None; // drop old handle (kills subprocess)
-                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
+                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+                    let p = acp_proxy.clone();
+                    move || { let _ = p.send_event(AppEvent::AcpWake); }
+                }).ok();
                 // Reset sidebar status to "connecting"
                 let _ = sidebar_wv.evaluate_script(
                     "window.__setConnecting && window.__setConnecting()"
@@ -1227,6 +1313,9 @@ fn main() {
                     }
                 }
             }
+
+            // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
+            Event::UserEvent(AppEvent::AcpWake) => {}
 
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
@@ -1377,6 +1466,14 @@ fn main() {
                     let _ = progress_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
+                    });
+                    // Reposition notification toast at top-center
+                    let _ = notification_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(notif_w) / 2,
+                            0u32,
+                        ).into(),
+                        size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
                     });
                     // Resize active tab to full width (sidebar overlays, doesn't shrink)
                     let bounds = wry::Rect {

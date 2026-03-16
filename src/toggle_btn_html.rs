@@ -92,18 +92,50 @@ pub fn html() -> &'static str {
     /* Slight drop shadow so it pops on both light and dark */
     filter: drop-shadow(0 1px 2px rgba(0,0,0,0.18));
   }
+
+  /* ── Unread badge dot ──────────────────────────────────────────────── */
+  .badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff3b30;
+    border: 1.5px solid rgba(255,255,255,0.9);
+    box-shadow: 0 1px 4px rgba(255,59,48,0.45);
+    opacity: 0;
+    transform: scale(0);
+    transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.34,1.56,0.64,1);
+    pointer-events: none;
+  }
+  .badge.show {
+    opacity: 1;
+    transform: scale(1);
+  }
+  @media (prefers-color-scheme: dark) {
+    .badge {
+      border-color: rgba(0,0,0,0.5);
+      box-shadow: 0 1px 6px rgba(255,59,48,0.55);
+    }
+  }
 </style>
 </head>
 <body>
 <button id="btn" title="Toggle octomind (?)">
   <div class="pill">
     <span class="icon">🐙</span>
+    <span id="badge" class="badge"></span>
   </div>
 </button>
 <script>
   document.getElementById('btn').addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_sidebar' }));
   });
+  // Called from Rust to show/hide the unread badge dot
+  window.__setBadge = function(show) {
+    document.getElementById('badge').classList.toggle('show', !!show);
+  };
 </script>
 </body>
 </html>"#

@@ -23,6 +23,7 @@ pub fn html() -> &'static str {
 
   /* ── Tahoe Liquid Glass tokens ─────────────────────────────────────────── */
   :root {
+    --glass-solid:     rgb(235, 235, 240);
     --glass-bg:        rgba(235, 235, 240, 0.72);
     --glass-border:    rgba(255, 255, 255, 0.55);
     --glass-inner:     rgba(255, 255, 255, 0.38);
@@ -67,6 +68,7 @@ pub fn html() -> &'static str {
 
   @media (prefers-color-scheme: dark) {
     :root {
+      --glass-solid:     rgb(30, 30, 34);
       --glass-bg:        rgba(30, 30, 34, 0.78);
       --glass-border:    rgba(255, 255, 255, 0.10);
       --glass-inner:     rgba(255, 255, 255, 0.05);
@@ -125,14 +127,25 @@ pub fn html() -> &'static str {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: var(--glass-bg);
-    backdrop-filter: blur(48px) saturate(180%);
-    -webkit-backdrop-filter: blur(48px) saturate(180%);
+    /* Solid opaque fallback — prevents see-through when WKWebView
+       backdrop-filter degrades through two transparent window layers. */
+    background: var(--glass-solid);
     border-left: 1px solid var(--glass-border);
     box-shadow: var(--glass-shadow);
     position: relative;
   }
   #sidebar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    /* Glass layer + inner highlight on top of solid fallback */
+    background: var(--glass-bg);
+    backdrop-filter: blur(48px) saturate(180%);
+    -webkit-backdrop-filter: blur(48px) saturate(180%);
+    z-index: 0;
+  }
+  #sidebar::after {
     content: "";
     position: absolute;
     inset: 0;

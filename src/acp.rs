@@ -30,6 +30,7 @@ pub enum AgentEvent {
 /// All fs/terminal methods return method_not_found (not needed for chat).
 struct BrowserClient {
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -118,6 +119,7 @@ impl acp::Client for BrowserClient {
             };
             if !text.is_empty() {
                 let _ = self.tx.send(AgentEvent::Chunk(text));
+                (self.wake)();
             }
         }
         Ok(())
@@ -144,9 +146,13 @@ impl AcpHandle {
     /// Spawn the agent process described by `cmd` (e.g. `"octomind acp"` or
     /// `"octomind acp doctor:blood"`), initialize the ACP session, return the handle.
     /// Initialization is async — watch `rx` for `AgentEvent::Connected` or `AgentEvent::Error`.
-    pub fn connect(cmd: &str) -> anyhow::Result<Self> {
+    ///
+    /// `wake` is called from the ACP thread whenever an event is pushed — use it to
+    /// poke the main event loop out of `ControlFlow::Wait`.
+    pub fn connect(cmd: &str, wake: impl Fn() + Send + Sync + 'static) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
 
         // Parse "program arg1 arg2 ..." — simple whitespace split, no shell quoting needed.
         let mut parts = cmd.split_whitespace();
@@ -165,10 +171,19 @@ impl AcpHandle {
                 .expect("tokio runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
-                match init_session(event_tx.clone(), prompt_rx, program, args).await {
+                match init_session(
+                    event_tx.clone(),
+                    std::sync::Arc::clone(&wake),
+                    prompt_rx,
+                    program,
+                    args,
+                )
+                .await
+                {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = event_tx.send(AgentEvent::Error(e.to_string()));
+                        wake();
                     }
                 }
             });
@@ -199,6 +214,7 @@ impl AcpHandle {
 
 async fn init_session(
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
     mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     program: String,
     args: Vec<String>,
@@ -214,9 +230,11 @@ async fn init_session(
     let outgoing = child.stdin.take().unwrap().compat_write();
     let incoming = child.stdout.take().unwrap().compat();
 
-    // ClientSideConnection futures are !Send — we're already inside a LocalSet.
     let (conn, handle_io) = acp::ClientSideConnection::new(
-        BrowserClient { tx: tx.clone() },
+        BrowserClient {
+            tx: tx.clone(),
+            wake: std::sync::Arc::clone(&wake),
+        },
         outgoing,
         incoming,
         |fut| {
@@ -243,6 +261,7 @@ async fn init_session(
 
     let session_id = resp.session_id;
     let _ = tx.send(AgentEvent::Connected);
+    wake();
 
     // Process prompts sequentially — one at a time.
     while let Some(text) = prompt_rx.recv().await {
@@ -255,9 +274,11 @@ async fn init_session(
         match result {
             Ok(_) => {
                 let _ = tx.send(AgentEvent::Done);
+                wake();
             }
             Err(e) => {
                 let _ = tx.send(AgentEvent::Error(e.to_string()));
+                wake();
             }
         }
     }
