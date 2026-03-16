@@ -181,10 +181,9 @@ const NEWTAB_CSS: &str = r#"
   }
 
   .slots {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 8px;
-    justify-content: center;
     margin-bottom: 24px;
   }
 
@@ -202,7 +201,6 @@ const NEWTAB_CSS: &str = r#"
     text-decoration: none;
     color: inherit;
     transition: background 0.12s ease, box-shadow 0.15s ease, transform 0.1s ease;
-    max-width: 260px;
     min-width: 0;
   }
 
