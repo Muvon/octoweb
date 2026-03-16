@@ -779,35 +779,92 @@ pub fn html() -> &'static str {
     const scored = [];
 
     for (const item of list) {
-      const hay = (item.title || '') + ' ' + (item.url || '');
-      const score = fuzzyScore(q, hay.toLowerCase());
-      if (score <= 0) continue;
+      const title = (item.title || '').toLowerCase();
+      const url = (item.url || '').toLowerCase();
+      // Extract clean domain: "github.com" from "https://www.github.com/foo"
+      const domain = url.replace(/^https?:\/\//, '').replace(/^www\./, '').split(/[/?#]/)[0];
+      // Path without query string for matching
+      const path = url.replace(/^https?:\/\//, '').replace(/^www\./, '');
+
+      // Score each field independently — take the best match.
+      // This prevents cross-field pollution (matching 'g' in title, 'i' in URL).
+      const titleScore = fuzzyScore(q, title);
+      const domainScore = fuzzyScore(q, domain);
+      const pathScore = fuzzyScore(q, path);
+
+      // Also try substring match on domain — "hub" should match "github.com"
+      const substringBonus = domain.includes(q) ? q.length * 8 : 0;
+
+      const best = Math.max(titleScore, domainScore, pathScore, substringBonus);
+      if (best <= 0) continue;
+
+      // Boost: exact prefix match on domain is very strong
+      const prefixBonus = domain.startsWith(q) ? q.length * 12 : 0;
+      // Boost: exact word match in title
+      const wordBonus = hasWordMatch(q, title) ? q.length * 6 : 0;
+
       const visits = item.visit_count || 0;
-      const visitBoost = visits > 0 ? Math.round(Math.log2(visits + 1) * 80) : 0;
-      const kindBoost = item.kind === 'tab' ? 1200 : item.kind === 'history' ? 200 : 0;
-      scored.push({ item, score: score + kindBoost + visitBoost });
+      const visitBoost = visits > 0 ? Math.round(Math.log2(visits + 1) * 60) : 0;
+      const kindBoost = item.kind === 'tab' ? 800 : item.kind === 'history' ? 150 : 0;
+
+      scored.push({ item, score: best + prefixBonus + wordBonus + kindBoost + visitBoost });
     }
 
     scored.sort((a, b) => b.score - a.score);
     return scored.map(entry => entry.item);
   }
 
+  // Check if query appears as a whole word (or word prefix) in text
+  function hasWordMatch(q, text) {
+    // Split on common separators
+    const words = text.split(/[\s\-_./|:]+/);
+    for (const w of words) {
+      if (w.startsWith(q)) return true;
+    }
+    return false;
+  }
+
   function fuzzyScore(q, hay) {
+    if (!q || !hay) return 0;
+
     let qi = 0;
     let score = 0;
     let prev = -10;
+    let gapPenalty = 0;
 
     for (let i = 0; i < hay.length && qi < q.length; i++) {
       if (hay[i] !== q[qi]) continue;
 
-      score += 2;
-      if (i === prev + 1) score += 3;
-      if (i === 0 || hay[i - 1] === ' ' || hay[i - 1] === '/' || hay[i - 1] === '.') score += 2;
+      // Base point for matching a character
+      score += 3;
+
+      // Consecutive match bonus (strong)
+      if (i === prev + 1) {
+        score += 5;
+      } else {
+        // Gap penalty: the further apart matches are, the worse
+        const gap = i - prev - 1;
+        if (prev >= 0 && gap > 1) {
+          gapPenalty += Math.min(gap, 8);
+        }
+      }
+
+      // Word-boundary bonus: start of string, after separator
+      const ch = i > 0 ? hay[i - 1] : '\0';
+      if (i === 0 || ch === ' ' || ch === '/' || ch === '.' || ch === '-' || ch === '_') {
+        score += 4;
+      }
+
+      // CamelCase boundary (lowercase followed by uppercase in original — but we're lowercase, so check separators only)
+
       prev = i;
       qi++;
     }
 
-    return qi === q.length ? score : 0;
+    // All query chars must match
+    if (qi !== q.length) return 0;
+
+    return Math.max(score - gapPenalty, 1);
   }
 })();
 </script>
