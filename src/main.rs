@@ -834,7 +834,7 @@ fn main() {
                                 active_wv_id = new_id;
                                 pending_swap = Some((visible_id, new_id));
                                 macos::mru_push(&mut mru, new_id);
-                                browser_win.set_focus();
+                                if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                             }
                             let _ = response.send(Ok(new_id));
                         } else {
@@ -1172,7 +1172,7 @@ fn main() {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
                 if tab_id == active_wv_id {
-                    browser_win.set_focus();
+                    if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                     return;
                 }
                 tabs.lock().unwrap().switch(tab_id);
@@ -1195,7 +1195,7 @@ fn main() {
                 }
                 active_wv_id = tab_id;
                 macos::mru_push(&mut mru, tab_id);
-                browser_win.set_focus();
+                if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
             }
 
             // ── Close tab ─────────────────────────────────────────────────
@@ -1241,7 +1241,7 @@ fn main() {
                             }
                             active_wv_id = next;
                             macos::mru_push(&mut mru, next);
-                            browser_win.set_focus();
+                            if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                         }
                         None => *control_flow = ControlFlow::Exit,
                     }
