@@ -63,6 +63,7 @@ enum AppEvent {
     QuickSlotSave(usize), // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize), // remove slot (from footer bar ✕ or newtab page)
     AcpWake,            // lightweight wake — ACP thread pokes event loop
+    DismissNotification, // user clicked X on notification toast
     Quit,
 }
 fn main() {
@@ -478,8 +479,14 @@ fn main() {
             let p = proxy.clone();
             move |msg| {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
-                    if v["type"].as_str() == Some("open_sidebar") {
-                        let _ = p.send_event(AppEvent::ToggleSidebar);
+                    match v["type"].as_str() {
+                        Some("open_sidebar") => {
+                            let _ = p.send_event(AppEvent::ToggleSidebar);
+                        }
+                        Some("dismiss_notification") => {
+                            let _ = p.send_event(AppEvent::DismissNotification);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1408,6 +1415,17 @@ fn main() {
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
+
+            // ── Dismiss notification toast ─────────────────────────────────────
+            Event::UserEvent(AppEvent::DismissNotification) => {
+                if notification_visible {
+                    let _ = notification_wv.evaluate_script(
+                        "window.__hide && window.__hide()"
+                    );
+                    let _ = notification_wv.set_visible(false);
+                    notification_visible = false;
+                }
+            }
 
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {

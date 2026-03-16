@@ -1,6 +1,6 @@
 /// Returns the HTML for a macOS Tahoe-style notification toast.
 ///
-/// Slides down from the top when shown, auto-dismisses after 5 seconds.
+/// Slides down from the top-right when shown, stays until user clicks or dismisses.
 /// Glass background, rounded corners, click opens the AI sidebar.
 /// Light/dark adaptive via prefers-color-scheme.
 ///
@@ -10,6 +10,7 @@
 ///
 /// IPC messages sent to Rust:
 ///   { type: "open_sidebar" }  — user clicked the notification
+///   { type: "dismiss_notification" }  — user clicked the X button
 pub fn html() -> &'static str {
     r#"<!DOCTYPE html>
 <html>
@@ -112,7 +113,63 @@ pub fn html() -> &'static str {
     .preview { color: rgba(255, 255, 255, 0.50); }
   }
 
-  /* Hover feedback */
+  /* ── Close button ─────────────────────────────────────────────────── */
+  .close-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.06);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+  }
+
+  #toast:hover .close-btn {
+    opacity: 1;
+  }
+
+  .close-btn:hover {
+    background: rgba(0, 0, 0, 0.12);
+  }
+
+  .close-btn:active {
+    background: rgba(0, 0, 0, 0.18);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .close-btn {
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .close-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+    }
+    .close-btn:active {
+      background: rgba(255, 255, 255, 0.22);
+    }
+  }
+
+  .close-btn svg {
+    width: 10px;
+    height: 10px;
+    stroke: rgba(0, 0, 0, 0.5);
+    stroke-width: 1.5;
+    fill: none;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .close-btn svg {
+      stroke: rgba(255, 255, 255, 0.6);
+    }
+  }
+
+  /* Hover feedback for toast */
   #toast:hover {
     background: rgba(255, 255, 255, 0.95);
   }
@@ -125,7 +182,12 @@ pub fn html() -> &'static str {
 </head>
 <body>
 <div id="toast">
-  <div class="row">
+  <button class="close-btn" title="Dismiss">
+    <svg viewBox="0 0 10 10">
+      <path d="M2 2L8 8M8 2L2 8" />
+    </svg>
+  </button>
+  <div class="row" id="content">
     <span class="app-icon">🐙</span>
     <div class="content">
       <div class="title">Octomind</div>
@@ -137,28 +199,31 @@ pub fn html() -> &'static str {
 (function() {
   const toast = document.getElementById('toast');
   const preview = document.getElementById('preview');
-  let timer = null;
+  const closeBtn = document.querySelector('.close-btn');
+  const content = document.getElementById('content');
 
-  toast.addEventListener('click', () => {
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    window.ipc.postMessage(JSON.stringify({ type: 'dismiss_notification' }));
+    hide();
+  });
+
+  content.addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'open_sidebar' }));
     hide();
   });
 
   function hide() {
-    clearTimeout(timer);
-    timer = null;
     toast.classList.remove('show');
     toast.classList.add('hide');
   }
 
   window.__show = function(text) {
-    clearTimeout(timer);
     preview.textContent = text || 'New message from AI assistant';
     toast.classList.remove('hide');
     // Force reflow so transition fires from the start position
     void toast.offsetWidth;
     toast.classList.add('show');
-    timer = setTimeout(hide, 5000);
   };
 
   window.__hide = function() {
