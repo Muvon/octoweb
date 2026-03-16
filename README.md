@@ -12,8 +12,8 @@ Most browsers are built around the mouse. octoweb is built around the keyboard �
 
 Three things it does differently:
 
-1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette fuzzy-searches tabs and history with `⌘1`–`⌘9` instant-jump to any result; pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back to it instantly from anywhere
-2. **AI assistant built in** — not an extension, not a tab, a sidebar powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol)
+1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette (`⌘K`) fuzzy-searches tabs and history; pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere
+2. **AI assistant built in** — not an extension, not a tab, a sidebar panel that overlays the page, powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol); also reachable from the command palette with `⌘⇧↵`
 3. **MCP server inside the browser** — your AI tools can actually *drive* the browser (`localhost:3434`)
 
 ---
@@ -121,49 +121,44 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘K` | Open command palette |
 | `⌘W` | Close current tab |
 | `⌘R` | Reload current page |
+| `⌘[` | Go back |
+| `⌘]` | Go forward |
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧I` | Toggle DevTools |
-| `⌘⇧1` – `⌘⇧9` | Pin current page to fast-access slot 1–9 |
-| `⌘⇧0` | Pin current page to fast-access slot 10 |
-| `⌘1` – `⌘9` | Switch to fast-access slot 1–9 (outside palette) |
-| `⌘0` | Switch to fast-access slot 10 (outside palette) |
+| `⌘1` – `⌘9` | Open fast-access slot 1–9 |
+| `⌘0` | Open fast-access slot 10 |
+| `⌘⇧1` – `⌘⇧9` | Save current page to slot 1–9 |
+| `⌘⇧0` | Save current page to slot 10 |
 | `⌃N` | Next tab (MRU order) |
 | `⌃P` | Previous tab (MRU order) |
 
-### Fast access slots
+### Fast-access slots
 
-Pin any page to a numbered slot and jump back to it instantly — no palette, no search, one keystroke from anywhere in the browser.
+Pin any page to a numbered slot and jump back to it instantly — one keystroke from anywhere. Slots are shown in a footer bar at the bottom of the window and on the new-tab page.
 
-- **`⌘⇧1`–`⌘⇧9` / `⌘⇧0`** — save the current page's URL into slot 1–9 / 10
-- **`⌘1`–`⌘9` / `⌘0`** — navigate to the URL saved in that slot (opens in current tab if the slot is already open, otherwise navigates)
+- **`⌘⇧1`–`⌘⇧9` / `⌘⇧0`** — save the current page to slot 1–9 / 10
+- **`⌘1`–`⌘9` / `⌘0`** — navigate to the saved URL in that slot
 
-Slots are persisted in `config.toml` so they survive restarts. An empty slot does nothing.
-
-```toml
-# Example — set manually or via ⌘⇧N shortcuts
-fast_access = [
-  "https://github.com",        # ⌘1
-  "https://news.ycombinator.com", # ⌘2
-  "",                          # ⌘3 — empty, no-op
-]
-```
+Slots persist across restarts. An empty slot does nothing.
 
 ### Command palette (`⌘K`)
 
 The main interface. Type a URL, a search query, or any fragment of a page title or URL you've visited — it fuzzy-matches across open tabs and history instantly, ranked by match quality and visit frequency.
 
-Results are numbered: the first nine show a `⌘1`–`⌘9` badge, the tenth shows `⌘0`. Press that shortcut to jump directly without moving the selection at all.
+When a query is entered, three action rows appear at the bottom: **Search Google**, **Open URL**, and **Ask AI**. Select one and press Enter, or use the dedicated shortcuts below.
 
 | Shortcut | Action |
 |---|---|
 | `↑` / `↓` | Move selection |
 | `⌃N` / `⌃P` | Move selection (Emacs-style) |
-| `⌘1` – `⌘9` | Jump directly to result 1–9 |
+| `↵` | Confirm selection (open / switch / search) |
+| `⌘↵` | Force navigate: open as URL if it looks like one, otherwise search |
+| `⌘⇧↵` | Send query to AI sidebar |
+| `⌘1` – `⌘9` | Jump directly to result 1–9 (tabs and history only) |
 | `⌘0` | Jump directly to result 10 |
-| `Return` | Open / navigate / switch to tab |
 | `Esc` | Close palette |
-| `⌘W` | Close the selected tab (while palette is open) |
+| `⌘W` | Close the selected tab |
 | `⌃A` | Move cursor to start of input |
 | `⌃E` | Move cursor to end of input |
 | `⌃K` | Delete from cursor to end of line |
@@ -173,10 +168,12 @@ Results are numbered: the first nine show a `⌘1`–`⌘9` badge, the tenth sho
 
 ### AI sidebar (`⌘⇧A`)
 
+The sidebar overlays the page on the right — the page content underneath is not resized.
+
 | Shortcut | Action |
 |---|---|
-| `Return` | Send prompt |
-| `⇧Return` | Insert newline |
+| `↵` | Send prompt |
+| `⇧↵` | Insert newline |
 
 ---
 

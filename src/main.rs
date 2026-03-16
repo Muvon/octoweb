@@ -25,7 +25,7 @@ use tao::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
     keyboard::{KeyCode, ModifiersState},
-    platform::macos::WindowBuilderExtMacOS,
+    platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::WindowBuilder,
 };
 use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewExtMacOS};
@@ -112,6 +112,41 @@ fn main() {
 
     let overlay_win = Arc::new(overlay_win);
     let _overlay_win_id = overlay_win.id();
+
+    // ── Chrome window — borderless transparent layer for persistent UI ────
+    // Floats above browser_win; holds sidebar, footer, toggle button, progress bar.
+    // Transparent areas pass clicks through to browser_win underneath.
+    let chrome_win = {
+        let bsz = browser_win.inner_size();
+        let w = WindowBuilder::new()
+            .with_title("")
+            .with_inner_size(tao::dpi::PhysicalSize::new(bsz.width, bsz.height))
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_visible(true)
+            .build(&event_loop)
+            .expect("Failed to create chrome window");
+        // Position chrome_win exactly over browser_win's content area.
+        if let Ok(pos) = browser_win.outer_position() {
+            w.set_outer_position(pos);
+        }
+        unsafe {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            let ns_win: *mut AnyObject = w.ns_window() as *mut AnyObject;
+            // setHasShadow:NO — chrome layer shouldn't cast its own shadow
+            let _: () = msg_send![ns_win, setHasShadow: false];
+            // NSWindowCollectionBehaviorTransient — don't show in Mission Control / Exposé
+            let _: () = msg_send![ns_win, setCollectionBehavior: 8u64]; // 1 << 3
+                                                                        // Make chrome_win a child of browser_win — it moves/minimizes/closes with parent.
+            let parent_ns: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
+            // NSWindowAbove = 1
+            let _: () = msg_send![parent_ns, addChildWindow: ns_win, ordered: 1i64];
+        }
+        w
+    };
+    let chrome_win = Arc::new(chrome_win);
+    let chrome_win_id = chrome_win.id();
 
     // ── Browser WebView factory ───────────────────────────────────────────
     // Each tab gets its own WebView (build_as_child). Hide/show to switch —
@@ -364,7 +399,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&*browser_win)
+        .build_as_child(&*chrome_win)
         .expect("Failed to create toggle button WebView");
     let sidebar_wv = WebViewBuilder::new()
         .with_html(sidebar_html::html())
@@ -397,7 +432,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&*browser_win)
+        .build_as_child(&*chrome_win)
         .expect("Failed to create sidebar WebView");
     let _ = sidebar_wv.set_visible(false);
 
@@ -409,7 +444,7 @@ fn main() {
             position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
             size: tao::dpi::PhysicalSize::new(sz0.width, 3u32).into(),
         })
-        .build_as_child(&*browser_win)
+        .build_as_child(&*chrome_win)
         .expect("Failed to create progress WebView");
     let _ = progress_wv.set_visible(false);
 
@@ -448,7 +483,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&*browser_win)
+        .build_as_child(&*chrome_win)
         .expect("Failed to create quickslots footer WebView");
     // Initialize footer with saved slots
     {
@@ -1014,35 +1049,12 @@ fn main() {
             }
 
             // ── Toggle sidebar (Cmd+Shift+A or JS sidebar_close) ──────────
+            // Sidebar overlays on top of the page — no tab/footer resizing.
             Event::UserEvent(AppEvent::ToggleSidebar) => {
                 let sz = browser_win.inner_size();
                 if sidebar_visible {
                     let _ = sidebar_wv.set_visible(false);
                     sidebar_visible = false;
-                    // Restore active tab to full width
-                    let bounds = wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height).into(),
-                    };
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                        let _ = wv.set_bounds(bounds);
-                    }
-                    // Move toggle button back to right edge (no sidebar offset)
-                    let _ = toggle_btn_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(btn_size + btn_margin),
-                            btn_margin,
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
-                    });
-                    // Restore footer to full width
-                    let _ = footer_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            0u32,
-                            sz.height.saturating_sub(footer_h),
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, footer_h).into(),
-                    });
                 } else {
                     // Reposition sidebar to right edge (window may have been resized)
                     let _ = sidebar_wv.set_bounds(wry::Rect {
@@ -1058,32 +1070,6 @@ fn main() {
                     let _ = sidebar_wv.evaluate_script(
                         "document.getElementById('prompt-input').focus()"
                     );
-                    // Shrink active tab to leave room for sidebar
-                    let tab_w = sz.width.saturating_sub(sidebar_w);
-                    let bounds = wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(tab_w, sz.height).into(),
-                    };
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                        let _ = wv.set_bounds(bounds);
-                    }
-                    // Move toggle button left of sidebar
-                    let _ = toggle_btn_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(sidebar_w + btn_size + btn_margin),
-                            btn_margin,
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
-                    });
-                    // Shrink footer to leave room for sidebar
-                    let footer_w = sz.width.saturating_sub(sidebar_w);
-                    let _ = footer_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            0u32,
-                            sz.height.saturating_sub(footer_h),
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(footer_w, footer_h).into(),
-                    });
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
                         acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
@@ -1295,6 +1281,8 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
                         save_and_exit(&tabs, &favicon_cache, control_flow);
+                    } else if window_id == chrome_win_id {
+                        // Chrome window should not be closed independently — ignore.
                     } else {
                         overlay_win.set_visible(false);
                         overlay_visible = false;
@@ -1303,6 +1291,8 @@ fn main() {
                 }
 
                 WindowEvent::Resized(sz) if window_id == browser_win_id => {
+                    // Keep chrome overlay window in sync with browser window size
+                    chrome_win.set_inner_size(*sz);
                     if overlay_visible {
                         overlay_win.set_inner_size(*sz);
                     }
@@ -1317,13 +1307,11 @@ fn main() {
                         });
                     }
                     // Always reposition toggle button on resize
-                    let btn_x = if sidebar_visible {
-                        sz.width.saturating_sub(sidebar_w + btn_size + btn_margin)
-                    } else {
-                        sz.width.saturating_sub(btn_size + btn_margin)
-                    };
                     let _ = toggle_btn_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(btn_x, btn_margin).into(),
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(btn_size + btn_margin),
+                            btn_margin,
+                        ).into(),
                         size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
                     });
                     // Resize progress bar width
@@ -1331,23 +1319,21 @@ fn main() {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
                     });
-                    // Resize active tab (leave room for sidebar if open)
-                    let tab_w = if sidebar_visible { sz.width.saturating_sub(sidebar_w) } else { sz.width };
+                    // Resize active tab to full width (sidebar overlays, doesn't shrink)
                     let bounds = wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(tab_w, sz.height).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height).into(),
                     };
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         let _ = wv.set_bounds(bounds);
                     }
-                    // Resize footer bar (full width minus sidebar, pinned to bottom)
-                    let footer_w = if sidebar_visible { sz.width.saturating_sub(sidebar_w) } else { sz.width };
+                    // Resize footer bar to full width (pinned to bottom)
                     let _ = footer_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(
                             0u32,
                             sz.height.saturating_sub(footer_h),
                         ).into(),
-                        size: tao::dpi::PhysicalSize::new(footer_w, footer_h).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, footer_h).into(),
                     });
                 }
 
@@ -1355,8 +1341,19 @@ fn main() {
                     modifiers = *mods;
                 }
 
-                WindowEvent::Focused(focused) if window_id == browser_win_id => {
-                    app_focused.store(*focused, Ordering::Relaxed);
+                WindowEvent::Focused(focused) if window_id == browser_win_id || window_id == chrome_win_id => {
+                    if *focused {
+                        app_focused.store(true, Ordering::Relaxed);
+                    } else {
+                        // Only mark unfocused if NEITHER window has focus.
+                        // When clicking between browser_win and chrome_win, one gains
+                        // focus before the other loses it, so we defer the check.
+                        let bf = browser_win.is_focused();
+                        let cf = chrome_win.is_focused();
+                        if !bf && !cf {
+                            app_focused.store(false, Ordering::Relaxed);
+                        }
+                    }
                 }
 
                 WindowEvent::KeyboardInput {
