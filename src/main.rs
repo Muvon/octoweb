@@ -470,7 +470,8 @@ fn main() {
             position: tao::dpi::PhysicalPosition::new(
                 sz0.width.saturating_sub(notif_w + btn_margin),
                 0u32,
-            ).into(),
+            )
+            .into(),
             size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
         })
         .with_ipc_handler({
@@ -1264,18 +1265,23 @@ fn main() {
             }
 
             // ── Quick-slot: open saved URL ────────────────────────────────
+            // If a tab with this URL is already open → switch to it.
+            // Otherwise → open in a new tab (preserves current tab, e.g. music).
             Event::UserEvent(AppEvent::QuickSlotOpen(slot)) => {
                 if let Some(ref qs) = quick_slots[slot] {
                     let url = qs.url.clone();
-                    // Navigate the active tab to the slot URL
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                        let escaped = url.replace('\\', "\\\\").replace('\'', "\\'");
-                        let _ = wv.evaluate_script(&format!(
-                            "window.location.href = '{escaped}'"
-                        ));
+                    let existing_tab = {
+                        let tm = tabs.lock().unwrap();
+                        let normalized = url.trim_end_matches('/');
+                        tm.tabs().iter()
+                            .find(|t| t.url.trim_end_matches('/') == normalized)
+                            .map(|t| t.id)
+                    };
+                    if let Some(tab_id) = existing_tab {
+                        let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                    } else {
+                        let _ = proxy.send_event(AppEvent::NavigateTo(url));
                     }
-                    tabs.lock().unwrap().update_url(active_wv_id, url);
-                    browser_win.set_focus();
                 }
             }
 
