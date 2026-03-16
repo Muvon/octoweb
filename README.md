@@ -13,8 +13,102 @@ Most browsers are built for everyone. octoweb is built for you — the person wh
 Three things it does differently:
 
 1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click
-2. **AI assistant built in** — not an extension, not a tab, a sidebar that talks to a local AI agent via [ACP](https://github.com/muvon/agent-client-protocol)
+2. **AI assistant built in** — not an extension, not a tab, a sidebar powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol)
 3. **MCP server inside the browser** — your AI tools can actually *drive* the browser (`localhost:3434`)
+
+---
+
+## AI assistant
+
+Press `⌘⇧A` to open the sidebar. It connects to a local AI agent running under [octomind](https://github.com/muvon/octomind) using the [Agent Client Protocol (ACP)](https://github.com/muvon/agent-client-protocol). Responses stream in as they arrive.
+
+### How it works
+
+```
+octoweb sidebar  ──ACP/JSON-RPC──▶  octomind acp octoweb:assistant
+                                         │
+                                    specialist agent config
+                                    from the tap registry
+                                         │
+                                    your chosen AI provider
+                                    (OpenAI, Anthropic, etc.)
+```
+
+octomind is a plug-and-play AI agent runtime. You install it once, point it at an API key, and get a fully configured specialist agent — model, system prompt, tools, and all — with zero manual setup. The `octoweb:assistant` tag fetches that agent's configuration from the [community tap registry](https://github.com/muvon/octomind-tap) automatically.
+
+### Setup
+
+**1. Install octomind:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/muvon/octomind/master/install.sh | bash
+```
+
+**2. Set an API key** (any supported provider):
+
+```bash
+export OPENROUTER_API_KEY="your_key"   # easiest — covers all providers
+# or: OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
+```
+
+**3. Start octomind in ACP mode** (octoweb connects to this):
+
+```bash
+octomind acp octoweb:assistant
+```
+
+octomind fetches the `octoweb:assistant` agent manifest from the tap, installs any required tools, and starts listening for ACP connections. octoweb's sidebar connects automatically.
+
+**4. Open the sidebar in octoweb:** `⌘⇧A`
+
+### Changing the agent
+
+The agent tag in the sidebar header defaults to `octoweb:assistant`. You can type any tag your octomind instance knows about — `developer:rust`, `assistant`, your own custom agents — and the sidebar reconnects to that agent immediately.
+
+No data leaves your machine unless your agent sends it somewhere. The AI provider call is made by octomind, not by the browser.
+
+---
+
+## MCP server (AI browser control)
+
+octoweb runs an MCP server on `localhost:3434/mcp`. Any MCP-compatible AI client — Claude Desktop, octomind itself, your own scripts — can use it to control the browser directly.
+
+```
+Claude Desktop / octomind / any MCP client
+        │
+        │  HTTP JSON-RPC
+        ▼
+  localhost:3434/mcp  (inside octoweb)
+        │
+        ▼
+  WebKit WebView — navigate, click, type, read, run JS
+```
+
+**Available tools:**
+
+| Tool | What it does |
+|---|---|
+| `browser_navigate` | Navigate to a URL (`new_tab: true` to open in background) |
+| `browser_get_tabs` | List all open tabs with IDs, titles, URLs |
+| `browser_switch_tab` | Switch to a tab by ID |
+| `browser_close_tab` | Close a tab by ID |
+| `browser_get_page_info` | Get title, URL, meta description of current page |
+| `browser_execute_js` | Run arbitrary JavaScript in the page |
+| `browser_click` | Click an element by CSS selector |
+| `browser_type` | Type text into an input by CSS selector |
+
+Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
+
+### Using octomind as the MCP client
+
+Because octomind has a built-in `mcp` tool that can register external servers at runtime, you can give any running octomind agent live browser access in one step:
+
+```
+# inside an octomind session
+/mcp add octoweb http://localhost:3434/mcp
+```
+
+The agent can now navigate pages, extract content, and interact with the browser as part of its normal tool use — no restart, no config change.
 
 ---
 
@@ -57,37 +151,6 @@ The main interface. Type a URL, a search query, or any fragment of a page title 
 |---|---|
 | `Return` | Send prompt |
 | `⇧Return` | Insert newline |
-
----
-
-## AI assistant
-
-Press `⌘⇧A` to open the sidebar. It connects to a local AI agent via [octomind](https://github.com/muvon/octomind) using the Agent Client Protocol (ACP). Responses stream in as they arrive.
-
-The agent tag defaults to `octoweb:assistant`. You can change it in the sidebar header to point at any agent your octomind instance knows about.
-
-No data leaves your machine unless your agent sends it somewhere.
-
----
-
-## MCP server (AI browser control)
-
-octoweb runs an MCP server on `localhost:3434/mcp`. Any MCP-compatible AI client (Claude Desktop, your own scripts, whatever) can use it to control the browser directly.
-
-**Available tools:**
-
-| Tool | What it does |
-|---|---|
-| `browser_navigate` | Navigate to a URL (`new_tab: true` to open in background) |
-| `browser_get_tabs` | List all open tabs with IDs, titles, URLs |
-| `browser_switch_tab` | Switch to a tab by ID |
-| `browser_close_tab` | Close a tab by ID |
-| `browser_get_page_info` | Get title, URL, meta description of current page |
-| `browser_execute_js` | Run arbitrary JavaScript in the page |
-| `browser_click` | Click an element by CSS selector |
-| `browser_type` | Type text into an input by CSS selector |
-
-Point Claude Desktop (or any MCP client) at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
 
 ---
 
@@ -147,8 +210,9 @@ It won't replace your main browser. It might become the browser you reach for wh
 
 - **[wry](https://github.com/tauri-apps/wry)** — WebView (WKWebView on macOS)
 - **[tao](https://github.com/tauri-apps/tao)** — windowing + event loop
-- **[agent-client-protocol](https://github.com/muvon/agent-client-protocol)** — ACP for AI sidebar
-- **[rmcp](https://github.com/modelcontextprotocol/rust-sdk)** — MCP server
+- **[octomind](https://github.com/muvon/octomind)** — plug-and-play AI agent runtime powering the sidebar
+- **[agent-client-protocol](https://github.com/muvon/agent-client-protocol)** — ACP for browser ↔ agent communication
+- **[rmcp](https://github.com/modelcontextprotocol/rust-sdk)** — MCP server (AI browser control)
 - **CGEventTap** — system-wide keyboard shortcuts without rdev
 - Rust, release profile: LTO + `codegen-units=1` + stripped binary
 
