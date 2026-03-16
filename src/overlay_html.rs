@@ -331,7 +331,7 @@ pub fn html() -> &'static str {
       <div id="action-badge">↵ Open</div>
     </div>
     <div id="results"></div>
-    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
+    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump · <kbd>↵</kbd> confirm · <kbd>⌘↵</kbd> open/search · <kbd>⌘⇧↵</kbd> ask AI · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
   </div>
 </div>
 
@@ -349,7 +349,8 @@ pub fn html() -> &'static str {
     search: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
     globe: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>',
     tab: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line></svg>',
-    history: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 6.3L3 8"></path><line x1="12" y1="7" x2="12" y2="12"></line><line x1="12" y1="12" x2="15" y2="15"></line></svg>'
+    history: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 6.3L3 8"></path><line x1="12" y1="7" x2="12" y2="12"></line><line x1="12" y1="12" x2="15" y2="15"></line></svg>',
+    ai: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.09 6.26L20 10l-5.91 1.74L12 18l-2.09-6.26L4 10l5.91-1.74L12 2z"></path><path d="M18 14l1.18 3.54L22.72 19l-3.54 1.18L18 24l-1.18-3.54L13.28 19l3.54-1.18L18 14z"></path></svg>'
   };
 
   window.__setItems = function(data) {
@@ -386,7 +387,15 @@ pub fn html() -> &'static str {
       move(-1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      confirmSelection();
+      if (e.metaKey && e.shiftKey) {
+        // ⌘⇧Enter → Ask AI
+        askAI();
+      } else if (e.metaKey) {
+        // ⌘Enter → force navigate (URL → open, else → search)
+        forceNavigate();
+      } else {
+        confirmSelection();
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
       closeOverlay();
@@ -403,13 +412,16 @@ pub fn html() -> &'static str {
     const isMacCmd = e.metaKey && !e.ctrlKey && !e.altKey;
     const isCtrl = e.ctrlKey && !e.metaKey && !e.altKey;
 
-    // ⌘1-⌘9, ⌘0 → jump to item 1-9, 10
+    // ⌘1-⌘9, ⌘0 → jump to item 1-9, 10 (only for tabs/history, not actions)
     if (isMacCmd && /^[0-9]$/.test(e.key)) {
       e.preventDefault();
       var idx = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
       if (idx < filtered.length) {
-        sel = idx;
-        confirmSelection();
+        var target = filtered[idx];
+        if (target.kind === 'tab' || target.kind === 'history') {
+          sel = idx;
+          confirmSelection();
+        }
       }
       return true;
     }
@@ -508,7 +520,28 @@ pub fn html() -> &'static str {
       return;
     }
 
+    if (item.kind === 'ask') {
+      askAI();
+      return;
+    }
+
     navigate(item.url);
+  }
+
+  function forceNavigate() {
+    const q = queryEl.value.trim();
+    if (!q) return;
+    if (isLikelyUrl(q)) {
+      navigate(toNavigableUrl(q));
+    } else {
+      navigate(searchUrl(q));
+    }
+  }
+
+  function askAI() {
+    const q = queryEl.value.trim();
+    if (!q) return;
+    window.ipc.postMessage(JSON.stringify({ type: 'ask_ai', text: q }));
   }
 
   function navigate(url) {
@@ -581,8 +614,16 @@ pub fn html() -> &'static str {
       subtitle: raw,
       pill: 'Search'
     };
+    const askAction = {
+      kind: 'ask',
+      title: 'Ask AI',
+      url: '',
+      query: raw,
+      subtitle: raw,
+      pill: 'AI'
+    };
 
-    const actions = urlLike ? [openAction, searchAction] : [searchAction, openAction];
+    const actions = urlLike ? [openAction, searchAction, askAction] : [searchAction, openAction, askAction];
     filtered = [...list, ...actions].slice(0, 14);
     sel = 0;
     renderItems();
@@ -595,10 +636,11 @@ pub fn html() -> &'static str {
       return;
     }
     const item = filtered[sel];
-    if (item.kind === 'tab')     actionBadge.textContent = '↵ Switch';
+    if (item.kind === 'tab')          actionBadge.textContent = '↵ Switch';
     else if (item.kind === 'history') actionBadge.textContent = '↵ Open';
-    else if (item.kind === 'url')    actionBadge.textContent = '↵ Open URL';
-    else                             actionBadge.textContent = '↵ Search';
+    else if (item.kind === 'url')     actionBadge.textContent = '↵ Open URL';
+    else if (item.kind === 'ask')     actionBadge.textContent = '↵ Ask AI';
+    else                              actionBadge.textContent = '↵ Search';
   }
 
   function renderItems() {
@@ -675,9 +717,10 @@ pub fn html() -> &'static str {
     const rawTitle = (item.title && item.title !== item.url) ? item.title : hostname;
     const kindLabel = esc(item.pill || kindLabelFor(item));
     const selected = idx === sel ? ' selected' : '';
-    const shortcutNum = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '';
+    const isJumpable = item.kind === 'tab' || item.kind === 'history';
+    const shortcutNum = isJumpable ? (idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '') : '';
     const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>' : '';
-    const canClose = item.kind === 'tab' || item.kind === 'history';
+    const canClose = isJumpable;
     const closeAttr = item.kind === 'tab'
       ? 'data-tab-id="' + item.tab_id + '"'
       : 'data-history-url="' + esc(item.url) + '"';
@@ -707,6 +750,7 @@ pub fn html() -> &'static str {
     const html = item.kind === 'tab' ? ICONS.tab
                : item.kind === 'history' ? ICONS.history
                : item.kind === 'url' ? ICONS.globe
+               : item.kind === 'ask' ? ICONS.ai
                : ICONS.search;
     return html;
   }
@@ -715,6 +759,7 @@ pub fn html() -> &'static str {
     if (item.kind === 'tab') return 'Tab';
     if (item.kind === 'history') return 'History';
     if (item.kind === 'url') return 'URL';
+    if (item.kind === 'ask') return 'AI';
     return 'Search';
   }
 

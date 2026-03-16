@@ -49,6 +49,7 @@ enum AppEvent {
     ToggleSidebar,                          // Cmd+Shift+A — toggle AI assistant sidebar
     AcpPrompt(String),                      // user typed a prompt in the sidebar
     AcpRestart(String), // change agent tag (e.g. "octoweb:assistant") and reconnect
+    AskAI(String),      // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,     // Cmd+Shift+I — open devtools for active tab
     OpenInNewTab(String), // Cmd+click / target=_blank — open URL in new tab and switch to it
     PageLoadStarted(usize), // (tab_id) — show progress bar
@@ -311,6 +312,14 @@ fn main() {
                         Some("remove_history") => {
                             if let Some(url) = v["url"].as_str() {
                                 let _ = p.send_event(AppEvent::RemoveHistory(url.to_string()));
+                            }
+                        }
+                        Some("ask_ai") => {
+                            ow.set_visible(false);
+                            overlay_state.store(false, Ordering::Relaxed);
+                            let _ = p.send_event(AppEvent::HideOverlay);
+                            if let Some(text) = v["text"].as_str() {
+                                let _ = p.send_event(AppEvent::AskAI(text.to_string()));
                             }
                         }
                         _ => {}
@@ -1114,6 +1123,19 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                 "window.__setAgentTag && window.__setAgentTag(`{escaped}`)"
             ));
+            }
+
+            // ── Ask AI: open sidebar + inject prompt ──────────────────────
+            Event::UserEvent(AppEvent::AskAI(text)) => {
+                // Open sidebar if not already visible
+                if !sidebar_visible {
+                    let _ = proxy.send_event(AppEvent::ToggleSidebar);
+                }
+                // Inject the prompt into the sidebar and submit it
+                let escaped = text.replace('\\', "\\\\").replace('`', "\\`");
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__injectPrompt && window.__injectPrompt(`{escaped}`)"
+                ));
             }
 
             // ── Quick-slot: open saved URL ────────────────────────────────

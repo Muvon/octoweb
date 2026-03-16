@@ -867,6 +867,14 @@ pub fn html() -> &'static str {
     if (e.key === 'Escape') { showChip(); }
   });
 
+  // Called from Rust (overlay "Ask AI") to programmatically submit a prompt
+  window.__injectPrompt = function(text) {
+    input.value = text;
+    input.style.height = 'auto';
+    sendBtn.classList.toggle('active', true);
+    send();
+  };
+
   // Called from Rust after AcpRestart to sync the chip label
   window.__setAgentTag = function(tag) {
     agentInput.value = tag;
