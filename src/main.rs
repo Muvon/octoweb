@@ -467,8 +467,10 @@ fn main() {
         .with_html(notification_html::html())
         .with_transparent(true)
         .with_bounds(wry::Rect {
-            position: tao::dpi::PhysicalPosition::new(sz0.width.saturating_sub(notif_w) / 2, 0u32)
-                .into(),
+            position: tao::dpi::PhysicalPosition::new(
+                sz0.width.saturating_sub(notif_w + btn_margin),
+                0u32,
+            ).into(),
             size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
         })
         .with_ipc_handler({
@@ -1487,10 +1489,10 @@ fn main() {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
                     });
-                    // Reposition notification toast at top-center
+                    // Reposition notification toast at top-right
                     let _ = notification_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(notif_w) / 2,
+                            sz.width.saturating_sub(notif_w + btn_margin),
                             0u32,
                         ).into(),
                         size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),

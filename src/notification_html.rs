@@ -29,8 +29,8 @@ pub fn html() -> &'static str {
   #toast {
     position: fixed;
     top: 8px;
-    left: 50%;
-    transform: translateX(-50%) translateY(-120%);
+    right: 8px;
+    transform: translateY(-120%);
     width: 340px;
     padding: 10px 14px;
     border-radius: 14px;
@@ -54,13 +54,13 @@ pub fn html() -> &'static str {
   }
 
   #toast.show {
-    transform: translateX(-50%) translateY(0);
+    transform: translateY(0);
     opacity: 1;
     pointer-events: auto;
   }
 
   #toast.hide {
-    transform: translateX(-50%) translateY(-120%);
+    transform: translateY(-120%);
     opacity: 0;
     pointer-events: none;
   }
