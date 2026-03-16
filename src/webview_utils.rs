@@ -50,63 +50,63 @@ pub const FAVICON_FETCH_SCRIPT: &str = r#"
 "#;
 
 /// Tracks audio/video playback state and notifies Rust via IPC.
-/// Uses MutationObserver to catch dynamically added media elements.
+/// Uses document-level capture-phase listeners to catch all media events,
+/// including dynamically added elements (YouTube, SPAs, etc.).
 pub const MEDIA_TRACK_SCRIPT: &str = r#"
 (function() {
   'use strict';
 
-  // Count of currently playing media elements
-  var playingCount = 0;
+  // Track which media elements are currently playing
+  var playing = new Set();
+  var lastState = false;
 
   function sendState() {
-    var msg = playingCount > 0 ? 'media:playing' : 'media:paused';
-    window.ipc.postMessage(JSON.stringify({ type: msg }));
-  }
-
-  function setupMediaListeners(el) {
-    el.addEventListener('play', function() {
-      playingCount++;
-      sendState();
-    });
-    el.addEventListener('pause', function() {
-      if (playingCount > 0) playingCount--;
-      sendState();
-    });
-    el.addEventListener('ended', function() {
-      if (playingCount > 0) playingCount--;
-      sendState();
-    });
-    // If already playing (e.g., autoplay), count it
-    if (!el.paused && !el.ended) {
-      playingCount++;
-      sendState();
+    var nowPlaying = playing.size > 0;
+    if (nowPlaying !== lastState) {
+      lastState = nowPlaying;
+      var msg = nowPlaying ? 'media:playing' : 'media:paused';
+      window.ipc.postMessage(JSON.stringify({ type: msg }));
     }
   }
 
-  // Setup existing audio/video elements
-  document.addEventListener('DOMContentLoaded', function() {
-    var medias = document.querySelectorAll('audio, video');
-    for (var i = 0; i < medias.length; i++) {
-      setupMediaListeners(medias[i]);
-    }
-  });
+  function isMedia(el) {
+    var tag = el && el.tagName;
+    return tag === 'VIDEO' || tag === 'AUDIO';
+  }
 
-  // Watch for dynamically added media elements
+  // Capture phase catches events before they can be stopPropagation'd.
+  // Media events (play/pause/ended) don't bubble, but they DO get captured.
+  document.addEventListener('play', function(e) {
+    if (isMedia(e.target)) { playing.add(e.target); sendState(); }
+  }, true);
+
+  document.addEventListener('pause', function(e) {
+    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+  }, true);
+
+  document.addEventListener('ended', function(e) {
+    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+  }, true);
+
+  // Emptied/error — media element reset or failed
+  document.addEventListener('emptied', function(e) {
+    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+  }, true);
+
+  // Clean up removed elements so the Set doesn't hold stale refs
   var observer = new MutationObserver(function(mutations) {
+    var changed = false;
     mutations.forEach(function(mutation) {
-      mutation.addedNodes.forEach(function(node) {
-        if (node.nodeType === 1) { // Element node
-          if (node.tagName === 'AUDIO' || node.tagName === 'VIDEO') {
-            setupMediaListeners(node);
-          }
-          // Also check children
-          var children = node.querySelectorAll ? node.querySelectorAll('audio, video') : [];
-          for (var i = 0; i < children.length; i++) {
-            setupMediaListeners(children[i]);
-          }
+      mutation.removedNodes.forEach(function(node) {
+        if (node.nodeType !== 1) return;
+        if (isMedia(node) && playing.delete(node)) changed = true;
+        var children = node.querySelectorAll ? node.querySelectorAll('audio, video') : [];
+        for (var i = 0; i < children.length; i++) {
+          if (playing.delete(children[i])) changed = true;
         }
       });
     });
+    if (changed) sendState();
   });
   observer.observe(document.documentElement || document, { childList: true, subtree: true });
 })();
