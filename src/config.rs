@@ -21,7 +21,7 @@ pub fn save_session(tabs: &[String], active_url: &str) {
         Ok(s) => {
             let _ = fs::write(&path, s);
         }
-        Err(e) => eprintln!("Failed to serialize session: {e}"),
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize session"),
     }
 }
 
@@ -51,7 +51,7 @@ pub fn save_favicons(cache: &std::collections::HashMap<String, String>) {
         Ok(s) => {
             let _ = fs::write(&path, s);
         }
-        Err(e) => eprintln!("Failed to serialize favicon cache: {e}"),
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize favicon cache"),
     }
 }
 
@@ -109,7 +109,7 @@ impl Config {
         let raw = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to read config at {}: {e}", path.display());
+                tracing::error!(path = %path.display(), error = %e, "Failed to read config");
                 return Config::default();
             }
         };
@@ -117,7 +117,7 @@ impl Config {
         match toml::from_str(&raw) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("Invalid config at {}: {e}", path.display());
+                tracing::error!(path = %path.display(), error = %e, "Invalid config");
                 Config::default()
             }
         }
@@ -131,10 +131,10 @@ impl Config {
         match toml::to_string_pretty(self) {
             Ok(s) => {
                 if let Err(e) = fs::write(&path, s) {
-                    eprintln!("Failed to write config: {e}");
+                    tracing::warn!(error = %e, "Failed to write config");
                 }
             }
-            Err(e) => eprintln!("Failed to serialize config: {e}"),
+            Err(e) => tracing::warn!(error = %e, "Failed to serialize config"),
         }
     }
 

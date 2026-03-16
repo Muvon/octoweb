@@ -2,12 +2,15 @@ mod acp;
 mod browser;
 mod config;
 mod error_page_html;
+mod macos;
 mod mcp;
 mod nav_error_patch;
 mod overlay_html;
 mod progress_bar_html;
 mod sidebar_html;
 mod toggle_btn_html;
+mod url;
+mod webview_utils;
 
 use std::collections::HashMap;
 use std::sync::{
@@ -53,6 +56,14 @@ enum AppEvent {
     Quit,
 }
 fn main() {
+    // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
     let cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
 
@@ -120,9 +131,9 @@ fn main() {
                 // Fetch and cache favicon as base64 data-URI on every page load.
                 // Tries <link rel="icon"> first (highest quality), falls back to /favicon.ico.
                 // Posts IPC only once per domain per session (deduplication in Rust).
-                .with_initialization_script(FAVICON_FETCH_SCRIPT)
+                .with_initialization_script(webview_utils::FAVICON_FETCH_SCRIPT)
                 // Track audio/video playback state and notify Rust via IPC.
-                .with_initialization_script(MEDIA_TRACK_SCRIPT)
+                .with_initialization_script(webview_utils::MEDIA_TRACK_SCRIPT)
                 .with_ipc_handler(move |msg| {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                         match v["type"].as_str() {
@@ -236,7 +247,7 @@ fn main() {
         let _ = wv.set_visible(true);
     }
     tabs.lock().unwrap().switch(active_wv_id);
-    mru_push(&mut mru, active_wv_id);
+    macos::mru_push(&mut mru, active_wv_id);
 
     // ── Overlay WebView ───────────────────────────────────────────────────
     let overlay_wv = WebViewBuilder::new()
@@ -373,7 +384,7 @@ fn main() {
 
     // ── ACP handle — spawns octomind acp subprocess in background ─────────
     let mut acp_tag = "octoweb:assistant".to_string();
-    let acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
+    let mut acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
 
     // ── MCP server — exposes browser control tools on localhost:3434 ───────
     let mut mcp_handle = Some(mcp::spawn_mcp_server());
@@ -467,10 +478,6 @@ fn main() {
     let mut overlay_visible = false;
     let mut sidebar_visible = false;
     let mut icon_set = false;
-
-    // Move ACP handle into the event loop closure.
-    let mut acp_handle = acp_handle;
-
     // ── Event loop ────────────────────────────────────────────────────────
     event_loop.run(move |event, _, control_flow| {
         // Poll mode when sidebar is open (ACP events) or progress bar is fading out.
@@ -478,8 +485,8 @@ fn main() {
         *control_flow = if sidebar_visible || progress_hide_at.is_some() {
             ControlFlow::Poll
         } else {
-                ControlFlow::Wait
-            };
+            ControlFlow::Wait
+        };
 
         // Hide progress bar after CSS fade completes
         if let Some(hide_at) = progress_hide_at {
@@ -492,8 +499,8 @@ fn main() {
 
         // Set dock icon and app menu once — must happen after tao has initialized NSApplication.
         if !icon_set {
-            set_app_icon();
-            setup_edit_menu();
+            macos::set_app_icon();
+            macos::setup_edit_menu();
             icon_set = true;
         }
 
@@ -530,13 +537,11 @@ fn main() {
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
             while let Some(cmd) = handle.poll() {
-                #[cfg(debug_assertions)]
-                eprintln!("MCP MAIN: Received command: {:?}", std::mem::discriminant(&cmd));
+                tracing::debug!(cmd = ?std::mem::discriminant(&cmd), "MCP command received");
 
                 match cmd {
                     McpCommand::Navigate { url, new_tab, response } => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("MCP MAIN: Navigate to {} (new_tab={})", url, new_tab);
+                        tracing::debug!(url = %url, new_tab, "MCP navigate");
 
                         if new_tab {
                             let _ = proxy.send_event(AppEvent::OpenInNewTab(url));
@@ -546,8 +551,7 @@ fn main() {
                         let _ = response.send(Ok(()));
                     }
                     McpCommand::GetTabs { response } => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("MCP MAIN: GetTabs requested");
+                        tracing::debug!("MCP get_tabs");
 
                         let tm = tabs.lock().unwrap();
                         let tabs_list: Vec<TabInfo> = tm.tabs().iter().map(|t| TabInfo {
@@ -558,21 +562,18 @@ fn main() {
                             is_playing_audio: t.is_playing_audio,
                         }).collect();
 
-                        #[cfg(debug_assertions)]
-                        eprintln!("MCP MAIN: Returning {} tabs", tabs_list.len());
+                        tracing::debug!(count = tabs_list.len(), "MCP get_tabs response");
 
                         let _ = response.send(Ok(tabs_list));
                     }
                     McpCommand::SwitchTab { tab_id, response } => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("MCP MAIN: SwitchTab to {}", tab_id);
+                        tracing::debug!(tab_id, "MCP switch_tab");
 
                         let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
                         let _ = response.send(Ok(()));
                     }
                     McpCommand::CloseTab { tab_id, response } => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("MCP MAIN: CloseTab {}", tab_id);
+                        tracing::debug!(tab_id, "MCP close_tab");
 
                         let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
                         let _ = response.send(Ok(()));
@@ -747,7 +748,7 @@ fn main() {
                     }
                     let json = {
                         let tm = tabs.lock().unwrap();
-                        build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                        webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
                     };
                     let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setItems && window.__setItems({json})"
@@ -763,7 +764,7 @@ fn main() {
             Event::UserEvent(AppEvent::NavigateTo(raw)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
-                let url = resolve_url(&raw);
+                let url = url::resolve_url(&raw);
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let _ = wv.set_visible(false);
@@ -776,7 +777,7 @@ fn main() {
                 });
                 tab_webviews.insert(tab_id, new_wv);
                 active_wv_id = tab_id;
-                mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
 
@@ -794,7 +795,7 @@ fn main() {
                 });
                 tab_webviews.insert(tab_id, new_wv);
                 active_wv_id = tab_id;
-                mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
 
@@ -814,7 +815,7 @@ fn main() {
                     let _ = wv.set_visible(true);
                 }
                 active_wv_id = tab_id;
-                mru_push(&mut mru, tab_id);
+                    macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
 
@@ -846,7 +847,7 @@ fn main() {
                                 let _ = wv.set_visible(true);
                             }
                             active_wv_id = next;
-                            mru_push(&mut mru, next);
+                            macos::mru_push(&mut mru, next);
                             browser_win.set_focus();
                         }
                         None => *control_flow = ControlFlow::Exit,
@@ -897,7 +898,6 @@ fn main() {
                 active_wv_id = target;
                 browser_win.set_focus();
             }
-
 
             // ── Toggle sidebar (Cmd+Shift+A or JS sidebar_close) ──────────
             Event::UserEvent(AppEvent::ToggleSidebar) => {
@@ -996,16 +996,7 @@ fn main() {
 
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
-                let tm = tabs.lock().unwrap();
-                let tab_urls: Vec<String> = tm.tabs().iter().map(|t| t.url.clone()).collect();
-                let active_url = tm
-                    .active_tab()
-                    .map(|t| t.url.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                drop(tm);
-                config::save_session(&tab_urls, &active_url);
-                *control_flow = ControlFlow::Exit;
+                save_and_exit(&tabs, &favicon_cache, control_flow);
             }
 
             // ── Title update ──────────────────────────────────────────────
@@ -1086,17 +1077,7 @@ fn main() {
             } => match win_event {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
-                        let tm = tabs.lock().unwrap();
-                        let tab_urls: Vec<String> =
-                        tm.tabs().iter().map(|t| t.url.clone()).collect();
-                        let active_url = tm
-                            .active_tab()
-                            .map(|t| t.url.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        drop(tm);
-                        config::save_session(&tab_urls, &active_url);
-                        *control_flow = ControlFlow::Exit;
+                        save_and_exit(&tabs, &favicon_cache, control_flow);
                     } else {
                         overlay_win.set_visible(false);
                         overlay_visible = false;
@@ -1184,340 +1165,21 @@ fn main() {
     });
 }
 
-/// If input looks like a URL, ensure it has a scheme. Otherwise Google search.
-fn resolve_url(input: &str) -> String {
-    let s = input.trim();
-    if s.is_empty() {
-        return "about:blank".to_string();
-    }
-
-    if has_url_scheme(s) {
-        return s.to_string();
-    }
-
-    if !s.chars().any(char::is_whitespace)
-        && (looks_like_localhost(s) || looks_like_ipv4(s) || looks_like_domain(s))
-    {
-        return format!("https://{s}");
-    }
-
-    format!("https://www.google.com/search?q={}", encode_uri(s))
-}
-
-fn has_url_scheme(s: &str) -> bool {
-    let Some(idx) = s.find(':') else {
-        return false;
-    };
-    let scheme = &s[..idx];
-    !scheme.is_empty()
-        && scheme
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-}
-
-fn host_part(input: &str) -> &str {
-    input.split(['/', '?', '#']).next().unwrap_or(input)
-}
-
-fn looks_like_localhost(input: &str) -> bool {
-    let host = host_part(input);
-    if host == "localhost" {
-        return true;
-    }
-    host.strip_prefix("localhost:")
-        .map(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or(false)
-}
-
-fn looks_like_ipv4(input: &str) -> bool {
-    let host = host_part(input);
-    let ip = host.split(':').next().unwrap_or(host);
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
-}
-
-fn looks_like_domain(input: &str) -> bool {
-    let host = host_part(input);
-    let domain = host.split(':').next().unwrap_or(host);
-    if !domain.contains('.') {
-        return false;
-    }
-
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.iter().any(|label| label.is_empty()) {
-        return false;
-    }
-
-    labels.iter().all(|label| {
-        label
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-    })
-}
-
-/// Percent-encode a query string for use in a URL (encodes everything except unreserved chars)
-fn encode_uri(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
-                vec![c]
-            } else {
-                let mut buf = [0u8; 4];
-                let bytes = c.encode_utf8(&mut buf);
-                bytes
-                    .bytes()
-                    .flat_map(|b| format!("%{b:02X}").chars().collect::<Vec<_>>())
-                    .collect()
-            }
-        })
-        .collect()
-}
-
-/// Serialize open tabs + recent history into a JSON array for the overlay JS.
-/// Favicons come from the local cache (base64 data-URIs) — no external requests.
-fn build_items_json(
-    tabs: &[browser::Tab],
-    history: &[browser::HistoryEntry],
-    tm: &browser::TabManager,
-    favicons: &HashMap<String, String>,
-) -> String {
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    for tab in tabs {
-        let visits = tm.visit_count(&tab.url);
-        items.push(serde_json::json!({
-            "kind": "tab",
-            "tab_id": tab.id,
-            "title": tab.title,
-            "url": tab.url,
-            "favicon": cached_favicon(&tab.url, favicons),
-            "visit_count": visits,
-        }));
-    }
-    let open_urls: std::collections::HashSet<&str> =
-        tabs.iter().map(|t| t.url.trim_end_matches('/')).collect();
-    for entry in history.iter().rev().take(200) {
-        if !open_urls.contains(entry.url.trim_end_matches('/')) {
-            let visits = tm.visit_count(&entry.url);
-            items.push(serde_json::json!({
-                "kind": "history",
-                "title": entry.title,
-                "url": entry.url,
-                "favicon": cached_favicon(&entry.url, favicons),
-                "visit_count": visits,
-                "visited_at": entry.visited_at,
-            }));
-        }
-    }
-    serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
-}
-
-/// Look up a cached favicon data-URI by domain extracted from the URL.
-fn cached_favicon(url: &str, favicons: &HashMap<String, String>) -> Option<String> {
-    let after_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let host = after_scheme.split('/').next().filter(|h| !h.is_empty())?;
-    favicons.get(host).cloned()
-}
-
-/// JS injected into every tab page at document-start.
-/// Finds the best favicon (link[rel~=icon] → /favicon.ico), fetches it,
-/// converts to a base64 data-URI, and posts IPC once per page load.
-/// The Rust side deduplicates by domain so disk writes are rare.
-const FAVICON_FETCH_SCRIPT: &str = r#"
-(function() {
-  'use strict';
-
-  // Favicon fetch — runs on every page load
-
-  // Favicon fetch
-  window.addEventListener('load', function() {
-    var loc = window.location;
-    if (loc.protocol !== 'https:' && loc.protocol !== 'http:') return;
-    var domain = loc.hostname;
-    if (!domain) return;
-
-    // Find best <link rel="icon"> href
-    var best = null;
-    var links = document.querySelectorAll('link[rel]');
-    for (var i = 0; i < links.length; i++) {
-      var rel = links[i].rel.toLowerCase();
-      if (rel.indexOf('icon') !== -1 && links[i].href) {
-        best = links[i].href;
-        if (rel === 'icon' || rel === 'shortcut icon') break;
-      }
-    }
-    var url = best || (loc.protocol + '//' + loc.host + '/favicon.ico');
-
-    fetch(url, { cache: 'force-cache' })
-      .then(function(r) { return r.ok ? r.blob() : Promise.reject(); })
-      .then(function(blob) {
-        return new Promise(function(resolve, reject) {
-          var reader = new FileReader();
-          reader.onload = function() { resolve(reader.result); };
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      })
-      .then(function(dataUri) {
-        window.ipc.postMessage(JSON.stringify({ type: 'favicon', domain: domain, data: dataUri }));
-      })
-      .catch(function() {});
-  });
-})();
-"#;
-
-/// Tracks audio/video playback state and notifies Rust via IPC.
-/// Uses MutationObserver to catch dynamically added media elements.
-const MEDIA_TRACK_SCRIPT: &str = r#"
-(function() {
-  'use strict';
-
-  // Count of currently playing media elements
-  var playingCount = 0;
-
-  function sendState() {
-    var msg = playingCount > 0 ? 'media:playing' : 'media:paused';
-    window.ipc.postMessage(JSON.stringify({ type: msg }));
-  }
-
-  function setupMediaListeners(el) {
-    el.addEventListener('play', function() {
-      playingCount++;
-      sendState();
-    });
-    el.addEventListener('pause', function() {
-      if (playingCount > 0) playingCount--;
-      sendState();
-    });
-    el.addEventListener('ended', function() {
-      if (playingCount > 0) playingCount--;
-      sendState();
-    });
-    // If already playing (e.g., autoplay), count it
-    if (!el.paused && !el.ended) {
-      playingCount++;
-      sendState();
-    }
-  }
-
-  // Setup existing audio/video elements
-  document.addEventListener('DOMContentLoaded', function() {
-    var medias = document.querySelectorAll('audio, video');
-    for (var i = 0; i < medias.length; i++) {
-      setupMediaListeners(medias[i]);
-    }
-  });
-
-  // Watch for dynamically added media elements
-  var observer = new MutationObserver(function(mutations) {
-    mutations.forEach(function(mutation) {
-      mutation.addedNodes.forEach(function(node) {
-        if (node.nodeType === 1) { // Element node
-          if (node.tagName === 'AUDIO' || node.tagName === 'VIDEO') {
-            setupMediaListeners(node);
-          }
-          // Also check children
-          var children = node.querySelectorAll ? node.querySelectorAll('audio, video') : [];
-          for (var i = 0; i < children.length; i++) {
-            setupMediaListeners(children[i]);
-          }
-        }
-      });
-    });
-  });
-  observer.observe(document.documentElement || document, { childList: true, subtree: true });
-})();
-"#;
-
-/// Set the macOS dock/app icon from the embedded PNG.
-fn set_app_icon() {
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::{MainThreadMarker, NSData};
-
-    const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
-
-    // SAFETY: called at startup on the main thread before the event loop starts.
-    let mtm = unsafe { MainThreadMarker::new_unchecked() };
-    unsafe {
-        let data = NSData::with_bytes(ICON_PNG);
-        if let Some(image) = NSImage::initWithData(mtm.alloc(), &data) {
-            let app = NSApplication::sharedApplication(mtm);
-            app.setApplicationIconImage(Some(&image));
-        }
-    }
-}
-/// Push tab_id to front of MRU list, removing any prior occurrence.
-/// Keeps the list bounded to 64 entries (more than enough for any session).
-fn mru_push(mru: &mut Vec<usize>, id: usize) {
-    mru.retain(|&x| x != id);
-    mru.insert(0, id);
-    mru.truncate(64);
-}
-
-/// Install a minimal macOS menu bar so that standard Edit shortcuts
-/// (Cmd+A, Cmd+C, Cmd+V, Cmd+X, Cmd+Z, Cmd+Shift+Z) are routed through
-/// the NSResponder chain to WKWebView.
-///
-/// Without a menu bar, macOS has no `selectAll:` / `copy:` / `paste:` /
-/// `cut:` / `undo:` / `redo:` actions registered, so those key equivalents
-/// are silently swallowed and never reach the web view's text inputs.
-fn setup_edit_menu() {
-    use objc2::sel;
-    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
-    use objc2_foundation::{MainThreadMarker, NSString};
-
-    // SAFETY: called on the main thread from the tao event loop.
-    let mtm = unsafe { MainThreadMarker::new_unchecked() };
-
-    unsafe {
-        let app = NSApplication::sharedApplication(mtm);
-
-        // Top-level menu bar.
-        let menubar = NSMenu::new(mtm);
-
-        // ── Edit menu ────────────────────────────────────────────────────
-        let edit_menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("Edit"));
-
-        // Helper: add an item with title, action selector, and key equivalent.
-        macro_rules! add_item {
-            ($menu:expr, $title:expr, $sel:expr, $key:expr) => {{
-                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                    mtm.alloc(),
-                    &NSString::from_str($title),
-                    Some($sel),
-                    &NSString::from_str($key),
-                );
-                $menu.addItem(&item);
-            }};
-        }
-
-        add_item!(edit_menu, "Select All", sel!(selectAll:), "a");
-        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_item!(edit_menu, "Cut", sel!(cut:), "x");
-        add_item!(edit_menu, "Copy", sel!(copy:), "c");
-        add_item!(edit_menu, "Paste", sel!(paste:), "v");
-        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add_item!(edit_menu, "Undo", sel!(undo:), "z");
-        // Redo: Cmd+Shift+Z — set modifier mask after creation.
-        let redo = NSMenuItem::initWithTitle_action_keyEquivalent(
-            mtm.alloc(),
-            &NSString::from_str("Redo"),
-            Some(sel!(redo:)),
-            &NSString::from_str("Z"), // uppercase = Shift in key equivalent
-        );
-        edit_menu.addItem(&redo);
-
-        // Wrap the Edit menu in a top-level container item.
-        let edit_item = NSMenuItem::new(mtm);
-        edit_item.setSubmenu(Some(&edit_menu));
-        menubar.addItem(&edit_item);
-
-        app.setMainMenu(Some(&menubar));
-    }
+/// Save session state and exit the event loop.
+fn save_and_exit(
+    tabs: &Arc<Mutex<browser::TabManager>>,
+    favicon_cache: &std::collections::HashMap<String, String>,
+    control_flow: &mut ControlFlow,
+) {
+    let tm = tabs.lock().unwrap();
+    let tab_urls: Vec<String> = tm.tabs().iter().map(|t| t.url.clone()).collect();
+    let active_url = tm
+        .active_tab()
+        .map(|t| t.url.as_str())
+        .unwrap_or("")
+        .to_string();
+    drop(tm);
+    config::save_session(&tab_urls, &active_url);
+    config::save_favicons(favicon_cache);
+    *control_flow = ControlFlow::Exit;
 }

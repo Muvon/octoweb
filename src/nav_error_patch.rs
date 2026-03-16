@@ -30,11 +30,7 @@ fn registry() -> &'static Mutex<HashMap<usize, ErrorCallback>> {
 /// `ptr` is the raw WKWebView pointer cast to usize.
 /// Called from the main thread after building each tab WebView.
 pub fn register(ptr: usize, callback: impl Fn(String, i64) + Send + 'static) {
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "[nav_error_patch] Registering callback for webview ptr={}",
-        ptr
-    );
+    tracing::debug!(ptr, "Registering nav-error callback");
     registry().lock().unwrap().insert(ptr, Box::new(callback));
 }
 
@@ -52,11 +48,7 @@ pub fn inject_from_webview(webview_ptr: usize) {
         return;
     }
 
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "[nav_error_patch] Attempting to get delegate class from webview {:p}",
-        webview_ptr as *mut ()
-    );
+    tracing::debug!(ptr = webview_ptr, "Injecting nav-error delegate methods");
 
     // Get the navigation delegate from the WKWebView
     unsafe {
@@ -64,8 +56,7 @@ pub fn inject_from_webview(webview_ptr: usize) {
         let delegate: *mut AnyObject = msg_send![wv, navigationDelegate];
 
         if delegate.is_null() {
-            #[cfg(debug_assertions)]
-            eprintln!("[nav_error_patch] navigationDelegate is null");
+            tracing::debug!("navigationDelegate is null");
             return;
         }
 
@@ -73,8 +64,7 @@ pub fn inject_from_webview(webview_ptr: usize) {
         let delegate_class: *const AnyClass = msg_send![delegate, class];
         let class_name: *const i8 = msg_send![delegate_class, className];
         let name = std::ffi::CStr::from_ptr(class_name);
-        #[cfg(debug_assertions)]
-        eprintln!("[nav_error_patch] Delegate class: {:?}", name);
+        tracing::debug!(?name, "Nav-error delegate class");
 
         // Inject methods
         let types = c"v@:@@@";
@@ -109,8 +99,7 @@ pub fn inject_from_webview(webview_ptr: usize) {
             types.as_ptr(),
         );
 
-        #[cfg(debug_assertions)]
-        eprintln!("[nav_error_patch] Methods injected via webview delegate");
+        tracing::debug!("Nav-error methods injected");
         DONE.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -147,11 +136,7 @@ fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {
 
     // Extract error code (NSInteger) and URL string from NSError
     let code: c_long = unsafe { msg_send![&*error, code] };
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "[nav_error_patch] didFail callback fired! code={}, webview={:p}",
-        code, webview
-    );
+    tracing::debug!(code, ?webview, "Nav-error callback fired");
 
     // Get the failing URL from NSError.userInfo[NSURLErrorFailingURLStringErrorKey]
     // Falls back to empty string — the Rust side already knows the URL from NavigateTo.

@@ -35,6 +35,8 @@ async-trait = "0.1"
 tokio = { version = "1.50.0", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["compat"] }
 anyhow = "1.0.102"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # MCP Server for AI assistant control (HTTP JSON-RPC)
 rmcp = { version = "1.2.0", features = ["server", "transport-streamable-http-server"] }

@@ -229,11 +229,7 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<NavigateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "MCP TOOL: browser_navigate called with url={}, new_tab={:?}",
-            req.url, req.new_tab
-        );
+        tracing::debug!(url = %req.url, new_tab = ?req.new_tab, "MCP browser_navigate");
 
         let (tx, rx) = oneshot::channel();
         let new_tab = req.new_tab.unwrap_or(false);
@@ -247,15 +243,13 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        #[cfg(debug_assertions)]
-        eprintln!("MCP TOOL: Navigate command sent, waiting for response...");
+        tracing::debug!("MCP navigate command sent");
 
         let result = rx
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        #[cfg(debug_assertions)]
-        eprintln!("MCP TOOL: Navigate response received: {:?}", result);
+        tracing::debug!(?result, "MCP navigate response");
 
         match result {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
@@ -267,8 +261,7 @@ impl McpServer {
 
     #[tool(description = "Get list of all open tabs with their IDs, titles, and URLs.")]
     async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
-        #[cfg(debug_assertions)]
-        eprintln!("MCP TOOL: browser_get_tabs called");
+        tracing::debug!("MCP browser_get_tabs");
 
         let (tx, rx) = oneshot::channel();
 
@@ -277,15 +270,13 @@ impl McpServer {
             .send(McpCommand::GetTabs { response: tx })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        #[cfg(debug_assertions)]
-        eprintln!("MCP TOOL: GetTabs command sent, waiting for response...");
+        tracing::debug!("MCP get_tabs command sent");
 
         let result = rx
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        #[cfg(debug_assertions)]
-        eprintln!("MCP TOOL: GetTabs response received: {:?}", result);
+        tracing::debug!(?result, "MCP get_tabs response");
 
         match result {
             Ok(tabs) => {
@@ -606,8 +597,7 @@ impl McpServer {
 #[tool_handler]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
-        #[cfg(debug_assertions)]
-        eprintln!("MCP: get_info called");
+        tracing::debug!("MCP get_info");
 
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -663,18 +653,15 @@ pub fn spawn_mcp_server() -> McpHandle {
             let listener = match tokio::net::TcpListener::bind("127.0.0.1:3434").await {
                 Ok(l) => l,
                 Err(e) => {
-                    #[cfg(debug_assertions)]
-                    eprintln!("MCP HTTP server failed to bind: {e}");
+                    tracing::warn!(error = %e, "MCP HTTP server failed to bind");
                     return;
                 }
             };
 
-            #[cfg(debug_assertions)]
-            eprintln!("MCP HTTP server listening on http://127.0.0.1:3434/mcp");
+            tracing::info!("MCP HTTP server listening on http://127.0.0.1:3434/mcp");
 
             if let Err(e) = axum::serve(listener, app).await {
-                #[cfg(debug_assertions)]
-                eprintln!("MCP HTTP server error: {e}");
+                tracing::error!(error = %e, "MCP HTTP server error");
             }
         });
     });
