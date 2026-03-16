@@ -12,7 +12,7 @@ Most browsers are built for everyone. octoweb is built for you — the person wh
 
 Three things it does differently:
 
-1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click
+1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette fuzzy-searches tabs and history with `⌘1`–`⌘9` instant-jump to any result
 2. **AI assistant built in** — not an extension, not a tab, a sidebar powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol)
 3. **MCP server inside the browser** — your AI tools can actually *drive* the browser (`localhost:3434`)
 
@@ -129,12 +129,16 @@ The agent can now navigate pages, extract content, and interact with the browser
 
 ### Command palette (`⌘K`)
 
-The main interface. Type a URL, a search query, or any fragment of a page title or URL you've visited — it fuzzy-matches across open tabs and history instantly.
+The main interface. Type a URL, a search query, or any fragment of a page title or URL you've visited — it fuzzy-matches across open tabs and history instantly, ranked by match quality and visit frequency.
+
+Results are numbered: the first nine show a `⌘1`–`⌘9` badge, the tenth shows `⌘0`. Press that shortcut to jump directly without moving the selection at all.
 
 | Shortcut | Action |
 |---|---|
 | `↑` / `↓` | Move selection |
 | `⌃N` / `⌃P` | Move selection (Emacs-style) |
+| `⌘1` – `⌘9` | Jump directly to result 1–9 |
+| `⌘0` | Jump directly to result 10 |
 | `Return` | Open / navigate / switch to tab |
 | `Esc` | Close palette |
 | `⌘W` | Close the selected tab (while palette is open) |
