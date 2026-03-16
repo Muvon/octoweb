@@ -738,15 +738,44 @@ fn main() {
                 tracing::debug!(cmd = ?std::mem::discriminant(&cmd), "MCP command received");
 
                 match cmd {
-                    McpCommand::Navigate { url, new_tab, response } => {
-                        tracing::debug!(url = %url, new_tab, "MCP navigate");
+                    McpCommand::Navigate { url, tab_id, new_tab, background, response } => {
+                        tracing::debug!(url = %url, ?tab_id, new_tab, background, "MCP navigate");
 
                         if new_tab {
-                            let _ = proxy.send_event(AppEvent::OpenInNewTab(url));
+                            // Open a new tab with its own WebView
+                            let resolved = url::resolve_url(&url);
+                            let new_id = tabs.lock().unwrap().open(resolved.clone());
+                            let new_wv = make_webview(new_id, &resolved);
+                            let _ = new_wv.set_visible(false);
+                            let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
+                            let p = proxy.clone();
+                            nav_error_patch::register(wv_ptr, move |url, code| {
+                                let _ = p.send_event(AppEvent::NavigationError(new_id, url, code.to_string()));
+                            });
+                            tab_webviews.insert(new_id, new_wv);
+
+                            if !background {
+                                // Switch to the new tab (deferred swap)
+                                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
+                                active_wv_id = new_id;
+                                pending_swap = Some((visible_id, new_id));
+                                macos::mru_push(&mut mru, new_id);
+                                browser_win.set_focus();
+                            }
+                            let _ = response.send(Ok(new_id));
                         } else {
-                            let _ = proxy.send_event(AppEvent::NavigateTo(url));
+                            // Navigate an existing tab in-place
+                            let target_id = tab_id.unwrap_or(active_wv_id);
+                            if let Some(wv) = tab_webviews.get(&target_id) {
+                                let resolved = url::resolve_url(&url);
+                                let escaped = resolved.replace('\\', "\\\\").replace('\'', "\\'");
+                                let _ = wv.evaluate_script(&format!("window.location.href = '{escaped}'"));
+                                tabs.lock().unwrap().update_url(target_id, resolved);
+                                let _ = response.send(Ok(target_id));
+                            } else {
+                                let _ = response.send(Err("Tab not found".to_string()));
+                            }
                         }
-                        let _ = response.send(Ok(()));
                     }
                     McpCommand::GetTabs { response } => {
                         tracing::debug!("MCP get_tabs");
@@ -919,6 +948,41 @@ fn main() {
                                 is_playing_audio: true,
                             }).collect();
                         let _ = response.send(Ok(playing));
+                    }
+                    McpCommand::Reload { tab_id, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let _ = wv.reload();
+                            let _ = response.send(Ok(()));
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::GetPageContent { tab_id, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(
+                                "document.body ? document.body.innerText : ''",
+                                move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        // val comes as a JSON string — strip outer quotes
+                                        let text = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                        let _ = tx.send(Ok(text));
+                                    }
+                                },
+                            ) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("JS error: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
                     }
                 }
             }

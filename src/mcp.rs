@@ -1,18 +1,21 @@
 //! MCP (Model Context Protocol) server for AI assistant control.
 //!
 //! Exposes browser tools over HTTP JSON-RPC on localhost:3434/mcp:
-//! - browser_navigate: Open URL in current or new tab
+//! - browser_navigate: Open URL in current tab, new tab, or background tab
 //! - browser_get_tabs: List all open tabs
 //! - browser_get_current_tab: Get the active tab
 //! - browser_switch_tab: Switch to tab by ID
 //! - browser_close_tab: Close tab by ID
 //! - browser_get_page_info: Get title, URL, description
+//! - browser_get_page_content: Get readable text content of a page
 //! - browser_execute_js: Run JavaScript in page (returns result)
 //! - browser_click: Click element by selector
 //! - browser_type: Type text into input
 //! - browser_go_back: Navigate back in history
 //! - browser_go_forward: Navigate forward in history
 //! - browser_get_history: Get browsing history
+//! - browser_get_playing_tabs: Get tabs playing audio
+//! - browser_reload: Reload a tab
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -34,11 +37,13 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Commands that MCP tools can request from the main event loop.
 pub enum McpCommand {
-    /// Navigate to URL (optionally in new tab)
+    /// Navigate to URL in a specific tab, new tab, or background tab
     Navigate {
         url: String,
+        tab_id: Option<usize>,
         new_tab: bool,
-        response: oneshot::Sender<Result<(), String>>,
+        background: bool,
+        response: oneshot::Sender<Result<usize, String>>,
     },
     /// Get list of all tabs
     GetTabs {
@@ -101,6 +106,16 @@ pub enum McpCommand {
     GetPlayingTabs {
         response: oneshot::Sender<Result<Vec<TabInfo>, String>>,
     },
+    /// Reload a tab
+    Reload {
+        tab_id: Option<usize>,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    /// Get readable text content of a page
+    GetPageContent {
+        tab_id: Option<usize>,
+        response: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -139,8 +154,18 @@ pub struct HistoryInfo {
 pub struct NavigateRequest {
     #[schemars(description = "URL to navigate to")]
     pub url: String,
-    #[schemars(description = "Open in new tab (default: false)")]
+    #[schemars(
+        description = "Tab ID to navigate in-place. Omit to use active tab (when new_tab is false) or create a new tab (when new_tab is true)"
+    )]
+    pub tab_id: Option<usize>,
+    #[schemars(
+        description = "Open in a new tab instead of navigating the current one (default: false)"
+    )]
     pub new_tab: Option<bool>,
+    #[schemars(
+        description = "Keep the new tab hidden in the background — user stays on their current page. Only applies when new_tab is true. (default: false)"
+    )]
+    pub background: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -223,43 +248,51 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Navigate to a URL in the browser. Opens in current tab by default, or new tab if new_tab is true."
+        description = "Navigate to a URL. By default navigates the active tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user — useful for research. Set tab_id to navigate a specific tab in-place. Returns the tab ID."
     )]
     async fn browser_navigate(
         &self,
         Parameters(req): Parameters<NavigateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        tracing::debug!(url = %req.url, new_tab = ?req.new_tab, "MCP browser_navigate");
+        let new_tab = req.new_tab.unwrap_or(false);
+        let background = req.background.unwrap_or(false);
+        tracing::debug!(url = %req.url, ?req.tab_id, new_tab, background, "MCP browser_navigate");
 
         let (tx, rx) = oneshot::channel();
-        let new_tab = req.new_tab.unwrap_or(false);
 
         self.state
             .command_tx
             .send(McpCommand::Navigate {
                 url: req.url,
+                tab_id: req.tab_id,
                 new_tab,
+                background,
                 response: tx,
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        tracing::debug!("MCP navigate command sent");
 
         let result = rx
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        tracing::debug!(?result, "MCP navigate response");
-
         match result {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
-                "Navigation successful".to_string(),
-            )])),
+            Ok(tab_id) => {
+                let msg = if background {
+                    format!("Opened background tab {tab_id}")
+                } else if new_tab {
+                    format!("Opened new tab {tab_id}")
+                } else {
+                    format!("Navigated tab {tab_id}")
+                };
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
 
-    #[tool(description = "Get list of all open tabs with their IDs, titles, and URLs.")]
+    #[tool(
+        description = "List all open tabs. Returns array of {id, title, url, is_active, is_playing_audio}. Use tab IDs from this list for other tools."
+    )]
     async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
         tracing::debug!("MCP browser_get_tabs");
 
@@ -288,7 +321,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Switch to a specific tab by its ID.")]
+    #[tool(
+        description = "Switch the visible tab to the one with the given ID. The user will see this tab."
+    )]
     async fn browser_switch_tab(
         &self,
         Parameters(req): Parameters<SwitchTabRequest>,
@@ -316,7 +351,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Close a specific tab by its ID.")]
+    #[tool(
+        description = "Close a tab by its ID. If it's the active tab, the next tab becomes active."
+    )]
     async fn browser_close_tab(
         &self,
         Parameters(req): Parameters<CloseTabRequest>,
@@ -345,7 +382,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get information about the current page: title, URL, and meta description."
+        description = "Get metadata about a page: title, URL, and meta description. Uses active tab if tab_id is not specified."
     )]
     async fn browser_get_page_info(
         &self,
@@ -376,7 +413,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Execute JavaScript code in the page. Returns the result of the expression as a JSON string."
+        description = "Execute JavaScript code in a page and return the result as a string. Uses active tab if tab_id is not specified. For reading page text prefer browser_get_page_content instead."
     )]
     async fn browser_execute_js(
         &self,
@@ -403,7 +440,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Click an element on the page using a CSS selector.")]
+    #[tool(
+        description = "Click an element on the page by CSS selector. Uses active tab if tab_id is not specified."
+    )]
     async fn browser_click(
         &self,
         Parameters(req): Parameters<ClickRequest>,
@@ -431,7 +470,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Type text into an input element using a CSS selector.")]
+    #[tool(
+        description = "Type text into an input element by CSS selector. Uses active tab if tab_id is not specified."
+    )]
     async fn browser_type(
         &self,
         Parameters(req): Parameters<TypeRequest>,
@@ -460,7 +501,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Get the currently active tab with its ID, title, and URL.")]
+    #[tool(
+        description = "Get the currently active (visible) tab. Returns {id, title, url, is_active, is_playing_audio}."
+    )]
     async fn browser_get_current_tab(&self) -> Result<CallToolResult, McpError> {
         let (tx, rx) = oneshot::channel();
 
@@ -483,7 +526,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Navigate back in the browser history for a tab.")]
+    #[tool(
+        description = "Navigate back in the browser history for a tab. Uses active tab if tab_id is not specified."
+    )]
     async fn browser_go_back(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -510,7 +555,9 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Navigate forward in the browser history for a tab.")]
+    #[tool(
+        description = "Navigate forward in the browser history for a tab. Uses active tab if tab_id is not specified."
+    )]
     async fn browser_go_forward(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -589,6 +636,60 @@ impl McpServer {
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 Ok(CallToolResult::success(vec![Content::text(json)]))
             }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(description = "Reload a tab. Uses active tab if tab_id is not specified.")]
+    async fn browser_reload(
+        &self,
+        Parameters(req): Parameters<TabIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.state
+            .command_tx
+            .send(McpCommand::Reload {
+                tab_id: req.tab_id,
+                response: tx,
+            })
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let result = rx
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match result {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                "Page reloaded".to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Get the readable text content of a page (document.body.innerText). Useful for reading articles, search results, or any page content. Uses active tab if tab_id is not specified."
+    )]
+    async fn browser_get_page_content(
+        &self,
+        Parameters(req): Parameters<TabIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.state
+            .command_tx
+            .send(McpCommand::GetPageContent {
+                tab_id: req.tab_id,
+                response: tx,
+            })
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let result = rx
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match result {
+            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
