@@ -33,7 +33,7 @@ pub fn load_session() -> Option<SessionData> {
 
 fn session_path() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
         .join("octoweb")
         .join("session.json")
 }
@@ -65,7 +65,7 @@ pub fn load_favicons() -> std::collections::HashMap<String, String> {
 
 fn favicons_path() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
         .join("octoweb")
         .join("favicons.json")
 }
@@ -148,7 +148,7 @@ impl Config {
 
 fn config_path() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
         .join("octoweb")
         .join("config.toml")
 }

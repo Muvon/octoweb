@@ -1,4 +1,68 @@
-//! macOS-specific setup: dock icon, Edit menu, MRU list.
+//! macOS-specific setup: dock icon, Edit menu, MRU list, PATH expansion.
+
+/// Expand `PATH` so child processes (e.g. `octomind`) can be found when
+/// launched as a macOS `.app` bundle. Finder gives apps a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), missing user-installed locations.
+///
+/// Reads `/etc/paths`, `/etc/paths.d/*`, and appends well-known user dirs.
+/// Deduplicates and preserves existing entries.
+pub fn expand_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut dirs: Vec<String> = current.split(':').map(str::to_string).collect();
+
+    // Append only if not already present.
+    let mut push = |dir: String| {
+        if !dir.is_empty() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+
+    // /etc/paths — system-wide base paths
+    if let Ok(contents) = std::fs::read_to_string("/etc/paths") {
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                push(trimmed.to_string());
+            }
+        }
+    }
+
+    // /etc/paths.d/* — per-package additions (Homebrew, Go, etc.)
+    if let Ok(entries) = std::fs::read_dir("/etc/paths.d") {
+        for entry in entries.flatten() {
+            if let Ok(contents) = std::fs::read_to_string(entry.path()) {
+                for line in contents.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Well-known user binary locations
+    if let Some(home) = dirs::home_dir() {
+        for subdir in [".cargo/bin", ".local/bin", "bin", "go/bin"] {
+            push(home.join(subdir).to_string_lossy().into_owned());
+        }
+    }
+
+    // Common system locations that Finder PATH may lack
+    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        push(dir.to_string());
+    }
+
+    // Rebuild PATH, dropping empty entries
+    let new_path: String = dirs
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .collect::<Vec<_>>()
+        .join(":");
+    std::env::set_var("PATH", &new_path);
+
+    tracing::debug!(path = %new_path, "expanded PATH for .app context");
+}
 
 /// Set the macOS dock/app icon from the embedded PNG.
 pub fn set_app_icon() {

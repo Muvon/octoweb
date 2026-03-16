@@ -207,6 +207,7 @@ async fn init_session(
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
+        .current_dir(dirs::home_dir().unwrap_or_else(|| "/".into()))
         .kill_on_drop(true)
         .spawn()?;
 
@@ -234,7 +235,9 @@ async fn init_session(
 
     let resp = conn
         .new_session(acp::NewSessionRequest::new(
-            std::env::current_dir().unwrap_or_else(|_| "/".into()),
+            std::env::current_dir()
+                .or_else(|_| dirs::home_dir().ok_or(std::io::Error::other("no home")))
+                .unwrap_or_else(|_| "/".into()),
         ))
         .await?;
 
