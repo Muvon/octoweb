@@ -49,6 +49,7 @@ enum AppEvent {
     NextTab,                                // Ctrl+N — switch to next tab in MRU order
     ToggleSidebar,                          // Cmd+Shift+A — toggle AI assistant sidebar
     AcpPrompt(String),                      // user typed a prompt in the sidebar
+    AcpCancel,                              // user clicked stop button — cancel current prompt
     AcpRestart(String), // change agent tag (e.g. "octoweb:assistant") and reconnect
     AskAI(String),      // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,     // Cmd+Shift+I — open devtools for active tab
@@ -425,6 +426,9 @@ fn main() {
                                 let _ = p.send_event(AppEvent::AcpPrompt(text.to_string()));
                             }
                         }
+                        Some("acp_cancel") => {
+                            let _ = p.send_event(AppEvent::AcpCancel);
+                        }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
                         }
@@ -707,6 +711,22 @@ fn main() {
                             ));
                         }
                     }
+                    acp::AgentEvent::ToolStart { id, title, kind } => {
+                        let eid = id.replace('\\', "\\\\").replace('`', "\\`");
+                        let etitle = title.replace('\\', "\\\\").replace('`', "\\`");
+                        let ekind = kind.replace('\\', "\\\\").replace('`', "\\`");
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__toolStart && window.__toolStart(`{eid}`,`{etitle}`,`{ekind}`)"
+                        ));
+                    }
+                    acp::AgentEvent::ToolUpdate { id, title, status } => {
+                        let eid = id.replace('\\', "\\\\").replace('`', "\\`");
+                        let etitle = title.as_deref().unwrap_or("").replace('\\', "\\\\").replace('`', "\\`");
+                        let estatus = status.replace('\\', "\\\\").replace('`', "\\`");
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`)"
+                        ));
+                    }
                     acp::AgentEvent::Done => {
                         let _ = sidebar_wv.evaluate_script(
                             "window.__setThinking && window.__setThinking(false)"
@@ -716,6 +736,11 @@ fn main() {
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                         }
+                    }
+                    acp::AgentEvent::Cancelled => {
+                        let _ = sidebar_wv.evaluate_script(
+                            "window.__setThinking && window.__setThinking(false)"
+                        );
                     }
                     acp::AgentEvent::Error(err) => {
                         let escaped = err.replace('\\', "\\\\").replace('`', "\\`");
@@ -1303,7 +1328,14 @@ fn main() {
                 }
             }
 
-            // ── ACP restart with new agent command ─────────────────────────────
+            // ── ACP cancel (stop button) ───────────────────────────────────────────
+            Event::UserEvent(AppEvent::AcpCancel) => {
+                if let Some(ref handle) = acp_handle {
+                    handle.cancel();
+                }
+            }
+
+            // ── ACP restart with new agent command ─────────────────────────────────
             Event::UserEvent(AppEvent::AcpRestart(tag)) => {
                 acp_tag = tag.clone();
                 acp_handle = None; // drop old handle (kills subprocess)

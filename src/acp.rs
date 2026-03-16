@@ -20,8 +20,22 @@ pub enum AgentEvent {
     Connected,
     /// A text chunk from the agent's response (streaming).
     Chunk(String),
+    /// A new tool call started (id, title, kind).
+    ToolStart {
+        id: String,
+        title: String,
+        kind: String,
+    },
+    /// An existing tool call was updated (id, optional new title, status).
+    ToolUpdate {
+        id: String,
+        title: Option<String>,
+        status: String,
+    },
     /// Agent finished responding (conn.prompt() returned).
     Done,
+    /// Agent was cancelled by user.
+    Cancelled,
     /// Agent or connection error.
     Error(String),
 }
@@ -108,19 +122,39 @@ impl acp::Client for BrowserClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if let acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) =
-            args.update
-        {
-            let text = match content {
-                acp::ContentBlock::Text(t) => t.text,
-                acp::ContentBlock::ResourceLink(r) => r.uri,
-                // Skip non-text content blocks
-                _ => return Ok(()),
-            };
-            if !text.is_empty() {
-                let _ = self.tx.send(AgentEvent::Chunk(text));
+        match args.update {
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
+                let text = match content {
+                    acp::ContentBlock::Text(t) => t.text,
+                    acp::ContentBlock::ResourceLink(r) => r.uri,
+                    _ => return Ok(()),
+                };
+                if !text.is_empty() {
+                    let _ = self.tx.send(AgentEvent::Chunk(text));
+                    (self.wake)();
+                }
+            }
+            acp::SessionUpdate::ToolCall(tc) => {
+                let _ = self.tx.send(AgentEvent::ToolStart {
+                    id: tc.tool_call_id.0.to_string(),
+                    title: tc.title,
+                    kind: format!("{:?}", tc.kind).to_lowercase(),
+                });
                 (self.wake)();
             }
+            acp::SessionUpdate::ToolCallUpdate(upd) => {
+                let status = match upd.fields.status {
+                    Some(s) => format!("{:?}", s).to_lowercase(),
+                    None => String::new(),
+                };
+                let _ = self.tx.send(AgentEvent::ToolUpdate {
+                    id: upd.tool_call_id.0.to_string(),
+                    title: upd.fields.title,
+                    status,
+                });
+                (self.wake)();
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -140,6 +174,8 @@ pub struct AcpHandle {
     pub rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     /// Send prompts to the background ACP thread.
     prompt_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Signal the ACP thread to cancel the current prompt.
+    cancel_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 impl AcpHandle {
@@ -152,6 +188,7 @@ impl AcpHandle {
     pub fn connect(cmd: &str, wake: impl Fn() + Send + Sync + 'static) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
 
         // Parse "program arg1 arg2 ..." — simple whitespace split, no shell quoting needed.
@@ -175,6 +212,7 @@ impl AcpHandle {
                     event_tx.clone(),
                     std::sync::Arc::clone(&wake),
                     prompt_rx,
+                    cancel_rx,
                     program,
                     args,
                 )
@@ -192,6 +230,7 @@ impl AcpHandle {
         Ok(Self {
             rx: event_rx,
             prompt_tx,
+            cancel_tx,
         })
     }
 
@@ -210,12 +249,18 @@ impl AcpHandle {
     pub fn send_prompt(&self, text: String) {
         let _ = self.prompt_tx.send(text);
     }
+
+    /// Cancel the current prompt. The agent will stop and `AgentEvent::Cancelled` is sent.
+    pub fn cancel(&self) {
+        let _ = self.cancel_tx.send(());
+    }
 }
 
 async fn init_session(
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
     mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -265,19 +310,32 @@ async fn init_session(
 
     // Process prompts sequentially — one at a time.
     while let Some(text) = prompt_rx.recv().await {
-        let result: acp::Result<acp::PromptResponse> = conn
-            .prompt(acp::PromptRequest::new(
-                session_id.clone(),
-                vec![text.into()],
-            ))
-            .await;
-        match result {
-            Ok(_) => {
-                let _ = tx.send(AgentEvent::Done);
-                wake();
+        let prompt_fut = conn.prompt(acp::PromptRequest::new(
+            session_id.clone(),
+            vec![text.into()],
+        ));
+
+        // Use tokio::select! to allow cancellation mid-prompt
+        tokio::select! {
+            res = prompt_fut => {
+                match res {
+                    Ok(_) => {
+                        let _ = tx.send(AgentEvent::Done);
+                        wake();
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AgentEvent::Error(e.to_string()));
+                        wake();
+                    }
+                }
             }
-            Err(e) => {
-                let _ = tx.send(AgentEvent::Error(e.to_string()));
+            _ = cancel_rx.recv() => {
+                // Cancel received — send cancel notification to agent
+                let _ = conn
+                    .cancel(acp::CancelNotification::new(session_id.clone()))
+                    .await;
+                // Send cancelled event
+                let _ = tx.send(AgentEvent::Cancelled);
                 wake();
             }
         }

@@ -1,13 +1,15 @@
 /// Returns the full HTML for the ACP agent sidebar panel.
 ///
 /// JS API (called from Rust via evaluate_script):
-///   window.__setConnected()      — mark ACP session ready (green dot)
-///   window.__setConnecting()     — mark ACP session connecting (orange dot)
-///   window.__setError()          — mark connection error (red dot)
-///   window.__appendChunk(text)   — append streaming text to current agent bubble
-///   window.__setThinking(bool)   — show/hide the typing indicator
-///   window.__appendError(text)   — show an error message
-///   window.__setAgentTag(tag)    — update the agent chip label
+///   window.__setConnected()          — mark ACP session ready (green dot)
+///   window.__setConnecting()         — mark ACP session connecting (orange dot)
+///   window.__setError()              — mark connection error (red dot)
+///   window.__appendChunk(text)       — append streaming text to current agent bubble
+///   window.__setThinking(bool)       — show/hide the activity indicator
+///   window.__toolStart(id,title,kind)— show a new tool call in the activity feed
+///   window.__toolUpdate(id,title,st) — update a tool call status/title
+///   window.__appendError(text)       — show an error message
+///   window.__setAgentTag(tag)        — update the agent chip label
 ///
 /// IPC messages sent to Rust:
 ///   { type: "acp_prompt", text: "..." }      — user submitted a prompt
@@ -405,15 +407,30 @@ pub fn html() -> &'static str {
   .msg { display: flex; flex-direction: column; gap: 3px; }
 
   .msg-label {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 0 4px;
+  }
+  .msg-label .msg-who {
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-tertiary);
-    padding: 0 4px;
   }
-  .msg.user  .msg-label { text-align: right; color: var(--accent); opacity: 0.75; }
-  .msg.error .msg-label { color: var(--dot-err); opacity: 0.85; }
+  .msg-label .msg-time {
+    font-size: 9.5px;
+    font-weight: 400;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    color: var(--text-tertiary);
+    opacity: 0.7;
+    font-variant-numeric: tabular-nums;
+  }
+  .msg.user  .msg-label { justify-content: flex-end; }
+  .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
+  .msg.error .msg-label .msg-who { color: var(--dot-err); opacity: 0.85; }
 
   /* Bubbles — NOT glass (Tahoe: never glass on glass) */
   .msg-bubble {
@@ -570,26 +587,116 @@ pub fn html() -> &'static str {
   .msg.agent .msg-bubble strong { font-weight: 600; }
   .msg.agent .msg-bubble em     { font-style: italic; }
 
-  /* ── Thinking indicator ─────────────────────────────────────────────────── */
+  /* ── Activity indicator ─────────────────────────────────────────────────────────────── */
   #thinking {
     display: none;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 4px;
+    flex-direction: column;
+    gap: 0;
+    padding: 4px 0;
   }
   #thinking.visible { display: flex; }
-  #thinking span {
+
+  /* Tahoe-style 3-dot bounce — shown as header while tools stream below */
+  .activity-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 4px 4px;
+  }
+  .activity-dots {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .activity-dots span {
     width: 5px; height: 5px;
     border-radius: 50%;
     background: var(--text-tertiary);
-    animation: bounce 1.3s ease-in-out infinite;
+    animation: dot-bounce 1.3s ease-in-out infinite;
   }
-  #thinking span:nth-child(2) { animation-delay: 0.20s; }
-  #thinking span:nth-child(3) { animation-delay: 0.40s; }
-
-  @keyframes bounce {
+  .activity-dots span:nth-child(2) { animation-delay: 0.20s; }
+  .activity-dots span:nth-child(3) { animation-delay: 0.40s; }
+  @keyframes dot-bounce {
     0%, 80%, 100% { transform: translateY(0);    opacity: 0.30; }
-    40%           { transform: translateY(-5px); opacity: 0.90; }
+    40%           { transform: translateY(-4px); opacity: 0.90; }
+  }
+  .activity-elapsed {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    margin-left: 2px;
+    opacity: 0.7;
+  }
+
+  /* Individual tool row */
+  .tool-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    animation: tool-in 0.25s ease-out;
+    overflow: hidden;
+  }
+  @keyframes tool-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .tool-row.done {
+    opacity: 0.45;
+    transition: opacity 0.3s ease;
+  }
+  .tool-row.failed {
+    color: var(--error-text);
+    opacity: 0.7;
+  }
+
+  /* Kind icon — tiny circle with letter */
+  .tool-kind {
+    width: 14px; height: 14px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0;
+    flex-shrink: 0;
+    color: #fff;
+    background: var(--text-tertiary);
+  }
+  .tool-kind.read    { background: #34c759; }
+  .tool-kind.edit    { background: #ff9500; }
+  .tool-kind.delete  { background: #ff3b30; }
+  .tool-kind.search  { background: #5856d6; }
+  .tool-kind.execute { background: #007aff; }
+  .tool-kind.think   { background: #af52de; }
+  .tool-kind.fetch   { background: #30b0c7; }
+
+  .tool-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-time {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+  .tool-check {
+    flex-shrink: 0;
+    color: #34c759;
+    font-size: 10px;
+    line-height: 1;
+  }
+  .tool-fail {
+    flex-shrink: 0;
+    color: #ff3b30;
+    font-size: 10px;
+    line-height: 1;
   }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
@@ -649,14 +756,30 @@ pub fn html() -> &'static str {
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s, opacity 0.15s, transform 0.12s;
+    transition: background 0.15s, opacity 0.15s, transform 0.12s, border-radius 0.2s ease;
     opacity: 0.28;
     pointer-events: none;
   }
   #send-btn.active              { opacity: 1; pointer-events: auto; }
   #send-btn.active:hover        { background: var(--accent-hover); }
   #send-btn.active:active       { transform: scale(0.88); }
-
+  /* Stop mode — Tahoe-style: same pill shape as input, subtle red */
+  #send-btn.stop-mode {
+    background: #ff3b30;
+    border-radius: 50%;
+    opacity: 1;
+    pointer-events: auto;
+    animation: stop-pulse 1.2s ease-in-out infinite;
+  }
+  #send-btn.stop-mode:hover     { background: #e6352b; }
+  #send-btn.stop-mode:active    { transform: scale(0.88); }
+  #send-btn.stop-mode .send-icon { display: none; }
+  #send-btn.stop-mode .stop-icon { display: block; }
+  #send-btn .stop-icon          { display: none; }
+  @keyframes stop-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
   #hint {
     font-size: 10.5px;
     color: var(--text-tertiary);
@@ -781,9 +904,7 @@ pub fn html() -> &'static str {
 
   <!-- Messages -->
   <div id="messages">
-    <div id="thinking">
-      <span></span><span></span><span></span>
-    </div>
+    <div id="thinking"></div>
   </div>
 
   <!-- Input -->
@@ -792,15 +913,18 @@ pub fn html() -> &'static str {
       <textarea
         id="prompt-input"
         rows="1"
-        placeholder="Ask octomind…"
+        placeholder="Ask Octopus…"
         autocomplete="off"
         spellcheck="false"
       ></textarea>
       <button id="send-btn" title="Send (Return)" aria-label="Send">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <svg class="send-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M6 10V2M2 6L6 2L10 6"
                 stroke="currentColor" stroke-width="1.8"
                 stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <svg class="stop-icon" width="8" height="8" viewBox="0 0 8 8" fill="none">
+          <rect x="1" y="1" width="6" height="6" rx="1.5" fill="currentColor"/>
         </svg>
       </button>
     </div>
@@ -905,12 +1029,27 @@ pub fn html() -> &'static str {
   }
 
   // ── Messages ────────────────────────────────────────────────────────────
+  function fmtTime(d) {
+    const h = d.getHours();
+    const m = d.getMinutes();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+  }
+
   function appendMessage(role, text) {
     const wrap   = document.createElement('div');
     wrap.className = 'msg ' + role;
     const label  = document.createElement('div');
     label.className = 'msg-label';
-    label.textContent = role === 'user' ? 'You' : role === 'error' ? 'Error' : 'octomind';
+    const who = document.createElement('span');
+    who.className = 'msg-who';
+    who.textContent = role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Octopus';
+    const time = document.createElement('span');
+    time.className = 'msg-time';
+    time.textContent = fmtTime(new Date());
+    label.appendChild(who);
+    label.appendChild(time);
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
     bubble.textContent = text;
@@ -984,7 +1123,14 @@ pub fn html() -> &'static str {
     wrap.className = 'msg agent';
     const label  = document.createElement('div');
     label.className = 'msg-label';
-    label.textContent = 'octomind';
+    const who = document.createElement('span');
+    who.className = 'msg-who';
+    who.textContent = 'Octopus';
+    const time = document.createElement('span');
+    time.className = 'msg-time';
+    time.textContent = fmtTime(new Date());
+    label.appendChild(who);
+    label.appendChild(time);
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
     wrap.appendChild(label);
@@ -1000,27 +1146,122 @@ pub fn html() -> &'static str {
     if (!currentAgentBubble) {
       currentAgentBubble = startAgentBubble();
       currentAgentRaw    = '';
-      // Hide thinking indicator without triggering finishAgentBubble
+      // Hide activity feed without triggering finishAgentBubble
       isThinking = false;
       thinking.className = '';
+      clearActivity();
     }
     currentAgentRaw += text;
     currentAgentBubble.innerHTML = renderMd(currentAgentRaw);
     scrollToBottom();
   };
 
+  // ── Activity feed state ──────────────────────────────────────────────────────────────
+  let activityStart = 0;       // Date.now() when thinking began
+  let activityTimer = null;    // setInterval id for elapsed display
+  const toolRows = {};         // id → { el, startTime, timerEl }
+
+  const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
+
+  function fmtElapsed(ms) {
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's';
+    return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+  }
+
+  function clearActivity() {
+    if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+    thinking.innerHTML = '';
+    for (const k in toolRows) delete toolRows[k];
+  }
+
+  function tickActivity() {
+    const hdr = thinking.querySelector('.activity-elapsed');
+    if (hdr) hdr.textContent = fmtElapsed(Date.now() - activityStart);
+    // Update per-tool timers for in-progress tools
+    for (const id in toolRows) {
+      const t = toolRows[id];
+      if (t.timerEl && !t.finished) {
+        t.timerEl.textContent = fmtElapsed(Date.now() - t.startTime);
+      }
+    }
+  }
+
+  window.__toolStart = function(id, title, kind) {
+    // Create row
+    const row = document.createElement('div');
+    row.className = 'tool-row';
+
+    const icon = document.createElement('span');
+    icon.className = 'tool-kind ' + kind;
+    icon.textContent = kindLabel[kind] || '·';
+
+    const ttl = document.createElement('span');
+    ttl.className = 'tool-title';
+    ttl.textContent = title;
+
+    const tm = document.createElement('span');
+    tm.className = 'tool-time';
+    tm.textContent = '0s';
+
+    row.appendChild(icon);
+    row.appendChild(ttl);
+    row.appendChild(tm);
+    thinking.appendChild(row);
+
+    toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false };
+    scrollToBottom();
+  };
+
+  window.__toolUpdate = function(id, title, status) {
+    const t = toolRows[id];
+    if (!t) return;
+    if (title) t.el.querySelector('.tool-title').textContent = title;
+    if (status === 'completed') {
+      t.finished = true;
+      t.el.classList.add('done');
+      t.timerEl.textContent = fmtElapsed(Date.now() - t.startTime);
+      // Replace timer with checkmark
+      const check = document.createElement('span');
+      check.className = 'tool-check';
+      check.textContent = '✓';
+      t.timerEl.replaceWith(check);
+    } else if (status === 'failed') {
+      t.finished = true;
+      t.el.classList.add('failed');
+      const fail = document.createElement('span');
+      fail.className = 'tool-fail';
+      fail.textContent = '✗';
+      t.timerEl.replaceWith(fail);
+    }
+  };
+
   window.__setThinking = function(on) {
     isThinking = on;
     thinking.className = on ? 'visible' : '';
+    // Toggle send button between send and stop modes
+    sendBtn.classList.toggle('stop-mode', on);
+    sendBtn.title = on ? 'Stop' : 'Send (Return)';
     if (on) {
       currentAgentBubble = null;
       currentAgentRaw = '';
+      clearActivity();
+      activityStart = Date.now();
+      // Header with 3-dot bounce + elapsed
+      const hdr = document.createElement('div');
+      hdr.className = 'activity-header';
+      hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span><span class="activity-elapsed">0s</span>';
+      thinking.appendChild(hdr);
+      activityTimer = setInterval(tickActivity, 1000);
       scrollToBottom();
-    } else if (currentAgentBubble) {
-      // Done — finalize: store raw for copy, add copy btn, collapse if tall
-      finishAgentBubble(currentAgentBubble, currentAgentRaw);
-      currentAgentBubble = null;
-      currentAgentRaw = '';
+    } else {
+      clearActivity();
+      if (currentAgentBubble) {
+        // Done — finalize: store raw for copy, add copy btn, collapse if tall
+        finishAgentBubble(currentAgentBubble, currentAgentRaw);
+        currentAgentBubble = null;
+        currentAgentRaw = '';
+      }
     }
   };
 
@@ -1109,7 +1350,21 @@ pub fn html() -> &'static str {
     // If queue full and input is locked, this branch is unreachable (input locked)
   }
 
-  sendBtn.addEventListener('click', send);
+  // Stop button — cancel current prompt
+  function stop() {
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_cancel' }));
+    // Clear activity feed immediately
+    window.__setThinking(false);
+  }
+
+  // Click handler: send or stop depending on mode
+  sendBtn.addEventListener('click', () => {
+    if (sendBtn.classList.contains('stop-mode')) {
+      stop();
+    } else {
+      send();
+    }
+  });
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
