@@ -264,7 +264,7 @@ pub fn html() -> &'static str {
     padding: 2px 7px;
   }
 
-  .close-tab {
+  .close-btn {
     width: 18px;
     height: 18px;
     border: 0;
@@ -278,14 +278,25 @@ pub fn html() -> &'static str {
     transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
   }
 
-  .item:hover .close-tab,
-  .item.selected .close-tab {
+  .item:hover .close-btn,
+  .item.selected .close-btn {
     opacity: 1;
   }
 
-  .close-tab:hover {
+  .close-btn:hover {
     background: rgba(255, 59, 48, 0.12);
     color: #ff3b30;
+  }
+
+  .shortcut-badge {
+    font-size: 10px;
+    font-weight: 500;
+    font-family: inherit;
+    color: var(--text-tertiary);
+    border: 1px solid var(--input-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    letter-spacing: 0.02em;
   }
 
   #hint {
@@ -320,7 +331,7 @@ pub fn html() -> &'static str {
       <div id="action-badge">↵ Open</div>
     </div>
     <div id="results"></div>
-    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
+    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
   </div>
 </div>
 
@@ -348,6 +359,13 @@ pub fn html() -> &'static str {
     window.ipc.postMessage(JSON.stringify({ type: 'overlay_open' }));
     render('');
     queryEl.focus();
+  };
+
+  // Refresh items in-place (after tab close / history remove) — keeps current query
+  window.__refreshItems = function(data) {
+    items = Array.isArray(data) ? data : [];
+    sel = Math.min(sel, Math.max(filtered.length - 2, 0));
+    render(queryEl.value);
   };
 
   queryEl.addEventListener('input', () => render(queryEl.value));
@@ -384,6 +402,17 @@ pub fn html() -> &'static str {
   function handleEditingHotkeys(e) {
     const isMacCmd = e.metaKey && !e.ctrlKey && !e.altKey;
     const isCtrl = e.ctrlKey && !e.metaKey && !e.altKey;
+
+    // ⌘1-⌘9, ⌘0 → jump to item 1-9, 10
+    if (isMacCmd && /^[0-9]$/.test(e.key)) {
+      e.preventDefault();
+      var idx = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
+      if (idx < filtered.length) {
+        sel = idx;
+        confirmSelection();
+      }
+      return true;
+    }
 
     if (isMacCmd && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then(text => {
@@ -617,20 +646,25 @@ pub fn html() -> &'static str {
     resultsEl.querySelectorAll('.item').forEach(row => {
       const idx = parseInt(row.dataset.idx, 10);
       row.addEventListener('mousedown', e => {
-        if (e.target && e.target.classList && e.target.classList.contains('close-tab')) return;
+        if (e.target && e.target.classList && e.target.classList.contains('close-btn')) return;
         e.preventDefault();
         sel = idx;
         confirmSelection();
       });
     });
 
-    resultsEl.querySelectorAll('.close-tab').forEach(btn => {
+    resultsEl.querySelectorAll('.close-btn').forEach(btn => {
       btn.addEventListener('mousedown', e => {
         e.preventDefault();
         e.stopPropagation();
         const tabId = Number(btn.getAttribute('data-tab-id'));
         if (Number.isFinite(tabId) && tabId > 0) {
           window.ipc.postMessage(JSON.stringify({ type: 'close_tab', tab_id: tabId }));
+          return;
+        }
+        const histUrl = btn.getAttribute('data-history-url');
+        if (histUrl) {
+          window.ipc.postMessage(JSON.stringify({ type: 'remove_history', url: histUrl }));
         }
       });
     });
@@ -641,6 +675,15 @@ pub fn html() -> &'static str {
     const rawTitle = (item.title && item.title !== item.url) ? item.title : hostname;
     const kindLabel = esc(item.pill || kindLabelFor(item));
     const selected = idx === sel ? ' selected' : '';
+    const shortcutNum = idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '';
+    const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>' : '';
+    const canClose = item.kind === 'tab' || item.kind === 'history';
+    const closeAttr = item.kind === 'tab'
+      ? 'data-tab-id="' + item.tab_id + '"'
+      : 'data-history-url="' + esc(item.url) + '"';
+    const closeHtml = canClose
+      ? '<button class="close-btn" ' + closeAttr + ' title="Remove">×</button>'
+      : '';
 
     return '<div class="item' + selected + '" data-idx="' + idx + '">' +
       iconHtml(item) +
@@ -649,8 +692,9 @@ pub fn html() -> &'static str {
         '<div class="item-url">' + esc(hostname) + '</div>' +
       '</div>' +
       '<div class="item-meta">' +
+        shortcutHtml +
         '<span class="kind-pill">' + kindLabel + '</span>' +
-        (item.kind === 'tab' ? '<button class="close-tab" data-tab-id="' + item.tab_id + '" title="Close tab">×</button>' : '') +
+        closeHtml +
       '</div>' +
     '</div>';
   }

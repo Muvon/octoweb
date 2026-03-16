@@ -126,6 +126,13 @@ impl TabManager {
         }
     }
 
+    /// Remove all history entries matching the given URL.
+    pub fn remove_history(&mut self, url: &str) {
+        let normalized = url.trim_end_matches('/');
+        self.history
+            .retain(|e| e.url.trim_end_matches('/') != normalized);
+    }
+
     pub fn history(&self) -> &[HistoryEntry] {
         &self.history
     }

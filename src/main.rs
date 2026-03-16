@@ -53,6 +53,7 @@ enum AppEvent {
     NavigationError(usize, String, String), // (tab_id, url, error) — show error page
     Reload,             // Cmd+R — reload current page
     MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
+    RemoveHistory(String), // URL to remove from history
     Quit,
 }
 fn main() {
@@ -288,6 +289,11 @@ fn main() {
                         Some("close_tab") => {
                             if let Some(id) = v["tab_id"].as_u64() {
                                 let _ = p.send_event(AppEvent::CloseTab(id as usize));
+                            }
+                        }
+                        Some("remove_history") => {
+                            if let Some(url) = v["url"].as_str() {
+                                let _ = p.send_event(AppEvent::RemoveHistory(url.to_string()));
                             }
                         }
                         _ => {}
@@ -855,6 +861,31 @@ fn main() {
                         }
                         None => *control_flow = ControlFlow::Exit,
                     }
+                    // Refresh overlay if it's open so the closed tab disappears
+                    if overlay_visible {
+                        let json = {
+                            let tm = tabs.lock().unwrap();
+                            webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                        };
+                        let _ = overlay_wv.evaluate_script(&format!(
+                            "window.__refreshItems && window.__refreshItems({json})"
+                        ));
+                    }
+                }
+            }
+
+            // ── Remove history entry (from overlay × button) ────────────────
+            Event::UserEvent(AppEvent::RemoveHistory(url)) => {
+                tabs.lock().unwrap().remove_history(&url);
+                // Refresh overlay so the removed entry disappears
+                if overlay_visible {
+                    let json = {
+                        let tm = tabs.lock().unwrap();
+                        webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                    };
+                    let _ = overlay_wv.evaluate_script(&format!(
+                        "window.__refreshItems && window.__refreshItems({json})"
+                    ));
                 }
             }
 
