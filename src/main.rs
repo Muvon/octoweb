@@ -464,9 +464,7 @@ fn main() {
                                     let pb: *mut AnyObject =
                                         msg_send![class!(NSPasteboard), generalPasteboard];
                                     let _: () = msg_send![pb, clearContents];
-                                    let ns_str: *mut AnyObject = msg_send![
-                                        class!(NSString), alloc
-                                    ];
+                                    let ns_str: *mut AnyObject = msg_send![class!(NSString), alloc];
                                     let ns_str: *mut AnyObject = msg_send![
                                         ns_str,
                                         initWithBytes: text.as_ptr(),
@@ -884,14 +882,43 @@ fn main() {
                     McpCommand::GetPageInfo { tab_id, response } => {
                         let tm = tabs.lock().unwrap();
                         let target_id = tab_id.or(tm.active_id());
-                        let info = target_id.and_then(|id| {
-                            tm.tabs().iter().find(|t| t.id == id).map(|t| PageInfo {
-                                title: t.title.clone(),
-                                url: t.url.clone(),
-                                description: None, // TODO: extract from meta tag
-                            })
+                        let base_info = target_id.and_then(|id| {
+                            tm.tabs().iter().find(|t| t.id == id).map(|t| (id, t.title.clone(), t.url.clone()))
                         });
-                        let _ = response.send(info.ok_or("Tab not found".to_string()));
+                        drop(tm);
+                        match base_info {
+                            Some((id, title, url)) => {
+                                if let Some(wv) = tab_webviews.get(&id) {
+                                    let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                                    let response_cb = response.clone();
+                                    let cb_title = title.clone();
+                                    let cb_url = url.clone();
+                                    match wv.evaluate_script_with_callback(
+                                        "document.querySelector('meta[name=\"description\"]')?.content || ''",
+                                        move |val| {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let desc = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                                let description = if desc.is_empty() { None } else { Some(desc) };
+                                                let _ = tx.send(Ok(PageInfo { title: cb_title.clone(), url: cb_url.clone(), description }));
+                                            }
+                                        },
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(_) => {
+                                            // JS failed — return info without description
+                                            if let Some(tx) = response.lock().unwrap().take() {
+                                                let _ = tx.send(Ok(PageInfo { title, url, description: None }));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let _ = response.send(Ok(PageInfo { title, url, description: None }));
+                                }
+                            }
+                            None => {
+                                let _ = response.send(Err("Tab not found".to_string()));
+                            }
+                        }
                     }
                     McpCommand::ExecuteJs { tab_id, script, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));

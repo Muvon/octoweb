@@ -170,7 +170,9 @@ pub struct NavigateRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TabIdRequest {
-    #[schemars(description = "Tab ID (use active tab if not specified)")]
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
     pub tab_id: Option<usize>,
 }
 
@@ -188,7 +190,9 @@ pub struct CloseTabRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteJsRequest {
-    #[schemars(description = "Tab ID (uses active tab if not specified)")]
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
     pub tab_id: Option<usize>,
     #[schemars(description = "JavaScript code to execute")]
     pub script: String,
@@ -196,7 +200,9 @@ pub struct ExecuteJsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClickRequest {
-    #[schemars(description = "Tab ID (uses active tab if not specified)")]
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
     pub tab_id: Option<usize>,
     #[schemars(description = "CSS selector for element to click")]
     pub selector: String,
@@ -204,7 +210,9 @@ pub struct ClickRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeRequest {
-    #[schemars(description = "Tab ID (uses active tab if not specified)")]
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
     pub tab_id: Option<usize>,
     #[schemars(description = "CSS selector for input element")]
     pub selector: String,
@@ -248,7 +256,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Navigate to a URL. By default navigates the active tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user — useful for research. Set tab_id to navigate a specific tab in-place. Returns the tab ID."
+        description = "Navigate to a URL. By default navigates the user's visible tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user's view — ideal for research. Set tab_id to navigate a specific tab (including background ones) in-place. Returns the tab ID."
     )]
     async fn browser_navigate(
         &self,
@@ -291,7 +299,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List all open tabs. Returns array of {id, title, url, is_active, is_playing_audio}. Use tab IDs from this list for other tools."
+        description = "List all open tabs in the browser. Returns array of {id, title, url, is_active, is_playing_audio}. is_active=true marks the tab the user is currently viewing. Use tab IDs from this list to target specific tabs with other tools."
     )]
     async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
         tracing::debug!("MCP browser_get_tabs");
@@ -322,7 +330,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Switch the visible tab to the one with the given ID. The user will see this tab."
+        description = "Switch the user's visible tab to the one with the given ID. This changes what the user sees — only use when the task is done and the user needs to see the result, or they explicitly asked to go somewhere."
     )]
     async fn browser_switch_tab(
         &self,
@@ -352,7 +360,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Close a tab by its ID. If it's the active tab, the next tab becomes active."
+        description = "Close a tab by its ID. If it's the user's visible tab, the next tab becomes visible. Always close background tabs when you're done with them."
     )]
     async fn browser_close_tab(
         &self,
@@ -382,7 +390,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get metadata about a page: title, URL, and meta description. Uses active tab if tab_id is not specified."
+        description = "Get metadata about a page: title, URL, and meta description. Defaults to the user's visible tab if tab_id is omitted. Pass tab_id to read any tab including background ones."
     )]
     async fn browser_get_page_info(
         &self,
@@ -413,7 +421,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Execute JavaScript code in a page and return the result as a string. Uses active tab if tab_id is not specified. For reading page text prefer browser_get_page_content instead."
+        description = "Execute JavaScript code in a page and return the result as a string. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to target background tabs. For reading page text prefer browser_get_page_content instead."
     )]
     async fn browser_execute_js(
         &self,
@@ -441,7 +449,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Click an element on the page by CSS selector. Uses active tab if tab_id is not specified."
+        description = "Click an element on the page by CSS selector. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to click in background tabs."
     )]
     async fn browser_click(
         &self,
@@ -471,7 +479,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Type text into an input element by CSS selector. Uses active tab if tab_id is not specified."
+        description = "Type text into an input element by CSS selector. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to type in background tabs."
     )]
     async fn browser_type(
         &self,
@@ -502,7 +510,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get the currently active (visible) tab. Returns {id, title, url, is_active, is_playing_audio}."
+        description = "Get the tab the user is currently viewing (the foreground tab). Returns {id, title, url, is_active, is_playing_audio}. Use this to understand what the user sees right now — NOT to get a tab you opened in the background (use browser_get_tabs for that)."
     )]
     async fn browser_get_current_tab(&self) -> Result<CallToolResult, McpError> {
         let (tx, rx) = oneshot::channel();
@@ -527,7 +535,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Navigate back in the browser history for a tab. Uses active tab if tab_id is not specified."
+        description = "Navigate back in the browser history for a tab. Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_go_back(
         &self,
@@ -556,7 +564,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Navigate forward in the browser history for a tab. Uses active tab if tab_id is not specified."
+        description = "Navigate forward in the browser history for a tab. Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_go_forward(
         &self,
@@ -616,7 +624,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get list of tabs currently playing audio. Returns array of TabInfo with id, title, url, is_active, is_playing_audio."
+        description = "Get list of tabs currently playing audio/video. Returns array of {id, title, url, is_active, is_playing_audio}."
     )]
     async fn browser_get_playing_tabs(&self) -> Result<CallToolResult, McpError> {
         let (tx, rx) = oneshot::channel();
@@ -640,7 +648,7 @@ impl McpServer {
         }
     }
 
-    #[tool(description = "Reload a tab. Uses active tab if tab_id is not specified.")]
+    #[tool(description = "Reload a tab. Defaults to the user's visible tab if tab_id is omitted.")]
     async fn browser_reload(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -668,7 +676,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get the readable text content of a page (document.body.innerText). Useful for reading articles, search results, or any page content. Uses active tab if tab_id is not specified."
+        description = "Get the readable text content of a page (innerText). Use for reading articles, search results, or extracting data. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to read background tabs."
     )]
     async fn browser_get_page_content(
         &self,
@@ -707,7 +715,7 @@ impl ServerHandler for McpServer {
         )
         .with_server_info(Implementation::from_build_env())
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
-        .with_instructions("Octoweb browser control. Use these tools to navigate, inspect pages, and interact with web content.".to_string())
+        .with_instructions("Octoweb browser control. Tools that accept tab_id default to the user's visible (foreground) tab when omitted. Always pass tab_id explicitly when working with background tabs. Use browser_navigate with new_tab+background to open tabs the user doesn't see.".to_string())
     }
 }
 
