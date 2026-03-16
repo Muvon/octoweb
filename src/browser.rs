@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single browser tab (metadata only — the WebView is owned separately)
@@ -21,7 +22,7 @@ pub struct HistoryEntry {
 pub struct TabManager {
     tabs: Vec<Tab>,
     active_id: Option<usize>,
-    history: Vec<HistoryEntry>,
+    history: VecDeque<HistoryEntry>,
     max_history: usize,
     next_id: usize,
 }
@@ -31,7 +32,7 @@ impl TabManager {
         Self {
             tabs: Vec::new(),
             active_id: None,
-            history: Vec::new(),
+            history: VecDeque::new(),
             max_history,
             next_id: 1,
         }
@@ -70,16 +71,14 @@ impl TabManager {
 
     /// Update the title of a tab; backfills the most recent history entry for its URL.
     pub fn update_title(&mut self, id: usize, title: String) {
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+        let url = if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             tab.title = title.clone();
+            tab.url.clone()
         } else {
             return;
-        }
-        let url = self.tabs.iter().find(|t| t.id == id).map(|t| t.url.clone());
-        if let Some(url) = url {
-            if let Some(entry) = self.history.iter_mut().rev().find(|e| e.url == url) {
-                entry.title = title;
-            }
+        };
+        if let Some(entry) = self.history.iter_mut().rev().find(|e| e.url == url) {
+            entry.title = title;
         }
     }
 
@@ -89,13 +88,13 @@ impl TabManager {
             if tab.url == url {
                 return; // same URL re-fired (iframe, redirect) — skip
             }
-            self.history.push(HistoryEntry {
+            self.history.push_back(HistoryEntry {
                 title: tab.title.clone(),
                 url: url.clone(),
                 visited_at: unix_now(),
             });
             if self.history.len() > self.max_history {
-                self.history.remove(0);
+                self.history.pop_front();
             }
             tab.url = url;
         }
@@ -128,17 +127,28 @@ impl TabManager {
             .retain(|e| e.url.trim_end_matches('/') != normalized);
     }
 
-    pub fn history(&self) -> &[HistoryEntry] {
-        &self.history
+    /// Ensure history is contiguous in memory. Call before `history()` when
+    /// you also need other immutable borrows (e.g. `tabs()`).
+    pub fn ensure_contiguous(&mut self) {
+        self.history.make_contiguous();
     }
 
-    /// How many times this URL appears in history (used for ranking in the overlay).
-    pub fn visit_count(&self, url: &str) -> u32 {
-        let url = url.trim_end_matches('/');
-        self.history
-            .iter()
-            .filter(|e| e.url.trim_end_matches('/') == url)
-            .count() as u32
+    pub fn history(&self) -> &[HistoryEntry] {
+        // After ensure_contiguous (or when deque hasn't wrapped), first slice is everything
+        let (a, b) = self.history.as_slices();
+        debug_assert!(b.is_empty(), "call ensure_contiguous() first");
+        a
+    }
+
+    /// Pre-computed visit counts for all URLs in history.
+    /// Single O(n) pass — use instead of per-URL `visit_count()` in hot paths.
+    pub fn visit_counts(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for entry in &self.history {
+            let key = entry.url.trim_end_matches('/').to_string();
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        counts
     }
 }
 

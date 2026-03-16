@@ -117,12 +117,13 @@ pub const MEDIA_TRACK_SCRIPT: &str = r#"
 pub fn build_items_json(
     tabs: &[browser::Tab],
     history: &[browser::HistoryEntry],
-    tm: &browser::TabManager,
+    visit_counts: &std::collections::HashMap<String, u32>,
     favicons: &HashMap<String, String>,
 ) -> String {
     let mut items: Vec<serde_json::Value> = Vec::new();
     for tab in tabs {
-        let visits = tm.visit_count(&tab.url);
+        let key = tab.url.trim_end_matches('/');
+        let visits = visit_counts.get(key).copied().unwrap_or(0);
         items.push(serde_json::json!({
             "kind": "tab",
             "tab_id": tab.id,
@@ -136,7 +137,8 @@ pub fn build_items_json(
         tabs.iter().map(|t| t.url.trim_end_matches('/')).collect();
     for entry in history.iter().rev().take(200) {
         if !open_urls.contains(entry.url.trim_end_matches('/')) {
-            let visits = tm.visit_count(&entry.url);
+            let key = entry.url.trim_end_matches('/');
+            let visits = visit_counts.get(key).copied().unwrap_or(0);
             items.push(serde_json::json!({
                 "kind": "history",
                 "title": entry.title,
@@ -151,25 +153,27 @@ pub fn build_items_json(
 }
 
 /// Escape a string for safe embedding in a JS template literal (backtick string).
-/// Handles: backslash, backtick, and `${` (template interpolation).
+/// Handles: backslash, backtick, `${` (template interpolation), and `</` (script injection).
 pub fn escape_js_template(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '`' => out.push_str("\\`"),
-            '$' => out.push_str("\\$"),
-            _ => out.push(ch),
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'`' => out.push_str("\\`"),
+            b'$' if bytes.get(i + 1) == Some(&b'{') => out.push_str("\\$"),
+            b'<' if bytes.get(i + 1) == Some(&b'/') => out.push_str("<\\/"),
+            _ => out.push(b as char),
         }
     }
     out
 }
 
 /// Look up a cached favicon data-URI by domain extracted from the URL.
-pub fn cached_favicon(url: &str, favicons: &HashMap<String, String>) -> Option<String> {
+pub fn cached_favicon<'a>(url: &str, favicons: &'a HashMap<String, String>) -> Option<&'a str> {
     let after_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let host = after_scheme.split('/').next().filter(|h| !h.is_empty())?;
-    favicons.get(host).cloned()
+    favicons.get(host).map(|s| s.as_str())
 }

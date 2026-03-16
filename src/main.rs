@@ -764,8 +764,10 @@ fn main() {
         () => {
             if overlay_visible {
                 let json = {
-                    let tm = tabs.lock().unwrap();
-                    webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                    let mut tm = tabs.lock().unwrap();
+                    let vc = tm.visit_counts();
+                    tm.ensure_contiguous();
+                    webview_utils::build_items_json(tm.tabs(), tm.history(), &vc, &favicon_cache)
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
                     "window.__refreshItems && window.__refreshItems({json})"
@@ -1119,7 +1121,8 @@ fn main() {
                         }
                     }
                     McpCommand::GetHistory { limit, response } => {
-                        let tm = tabs.lock().unwrap();
+                        let mut tm = tabs.lock().unwrap();
+                        tm.ensure_contiguous();
                         let history = tm.history();
                         let limit = limit.unwrap_or(50);
                         // history is oldest-first; return most recent first
@@ -1304,8 +1307,10 @@ fn main() {
                         overlay_win.set_outer_position(pos);
                     }
                     let json = {
-                        let tm = tabs.lock().unwrap();
-                        webview_utils::build_items_json(tm.tabs(), tm.history(), &tm, &favicon_cache)
+                        let mut tm = tabs.lock().unwrap();
+                        let vc = tm.visit_counts();
+                        tm.ensure_contiguous();
+                        webview_utils::build_items_json(tm.tabs(), tm.history(), &vc, &favicon_cache)
                     };
                     let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setItems && window.__setItems({json})"
@@ -1607,7 +1612,8 @@ fn main() {
                         quick_slots[slot] = None;
                     } else {
                         // Save current page into the slot
-                        let favicon = webview_utils::cached_favicon(&url, &favicon_cache);
+                        let favicon = webview_utils::cached_favicon(&url, &favicon_cache)
+                            .map(String::from);
                         quick_slots[slot] = Some(quickslots::QuickSlot {
                             url,
                             title,
@@ -1654,7 +1660,7 @@ fn main() {
                     format!("Download failed: {filename}")
                 };
                 tracing::debug!(%msg, "Download completed");
-                let escaped = msg.replace('\\', "\\\\").replace('`', "\\`").replace("</", "<\\/");
+                let escaped = webview_utils::escape_js_template(&msg);
                 if !notification_visible {
                     let _ = notification_wv.set_visible(true);
                     notification_visible = true;

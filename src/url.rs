@@ -84,18 +84,14 @@ fn looks_like_domain(input: &str) -> bool {
 
 /// Percent-encode a query string for use in a URL (encodes everything except unreserved chars)
 fn encode_uri(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
-                vec![c]
-            } else {
-                let mut buf = [0u8; 4];
-                let bytes = c.encode_utf8(&mut buf);
-                bytes
-                    .bytes()
-                    .flat_map(|b| format!("%{b:02X}").chars().collect::<Vec<_>>())
-                    .collect()
-            }
-        })
-        .collect()
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len() * 2);
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
