@@ -251,6 +251,9 @@ fn main() {
     let mut tab_webviews: HashMap<usize, WebView> = HashMap::new();
     let mut active_wv_id;
     let mut mru: Vec<usize> = Vec::new();
+    // Deferred tab swap: (old_visible_tab, new_loading_tab).
+    // Old tab stays visible while new one loads behind it (Safari-style).
+    let mut pending_swap: Option<(usize, usize)> = None;
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
     let mut favicon_cache: HashMap<String, String> = config::load_favicons();
@@ -890,10 +893,11 @@ fn main() {
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
                 let url = url::resolve_url(&raw);
                 let tab_id = tabs.lock().unwrap().open(url.clone());
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
-                }
+                // Keep the currently *visible* tab on screen while new one loads.
+                // If a swap is already pending, the visible tab is the old one from that swap.
+                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
                 let new_wv = make_webview(tab_id, &url);
+                let _ = new_wv.set_visible(false); // hidden until loaded
                 let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
                 let p = proxy.clone();
                 nav_error_patch::register(wv_ptr, move |url, code| {
@@ -901,6 +905,7 @@ fn main() {
                 });
                 tab_webviews.insert(tab_id, new_wv);
                 active_wv_id = tab_id;
+                pending_swap = Some((visible_id, tab_id));
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
@@ -908,10 +913,10 @@ fn main() {
             // ── Open in new tab: Cmd+click or target=_blank ───────────────
             Event::UserEvent(AppEvent::OpenInNewTab(url)) => {
                 let tab_id = tabs.lock().unwrap().open(url.clone());
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
-                }
+                // Keep the currently visible tab on screen while new one loads.
+                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
                 let new_wv = make_webview(tab_id, &url);
+                let _ = new_wv.set_visible(false); // hidden until loaded
                 let wv_ptr = objc2::rc::Retained::as_ptr(&new_wv.webview()) as usize;
                 let p = proxy.clone();
                 nav_error_patch::register(wv_ptr, move |url, code| {
@@ -919,6 +924,7 @@ fn main() {
                 });
                 tab_webviews.insert(tab_id, new_wv);
                 active_wv_id = tab_id;
+                pending_swap = Some((visible_id, tab_id));
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
@@ -932,14 +938,25 @@ fn main() {
                     return;
                 }
                 tabs.lock().unwrap().switch(tab_id);
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                // If a deferred swap is pending, the old tab is still visible —
+                // hide it (and the hidden new tab) before showing the target.
+                if let Some((old_id, new_id)) = pending_swap.take() {
+                    if let Some(wv) = tab_webviews.get(&old_id) {
+                        let _ = wv.set_visible(false);
+                    }
+                    if new_id != tab_id {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(false);
+                        }
+                    }
+                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let _ = wv.set_visible(false);
                 }
                 if let Some(wv) = tab_webviews.get(&tab_id) {
                     let _ = wv.set_visible(true);
                 }
                 active_wv_id = tab_id;
-                    macos::mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
 
@@ -954,6 +971,20 @@ fn main() {
                     }
                 };
                 if let Some(id) = id {
+                    // Cancel any pending swap involving this tab
+                    if let Some((old_id, new_id)) = pending_swap.take() {
+                        if id == new_id {
+                            // Closing the loading tab — old tab is still visible, keep it
+                        } else if id == old_id {
+                            // Closing the old visible tab — show the new one
+                            if let Some(wv) = tab_webviews.get(&new_id) {
+                                let _ = wv.set_visible(true);
+                            }
+                        } else {
+                            // Closing an unrelated tab — restore pending_swap
+                            pending_swap = Some((old_id, new_id));
+                        }
+                    }
                     let next_id = {
                         let mut tm = tabs.lock().unwrap();
                         tm.close(id);
@@ -1066,9 +1097,9 @@ fn main() {
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
-                    // Focus the prompt input so the user can type immediately
+                    // Defer focus — set_visible is async, DOM needs one render cycle first
                     let _ = sidebar_wv.evaluate_script(
-                        "document.getElementById('prompt-input').focus()"
+                        "setTimeout(() => document.getElementById('prompt-input').focus(), 50)"
                     );
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
@@ -1244,6 +1275,20 @@ fn main() {
                     // Hide after CSS fade completes (width 0.2s + opacity 0.3s delay 0.1s = 600ms, +50ms buffer)
                     progress_hide_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(650));
                 }
+                // Deferred swap: new page finished loading — show it, hide old tab.
+                if let Some((old_id, new_id)) = pending_swap {
+                    if tab_id == new_id {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(true);
+                        }
+                        if old_id != new_id {
+                            if let Some(wv) = tab_webviews.get(&old_id) {
+                                let _ = wv.set_visible(false);
+                            }
+                        }
+                        pending_swap = None;
+                    }
+                }
             }
 
             Event::UserEvent(AppEvent::NavigationError(tab_id, url, error)) => {
@@ -1257,6 +1302,20 @@ fn main() {
                 if let Some(wv) = tab_webviews.get(&tab_id) {
                     let error_html = error_page_html::html(&url, &error);
                     let _ = wv.load_html(&error_html);
+                }
+                // Complete deferred swap so the error page is visible
+                if let Some((old_id, new_id)) = pending_swap {
+                    if tab_id == new_id {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(true);
+                        }
+                        if old_id != new_id {
+                            if let Some(wv) = tab_webviews.get(&old_id) {
+                                let _ = wv.set_visible(false);
+                            }
+                        }
+                        pending_swap = None;
+                    }
                 }
             }
 
