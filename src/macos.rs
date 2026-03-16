@@ -16,7 +16,7 @@ pub fn init_env() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
 
     let output = match std::process::Command::new(&shell)
-        .args(["-l", "-c", "env"])
+        .args(["-l", "-i", "-c", "env"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

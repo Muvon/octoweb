@@ -5,8 +5,11 @@ mod error_page_html;
 mod macos;
 mod mcp;
 mod nav_error_patch;
+mod newtab_html;
 mod overlay_html;
 mod progress_bar_html;
+mod quickslots;
+mod quickslots_html;
 mod sidebar_html;
 mod toggle_btn_html;
 mod url;
@@ -54,6 +57,9 @@ enum AppEvent {
     Reload,             // Cmd+R — reload current page
     MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
     RemoveHistory(String), // URL to remove from history
+    QuickSlotOpen(usize), // ⌘1–⌘0 — open saved URL in slot 0–9
+    QuickSlotSave(usize), // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
+    QuickSlotRemove(usize), // remove slot (from footer bar ✕ or newtab page)
     Quit,
 }
 fn main() {
@@ -172,6 +178,11 @@ fn main() {
                             Some("media:paused") => {
                                 let _ = p3.send_event(AppEvent::MediaPlaying(tab_id, false));
                             }
+                            Some("quickslot_open") => {
+                                if let Some(slot) = v["slot"].as_u64() {
+                                    let _ = p3.send_event(AppEvent::QuickSlotOpen(slot as usize));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -207,6 +218,7 @@ fn main() {
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
     let mut favicon_cache: HashMap<String, String> = config::load_favicons();
+    let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
     let session = config::load_session();
@@ -225,6 +237,11 @@ fn main() {
     for url in &urls {
         let tab_id = tabs.lock().unwrap().open(url.clone());
         let wv = make_webview(tab_id, url);
+        // For about:blank, load the styled new-tab page
+        if url == "about:blank" {
+            let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+            let _ = wv.load_html(&html);
+        }
         // Register ObjC error callback for this WebView
         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
         // Inject error methods into WryNavigationDelegate (only runs once)
@@ -391,6 +408,47 @@ fn main() {
     // Instant when __finish was called — we hide progress_wv after the CSS fade (400ms)
     let mut progress_hide_at: Option<std::time::Instant> = None;
 
+    // ── Quick-slots footer bar (thin strip at bottom of browser window) ───
+    const FOOTER_H_LOGICAL: f64 = 36.0;
+    let footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
+    let footer_wv = WebViewBuilder::new()
+        .with_html(quickslots_html::html())
+        .with_transparent(true)
+        .with_bounds(wry::Rect {
+            position: tao::dpi::PhysicalPosition::new(0u32, sz0.height.saturating_sub(footer_h))
+                .into(),
+            size: tao::dpi::PhysicalSize::new(sz0.width, footer_h).into(),
+        })
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("quickslot_open") => {
+                            if let Some(slot) = v["slot"].as_u64() {
+                                let _ = p.send_event(AppEvent::QuickSlotOpen(slot as usize));
+                            }
+                        }
+                        Some("quickslot_remove") => {
+                            if let Some(slot) = v["slot"].as_u64() {
+                                let _ = p.send_event(AppEvent::QuickSlotRemove(slot as usize));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build_as_child(&*browser_win)
+        .expect("Failed to create quickslots footer WebView");
+    // Initialize footer with saved slots
+    {
+        let json = quickslots::to_json(&quick_slots);
+        let _ = footer_wv.evaluate_script(&format!(
+            "window.__updateSlots && window.__updateSlots({json})"
+        ));
+    }
+
     // ── ACP handle — spawns octomind acp subprocess in background ─────────
     let mut acp_tag = "octoweb:assistant".to_string();
     let mut acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag)).ok();
@@ -433,6 +491,8 @@ fn main() {
                 const A_KEYCODE: i64 = 0;  // a (Cmd+Shift+A = toggle sidebar)
                 const I_KEYCODE: i64 = 34; // i (Cmd+Shift+I = toggle devtools)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
+                // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
+                const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
                 let flags = event.get_flags();
                 let cmd   = flags.contains(CGEventFlags::CGEventFlagCommand);
@@ -463,6 +523,17 @@ fn main() {
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::Reload);
                     CallbackResult::Drop
+                } else if cmd && !overlay_state.load(Ordering::Relaxed) {
+                    // ⌘+digit → QuickSlotOpen, ⌘⇧+digit → QuickSlotSave
+                    if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
+                        if shift {
+                            let _ = p.send_event(AppEvent::QuickSlotSave(slot));
+                        } else {
+                            let _ = p.send_event(AppEvent::QuickSlotOpen(slot));
+                        }
+                        return CallbackResult::Drop;
+                    }
+                    CallbackResult::Keep
                 } else {
                     CallbackResult::Keep
                 }
@@ -955,6 +1026,14 @@ fn main() {
                         ).into(),
                         size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
                     });
+                    // Restore footer to full width
+                    let _ = footer_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            0u32,
+                            sz.height.saturating_sub(footer_h),
+                        ).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, footer_h).into(),
+                    });
                 } else {
                     // Reposition sidebar to right edge (window may have been resized)
                     let _ = sidebar_wv.set_bounds(wry::Rect {
@@ -986,6 +1065,15 @@ fn main() {
                             btn_margin,
                         ).into(),
                         size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
+                    });
+                    // Shrink footer to leave room for sidebar
+                    let footer_w = sz.width.saturating_sub(sidebar_w);
+                    let _ = footer_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            0u32,
+                            sz.height.saturating_sub(footer_h),
+                        ).into(),
+                        size: tao::dpi::PhysicalSize::new(footer_w, footer_h).into(),
                     });
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
@@ -1026,6 +1114,79 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                 "window.__setAgentTag && window.__setAgentTag(`{escaped}`)"
             ));
+            }
+
+            // ── Quick-slot: open saved URL ────────────────────────────────
+            Event::UserEvent(AppEvent::QuickSlotOpen(slot)) => {
+                if let Some(ref qs) = quick_slots[slot] {
+                    let url = qs.url.clone();
+                    // Navigate the active tab to the slot URL
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let escaped = url.replace('\\', "\\\\").replace('\'', "\\'");
+                        let _ = wv.evaluate_script(&format!(
+                            "window.location.href = '{escaped}'"
+                        ));
+                    }
+                    tabs.lock().unwrap().update_url(active_wv_id, url);
+                    browser_win.set_focus();
+                }
+            }
+
+            // ── Quick-slot: save current page to slot ─────────────────────
+            Event::UserEvent(AppEvent::QuickSlotSave(slot)) => {
+                let info = {
+                    let tm = tabs.lock().unwrap();
+                    tm.active_tab().map(|t| (t.url.clone(), t.title.clone()))
+                };
+                if let Some((url, title)) = info {
+                    if url == "about:blank" || url.is_empty() {
+                        // On blank page: remove the slot
+                        quick_slots[slot] = None;
+                    } else {
+                        // Save current page into the slot
+                        let favicon = webview_utils::cached_favicon(&url, &favicon_cache);
+                        quick_slots[slot] = Some(quickslots::QuickSlot {
+                            url,
+                            title,
+                            favicon,
+                        });
+                    }
+                    quickslots::save(&quick_slots);
+                    // Update footer bar
+                    let json = quickslots::to_json(&quick_slots);
+                    let _ = footer_wv.evaluate_script(&format!(
+                        "window.__updateSlots && window.__updateSlots({json})"
+                    ));
+                    // Update any about:blank newtab pages
+                    for (&tid, wv) in &tab_webviews {
+                        let tab_url = tabs.lock().unwrap().tabs().iter()
+                            .find(|t| t.id == tid).map(|t| t.url.clone());
+                        if tab_url.as_deref() == Some("about:blank") {
+                            let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                            let _ = wv.load_html(&html);
+                        }
+                    }
+                }
+            }
+
+            // ── Quick-slot: remove slot ───────────────────────────────────
+            Event::UserEvent(AppEvent::QuickSlotRemove(slot)) => {
+                quick_slots[slot] = None;
+                quickslots::save(&quick_slots);
+                // Update footer bar
+                let json = quickslots::to_json(&quick_slots);
+                let _ = footer_wv.evaluate_script(&format!(
+                    "window.__updateSlots && window.__updateSlots({json})"
+                ));
+                // Update any about:blank newtab pages
+                for (&tid, wv) in &tab_webviews {
+                    let tab_url = tabs.lock().unwrap().tabs().iter()
+                        .find(|t| t.id == tid).map(|t| t.url.clone());
+                    if tab_url.as_deref() == Some("about:blank") {
+                        let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                        let _ = wv.load_html(&html);
+                    }
+                }
             }
 
             // ── Quit ──────────────────────────────────────────────────────
@@ -1157,6 +1318,15 @@ fn main() {
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         let _ = wv.set_bounds(bounds);
                     }
+                    // Resize footer bar (full width minus sidebar, pinned to bottom)
+                    let footer_w = if sidebar_visible { sz.width.saturating_sub(sidebar_w) } else { sz.width };
+                    let _ = footer_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            0u32,
+                            sz.height.saturating_sub(footer_h),
+                        ).into(),
+                        size: tao::dpi::PhysicalSize::new(footer_w, footer_h).into(),
+                    });
                 }
 
                 WindowEvent::ModifiersChanged(mods) => {

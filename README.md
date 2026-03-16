@@ -1,18 +1,18 @@
 # octoweb
 
-A macOS browser for people who think with their keyboard.
+The browser you reach for when you want to think.
 
-Built on [wry](https://github.com/tauri-apps/wry) + [tao](https://github.com/tauri-apps/tao). No Electron. No Chrome. No memory bloat. Just WebKit, Rust, and a few sharp shortcuts.
+Built on WebKit and Rust. No Electron. No Chrome. No mouse required.
 
 ---
 
 ## Why
 
-Most browsers are built for everyone. octoweb is built for you — the person who reaches for the keyboard before the mouse, who has 20 tabs open but knows exactly which one they want, and who thinks the browser UI should get out of the way.
+Most browsers are built around the mouse. octoweb is built around the keyboard — and around the idea that your browser should amplify your thinking, not interrupt it. Every action has a shortcut. The AI assistant lives in the sidebar, not a tab. And your AI tools can drive the browser directly. No extensions. No config. Just open it and go.
 
 Three things it does differently:
 
-1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette fuzzy-searches tabs and history with `⌘1`–`⌘9` instant-jump to any result
+1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette fuzzy-searches tabs and history with `⌘1`–`⌘9` instant-jump to any result; pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back to it instantly from anywhere
 2. **AI assistant built in** — not an extension, not a tab, a sidebar powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol)
 3. **MCP server inside the browser** — your AI tools can actually *drive* the browser (`localhost:3434`)
 
@@ -124,8 +124,30 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧I` | Toggle DevTools |
+| `⌘⇧1` – `⌘⇧9` | Pin current page to fast-access slot 1–9 |
+| `⌘⇧0` | Pin current page to fast-access slot 10 |
+| `⌘1` – `⌘9` | Switch to fast-access slot 1–9 (outside palette) |
+| `⌘0` | Switch to fast-access slot 10 (outside palette) |
 | `⌃N` | Next tab (MRU order) |
 | `⌃P` | Previous tab (MRU order) |
+
+### Fast access slots
+
+Pin any page to a numbered slot and jump back to it instantly — no palette, no search, one keystroke from anywhere in the browser.
+
+- **`⌘⇧1`–`⌘⇧9` / `⌘⇧0`** — save the current page's URL into slot 1–9 / 10
+- **`⌘1`–`⌘9` / `⌘0`** — navigate to the URL saved in that slot (opens in current tab if the slot is already open, otherwise navigates)
+
+Slots are persisted in `config.toml` so they survive restarts. An empty slot does nothing.
+
+```toml
+# Example — set manually or via ⌘⇧N shortcuts
+fast_access = [
+  "https://github.com",        # ⌘1
+  "https://news.ycombinator.com", # ⌘2
+  "",                          # ⌘3 — empty, no-op
+]
+```
 
 ### Command palette (`⌘K`)
 
