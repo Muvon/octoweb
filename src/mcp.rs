@@ -116,6 +116,11 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<String, String>>,
     },
+    /// Take a screenshot of a tab
+    Screenshot {
+        tab_id: Option<usize>,
+        response: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -698,6 +703,35 @@ impl McpServer {
 
         match result {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    #[tool(
+        description = "Take a screenshot of a tab's web page. Saves PNG to a temp file and copies it to the clipboard so the user can paste it anywhere. Returns the file path. Defaults to the user's visible tab if tab_id is omitted."
+    )]
+    async fn browser_screenshot(
+        &self,
+        Parameters(req): Parameters<TabIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.state
+            .command_tx
+            .send(McpCommand::Screenshot {
+                tab_id: req.tab_id,
+                response: tx,
+            })
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let result = rx
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        match result {
+            Ok(path) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Screenshot saved to {path} and copied to clipboard"
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }

@@ -767,8 +767,13 @@ fn main() {
                 "window.__updateSlots && window.__updateSlots({json})"
             ));
             for (&tid, wv) in &tab_webviews {
-                let tab_url = tabs.lock().unwrap().tabs().iter()
-                    .find(|t| t.id == tid).map(|t| t.url.clone());
+                let tab_url = tabs
+                    .lock()
+                    .unwrap()
+                    .tabs()
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .map(|t| t.url.clone());
                 if tab_url.as_deref() == Some("about:blank") {
                     let html = newtab_html::html(&quickslots::to_json(&quick_slots));
                     let _ = wv.load_html(&html);
@@ -1128,6 +1133,107 @@ fn main() {
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let _ = wv.reload();
                             let _ = response.send(Ok(()));
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::Screenshot { tab_id, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+
+                            // WKWebView.takeSnapshot(with:completionHandler:)
+                            // completionHandler: ^(NSImage * _Nullable image, NSError * _Nullable error)
+                            let handler = block2::RcBlock::new(move |image: *mut objc2::runtime::AnyObject, error: *mut objc2::runtime::AnyObject| {
+                                let Some(tx) = response_cb.lock().unwrap().take() else { return };
+
+                                if image.is_null() {
+                                    let msg = if !error.is_null() {
+                                        unsafe {
+                                            let desc: *mut objc2::runtime::AnyObject = objc2::msg_send![&*error, localizedDescription];
+                                            if desc.is_null() {
+                                                "Screenshot failed".to_string()
+                                            } else {
+                                                let bytes: *const u8 = objc2::msg_send![&*desc, UTF8String];
+                                                std::ffi::CStr::from_ptr(bytes.cast()).to_string_lossy().into_owned()
+                                            }
+                                        }
+                                    } else {
+                                        "Screenshot returned nil image".to_string()
+                                    };
+                                    let _ = tx.send(Err(msg));
+                                    return;
+                                }
+
+                                unsafe {
+                                    // NSImage → TIFF → NSBitmapImageRep → PNG data
+                                    let tiff: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, TIFFRepresentation];
+                                    if tiff.is_null() {
+                                        let _ = tx.send(Err("Failed to get TIFF data".to_string()));
+                                        return;
+                                    }
+                                    let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                        objc2::class!(NSBitmapImageRep),
+                                        imageRepWithData: &*tiff
+                                    ];
+                                    if rep.is_null() {
+                                        let _ = tx.send(Err("Failed to create bitmap rep".to_string()));
+                                        return;
+                                    }
+                                    // NSBitmapImageFileTypePNG = 4
+                                    let empty_dict: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSDictionary), dictionary];
+                                    let png_data: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                        &*rep,
+                                        representationUsingType: 4u64,
+                                        properties: &*empty_dict
+                                    ];
+                                    if png_data.is_null() {
+                                        let _ = tx.send(Err("Failed to encode PNG".to_string()));
+                                        return;
+                                    }
+
+                                    // Get raw bytes from NSData
+                                    let length: usize = objc2::msg_send![&*png_data, length];
+                                    let bytes_ptr: *const u8 = objc2::msg_send![&*png_data, bytes];
+                                    let png_bytes = std::slice::from_raw_parts(bytes_ptr, length);
+
+                                    // Write to temp file
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis();
+                                    let path = std::env::temp_dir().join(format!("octoweb-screenshot-{ts}.png"));
+                                    if let Err(e) = std::fs::write(&path, png_bytes) {
+                                        let _ = tx.send(Err(format!("Failed to write file: {e}")));
+                                        return;
+                                    }
+
+                                    // Copy to clipboard as PNG
+                                    let pb: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
+                                    let _: () = objc2::msg_send![&*pb, clearContents];
+                                    let png_type: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                        objc2::class!(NSString),
+                                        stringWithUTF8String: c"public.png".as_ptr()
+                                    ];
+                                    let _: bool = objc2::msg_send![&*pb, setData: &*png_data, forType: &*png_type];
+
+                                    let path_str = path.to_string_lossy().into_owned();
+                                    tracing::debug!(path = %path_str, "Screenshot saved and copied to clipboard");
+                                    let _ = tx.send(Ok(path_str));
+                                }
+                            });
+
+                            unsafe {
+                                let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+                                let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+                                let _: () = objc2::msg_send![
+                                    &*wv_obj,
+                                    takeSnapshotWithConfiguration: nil,
+                                    completionHandler: &*handler
+                                ];
+                            }
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }

@@ -137,7 +137,6 @@ impl Config {
             Err(e) => tracing::warn!(error = %e, "Failed to serialize config"),
         }
     }
-
 }
 
 fn config_path() -> PathBuf {
