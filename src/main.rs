@@ -1115,7 +1115,17 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = mru[(pos + 1) % mru.len()];
                 tabs.lock().unwrap().switch(target);
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                // Cancel deferred swap — hide both old visible and new loading tabs
+                if let Some((old_id, new_id)) = pending_swap.take() {
+                    if let Some(wv) = tab_webviews.get(&old_id) {
+                        let _ = wv.set_visible(false);
+                    }
+                    if new_id != target {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(false);
+                        }
+                    }
+                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let _ = wv.set_visible(false);
                 }
                 if let Some(wv) = tab_webviews.get(&target) {
@@ -1137,7 +1147,17 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = if pos == 0 { *mru.last().unwrap() } else { mru[pos - 1] };
                 tabs.lock().unwrap().switch(target);
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                // Cancel deferred swap — hide both old visible and new loading tabs
+                if let Some((old_id, new_id)) = pending_swap.take() {
+                    if let Some(wv) = tab_webviews.get(&old_id) {
+                        let _ = wv.set_visible(false);
+                    }
+                    if new_id != target {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(false);
+                        }
+                    }
+                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let _ = wv.set_visible(false);
                 }
                 if let Some(wv) = tab_webviews.get(&target) {
