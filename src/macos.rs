@@ -1,67 +1,68 @@
-//! macOS-specific setup: dock icon, Edit menu, MRU list, PATH expansion.
+//! macOS-specific setup: environment init, dock icon, Edit menu, MRU list.
 
-/// Expand `PATH` so child processes (e.g. `octomind`) can be found when
-/// launched as a macOS `.app` bundle. Finder gives apps a minimal PATH
-/// (`/usr/bin:/bin:/usr/sbin:/sbin`), missing user-installed locations.
+/// Import the user's full shell environment into this process.
 ///
-/// Reads `/etc/paths`, `/etc/paths.d/*`, and appends well-known user dirs.
-/// Deduplicates and preserves existing entries.
-pub fn expand_path() {
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut dirs: Vec<String> = current.split(':').map(str::to_string).collect();
+/// macOS `.app` bundles launched from Finder/Dock get a sanitized environment:
+/// minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), no user exports from
+/// `~/.zshrc` / `~/.bashrc`. This means API keys, custom PATH entries
+/// (Homebrew, Cargo, NVM, etc.), and other user config are all missing.
+///
+/// Fix: spawn the user's login shell (`$SHELL -l -c env`), capture its full
+/// environment, and import every variable into our process. This gives child
+/// processes (e.g. `octomind`) the same environment the user has in Terminal.
+///
+/// Skips a small set of shell-session-specific vars that don't apply to us.
+pub fn init_env() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
 
-    // Append only if not already present.
-    let mut push = |dir: String| {
-        if !dir.is_empty() && !dirs.contains(&dir) {
-            dirs.push(dir);
+    let output = match std::process::Command::new(&shell)
+        .args(["-l", "-c", "env"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            tracing::warn!(
+                shell,
+                "failed to capture user shell env — PATH may be incomplete"
+            );
+            return;
         }
     };
 
-    // /etc/paths — system-wide base paths
-    if let Ok(contents) = std::fs::read_to_string("/etc/paths") {
-        for line in contents.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                push(trimmed.to_string());
-            }
+    // Vars that belong to the parent shell session, not to us.
+    const SKIP: &[&str] = &[
+        "SHLVL",
+        "TERM",
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "TERM_SESSION_ID",
+        "TMPDIR",
+        "PWD",
+        "OLDPWD",
+        "_",
+        "GHOSTTY_RESOURCES_DIR",
+        "GHOSTTY_BIN_DIR",
+    ];
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut imported = 0usize;
+
+    for line in stdout.lines() {
+        // env output is KEY=VALUE (value may contain '=')
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.is_empty() || SKIP.contains(&key) {
+            continue;
         }
+        std::env::set_var(key, value);
+        imported += 1;
     }
 
-    // /etc/paths.d/* — per-package additions (Homebrew, Go, etc.)
-    if let Ok(entries) = std::fs::read_dir("/etc/paths.d") {
-        for entry in entries.flatten() {
-            if let Ok(contents) = std::fs::read_to_string(entry.path()) {
-                for line in contents.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        push(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Well-known user binary locations
-    if let Some(home) = dirs::home_dir() {
-        for subdir in [".cargo/bin", ".local/bin", "bin", "go/bin"] {
-            push(home.join(subdir).to_string_lossy().into_owned());
-        }
-    }
-
-    // Common system locations that Finder PATH may lack
-    for dir in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
-        push(dir.to_string());
-    }
-
-    // Rebuild PATH, dropping empty entries
-    let new_path: String = dirs
-        .into_iter()
-        .filter(|d| !d.is_empty())
-        .collect::<Vec<_>>()
-        .join(":");
-    std::env::set_var("PATH", &new_path);
-
-    tracing::debug!(path = %new_path, "expanded PATH for .app context");
+    tracing::debug!(shell, imported, "inherited user shell environment");
 }
 
 /// Set the macOS dock/app icon from the embedded PNG.

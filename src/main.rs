@@ -64,8 +64,8 @@ fn main() {
         )
         .init();
 
-    // Expand PATH so child processes (octomind) are found when launched as .app.
-    macos::expand_path();
+    // Import user's full shell environment (PATH, API keys, etc.) for .app context.
+    macos::init_env();
 
     let cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
