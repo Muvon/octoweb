@@ -719,7 +719,10 @@ pub fn html() -> &'static str {
     const selected = idx === sel ? ' selected' : '';
     const isJumpable = item.kind === 'tab' || item.kind === 'history';
     const shortcutNum = isJumpable ? (idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '') : '';
-    const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>' : '';
+    const actionShortcut = item.kind === 'ask' ? '⌘⇧↵' : (item.kind === 'search' || item.kind === 'url') ? '⌘↵' : '';
+    const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>'
+                       : actionShortcut ? '<span class="shortcut-badge">' + actionShortcut + '</span>'
+                       : '';
     const canClose = isJumpable;
     const closeAttr = item.kind === 'tab'
       ? 'data-tab-id="' + item.tab_id + '"'
