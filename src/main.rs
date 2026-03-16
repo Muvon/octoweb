@@ -1273,6 +1273,9 @@ fn main() {
                 if sidebar_visible {
                     let _ = sidebar_wv.set_visible(false);
                     sidebar_visible = false;
+                    // Return key window status to browser_win so the page
+                    // WebView receives keyboard input again.
+                    browser_win.set_focus();
                 } else {
                     // Reposition sidebar to right edge (window may have been resized)
                     let _ = sidebar_wv.set_bounds(wry::Rect {
@@ -1296,9 +1299,20 @@ fn main() {
                         let _ = notification_wv.set_visible(false);
                         notification_visible = false;
                     }
-                    // Defer focus — set_visible is async, DOM needs one render cycle first
+                    // Make chrome_win the key window so its child WebView can
+                    // accept first-responder, then focus the sidebar WKWebView
+                    // and the textarea inside it.
+                    unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                        let _: () = msg_send![ns_win, makeKeyWindow];
+                    }
+                    let _ = sidebar_wv.focus();
                     let _ = sidebar_wv.evaluate_script(
-                        "setTimeout(() => document.getElementById('prompt-input').focus(), 50)"
+                        "(function(){var el=document.getElementById('prompt-input');if(!el)return;\
+                         var n=0;(function f(){if(n++>20)return;el.focus();\
+                         if(document.activeElement===el)return;setTimeout(f,30)})()})()"
                     );
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
