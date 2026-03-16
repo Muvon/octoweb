@@ -1074,23 +1074,25 @@ pub fn html() -> &'static str {
       '<span>Copy</span>';
     btn.addEventListener('click', () => {
       const raw = wrap.dataset.raw || wrap.querySelector('.msg-bubble')?.textContent || '';
-      navigator.clipboard.writeText(raw).then(() => {
-        btn.classList.add('copied');
+      // navigator.clipboard requires secure context — unavailable in
+      // child WKWebView loaded via with_html().  Fall back to IPC so
+      // Rust writes to NSPasteboard directly.
+      window.ipc.postMessage(JSON.stringify({ type: 'copy_text', text: raw }));
+      btn.classList.add('copied');
+      btn.innerHTML =
+        '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
+          '<path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>' +
+        '<span>Copied</span>';
+      setTimeout(() => {
+        btn.classList.remove('copied');
         btn.innerHTML =
           '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
-            '<path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+            '<rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>' +
+            '<path d="M3 8H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
           '</svg>' +
-          '<span>Copied</span>';
-        setTimeout(() => {
-          btn.classList.remove('copied');
-          btn.innerHTML =
-            '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
-              '<rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>' +
-              '<path d="M3 8H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
-            '</svg>' +
-            '<span>Copy</span>';
-        }, 1800);
-      });
+          '<span>Copy</span>';
+      }, 1800);
     });
     return btn;
   }

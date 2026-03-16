@@ -437,6 +437,31 @@ fn main() {
                                 let _ = p.send_event(AppEvent::AcpRestart(tag.to_string()));
                             }
                         }
+                        Some("copy_text") => {
+                            if let Some(text) = v["text"].as_str() {
+                                unsafe {
+                                    use objc2::runtime::AnyObject;
+                                    use objc2::{class, msg_send};
+                                    let pb: *mut AnyObject =
+                                        msg_send![class!(NSPasteboard), generalPasteboard];
+                                    let _: () = msg_send![pb, clearContents];
+                                    let ns_str: *mut AnyObject = msg_send![
+                                        class!(NSString), alloc
+                                    ];
+                                    let ns_str: *mut AnyObject = msg_send![
+                                        ns_str,
+                                        initWithBytes: text.as_ptr(),
+                                        length: text.len(),
+                                        encoding: 4u64 // NSUTF8StringEncoding
+                                    ];
+                                    let arr: *mut AnyObject = msg_send![
+                                        class!(NSArray),
+                                        arrayWithObject: ns_str
+                                    ];
+                                    let _: bool = msg_send![pb, writeObjects: arr];
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
