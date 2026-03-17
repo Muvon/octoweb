@@ -156,14 +156,15 @@ pub fn build_items_json(
 /// Handles: backslash, backtick, `${` (template interpolation), and `</` (script injection).
 pub fn escape_js_template(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 8);
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'\\' => out.push_str("\\\\"),
-            b'`' => out.push_str("\\`"),
-            b'$' if bytes.get(i + 1) == Some(&b'{') => out.push_str("\\$"),
-            b'<' if bytes.get(i + 1) == Some(&b'/') => out.push_str("<\\/"),
-            _ => out.push(b as char),
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '`' => out.push_str("\\`"),
+            // Escape ${ to prevent template literal interpolation
+            '$' if s.as_bytes().get(i + 1) == Some(&b'{') => out.push_str("\\$"),
+            // Break up </script> to prevent early HTML parser termination
+            '<' if s.as_bytes().get(i + 1) == Some(&b'/') => out.push_str("<\\/"),
+            _ => out.push(ch),
         }
     }
     out
