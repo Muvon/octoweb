@@ -308,9 +308,12 @@ fn main() {
 
     // Restore previous session if available, otherwise open home page.
     let session = config::load_session();
-    let urls: Vec<String> = match &session {
+    let session_tabs: Vec<config::SessionTab> = match &session {
         Some(s) if !s.tabs.is_empty() => s.tabs.clone(),
-        _ => vec![home.clone()],
+        _ => vec![config::SessionTab {
+            url: home.clone(),
+            title: String::new(),
+        }],
     };
     let active_url = session
         .as_ref()
@@ -320,14 +323,20 @@ fn main() {
 
     let mut first_id: Option<usize> = None;
     let mut restored_active_id: Option<usize> = None;
-    for url in &urls {
-        let tab_id = tabs.lock().unwrap().open(url.clone());
+    for st in &session_tabs {
+        let tab_id = if st.title.is_empty() {
+            tabs.lock().unwrap().open(st.url.clone())
+        } else {
+            tabs.lock()
+                .unwrap()
+                .open_with_title(st.url.clone(), st.title.clone())
+        };
         // Lazy loading: only create WebView for the active tab.
         // Other tabs are stored in pending_tabs and loaded on demand.
-        if url == &active_url {
+        if st.url == active_url {
             // Active tab — create WebView immediately
-            let wv = make_webview(tab_id, url);
-            if url == "about:blank" {
+            let wv = make_webview(tab_id, &st.url);
+            if st.url == "about:blank" {
                 let html = newtab_html::html(&quickslots::to_json(&quick_slots));
                 let _ = wv.load_html(&html);
             }
@@ -342,7 +351,7 @@ fn main() {
             restored_active_id = Some(tab_id);
         } else {
             // Background tab — defer WebView creation until user switches to it
-            pending_tabs.insert(tab_id, url.clone());
+            pending_tabs.insert(tab_id, st.url.clone());
         }
         mru.push(tab_id);
         if first_id.is_none() {
@@ -2145,14 +2154,21 @@ fn save_and_exit(
     control_flow: &mut ControlFlow,
 ) {
     let tm = tabs.lock().unwrap();
-    let tab_urls: Vec<String> = tm.tabs().iter().map(|t| t.url.clone()).collect();
+    let session_tabs: Vec<config::SessionTab> = tm
+        .tabs()
+        .iter()
+        .map(|t| config::SessionTab {
+            url: t.url.clone(),
+            title: t.title.clone(),
+        })
+        .collect();
     let active_url = tm
         .active_tab()
         .map(|t| t.url.as_str())
         .unwrap_or("")
         .to_string();
     drop(tm);
-    config::save_session(&tab_urls, &active_url);
+    config::save_session(&session_tabs, &active_url);
     config::save_favicons(favicon_cache);
     *control_flow = ControlFlow::Exit;
 }

@@ -2,13 +2,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTab {
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionData {
-    pub tabs: Vec<String>,
+    /// Tabs — accepts both new `[{url, title}]` and legacy `["url"]` formats.
+    #[serde(deserialize_with = "deserialize_tabs")]
+    pub tabs: Vec<SessionTab>,
     pub active_url: String,
 }
 
-pub fn save_session(tabs: &[String], active_url: &str) {
+pub fn save_session(tabs: &[SessionTab], active_url: &str) {
     let data = SessionData {
         tabs: tabs.to_vec(),
         active_url: active_url.to_string(),
@@ -23,6 +32,31 @@ pub fn save_session(tabs: &[String], active_url: &str) {
         }
         Err(e) => tracing::warn!(error = %e, "Failed to serialize session"),
     }
+}
+
+/// Backward-compatible deserializer: accepts `["url"]` (legacy) or `[{url, title}]` (new).
+fn deserialize_tabs<'de, D>(deserializer: D) -> Result<Vec<SessionTab>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TabOrString {
+        Tab(SessionTab),
+        Url(String),
+    }
+
+    let items: Vec<TabOrString> = Vec::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .map(|item| match item {
+            TabOrString::Tab(t) => t,
+            TabOrString::Url(url) => SessionTab {
+                url,
+                title: String::new(),
+            },
+        })
+        .collect())
 }
 
 pub fn load_session() -> Option<SessionData> {

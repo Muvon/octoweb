@@ -51,6 +51,19 @@ impl TabManager {
         self.active_id = Some(id);
         id
     }
+    /// Register a new tab with a pre-filled title (used for session restore).
+    pub fn open_with_title(&mut self, url: String, title: String) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.tabs.push(Tab {
+            id,
+            title,
+            url,
+            is_playing_audio: false,
+        });
+        self.active_id = Some(id);
+        id
+    }
 
     /// Close a tab by id. Switches to the previous tab if it was active.
     pub fn close(&mut self, id: usize) {
