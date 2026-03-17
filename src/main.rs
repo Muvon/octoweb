@@ -825,7 +825,8 @@ fn main() {
                     nav_error_patch::inject_from_webview(wv_ptr);
                     let p = proxy.clone();
                     nav_error_patch::register(wv_ptr, move |url, code| {
-                        let _ = p.send_event(AppEvent::NavigationError(target, url, code.to_string()));
+                        let _ =
+                            p.send_event(AppEvent::NavigationError(target, url, code.to_string()));
                     });
                     let _ = wv.set_visible(false);
                     tab_webviews.insert(target, wv);
@@ -1856,14 +1857,22 @@ fn main() {
 
             // ── Page load progress ───────────────────────────────────────────
             // Only show progress for the active tab — background tabs load silently.
+            // Skip progress bar for about:blank (instant, no network).
             Event::UserEvent(AppEvent::PageLoadStarted(tab_id)) => {
                 if tab_id == active_wv_id {
-                    // Cancel any pending hide — new load started
-                    progress_hide_at = None;
-                    let _ = progress_wv.evaluate_script("window.__start && window.__start()");
-                    if !progress_visible {
-                        let _ = progress_wv.set_visible(true);
-                        progress_visible = true;
+                    // Check if this is about:blank — skip progress bar for instant pages
+                    let url = tabs.lock().unwrap().tabs().iter()
+                        .find(|t| t.id == tab_id)
+                        .map(|t| t.url.clone())
+                        .unwrap_or_default();
+                    if url != "about:blank" {
+                        // Cancel any pending hide — new load started
+                        progress_hide_at = None;
+                        let _ = progress_wv.evaluate_script("window.__start && window.__start()");
+                        if !progress_visible {
+                            let _ = progress_wv.set_visible(true);
+                            progress_visible = true;
+                        }
                     }
                     // Clear address bar stats for new navigation
                     let _ = address_bar_wv.evaluate_script("window.__clear && window.__clear()");
