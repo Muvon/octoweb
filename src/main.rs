@@ -12,6 +12,7 @@ mod overlay_html;
 mod progress_bar_html;
 mod quickslots;
 mod quickslots_html;
+mod shortcuts_html;
 mod sidebar_html;
 mod url;
 mod webview_utils;
@@ -69,6 +70,8 @@ enum AppEvent {
     DownloadStarted(usize),    // (tab_id) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,       // user clicked X on notification toast
+    ToggleShortcuts,           // ⌘/ — toggle keyboard shortcuts overlay
+    HideShortcuts,             // JS Esc / backdrop click in shortcuts overlay
     Quit,
 }
 fn main() {
@@ -411,6 +414,36 @@ fn main() {
         .build(&*overlay_win)
         .expect("Failed to create overlay WebView");
 
+    // ── Shortcuts overlay window — transparent, always-on-top, hidden ─────
+    let shortcuts_win = WindowBuilder::new()
+        .with_title("")
+        .with_inner_size(LogicalSize::new(cfg.window_width, cfg.window_height))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_visible(false)
+        .build(&event_loop)
+        .expect("Failed to create shortcuts window");
+    let shortcuts_win = Arc::new(shortcuts_win);
+
+    let _shortcuts_wv = WebViewBuilder::new()
+        .with_html(shortcuts_html::html())
+        .with_transparent(true)
+        .with_ipc_handler({
+            let p = proxy.clone();
+            let sw = Arc::clone(&shortcuts_win);
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    if v["type"].as_str() == Some("shortcuts_close") {
+                        sw.set_visible(false);
+                        let _ = p.send_event(AppEvent::HideShortcuts);
+                    }
+                }
+            }
+        })
+        .build(&*shortcuts_win)
+        .expect("Failed to create shortcuts WebView");
+
     // ── Sidebar WebView (child of browser_win, right-edge panel) ──────────
     // Hidden by default; shown/hidden via ToggleSidebar.
     // SIDEBAR_W is in logical points; scale to physical pixels for bounds arithmetic.
@@ -546,6 +579,9 @@ fn main() {
                                     let _: bool = msg_send![pb, writeObjects: arr];
                                 }
                             }
+                        }
+                        Some("toggle_shortcuts") => {
+                            let _ = p.send_event(AppEvent::ToggleShortcuts);
                         }
                         _ => {}
                     }
@@ -720,6 +756,7 @@ fn main() {
                 const N_KEYCODE: i64 = 45; // n
                 const A_KEYCODE: i64 = 0;  // a (Cmd+Shift+A = toggle sidebar)
                 const I_KEYCODE: i64 = 34; // i (Cmd+Shift+I = toggle devtools)
+                const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
@@ -737,6 +774,9 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == I_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleDevTools);
+                    CallbackResult::Drop
+                } else if cmd && keycode == SLASH_KEYCODE {
+                    let _ = p.send_event(AppEvent::ToggleShortcuts);
                     CallbackResult::Drop
                 } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::CloseTab(0));
@@ -787,6 +827,7 @@ fn main() {
     let mut modifiers = ModifiersState::default();
     let mut overlay_visible = false;
     let mut sidebar_visible = false;
+    let mut shortcuts_visible = false;
     let mut icon_set = false;
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
@@ -1425,6 +1466,29 @@ fn main() {
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
             }
 
+            // ── Hide shortcuts overlay (from JS Esc / backdrop click) ─────
+            Event::UserEvent(AppEvent::HideShortcuts) => {
+                shortcuts_win.set_visible(false);
+                shortcuts_visible = false;
+            }
+
+            // ── Toggle shortcuts overlay ──────────────────────────────────
+            Event::UserEvent(AppEvent::ToggleShortcuts) => {
+                if shortcuts_visible {
+                    shortcuts_win.set_visible(false);
+                    shortcuts_visible = false;
+                } else {
+                    let sz = browser_win.inner_size();
+                    shortcuts_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
+                    if let Ok(pos) = browser_win.outer_position() {
+                        shortcuts_win.set_outer_position(pos);
+                    }
+                    shortcuts_win.set_visible(true);
+                    shortcuts_win.set_focus();
+                    shortcuts_visible = true;
+                }
+            }
+
             // ── Toggle overlay ────────────────────────────────────────────
             Event::UserEvent(AppEvent::ToggleOverlay) => {
                 if overlay_visible {
@@ -1962,9 +2026,12 @@ fn main() {
                     } else if window_id == chrome_win_id {
                         // Chrome window should not be closed independently — ignore.
                     } else {
+                        // Close any overlay window (command palette or shortcuts)
                         overlay_win.set_visible(false);
                         overlay_visible = false;
                         overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                        shortcuts_win.set_visible(false);
+                        shortcuts_visible = false;
                     }
                 }
 
@@ -1973,6 +2040,9 @@ fn main() {
                     chrome_win.set_inner_size(*sz);
                     if overlay_visible {
                         overlay_win.set_inner_size(*sz);
+                    }
+                    if shortcuts_visible {
+                        shortcuts_win.set_inner_size(*sz);
                     }
                     // Resize sidebar to track window height and stay at right edge
                     if sidebar_visible {

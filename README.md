@@ -126,6 +126,7 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧I` | Toggle DevTools |
+| `⌘/` | Show keyboard shortcuts |
 | `⌘1` – `⌘9` | Open fast-access slot 1–9 |
 | `⌘0` | Open fast-access slot 10 |
 | `⌘⇧1` – `⌘⇧9` | Save current page to slot 1–9 |

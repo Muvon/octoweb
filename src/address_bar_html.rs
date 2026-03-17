@@ -267,6 +267,12 @@ pub fn html() -> &'static str {
     <span class="dot" id="dot">·</span>
     <span id="time" class="stat"></span>
   </div>
+  <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <path d="M6.2 5.6c0-.9.7-1.6 1.8-1.6 1 0 1.8.7 1.8 1.6 0 .7-.4 1.1-1.1 1.6-.6.4-.9.7-.9 1.3v.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <circle cx="8" cy="11.5" r="0.9" fill="currentColor"/>
+    </svg>
+  </button>
   <button id="spotlight-btn" class="bar-btn" title="Command palette (⌘K)">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
       <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.6"/>
@@ -412,6 +418,11 @@ pub fn html() -> &'static str {
   // Spotlight / command palette
   document.getElementById('spotlight-btn').addEventListener('click', function() {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_overlay' }));
+  });
+
+  // Keyboard shortcuts
+  document.getElementById('shortcuts-btn').addEventListener('click', function() {
+    window.ipc.postMessage(JSON.stringify({ type: 'toggle_shortcuts' }));
   });
 
   // Close current tab
