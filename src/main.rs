@@ -290,6 +290,9 @@ fn main() {
     };
 
     let mut tab_webviews: HashMap<usize, WebView> = HashMap::new();
+    // Tabs restored from session but not yet loaded (lazy loading).
+    // Key = tab_id, Value = URL to load when user switches to it.
+    let mut pending_tabs: HashMap<usize, String> = HashMap::new();
     let mut active_wv_id;
     let mut mru: Vec<usize> = Vec::new();
     // Deferred tab swap: (old_visible_tab, new_loading_tab).
@@ -316,37 +319,36 @@ fn main() {
     let mut restored_active_id: Option<usize> = None;
     for url in &urls {
         let tab_id = tabs.lock().unwrap().open(url.clone());
-        let wv = make_webview(tab_id, url);
-        // For about:blank, load the styled new-tab page
-        if url == "about:blank" {
-            let html = newtab_html::html(&quickslots::to_json(&quick_slots));
-            let _ = wv.load_html(&html);
+        // Lazy loading: only create WebView for the active tab.
+        // Other tabs are stored in pending_tabs and loaded on demand.
+        if url == &active_url {
+            // Active tab — create WebView immediately
+            let wv = make_webview(tab_id, url);
+            if url == "about:blank" {
+                let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                let _ = wv.load_html(&html);
+            }
+            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+            nav_error_patch::inject_from_webview(wv_ptr);
+            let p = proxy.clone();
+            nav_error_patch::register(wv_ptr, move |url, code| {
+                let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
+            });
+            let _ = wv.set_visible(true);
+            tab_webviews.insert(tab_id, wv);
+            restored_active_id = Some(tab_id);
+        } else {
+            // Background tab — defer WebView creation until user switches to it
+            pending_tabs.insert(tab_id, url.clone());
         }
-        // Register ObjC error callback for this WebView
-        let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-        // Inject error methods into WryNavigationDelegate (only runs once)
-        nav_error_patch::inject_from_webview(wv_ptr);
-        let p = proxy.clone();
-        nav_error_patch::register(wv_ptr, move |url, code| {
-            let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
-        });
-        // Hide all tabs initially; we'll show the active one below.
-        let _ = wv.set_visible(false);
-        tab_webviews.insert(tab_id, wv);
         mru.push(tab_id);
         if first_id.is_none() {
             first_id = Some(tab_id);
         }
-        if url == &active_url {
-            restored_active_id = Some(tab_id);
-        }
     }
 
-    // Show the active tab (prefer matched URL, fallback to first).
+    // Active tab is the one we just created (or first if no match)
     active_wv_id = restored_active_id.or(first_id).unwrap();
-    if let Some(wv) = tab_webviews.get(&active_wv_id) {
-        let _ = wv.set_visible(true);
-    }
     tabs.lock().unwrap().switch(active_wv_id);
     macos::mru_push(&mut mru, active_wv_id);
 
@@ -807,9 +809,28 @@ fn main() {
     }
 
     /// Switch visibility from the current active tab to `target`, handling pending_swap.
+    /// Also handles lazy loading: creates WebView on first access if tab was pending.
     macro_rules! switch_visible_tab {
         ($target:expr) => {{
             let target = $target;
+            // Lazy load: create WebView if this tab was pending
+            if !tab_webviews.contains_key(&target) {
+                if let Some(url) = pending_tabs.remove(&target) {
+                    let wv = make_webview(target, &url);
+                    if url == "about:blank" {
+                        let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                        let _ = wv.load_html(&html);
+                    }
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    nav_error_patch::inject_from_webview(wv_ptr);
+                    let p = proxy.clone();
+                    nav_error_patch::register(wv_ptr, move |url, code| {
+                        let _ = p.send_event(AppEvent::NavigationError(target, url, code.to_string()));
+                    });
+                    let _ = wv.set_visible(false);
+                    tab_webviews.insert(target, wv);
+                }
+            }
             tabs.lock().unwrap().switch(target);
             if let Some((old_id, new_id)) = pending_swap.take() {
                 if let Some(wv) = tab_webviews.get(&old_id) {
@@ -1507,6 +1528,7 @@ fn main() {
                         nav_error_patch::unregister(wv_ptr);
                     }
                     tab_webviews.remove(&id);
+                    pending_tabs.remove(&id);  // Also remove if it was pending lazy load
                     mru.retain(|&x| x != id);
                     match next_id {
                         Some(next) => {
@@ -1817,12 +1839,14 @@ fn main() {
                     favicon_cache.insert(domain.clone(), data_uri.clone());
                     config::save_favicons(&favicon_cache);
                 }
-                // Push to address bar if this domain matches the active tab
+                // Push to address bar ONLY if this domain matches the active tab's domain
                 let active_url = tabs.lock().unwrap().tabs().iter()
                     .find(|t| t.id == active_wv_id)
                     .map(|t| t.url.clone())
                     .unwrap_or_default();
-                if webview_utils::cached_favicon(&active_url, &favicon_cache).is_some() {
+                // Extract domain from active URL and compare
+                let active_domain = webview_utils::extract_domain(&active_url);
+                if active_domain == Some(domain.as_str()) {
                     let escaped = webview_utils::escape_js_template(&data_uri);
                     let _ = address_bar_wv.evaluate_script(&format!(
                         "window.__setFavicon && window.__setFavicon(`{escaped}`)"

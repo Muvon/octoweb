@@ -214,15 +214,15 @@ pub fn html() -> &'static str {
   .bar-btn:active { transform: scale(0.90); transition-duration: 0.06s; }
 
   #ai-btn {
-    background: var(--btn-bg);
+    background: transparent;
     color: inherit;
     width: 28px;
     height: 28px;
-    border-radius: 8px;
+    border-radius: 50%;
+    border: none;
   }
-  #ai-btn:hover { background: var(--btn-hover); transform: scale(1.08); color: inherit; }
-  #ai-btn:active { transform: scale(0.94); }
-
+  #ai-btn:hover { transform: scale(1.15); }
+  #ai-btn:active { transform: scale(0.92); }
   .ai-icon { font-size: 15px; line-height: 1; user-select: none; }
 
   /* ── Unread badge dot ────────────────────────────────────────────── */

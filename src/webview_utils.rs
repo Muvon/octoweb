@@ -196,9 +196,14 @@ pub fn escape_js_template(s: &str) -> String {
 
 /// Look up a cached favicon data-URI by domain extracted from the URL.
 pub fn cached_favicon<'a>(url: &str, favicons: &'a HashMap<String, String>) -> Option<&'a str> {
+    let domain = extract_domain(url)?;
+    favicons.get(domain).map(|s| s.as_str())
+}
+
+/// Extract the domain (host) from a URL, e.g. "https://example.com/path" → "example.com".
+pub fn extract_domain(url: &str) -> Option<&str> {
     let after_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    let host = after_scheme.split('/').next().filter(|h| !h.is_empty())?;
-    favicons.get(host).map(|s| s.as_str())
+    after_scheme.split('/').next().filter(|h| !h.is_empty())
 }
