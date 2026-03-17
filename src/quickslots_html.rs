@@ -6,6 +6,7 @@
 /// IPC messages sent to Rust:
 ///   { type: "quickslot_open",   slot: 0-9 }
 ///   { type: "quickslot_remove", slot: 0-9 }
+///   { type: "quickslot_save",   slot: 0-9 }  (click empty slot → save current page)
 ///
 /// JS API called from Rust:
 ///   window.__updateSlots(jsonArray)  — refresh slot data
@@ -103,9 +104,18 @@ pub fn html() -> &'static str {
   .slot.empty {
     background: var(--empty-bg);
     border-color: var(--empty-border);
-    cursor: default;
-    pointer-events: none;
+    cursor: pointer;
+    border-style: dashed;
+    transition: background 0.12s ease, transform 0.1s ease, border-color 0.12s ease;
   }
+
+  .slot.empty:hover {
+    background: var(--pill-hover);
+    border-color: var(--pill-border);
+    border-style: solid;
+  }
+
+  .slot.empty:active { transform: scale(0.97); }
 
   .slot .badge {
     flex-shrink: 0;
@@ -238,7 +248,12 @@ pub fn html() -> &'static str {
       } else {
         const lbl = document.createElement('span');
         lbl.className = 'label';
+        lbl.textContent = '⌘⇧' + ((i + 1) % 10);
         el.appendChild(lbl);
+
+        el.addEventListener('click', function() {
+          window.ipc.postMessage(JSON.stringify({ type: 'quickslot_save', slot: i }));
+        });
       }
 
       bar.appendChild(el);

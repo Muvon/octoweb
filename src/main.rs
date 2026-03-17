@@ -229,6 +229,11 @@ fn main() {
                                     let _ = p3.send_event(AppEvent::QuickSlotOpen(slot as usize));
                                 }
                             }
+                            Some("quickslot_save") => {
+                                if let Some(slot) = v["slot"].as_u64() {
+                                    let _ = p3.send_event(AppEvent::QuickSlotSave(slot as usize));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -582,6 +587,11 @@ fn main() {
                         Some("quickslot_remove") => {
                             if let Some(slot) = v["slot"].as_u64() {
                                 let _ = p.send_event(AppEvent::QuickSlotRemove(slot as usize));
+                            }
+                        }
+                        Some("quickslot_save") => {
+                            if let Some(slot) = v["slot"].as_u64() {
+                                let _ = p.send_event(AppEvent::QuickSlotSave(slot as usize));
                             }
                         }
                         _ => {}

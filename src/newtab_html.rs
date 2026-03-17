@@ -6,6 +6,7 @@
 ///
 /// IPC messages sent to Rust:
 ///   { type: "quickslot_open", slot: 0-9 }
+///   { type: "quickslot_save", slot: 0-9 }  (click empty slot → save current page)
 pub fn html(slots_json: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -31,17 +32,18 @@ pub fn html(slots_json: &str) -> String {
 (function() {{
   const slots = {slots_json};
   const container = document.getElementById('slots');
-  let hasAny = false;
   for (let i = 0; i < 10; i++) {{
     const s = slots[i];
-    if (!s) continue;
-    hasAny = true;
     const card = document.createElement('a');
-    card.className = 'slot-card';
+    card.className = 'slot-card' + (s ? '' : ' slot-empty');
     card.href = '#';
     card.addEventListener('click', function(e) {{
       e.preventDefault();
-      window.ipc.postMessage(JSON.stringify({{ type: 'quickslot_open', slot: i }}));
+      if (s) {{
+        window.ipc.postMessage(JSON.stringify({{ type: 'quickslot_open', slot: i }}));
+      }} else {{
+        window.ipc.postMessage(JSON.stringify({{ type: 'quickslot_save', slot: i }}));
+      }}
     }});
 
     const badge = document.createElement('span');
@@ -49,36 +51,47 @@ pub fn html(slots_json: &str) -> String {
     badge.textContent = (i + 1) % 10;
     card.appendChild(badge);
 
-    if (s.favicon) {{
-      const img = document.createElement('img');
-      img.className = 'card-favicon';
-      img.src = s.favicon;
-      card.appendChild(img);
+    if (s) {{
+      if (s.favicon) {{
+        const img = document.createElement('img');
+        img.className = 'card-favicon';
+        img.src = s.favicon;
+        card.appendChild(img);
+      }}
+
+      const info = document.createElement('div');
+      info.className = 'card-info';
+
+      const title = document.createElement('div');
+      title.className = 'card-title';
+      try {{
+        const u = new URL(s.url);
+        title.textContent = s.title || u.hostname.replace(/^www\./, '');
+      }} catch(_) {{
+        title.textContent = s.title || s.url;
+      }}
+      info.appendChild(title);
+
+      const url = document.createElement('div');
+      url.className = 'card-url';
+      url.textContent = s.url;
+      info.appendChild(url);
+
+      card.appendChild(info);
+    }} else {{
+      const hint = document.createElement('div');
+      hint.className = 'card-info';
+      const title = document.createElement('div');
+      title.className = 'card-title empty-hint';
+      title.textContent = 'Save page here';
+      hint.appendChild(title);
+      const shortcut = document.createElement('div');
+      shortcut.className = 'card-url';
+      shortcut.textContent = '\u2318\u21e7' + ((i + 1) % 10);
+      hint.appendChild(shortcut);
+      card.appendChild(hint);
     }}
-
-    const info = document.createElement('div');
-    info.className = 'card-info';
-
-    const title = document.createElement('div');
-    title.className = 'card-title';
-    try {{
-      const u = new URL(s.url);
-      title.textContent = s.title || u.hostname.replace(/^www\./, '');
-    }} catch(_) {{
-      title.textContent = s.title || s.url;
-    }}
-    info.appendChild(title);
-
-    const url = document.createElement('div');
-    url.className = 'card-url';
-    url.textContent = s.url;
-    info.appendChild(url);
-
-    card.appendChild(info);
     container.appendChild(card);
-  }}
-  if (!hasAny) {{
-    container.style.display = 'none';
   }}
 }})();
 </script>
@@ -210,6 +223,22 @@ const NEWTAB_CSS: &str = r#"
   }
 
   .slot-card:active { transform: scale(0.98); }
+
+  .slot-card.slot-empty {
+    border-style: dashed;
+    opacity: 0.5;
+    transition: opacity 0.15s ease, background 0.12s ease, box-shadow 0.15s ease, transform 0.1s ease, border-color 0.12s ease;
+  }
+
+  .slot-card.slot-empty:hover {
+    opacity: 0.8;
+    border-style: solid;
+  }
+
+  .empty-hint {
+    color: var(--text-dim) !important;
+    font-style: italic;
+  }
 
   .card-badge {
     flex-shrink: 0;
