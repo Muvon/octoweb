@@ -136,6 +136,14 @@ fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {
 
     // Extract error code (NSInteger) and URL string from NSError
     let code: c_long = unsafe { msg_send![&*error, code] };
+
+    // NSURLErrorCancelled (-999): fires routinely when WKWebView cancels in-flight
+    // requests during back/forward swipe gestures or rapid navigation. Not a real error.
+    if code == -999 {
+        tracing::debug!(?webview, "Ignoring NSURLErrorCancelled (-999)");
+        return;
+    }
+
     tracing::debug!(code, ?webview, "Nav-error callback fired");
 
     // Get the failing URL from NSError.userInfo[NSURLErrorFailingURLStringErrorKey]
