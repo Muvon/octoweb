@@ -169,7 +169,8 @@ pub fn html() -> &'static str {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 12px 11px 14px;
+    height: 32px;
+    padding: 0 12px 0 14px;
     border-bottom: 1px solid var(--divider);
     flex-shrink: 0;
     -webkit-app-region: drag;
