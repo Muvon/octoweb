@@ -1,4 +1,5 @@
 mod acp;
+mod address_bar_html;
 mod browser;
 mod config;
 mod error_page_html;
@@ -12,7 +13,6 @@ mod progress_bar_html;
 mod quickslots;
 mod quickslots_html;
 mod sidebar_html;
-mod toggle_btn_html;
 mod url;
 mod webview_utils;
 
@@ -60,14 +60,15 @@ enum AppEvent {
     NavigationError(usize, String, String), // (tab_id, url, error) — show error page
     Reload,             // Cmd+R — reload current page
     MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
-    RemoveHistory(String), // URL to remove from history
-    QuickSlotOpen(usize), // ⌘1–⌘0 — open saved URL in slot 0–9
-    QuickSlotSave(usize), // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
-    QuickSlotRemove(usize), // remove slot (from footer bar ✕ or newtab page)
-    AcpWake,            // lightweight wake — ACP thread pokes event loop
-    DownloadStarted(usize), // (tab_id) — navigation became a download, close the tab
+    PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
+    RemoveHistory(String),     // URL to remove from history
+    QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
+    QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
+    QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
+    AcpWake,                   // lightweight wake — ACP thread pokes event loop
+    DownloadStarted(usize),    // (tab_id) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
-    DismissNotification, // user clicked X on notification toast
+    DismissNotification,       // user clicked X on notification toast
     Quit,
 }
 fn main() {
@@ -121,8 +122,9 @@ fn main() {
     let _overlay_win_id = overlay_win.id();
 
     // ── Chrome window — borderless transparent layer for persistent UI ────
-    // Floats above browser_win; holds sidebar, footer, toggle button, progress bar.
+    // Floats above browser_win; holds sidebar, footer, notification toast.
     // Transparent areas pass clicks through to browser_win underneath.
+    // Address bar + progress bar are children of browser_win (titlebar zone).
     let chrome_win = {
         let bsz = browser_win.inner_size();
         let w = WindowBuilder::new()
@@ -161,9 +163,15 @@ fn main() {
     let home = cfg.home_page.clone();
     let search_engine = cfg.search_engine.clone();
 
+    // Address bar lives in the macOS titlebar zone (32pt actual height). Tab WebViews start at y=0;
+    // fullsize_content_view handles the titlebar inset natively.
+    const ADDRESS_BAR_H_LOGICAL: f64 = 32.0;
+    let address_bar_h = (ADDRESS_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
+
     let make_webview = {
         let browser_win = Arc::clone(&browser_win);
         let proxy = proxy.clone();
+        let bar_h = address_bar_h;
         move |tab_id: usize, url: &str| -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
@@ -173,8 +181,8 @@ fn main() {
             let p6 = proxy.clone();
             let sz = browser_win.inner_size();
             let bounds = wry::Rect {
-                position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                size: tao::dpi::PhysicalSize::new(sz.width, sz.height).into(),
+                position: tao::dpi::PhysicalPosition::new(0u32, bar_h).into(),
+                size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h)).into(),
             };
             WebViewBuilder::new()
                 .with_url(url)
@@ -190,6 +198,8 @@ fn main() {
                 .with_initialization_script(webview_utils::FAVICON_FETCH_SCRIPT)
                 // Track audio/video playback state and notify Rust via IPC.
                 .with_initialization_script(webview_utils::MEDIA_TRACK_SCRIPT)
+                // Collect page load stats (size, time) via PerformanceNavigationTiming.
+                .with_initialization_script(webview_utils::PAGE_INFO_SCRIPT)
                 .with_ipc_handler(move |msg| {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                         match v["type"].as_str() {
@@ -233,6 +243,11 @@ fn main() {
                                 if let Some(slot) = v["slot"].as_u64() {
                                     let _ = p3.send_event(AppEvent::QuickSlotSave(slot as usize));
                                 }
+                            }
+                            Some("page_info") => {
+                                let size = v["size"].as_u64().unwrap_or(0);
+                                let time = v["time"].as_u64().unwrap_or(0);
+                                let _ = p3.send_event(AppEvent::PageInfo(tab_id, size, time));
                             }
                             _ => {}
                         }
@@ -401,35 +416,9 @@ fn main() {
     let sidebar_w = (SIDEBAR_W_LOGICAL * browser_win.scale_factor()) as u32;
     let sz0 = browser_win.inner_size();
 
-    // Toggle button: 44×44 logical pt pill in the top-right corner, 12pt margin.
-    const BTN_SIZE_LOGICAL: f64 = 44.0;
-    const BTN_MARGIN_LOGICAL: f64 = 12.0;
-    let btn_size = (BTN_SIZE_LOGICAL * browser_win.scale_factor()) as u32;
-    let btn_margin = (BTN_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
-
-    let toggle_btn_wv = WebViewBuilder::new()
-        .with_html(toggle_btn_html::html())
-        .with_transparent(true)
-        .with_bounds(wry::Rect {
-            position: tao::dpi::PhysicalPosition::new(
-                sz0.width.saturating_sub(btn_size + btn_margin),
-                btn_margin,
-            )
-            .into(),
-            size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
-        })
-        .with_ipc_handler({
-            let p = proxy.clone();
-            move |msg| {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
-                    if v["type"].as_str() == Some("toggle_sidebar") {
-                        let _ = p.send_event(AppEvent::ToggleSidebar);
-                    }
-                }
-            }
-        })
-        .build_as_child(&*chrome_win)
-        .expect("Failed to create toggle button WebView");
+    // Notification margin from right edge (logical 12pt)
+    const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
+    let notif_margin = (NOTIF_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
     let sidebar_wv = WebViewBuilder::new()
         .with_html(sidebar_html::html())
         .with_transparent(true)
@@ -509,15 +498,87 @@ fn main() {
         .expect("Failed to create sidebar WebView");
     let _ = sidebar_wv.set_visible(false);
 
-    // ── Progress bar WebView (thin bar at top during page load) ───────────
+    // ── Address bar WebView (titlebar zone — URL + stats + 🐙 toggle) ─────
+    // Child of browser_win so macOS traffic lights render ON TOP natively.
+    // Window corner rounding and titlebar glass effect handled by macOS.
+    let address_bar_wv = WebViewBuilder::new()
+        .with_html(address_bar_html::html())
+        .with_transparent(true)
+        .with_bounds(wry::Rect {
+            position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+            size: tao::dpi::PhysicalSize::new(sz0.width, address_bar_h).into(),
+        })
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("toggle_sidebar") => {
+                            let _ = p.send_event(AppEvent::ToggleSidebar);
+                        }
+                        Some("toggle_overlay") => {
+                            let _ = p.send_event(AppEvent::ToggleOverlay);
+                        }
+                        Some("close_tab") => {
+                            let _ = p.send_event(AppEvent::CloseTab(0));
+                        }
+                        Some("copy_text") => {
+                            if let Some(text) = v["text"].as_str() {
+                                unsafe {
+                                    use objc2::runtime::AnyObject;
+                                    use objc2::{class, msg_send};
+                                    let pb: *mut AnyObject =
+                                        msg_send![class!(NSPasteboard), generalPasteboard];
+                                    let _: () = msg_send![pb, clearContents];
+                                    let ns_str: *mut AnyObject = msg_send![class!(NSString), alloc];
+                                    let ns_str: *mut AnyObject = msg_send![
+                                        ns_str,
+                                        initWithBytes: text.as_ptr(),
+                                        length: text.len(),
+                                        encoding: 4u64 // NSUTF8StringEncoding
+                                    ];
+                                    let arr: *mut AnyObject = msg_send![
+                                        class!(NSArray),
+                                        arrayWithObject: ns_str
+                                    ];
+                                    let _: bool = msg_send![pb, writeObjects: arr];
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build_as_child(&*browser_win)
+        .expect("Failed to create address bar WebView");
+    // Initialize address bar with the active tab's URL
+    {
+        let url = tabs
+            .lock()
+            .unwrap()
+            .tabs()
+            .iter()
+            .find(|t| t.id == active_wv_id)
+            .map(|t| t.url.clone())
+            .unwrap_or_default();
+        let secure = url.starts_with("https://");
+        let escaped_url = webview_utils::escape_js_template(&url);
+        let _ = address_bar_wv.evaluate_script(&format!(
+            "window.__update && window.__update(`{escaped_url}`, {secure}, ``, 0, 0)"
+        ));
+    }
+
+    // ── Progress bar WebView (thin bar at bottom edge of address bar) ─────
+    // Child of browser_win (same as address bar) so it layers correctly.
     let progress_wv = WebViewBuilder::new()
         .with_html(progress_bar_html::html())
         .with_transparent(true)
         .with_bounds(wry::Rect {
-            position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+            position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
             size: tao::dpi::PhysicalSize::new(sz0.width, 3u32).into(),
         })
-        .build_as_child(&*chrome_win)
+        .build_as_child(&*browser_win)
         .expect("Failed to create progress WebView");
     let _ = progress_wv.set_visible(false);
 
@@ -536,7 +597,7 @@ fn main() {
         .with_transparent(true)
         .with_bounds(wry::Rect {
             position: tao::dpi::PhysicalPosition::new(
-                sz0.width.saturating_sub(notif_w + btn_margin),
+                sz0.width.saturating_sub(notif_w + notif_margin),
                 0u32,
             )
             .into(),
@@ -766,6 +827,16 @@ fn main() {
                 let _ = wv.set_visible(true);
             }
             active_wv_id = target;
+            // Update address bar with the new tab's URL
+            let url = tabs
+                .lock()
+                .unwrap()
+                .tabs()
+                .iter()
+                .find(|t| t.id == target)
+                .map(|t| t.url.clone())
+                .unwrap_or_default();
+            update_address_bar_url!(url);
         }};
     }
 
@@ -784,6 +855,34 @@ fn main() {
                 ));
             }
         };
+    }
+
+    /// Update address bar with the given URL and title (clears stats — they arrive later via PageInfo).
+    macro_rules! update_address_bar_url {
+        ($url:expr) => {{
+            let u = &$url;
+            let secure = u.starts_with("https://");
+            let escaped_url = webview_utils::escape_js_template(u);
+            let raw_title = tabs.lock().unwrap().tabs().iter()
+                .find(|t| t.url == *u || t.id == active_wv_id)
+                .map(|t| t.title.clone())
+                .unwrap_or_default();
+            let escaped_title = webview_utils::escape_js_template(&raw_title);
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, 0, 0)"
+            ));
+            // Push cached favicon for this URL's domain
+            if let Some(fav) = webview_utils::cached_favicon(u, &favicon_cache) {
+                let escaped_fav = webview_utils::escape_js_template(fav);
+                let _ = address_bar_wv.evaluate_script(&format!(
+                    "window.__setFavicon && window.__setFavicon(`{escaped_fav}`)"
+                ));
+            } else {
+                let _ = address_bar_wv.evaluate_script(
+                    "window.__setFavicon && window.__setFavicon(``)"
+                );
+            }
+        }};
     }
 
     /// Sync quick-slot UI: footer bar + any about:blank newtab pages.
@@ -851,7 +950,7 @@ fn main() {
                     ));
                         // Show badge + notification toast when sidebar is hidden
                         if !sidebar_visible {
-                            let _ = toggle_btn_wv.evaluate_script(
+                            let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                             if !notification_visible {
@@ -884,7 +983,7 @@ fn main() {
                             "window.__setThinking && window.__setThinking(false)"
                         );
                         if !sidebar_visible {
-                            let _ = toggle_btn_wv.evaluate_script(
+                            let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                         }
@@ -900,7 +999,7 @@ fn main() {
                         "window.__appendError && window.__appendError(`{escaped}`)"
                     ));
                         if !sidebar_visible {
-                            let _ = toggle_btn_wv.evaluate_script(
+                            let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                             if !notification_visible {
@@ -1416,6 +1515,12 @@ fn main() {
                             }
                             active_wv_id = next;
                             macos::mru_push(&mut mru, next);
+                            // Update address bar for the new active tab
+                            let url = tabs.lock().unwrap().tabs().iter()
+                                .find(|t| t.id == next)
+                                .map(|t| t.url.clone())
+                                .unwrap_or_default();
+                            update_address_bar_url!(url);
                             if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                         }
                         None => *control_flow = ControlFlow::Exit,
@@ -1483,8 +1588,8 @@ fn main() {
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
-                    // Clear unread badge on toggle button
-                    let _ = toggle_btn_wv.evaluate_script(
+                    // Clear unread badge on address bar 🐙 button
+                    let _ = address_bar_wv.evaluate_script(
                         "window.__setBadge && window.__setBadge(false)"
                     );
                     // Hide notification toast if visible
@@ -1690,20 +1795,38 @@ fn main() {
                 tabs.lock().unwrap().update_title(tab_id, title.clone());
                 if tab_id == active_wv_id {
                     browser_win.set_title(&title);
+                    let escaped = webview_utils::escape_js_template(&title);
+                    let _ = address_bar_wv.evaluate_script(&format!(
+                        "window.__setTitle && window.__setTitle(`{escaped}`)"
+                    ));
                 }
             }
 
             // ── URL update from page load ─────────────────────────────────
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
-                tabs.lock().unwrap().update_url(tab_id, url);
+                tabs.lock().unwrap().update_url(tab_id, url.clone());
+                if tab_id == active_wv_id {
+                    update_address_bar_url!(url);
+                }
             }
 
             // ── Favicon fetched from page — store in cache ────────────────
             // Only update + save when we get a new domain (avoids redundant disk writes).
             Event::UserEvent(AppEvent::FaviconFetched(domain, data_uri)) => {
                 if favicon_cache.get(&domain).map(|s| s.as_str()) != Some(&data_uri) {
-                    favicon_cache.insert(domain, data_uri);
+                    favicon_cache.insert(domain.clone(), data_uri.clone());
                     config::save_favicons(&favicon_cache);
+                }
+                // Push to address bar if this domain matches the active tab
+                let active_url = tabs.lock().unwrap().tabs().iter()
+                    .find(|t| t.id == active_wv_id)
+                    .map(|t| t.url.clone())
+                    .unwrap_or_default();
+                if webview_utils::cached_favicon(&active_url, &favicon_cache).is_some() {
+                    let escaped = webview_utils::escape_js_template(&data_uri);
+                    let _ = address_bar_wv.evaluate_script(&format!(
+                        "window.__setFavicon && window.__setFavicon(`{escaped}`)"
+                    ));
                 }
             }
 
@@ -1718,6 +1841,8 @@ fn main() {
                         let _ = progress_wv.set_visible(true);
                         progress_visible = true;
                     }
+                    // Clear address bar stats for new navigation
+                    let _ = address_bar_wv.evaluate_script("window.__clear && window.__clear()");
                 }
             }
 
@@ -1783,6 +1908,15 @@ fn main() {
                 tabs.lock().unwrap().set_playing_audio(tab_id, is_playing);
             }
 
+            // ── Page info (size + load time) from injected script ─────────────
+            Event::UserEvent(AppEvent::PageInfo(tab_id, bytes, ms)) => {
+                if tab_id == active_wv_id {
+                    let _ = address_bar_wv.evaluate_script(&format!(
+                        "window.__stats && window.__stats({bytes}, {ms})"
+                    ));
+                }
+            }
+
             // ── Window events ─────────────────────────────────────────────
             Event::WindowEvent {
                 window_id,
@@ -1817,31 +1951,28 @@ fn main() {
                             size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
                         });
                     }
-                    // Always reposition toggle button on resize
-                    let _ = toggle_btn_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(btn_size + btn_margin),
-                            btn_margin,
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(btn_size, btn_size).into(),
-                    });
-                    // Resize progress bar width
+                    // Resize progress bar width (sits at bottom edge of address bar)
                     let _ = progress_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                        position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
+                    });
+                    // Resize address bar to full width
+                    let _ = address_bar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, address_bar_h).into(),
                     });
                     // Reposition notification toast at top-right
                     let _ = notification_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(notif_w + btn_margin),
+                            sz.width.saturating_sub(notif_w + notif_margin),
                             0u32,
                         ).into(),
                         size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
                     });
-                    // Resize active tab to full width (sidebar overlays, doesn't shrink)
+                    // Resize active tab to full width (offset below address bar)
                     let bounds = wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height).into(),
+                        position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(address_bar_h)).into(),
                     };
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         let _ = wv.set_bounds(bounds);

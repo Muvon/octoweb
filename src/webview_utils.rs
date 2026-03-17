@@ -4,6 +4,30 @@ use std::collections::HashMap;
 
 use crate::browser;
 
+/// JS injected into every tab page — collects page load stats after load.
+/// Reads PerformanceNavigationTiming for transferSize and duration,
+/// then posts IPC with `{ type: "page_info", size, time }`.
+pub const PAGE_INFO_SCRIPT: &str = r#"
+(function() {
+  'use strict';
+  window.addEventListener('load', function() {
+    // Delay slightly so the browser finalises the navigation timing entry.
+    setTimeout(function() {
+      var loc = window.location;
+      if (loc.protocol !== 'https:' && loc.protocol !== 'http:') return;
+      try {
+        var entries = performance.getEntriesByType('navigation');
+        if (!entries || !entries.length) return;
+        var nav = entries[0];
+        var size = nav.transferSize || nav.encodedBodySize || 0;
+        var time = Math.round(nav.duration || 0);
+        window.ipc.postMessage(JSON.stringify({ type: 'page_info', size: size, time: time }));
+      } catch(e) {}
+    }, 100);
+  });
+})();
+"#;
+
 /// JS injected into every tab page at document-start.
 /// Finds the best favicon (link[rel~=icon] → /favicon.ico), fetches it,
 /// converts to a base64 data-URI, and posts IPC once per page load.
