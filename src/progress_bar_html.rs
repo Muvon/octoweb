@@ -37,7 +37,7 @@ pub fn html() -> &'static str {
     background: var(--progress-fill);
     box-shadow: 0 0 8px var(--progress-fill);
     transition: width 0.15s ease-out, opacity 0.3s ease-out;
-    border-radius: 0 1px 1px 0;
+    border-radius: 16px 1px 1px 16px;
   }
 
   #bar.complete {
