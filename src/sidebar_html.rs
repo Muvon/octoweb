@@ -135,6 +135,11 @@ pub fn html() -> &'static str {
     border-left: 1px solid var(--glass-border);
     box-shadow: var(--glass-shadow);
     position: relative;
+    /* Match macOS window corner radius (16pt logical = 32px physical on 2x Retina).
+       Right-side corners rounded to align with the window frame.
+       Measured via NSThemeFrame _cornerRadius on macOS 26 Tahoe. */
+    border-radius: 0 16px 16px 0;
+    overflow: hidden;
   }
   #sidebar::before {
     content: "";
@@ -146,6 +151,7 @@ pub fn html() -> &'static str {
     backdrop-filter: blur(48px) saturate(180%);
     -webkit-backdrop-filter: blur(48px) saturate(180%);
     z-index: 0;
+    border-radius: inherit;
   }
   #sidebar::after {
     content: "";
@@ -154,6 +160,7 @@ pub fn html() -> &'static str {
     pointer-events: none;
     background: linear-gradient(135deg, var(--glass-inner) 0%, transparent 50%);
     z-index: 0;
+    border-radius: inherit;
   }
   #sidebar > * { position: relative; z-index: 1; }
 

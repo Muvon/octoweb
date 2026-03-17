@@ -77,6 +77,9 @@ pub fn html() -> &'static str {
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
     border-top: 0.5px solid var(--bar-border);
+    /* Round bottom corners to match macOS window corner radius (16pt logical).
+       Prevents the glass background from painting outside the window frame. */
+    border-radius: 0 0 16px 16px;
   }
 
   .slot {
