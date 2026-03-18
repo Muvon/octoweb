@@ -1666,8 +1666,19 @@ fn main() {
                 spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
+                tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
+                // Show progress bar immediately — PageLoadStarted fires on didCommitNavigation
+                // (after server responds), so we'd miss the DNS/TCP/request phase entirely.
+                if url != "about:blank" {
+                    progress_hide_at = None;
+                    let _ = progress_wv.evaluate_script("window.__start && window.__start()");
+                    if !progress_visible {
+                        let _ = progress_wv.set_visible(true);
+                        progress_visible = true;
+                    }
+                }
             }
 
             // ── Open in new tab: Cmd+click or target=_blank ───────────────
@@ -1749,17 +1760,11 @@ fn main() {
                     mru.retain(|&x| x != id);
                     match next_id {
                         Some(next) => {
-                            if let Some(wv) = tab_webviews.get(&next) {
-                                let _ = wv.set_visible(true);
-                            }
-                            active_wv_id = next;
+                            // switch_visible_tab! handles lazy loading (pending_tabs) and
+                            // sets active_wv_id + updates address bar — covers both loaded
+                            // and not-yet-loaded tabs.
+                            switch_visible_tab!(next);
                             macos::mru_push(&mut mru, next);
-                            // Update address bar for the new active tab
-                            let url = tabs.lock().unwrap().tabs().iter()
-                                .find(|t| t.id == next)
-                                .map(|t| t.url.clone())
-                                .unwrap_or_default();
-                            update_address_bar_url!(url);
                             if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                         }
                         None => *control_flow = ControlFlow::Exit,
@@ -2159,6 +2164,22 @@ fn main() {
             // Only show progress for the active tab — background tabs load silently.
             // Skip progress bar for about:blank (instant, no network).
             Event::UserEvent(AppEvent::PageLoadStarted(tab_id)) => {
+                tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadStarted");
+                // Deferred swap: first bytes received (didCommitNavigation) — page is rendering,
+                // safe to show it now and hide the old tab.
+                if let Some((old_id, new_id)) = pending_swap {
+                    if tab_id == new_id {
+                        if let Some(wv) = tab_webviews.get(&new_id) {
+                            let _ = wv.set_visible(true);
+                        }
+                        if old_id != new_id {
+                            if let Some(wv) = tab_webviews.get(&old_id) {
+                                let _ = wv.set_visible(false);
+                            }
+                        }
+                        pending_swap = None;
+                    }
+                }
                 if tab_id == active_wv_id {
                     // Check if this is about:blank — skip progress bar for instant pages
                     let url = tabs.lock().unwrap().tabs().iter()
@@ -2168,8 +2189,11 @@ fn main() {
                     if url != "about:blank" {
                         // Cancel any pending hide — new load started
                         progress_hide_at = None;
-                        let _ = progress_wv.evaluate_script("window.__start && window.__start()");
                         if !progress_visible {
+                            // Link click or in-page navigation — bar not yet started, start it now.
+                            // (NavigateTo already starts the bar immediately, so we skip __start()
+                            // here to avoid resetting the animation mid-flight at didCommitNavigation.)
+                            let _ = progress_wv.evaluate_script("window.__start && window.__start()");
                             let _ = progress_wv.set_visible(true);
                             progress_visible = true;
                         }
@@ -2183,24 +2207,11 @@ fn main() {
             }
 
             Event::UserEvent(AppEvent::PageLoadFinished(tab_id)) => {
+                tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadFinished");
                 if tab_id == active_wv_id && progress_visible {
                     let _ = progress_wv.evaluate_script("window.__finish && window.__finish()");
                     // Hide after CSS fade completes (width 0.2s + opacity 0.3s delay 0.1s = 600ms, +50ms buffer)
                     progress_hide_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(650));
-                }
-                // Deferred swap: new page finished loading — show it, hide old tab.
-                if let Some((old_id, new_id)) = pending_swap {
-                    if tab_id == new_id {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(true);
-                        }
-                        if old_id != new_id {
-                            if let Some(wv) = tab_webviews.get(&old_id) {
-                                let _ = wv.set_visible(false);
-                            }
-                        }
-                        pending_swap = None;
-                    }
                 }
             }
 
