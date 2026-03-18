@@ -14,6 +14,7 @@ mod quickslots;
 mod quickslots_html;
 mod shortcuts_html;
 mod sidebar_html;
+mod tab_stats;
 mod url;
 mod webview_utils;
 
@@ -642,6 +643,11 @@ fn main() {
     // Instant when __finish was called — we hide progress_wv after the CSS fade (400ms)
     let mut progress_hide_at: Option<std::time::Instant> = None;
 
+    // ── Per-tab WebContent process stats (CPU%, RSS) ───────────────────────
+    // Sampled every 2 s from the active tab's WebContent XPC process.
+    let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
+    let mut sys_stats_next_at = std::time::Instant::now();
+
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
     const NOTIF_H_LOGICAL: f64 = 64.0;
@@ -996,7 +1002,8 @@ fn main() {
         *control_flow = if sidebar_visible || progress_hide_at.is_some() {
             ControlFlow::Poll
         } else {
-            ControlFlow::Wait
+            // Wake up at the next stats sample time (every 2 s) to refresh CPU/mem display.
+            ControlFlow::WaitUntil(sys_stats_next_at)
         };
 
         // Hide progress bar after CSS fade completes
@@ -1005,6 +1012,29 @@ fn main() {
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
+            }
+        }
+        // ── Sample active tab's WebContent process stats every 2 s ────────
+        let now = std::time::Instant::now();
+        if now >= sys_stats_next_at {
+            sys_stats_next_at = now + std::time::Duration::from_secs(2);
+            if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                if let Some(pid) = tab_stats::webview_pid(wv_ptr) {
+                    if let Some((rss, cpu_ns)) = tab_stats::sample_pid(pid) {
+                        let cpu_pct = if let Some(ref prev) = sys_stats_last {
+                            tab_stats::compute_cpu_pct(prev, cpu_ns, now.duration_since(prev.ts))
+                        } else {
+                            0.0
+                        };
+                        sys_stats_last = Some(tab_stats::TabStatsSample { cpu_ns, ts: now });
+                        let mem_mb = rss / (1024 * 1024);
+                        let cpu_i = cpu_pct.round() as u32;
+                        let _ = address_bar_wv.evaluate_script(&format!(
+                            "window.__sysStats && window.__sysStats({cpu_i}, {mem_mb})"
+                        ));
+                    }
+                }
             }
         }
 
@@ -1573,6 +1603,10 @@ fn main() {
                 }
                 switch_visible_tab!(tab_id);
                 macos::mru_push(&mut mru, tab_id);
+                // Reset stats so first sample after switch starts fresh (no stale CPU delta)
+                sys_stats_last = None;
+                sys_stats_next_at = std::time::Instant::now();
+                let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
             }
 
@@ -1958,6 +1992,8 @@ fn main() {
                     }
                     // Clear address bar stats for new navigation
                     let _ = address_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                    let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
+                    sys_stats_last = None;
                 }
             }
 

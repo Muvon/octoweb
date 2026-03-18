@@ -11,6 +11,7 @@
 ///   window.__stats(sizeBytes, timeMs)                         — update stats only
 ///   window.__setFavicon(dataUri)                              — update favicon
 ///   window.__setBadge(show)                                   — show/hide unread badge on 🐙
+///   window.__sysStats(cpuPct, memMb)                          — update CPU%/RSS (null = hide)
 ///
 /// IPC messages sent to Rust:
 ///   { type: "toggle_sidebar" }       — 🐙 button clicked
@@ -194,6 +195,36 @@ pub fn html() -> &'static str {
   .stat { white-space: nowrap; }
   #stats .dot { opacity: 0.5; }
 
+  /* ── System stats: CPU% and RSS memory of the active tab's WebContent process ── */
+  #sys-stats {
+    display: none; /* hidden until first sample arrives */
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    margin-left: 4px;
+    margin-right: 4px;
+    letter-spacing: -0.1px;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  #sys-stats.visible {
+    display: flex;
+    opacity: 1;
+  }
+  .sys-chip {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+  }
+  .sys-icon {
+    font-size: 9px;
+    line-height: 1;
+    opacity: 0.7;
+  }
+
   /* ── 🐙 AI toggle button + utility buttons (spotlight, close tab) ── */
   .bar-btn {
     position: relative;
@@ -267,6 +298,10 @@ pub fn html() -> &'static str {
     <span class="dot" id="dot">·</span>
     <span id="time" class="stat"></span>
   </div>
+  <div id="sys-stats">
+    <span class="sys-chip"><span class="sys-icon">⚡</span><span id="cpu-stat"></span></span>
+    <span class="sys-chip"><span class="sys-icon">◉</span><span id="mem-stat"></span></span>
+  </div>
   <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.2 5.6c0-.9.7-1.6 1.8-1.6 1 0 1.8.7 1.8 1.6 0 .7-.4 1.1-1.1 1.6-.6.4-.9.7-.9 1.3v.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -299,6 +334,9 @@ pub fn html() -> &'static str {
   const sizeEl       = document.getElementById('size');
   const timeEl       = document.getElementById('time');
   const dotEl        = document.getElementById('dot');
+  const sysStatsEl   = document.getElementById('sys-stats');
+  const cpuStatEl    = document.getElementById('cpu-stat');
+  const memStatEl    = document.getElementById('mem-stat');
   const titleRow     = document.getElementById('title-row');
   const urlRow       = document.getElementById('url-row');
   const titleCopied  = document.getElementById('title-copied');
@@ -390,6 +428,16 @@ pub fn html() -> &'static str {
     sizeEl.textContent = '';
     timeEl.textContent = '';
     dotEl.style.display = 'none';
+  };
+
+  window.__sysStats = function(cpuPct, memMb) {
+    if (cpuPct === null || memMb === null) {
+      sysStatsEl.classList.remove('visible');
+      return;
+    }
+    cpuStatEl.textContent = cpuPct + '%';
+    memStatEl.textContent = memMb + 'M';
+    sysStatsEl.classList.add('visible');
   };
 
   window.__stats = function(sizeBytes, timeMs) {
