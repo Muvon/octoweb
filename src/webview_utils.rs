@@ -266,6 +266,8 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
 
   function highlightCurrent() {
     if (currentIdx >= 0 && currentIdx < ranges.length) {
+      // Clear first so WebKit repaints the old position before setting the new one.
+      clearHighlight(CURRENT_NAME);
       CSS.highlights.set(CURRENT_NAME, new Highlight(ranges[currentIdx]));
       const rect = ranges[currentIdx].getBoundingClientRect();
       if (rect.top < 0 || rect.bottom > window.innerHeight) {
