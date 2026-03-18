@@ -599,21 +599,29 @@ fn main() {
         })
         .build_as_child(&*browser_win)
         .expect("Failed to create address bar WebView");
-    // Initialize address bar with the active tab's URL
+    // Initialize address bar with the active tab's URL, title, and favicon from session.
     {
-        let url = tabs
-            .lock()
-            .unwrap()
-            .tabs()
-            .iter()
-            .find(|t| t.id == active_wv_id)
-            .map(|t| t.url.clone())
-            .unwrap_or_default();
+        let tm = tabs.lock().unwrap();
+        let tab = tm.tabs().iter().find(|t| t.id == active_wv_id);
+        let url = tab.map(|t| t.url.clone()).unwrap_or_default();
+        let title = tab.map(|t| t.title.clone()).unwrap_or_default();
+        drop(tm);
         let secure = url.starts_with("https://");
         let escaped_url = webview_utils::escape_js_template(&url);
+        let escaped_title = webview_utils::escape_js_template(&title);
         let _ = address_bar_wv.evaluate_script(&format!(
-            "window.__update && window.__update(`{escaped_url}`, {secure}, ``, 0, 0)"
+            "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, 0, 0)"
         ));
+        if let Some(fav) = webview_utils::cached_favicon(&url, &favicon_cache) {
+            let escaped_fav = webview_utils::escape_js_template(fav);
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__setFavicon && window.__setFavicon(`{escaped_fav}`)"
+            ));
+        }
+        // Set window title from restored session
+        if !title.is_empty() {
+            browser_win.set_title(&title);
+        }
     }
 
     // ── Progress bar WebView (thin bar at bottom edge of address bar) ─────
