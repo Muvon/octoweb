@@ -209,23 +209,51 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
   let currentIdx = -1;
   const HIGHLIGHT_NAME = 'octoweb-find';
   const CURRENT_NAME = 'octoweb-find-current';
-  let styleInjected = false;
 
-  function ensureStyle() {
-    if (styleInjected) return;
-    const s = document.createElement('style');
-    s.textContent = `
-      ::highlight(octoweb-find) {
-        background-color: rgba(255, 230, 0, 0.35);
-        color: inherit;
-      }
-      ::highlight(octoweb-find-current) {
-        background-color: rgba(255, 150, 50, 0.6);
-        color: inherit;
-      }
-    `;
-    (document.head || document.documentElement).appendChild(s);
-    styleInjected = true;
+  // Inject highlight styles once.
+  const s = document.createElement('style');
+  s.textContent = `
+    ::highlight(octoweb-find) { background-color: rgba(255, 230, 0, 0.35); color: inherit; }
+    ::highlight(octoweb-find-current) { background-color: rgba(255, 150, 50, 0.6); color: inherit; }
+  `;
+  (document.head || document.documentElement).appendChild(s);
+
+  // --- Text node cache ---
+  // Walk DOM once per search; invalidate on mutation so next search rebuilds.
+  // TreeWalker with numeric whatToShow (not a filter function) is ~10x faster —
+  // the browser applies it natively without JS callback overhead.
+  let textNodeCache = null;
+
+  function getTextNodes() {
+    if (textNodeCache) return textNodeCache;
+    const root = document.body;
+    if (!root) return [];
+    const nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const tag = node.parentElement && node.parentElement.tagName;
+      if (tag !== 'SCRIPT' && tag !== 'STYLE' && tag !== 'NOSCRIPT') nodes.push(node);
+    }
+    textNodeCache = nodes;
+    return nodes;
+  }
+
+  // Invalidate cache when DOM changes (e.g. SPA navigation, lazy content).
+  // Guard against document.body being null at injection time.
+  if (document.body) {
+    new MutationObserver(function() { textNodeCache = null; })
+      .observe(document.body, { childList: true, subtree: true });
+  }
+
+  // --- Highlight helpers ---
+
+  // Clear a named highlight: empty its Range Set first so WebKit repaints,
+  // then remove from registry. delete() alone doesn't always trigger repaint.
+  function clearHighlight(name) {
+    const h = CSS.highlights.get(name);
+    if (h) h.clear();
+    CSS.highlights.delete(name);
   }
 
   function postCount() {
@@ -236,70 +264,43 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
     }));
   }
 
-  // Collect visible text nodes — skip only script/style/noscript and display:none
-  function collectTextNodes(root) {
-    const nodes = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode: function(node) {
-        const p = node.parentElement;
-        if (!p) return NodeFilter.FILTER_REJECT;
-        const tag = p.tagName;
-        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      }
-    });
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    return nodes;
-  }
-
   function highlightCurrent() {
-    if (!CSS.highlights) return;
     if (currentIdx >= 0 && currentIdx < ranges.length) {
       CSS.highlights.set(CURRENT_NAME, new Highlight(ranges[currentIdx]));
-      const el = ranges[currentIdx].startContainer.parentElement;
-      if (el) {
-        const rect = ranges[currentIdx].getBoundingClientRect();
-        const viewH = window.innerHeight;
-        if (rect.top < 0 || rect.bottom > viewH) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+      const rect = ranges[currentIdx].getBoundingClientRect();
+      if (rect.top < 0 || rect.bottom > window.innerHeight) {
+        ranges[currentIdx].startContainer.parentElement
+          ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     } else {
       clearHighlight(CURRENT_NAME);
     }
   }
 
-  // Clear a named highlight: empty its Range Set first so WebKit repaints,
-  // then remove from registry. delete() alone doesn't always trigger repaint.
-  function clearHighlight(name) {
-    const h = CSS.highlights.get(name);
-    if (h) h.clear();
-    CSS.highlights.delete(name);
-  }
+  // --- Public API ---
 
   window.__findInPage = function(query) {
-    ensureStyle();
     ranges = [];
     currentIdx = -1;
     if (!CSS.highlights) { postCount(); return; }
     clearHighlight(HIGHLIGHT_NAME);
     clearHighlight(CURRENT_NAME);
 
-    if (!query || query.length === 0) { postCount(); return; }
+    if (!query) { postCount(); return; }
 
     const lower = query.toLowerCase();
-    const textNodes = collectTextNodes(document.body);
+    const qLen  = query.length;
+    const nodes = getTextNodes();
 
-    for (const node of textNodes) {
-      const text = node.textContent.toLowerCase();
+    for (let ni = 0; ni < nodes.length; ni++) {
+      const text = nodes[ni].textContent.toLowerCase();
       let start = 0;
-      while (true) {
-        const idx = text.indexOf(lower, start);
-        if (idx === -1) break;
-        const range = new Range();
-        range.setStart(node, idx);
-        range.setEnd(node, idx + query.length);
-        ranges.push(range);
+      let idx;
+      while ((idx = text.indexOf(lower, start)) !== -1) {
+        const r = new Range();
+        r.setStart(nodes[ni], idx);
+        r.setEnd(nodes[ni], idx + qLen);
+        ranges.push(r);
         start = idx + 1;
       }
     }

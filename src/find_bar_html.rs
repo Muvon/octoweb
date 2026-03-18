@@ -154,28 +154,17 @@ pub fn html() -> &'static str {
   const prevBtn = document.getElementById('prev');
   const nextBtn = document.getElementById('next');
 
-  let debounce = null;
   let lastSent = '';
 
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
   }
 
-  function sendQuery() {
+  input.addEventListener('input', function() {
     const v = input.value;
     if (v === lastSent) return;
     lastSent = v;
     ipc({ type: 'find_query', query: v });
-  }
-
-  input.addEventListener('input', function() {
-    clearTimeout(debounce);
-    if (input.value.length === 0) {
-      lastSent = '';
-      ipc({ type: 'find_query', query: '' });
-    } else {
-      debounce = setTimeout(sendQuery, 160);
-    }
   });
 
 
