@@ -189,6 +189,7 @@ fn main() {
             };
             WebViewBuilder::new()
                 .with_url(url)
+                .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
                 .with_bounds(bounds)
                 // Suspend JS timers, rAF, and network on hidden tabs (macOS 14+, no-op on older)
