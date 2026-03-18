@@ -944,19 +944,20 @@ fn main() {
         };
     }
 
-    /// Update address bar with the given URL and title (clears stats — they arrive later via PageInfo).
+    /// Update address bar with the given URL, title, and cached page stats.
     macro_rules! update_address_bar_url {
         ($url:expr) => {{
             let u = &$url;
             let secure = u.starts_with("https://");
             let escaped_url = webview_utils::escape_js_template(u);
-            let raw_title = tabs.lock().unwrap().tabs().iter()
-                .find(|t| t.url == *u || t.id == active_wv_id)
-                .map(|t| t.title.clone())
-                .unwrap_or_default();
+            let tm = tabs.lock().unwrap();
+            let tab = tm.tabs().iter().find(|t| t.url == *u || t.id == active_wv_id);
+            let raw_title = tab.map(|t| t.title.clone()).unwrap_or_default();
+            let (pb, pt) = tab.map(|t| (t.page_bytes, t.page_time_ms)).unwrap_or((0, 0));
+            drop(tm);
             let escaped_title = webview_utils::escape_js_template(&raw_title);
             let _ = address_bar_wv.evaluate_script(&format!(
-                "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, 0, 0)"
+                "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, {pb}, {pt})"
             ));
             // Push cached favicon for this URL's domain
             if let Some(fav) = webview_utils::cached_favicon(u, &favicon_cache) {
@@ -2061,6 +2062,7 @@ fn main() {
 
             // ── Page info (size + load time) from injected script ─────────────
             Event::UserEvent(AppEvent::PageInfo(tab_id, bytes, ms)) => {
+                tabs.lock().unwrap().set_page_info(tab_id, bytes, ms);
                 if tab_id == active_wv_id {
                     let _ = address_bar_wv.evaluate_script(&format!(
                         "window.__stats && window.__stats({bytes}, {ms})"

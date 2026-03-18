@@ -294,13 +294,13 @@ pub fn html() -> &'static str {
     </div>
   </div>
   <div id="stats">
-    <span id="size" class="stat"></span>
+    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">⬇</span><span id="size"></span></span>
     <span class="dot" id="dot">·</span>
-    <span id="time" class="stat"></span>
+    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">⏱</span><span id="time"></span></span>
   </div>
   <div id="sys-stats">
-    <span class="sys-chip"><span class="sys-icon">⚡</span><span id="cpu-stat"></span></span>
-    <span class="sys-chip"><span class="sys-icon">◉</span><span id="mem-stat"></span></span>
+    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">⚡</span><span id="cpu-stat"></span></span>
+    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">◉</span><span id="mem-stat"></span></span>
   </div>
   <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">

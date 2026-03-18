@@ -8,6 +8,8 @@ pub struct Tab {
     pub title: String,
     pub url: String,
     pub is_playing_audio: bool,
+    pub page_bytes: u64,
+    pub page_time_ms: u64,
 }
 
 /// A history entry
@@ -47,6 +49,8 @@ impl TabManager {
             title: String::new(),
             url,
             is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
         });
         self.active_id = Some(id);
         id
@@ -60,6 +64,8 @@ impl TabManager {
             title,
             url,
             is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
         });
         self.active_id = Some(id);
         id
@@ -110,6 +116,8 @@ impl TabManager {
                 self.history.pop_front();
             }
             tab.url = url;
+            tab.page_bytes = 0;
+            tab.page_time_ms = 0;
         }
     }
 
@@ -130,6 +138,14 @@ impl TabManager {
     pub fn set_playing_audio(&mut self, id: usize, playing: bool) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             tab.is_playing_audio = playing;
+        }
+    }
+
+    /// Cache page load stats (transfer size + load time) for a tab.
+    pub fn set_page_info(&mut self, id: usize, bytes: u64, time_ms: u64) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+            tab.page_bytes = bytes;
+            tab.page_time_ms = time_ms;
         }
     }
 
