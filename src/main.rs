@@ -707,6 +707,9 @@ fn main() {
     // Sampled every 2 s from the active tab's WebContent XPC process.
     let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
     let mut sys_stats_next_at = std::time::Instant::now();
+    // Last values sent to the address bar — skip evaluate_script when unchanged
+    // to avoid accumulating leaked WKWebView JS evaluation contexts (wry#1489).
+    let mut sys_stats_last_sent: Option<(u32, u64)> = None;
 
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
@@ -1076,14 +1079,16 @@ fn main() {
 
     // ── Event loop ────────────────────────────────────────────────────────
     event_loop.run(move |event, _, control_flow| {
-        // Poll mode when sidebar is open (ACP events) or progress bar is fading out.
-        // Wait mode otherwise to avoid burning CPU while idle.
-        *control_flow = if sidebar_visible || progress_hide_at.is_some() {
-            ControlFlow::Poll
+        // Never spin (Poll) — use a bounded wake time so ACP/progress events are
+        // still responsive (≤16 ms latency) without burning CPU during WebRTC calls.
+        let next_wake = if let Some(hide_at) = progress_hide_at {
+            sys_stats_next_at.min(hide_at)
         } else {
-            // Wake up at the next stats sample time (every 2 s) to refresh CPU/mem display.
-            ControlFlow::WaitUntil(sys_stats_next_at)
+            sys_stats_next_at
         };
+        *control_flow = ControlFlow::WaitUntil(
+            next_wake.min(std::time::Instant::now() + std::time::Duration::from_millis(16)),
+        );
 
         // Hide progress bar after CSS fade completes
         if let Some(hide_at) = progress_hide_at {
@@ -1109,9 +1114,14 @@ fn main() {
                         sys_stats_last = Some(tab_stats::TabStatsSample { cpu_ns, ts: now });
                         let mem_mb = rss / (1024 * 1024);
                         let cpu_i = cpu_pct.round() as u32;
-                        let _ = address_bar_wv.evaluate_script(&format!(
-                            "window.__sysStats && window.__sysStats({cpu_i}, {mem_mb})"
-                        ));
+                        // Skip evaluate_script when values unchanged — avoids leaking
+                        // WKWebView JS evaluation contexts on every 2 s tick (wry#1489).
+                        if sys_stats_last_sent != Some((cpu_i, mem_mb)) {
+                            sys_stats_last_sent = Some((cpu_i, mem_mb));
+                            let _ = address_bar_wv.evaluate_script(&format!(
+                                "window.__sysStats && window.__sysStats({cpu_i}, {mem_mb})"
+                            ));
+                        }
                     }
                 }
             }
@@ -1694,6 +1704,7 @@ fn main() {
                 macos::mru_push(&mut mru, tab_id);
                 // Reset stats so first sample after switch starts fresh (no stale CPU delta)
                 sys_stats_last = None;
+                sys_stats_last_sent = None;
                 sys_stats_next_at = std::time::Instant::now();
                 let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
@@ -2167,6 +2178,7 @@ fn main() {
                     let _ = address_bar_wv.evaluate_script("window.__clear && window.__clear()");
                     let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
                     sys_stats_last = None;
+                    sys_stats_last_sent = None;
                 }
             }
 
