@@ -844,6 +844,7 @@ fn main() {
                 const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
                 const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
+                const ESC_KEYCODE: i64 = 53; // Escape
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
@@ -886,6 +887,10 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::Reload);
+                    CallbackResult::Drop
+                } else if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
+                    // Esc closes find bar regardless of which WebView has focus
+                    let _ = p.send_event(AppEvent::HideFindBar);
                     CallbackResult::Drop
                 } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ToggleFindBar);

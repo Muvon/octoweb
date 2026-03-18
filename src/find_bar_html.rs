@@ -171,11 +171,13 @@ pub fn html() -> &'static str {
   input.addEventListener('input', function() {
     clearTimeout(debounce);
     if (input.value.length === 0) {
-      sendQuery();
+      lastSent = '';
+      ipc({ type: 'find_query', query: '' });
     } else {
       debounce = setTimeout(sendQuery, 160);
     }
   });
+
 
   input.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {

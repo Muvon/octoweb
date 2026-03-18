@@ -265,8 +265,16 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
         }
       }
     } else {
-      CSS.highlights.delete(CURRENT_NAME);
+      clearHighlight(CURRENT_NAME);
     }
+  }
+
+  // Clear a named highlight: empty its Range Set first so WebKit repaints,
+  // then remove from registry. delete() alone doesn't always trigger repaint.
+  function clearHighlight(name) {
+    const h = CSS.highlights.get(name);
+    if (h) h.clear();
+    CSS.highlights.delete(name);
   }
 
   window.__findInPage = function(query) {
@@ -274,8 +282,8 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
     ranges = [];
     currentIdx = -1;
     if (!CSS.highlights) { postCount(); return; }
-    CSS.highlights.delete(HIGHLIGHT_NAME);
-    CSS.highlights.delete(CURRENT_NAME);
+    clearHighlight(HIGHLIGHT_NAME);
+    clearHighlight(CURRENT_NAME);
 
     if (!query || query.length === 0) { postCount(); return; }
 
@@ -322,8 +330,8 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
     ranges = [];
     currentIdx = -1;
     if (CSS.highlights) {
-      CSS.highlights.delete(HIGHLIGHT_NAME);
-      CSS.highlights.delete(CURRENT_NAME);
+      clearHighlight(HIGHLIGHT_NAME);
+      clearHighlight(CURRENT_NAME);
     }
   };
 })();
