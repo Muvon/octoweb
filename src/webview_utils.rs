@@ -194,6 +194,141 @@ pub fn escape_js_template(s: &str) -> String {
     out
 }
 
+/// Find-in-page script using CSS Custom Highlight API.
+/// Injected into tab WebViews. Exposes:
+/// - `window.__findInPage(query)` — highlight all matches, scroll to first
+/// - `window.__findNext()` / `window.__findPrev()` — cycle through matches
+/// - `window.__findClear()` — remove all highlights
+///
+/// Posts IPC `{ type: "find_count", current, total }` after each operation.
+pub const FIND_IN_PAGE_SCRIPT: &str = r#"
+(function() {
+  if (window.__findInPage) return;
+
+  let ranges = [];
+  let currentIdx = -1;
+  const HIGHLIGHT_NAME = 'octoweb-find';
+  const CURRENT_NAME = 'octoweb-find-current';
+  let styleInjected = false;
+
+  function ensureStyle() {
+    if (styleInjected) return;
+    const s = document.createElement('style');
+    s.textContent = `
+      ::highlight(octoweb-find) {
+        background-color: rgba(255, 230, 0, 0.35);
+        color: inherit;
+      }
+      ::highlight(octoweb-find-current) {
+        background-color: rgba(255, 150, 50, 0.6);
+        color: inherit;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(s);
+    styleInjected = true;
+  }
+
+  function postCount() {
+    window.ipc.postMessage(JSON.stringify({
+      type: 'find_count',
+      current: ranges.length > 0 ? currentIdx + 1 : 0,
+      total: ranges.length
+    }));
+  }
+
+  // Collect visible text nodes — skip only script/style/noscript and display:none
+  function collectTextNodes(root) {
+    const nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        const p = node.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        const tag = p.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    return nodes;
+  }
+
+  function highlightCurrent() {
+    if (!CSS.highlights) return;
+    if (currentIdx >= 0 && currentIdx < ranges.length) {
+      CSS.highlights.set(CURRENT_NAME, new Highlight(ranges[currentIdx]));
+      const el = ranges[currentIdx].startContainer.parentElement;
+      if (el) {
+        const rect = ranges[currentIdx].getBoundingClientRect();
+        const viewH = window.innerHeight;
+        if (rect.top < 0 || rect.bottom > viewH) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    } else {
+      CSS.highlights.delete(CURRENT_NAME);
+    }
+  }
+
+  window.__findInPage = function(query) {
+    ensureStyle();
+    ranges = [];
+    currentIdx = -1;
+    if (!CSS.highlights) { postCount(); return; }
+    CSS.highlights.delete(HIGHLIGHT_NAME);
+    CSS.highlights.delete(CURRENT_NAME);
+
+    if (!query || query.length === 0) { postCount(); return; }
+
+    const lower = query.toLowerCase();
+    const textNodes = collectTextNodes(document.body);
+
+    for (const node of textNodes) {
+      const text = node.textContent.toLowerCase();
+      let start = 0;
+      while (true) {
+        const idx = text.indexOf(lower, start);
+        if (idx === -1) break;
+        const range = new Range();
+        range.setStart(node, idx);
+        range.setEnd(node, idx + query.length);
+        ranges.push(range);
+        start = idx + 1;
+      }
+    }
+
+    if (ranges.length > 0) {
+      CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...ranges));
+      currentIdx = 0;
+      highlightCurrent();
+    }
+    postCount();
+  };
+
+  window.__findNext = function() {
+    if (ranges.length === 0) return;
+    currentIdx = (currentIdx + 1) % ranges.length;
+    highlightCurrent();
+    postCount();
+  };
+
+  window.__findPrev = function() {
+    if (ranges.length === 0) return;
+    currentIdx = (currentIdx - 1 + ranges.length) % ranges.length;
+    highlightCurrent();
+    postCount();
+  };
+
+  window.__findClear = function() {
+    ranges = [];
+    currentIdx = -1;
+    if (CSS.highlights) {
+      CSS.highlights.delete(HIGHLIGHT_NAME);
+      CSS.highlights.delete(CURRENT_NAME);
+    }
+  };
+})();
+"#;
+
 /// Look up a cached favicon data-URI by domain extracted from the URL.
 pub fn cached_favicon<'a>(url: &str, favicons: &'a HashMap<String, String>) -> Option<&'a str> {
     let domain = extract_domain(url)?;

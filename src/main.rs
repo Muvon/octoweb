@@ -3,6 +3,7 @@ mod address_bar_html;
 mod browser;
 mod config;
 mod error_page_html;
+mod find_bar_html;
 mod macos;
 mod mcp;
 mod nav_error_patch;
@@ -73,6 +74,12 @@ enum AppEvent {
     DismissNotification,       // user clicked X on notification toast
     ToggleShortcuts,           // ⌘/ — toggle keyboard shortcuts overlay
     HideShortcuts,             // JS Esc / backdrop click in shortcuts overlay
+    ToggleFindBar,             // ⌘F — toggle find-in-page bar
+    HideFindBar,               // Esc / close button in find bar
+    FindInPage(String),        // search query from find bar input
+    FindNext,                  // next match (Enter in find bar)
+    FindPrev,                  // previous match (⇧Enter in find bar)
+    FindCount(usize, usize),   // (current, total) — match count from tab WebView
     Quit,
 }
 fn main() {
@@ -93,6 +100,7 @@ fn main() {
     let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
+    let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
     // Tracks whether the browser window is the frontmost app.
     // CGEventTap fires system-wide, so we gate all hotkeys on this flag.
     let app_focused = Arc::new(AtomicBool::new(false));
@@ -205,6 +213,8 @@ fn main() {
                 .with_initialization_script(webview_utils::MEDIA_TRACK_SCRIPT)
                 // Collect page load stats (size, time) via PerformanceNavigationTiming.
                 .with_initialization_script(webview_utils::PAGE_INFO_SCRIPT)
+                // Find-in-page: CSS Custom Highlight API for zero-DOM-mutation search.
+                .with_initialization_script(webview_utils::FIND_IN_PAGE_SCRIPT)
                 .with_ipc_handler(move |msg| {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                         match v["type"].as_str() {
@@ -253,6 +263,11 @@ fn main() {
                                 let size = v["size"].as_u64().unwrap_or(0);
                                 let time = v["time"].as_u64().unwrap_or(0);
                                 let _ = p3.send_event(AppEvent::PageInfo(tab_id, size, time));
+                            }
+                            Some("find_count") => {
+                                let current = v["current"].as_u64().unwrap_or(0) as usize;
+                                let total = v["total"].as_u64().unwrap_or(0) as usize;
+                                let _ = p3.send_event(AppEvent::FindCount(current, total));
                             }
                             _ => {}
                         }
@@ -643,6 +658,51 @@ fn main() {
     // Instant when __finish was called — we hide progress_wv after the CSS fade (400ms)
     let mut progress_hide_at: Option<std::time::Instant> = None;
 
+    // ── Find bar WebView (⌘F — pill-shaped bar at top-right) ──────────────
+    const FIND_BAR_W_LOGICAL: f64 = 320.0;
+    const FIND_BAR_H_LOGICAL: f64 = 36.0;
+    let find_bar_w = (FIND_BAR_W_LOGICAL * browser_win.scale_factor()) as u32;
+    let find_bar_h = (FIND_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
+    let find_bar_wv = WebViewBuilder::new()
+        .with_html(find_bar_html::html())
+        .with_transparent(true)
+        .with_bounds(wry::Rect {
+            position: tao::dpi::PhysicalPosition::new(
+                sz0.width.saturating_sub(find_bar_w + 8),
+                address_bar_h,
+            )
+            .into(),
+            size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
+        })
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("find_query") => {
+                            if let Some(q) = v["query"].as_str() {
+                                let _ = p.send_event(AppEvent::FindInPage(q.to_string()));
+                            }
+                        }
+                        Some("find_next") => {
+                            let _ = p.send_event(AppEvent::FindNext);
+                        }
+                        Some("find_prev") => {
+                            let _ = p.send_event(AppEvent::FindPrev);
+                        }
+                        Some("find_close") => {
+                            let _ = p.send_event(AppEvent::HideFindBar);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create find bar WebView");
+    let _ = find_bar_wv.set_visible(false);
+    let mut find_bar_visible = false;
+
     // ── Per-tab WebContent process stats (CPU%, RSS) ───────────────────────
     // Sampled every 2 s from the active tab's WebContent XPC process.
     let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
@@ -759,6 +819,7 @@ fn main() {
 
         let p = proxy.clone();
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
+        let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let focused_state = Arc::clone(&app_focused);
         // keyCode 40 = k, flagsChanged catches modifier-only events separately.
         // We check the CGEventFlags for Command inside the callback.
@@ -782,6 +843,7 @@ fn main() {
                 const I_KEYCODE: i64 = 34; // i (Cmd+Shift+I = toggle devtools)
                 const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
+                const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
@@ -809,13 +871,24 @@ fn main() {
                     let _ = p.send_event(AppEvent::Quit);
                     CallbackResult::Drop
                 } else if ctrl && keycode == P_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::PrevTab);
+                    if find_bar_state.load(Ordering::Relaxed) {
+                        let _ = p.send_event(AppEvent::FindPrev);
+                    } else {
+                        let _ = p.send_event(AppEvent::PrevTab);
+                    }
                     CallbackResult::Drop
                 } else if ctrl && keycode == N_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::NextTab);
+                    if find_bar_state.load(Ordering::Relaxed) {
+                        let _ = p.send_event(AppEvent::FindNext);
+                    } else {
+                        let _ = p.send_event(AppEvent::NextTab);
+                    }
                     CallbackResult::Drop
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::Reload);
+                    CallbackResult::Drop
+                } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ToggleFindBar);
                     CallbackResult::Drop
                 } else if cmd && !overlay_state.load(Ordering::Relaxed) {
                     // ⌘+digit → QuickSlotOpen, ⌘⇧+digit → QuickSlotSave
@@ -1598,6 +1671,16 @@ fn main() {
             Event::UserEvent(AppEvent::SwitchTab(tab_id)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                // Hide find bar on tab switch — highlights are per-tab
+                if find_bar_visible {
+                    let _ = find_bar_wv.set_visible(false);
+                    let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                    find_bar_visible = false;
+                    find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
+                    }
+                }
                 if tab_id == active_wv_id {
                     if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                     return;
@@ -1901,6 +1984,90 @@ fn main() {
                 }
             }
 
+            // ── Find bar: toggle ⌘F ──────────────────────────────────────────
+            Event::UserEvent(AppEvent::ToggleFindBar) => {
+                if find_bar_visible {
+                    // Hide find bar and clear highlights
+                    let _ = find_bar_wv.set_visible(false);
+                    let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                    find_bar_visible = false;
+                    find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
+                    }
+                    browser_win.set_focus();
+                } else {
+                    // Position find bar at top-right, just below address bar
+                    let sz = browser_win.inner_size();
+                    let _ = find_bar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(find_bar_w + 8),
+                            address_bar_h,
+                        ).into(),
+                        size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
+                    });
+                    let _ = find_bar_wv.set_visible(true);
+                    find_bar_visible = true;
+                    find_bar_hotkey_visible.store(true, Ordering::Relaxed);
+                    // Focus the find bar input via chrome_win (child WebView needs key window)
+                    unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                        let _: () = msg_send![ns_win, makeKeyWindow];
+                    }
+                    let _ = find_bar_wv.focus();
+                    let _ = find_bar_wv.evaluate_script("window.__focus && window.__focus()");
+                }
+            }
+
+            // ── Find bar: hide (Esc / close button) ─────────────────────────
+            Event::UserEvent(AppEvent::HideFindBar) => {
+                if find_bar_visible {
+                    let _ = find_bar_wv.set_visible(false);
+                    let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                    find_bar_visible = false;
+                    find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
+                    }
+                    browser_win.set_focus();
+                }
+            }
+
+            // ── Find bar: search query from input ───────────────────────────
+            Event::UserEvent(AppEvent::FindInPage(query)) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let escaped = webview_utils::escape_js_template(&query);
+                    let _ = wv.evaluate_script(&format!(
+                        "window.__findInPage && window.__findInPage(`{escaped}`)"
+                    ));
+                }
+            }
+
+            // ── Find bar: next match ────────────────────────────────────────
+            Event::UserEvent(AppEvent::FindNext) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.__findNext && window.__findNext()");
+                }
+            }
+
+            // ── Find bar: previous match ────────────────────────────────────
+            Event::UserEvent(AppEvent::FindPrev) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.__findPrev && window.__findPrev()");
+                }
+            }
+
+            // ── Find bar: match count from tab WebView ──────────────────────
+            Event::UserEvent(AppEvent::FindCount(current, total)) => {
+                if find_bar_visible {
+                    let _ = find_bar_wv.evaluate_script(&format!(
+                        "window.__setCount && window.__setCount({current}, {total})"
+                    ));
+                }
+            }
+
             // ── Download started — close the tab that became a download ──────
             Event::UserEvent(AppEvent::DownloadStarted(tab_id)) => {
                 tracing::debug!(tab_id, "Download started, closing download tab");
@@ -2115,6 +2282,16 @@ fn main() {
                         position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
                     });
+                    // Reposition find bar at top-right
+                    if find_bar_visible {
+                        let _ = find_bar_wv.set_bounds(wry::Rect {
+                            position: tao::dpi::PhysicalPosition::new(
+                                sz.width.saturating_sub(find_bar_w + 8),
+                                address_bar_h,
+                            ).into(),
+                            size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
+                        });
+                    }
                     // Resize address bar to full width
                     let _ = address_bar_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
