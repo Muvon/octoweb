@@ -187,10 +187,7 @@ pub fn html() -> &'static str {
 
   // Called from Rust to update match count display
   window.__setCount = function(current, total) {
-    if (total === 0 && input.value.length > 0) {
-      count.textContent = 'No matches';
-      count.style.color = 'var(--count-none)';
-    } else if (total > 0) {
+    if (total > 0) {
       count.textContent = current + '/' + total;
       count.style.color = '';
     } else {
