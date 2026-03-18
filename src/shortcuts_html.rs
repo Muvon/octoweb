@@ -1,8 +1,27 @@
 /// Keyboard shortcuts help overlay — compact 2-column frosted glass panel.
 ///
 /// Shown via `⌘/` or the `?` button in the address bar.
-/// Two columns: Global (left) and Command Palette (right).
 /// IPC: `{ type: "shortcuts_close" }` on Esc or backdrop click.
+///
+/// ## Layout rules
+///
+/// Two columns inside a single `.shortcuts` flex box: **Global** (left) and
+/// **Command Palette** (right). Both columns are `flex: 1` — always equal width.
+///
+/// **Row alignment rule:**
+/// - If the same key binding has an action in BOTH columns, place it on the
+///   SAME row index in both `.shortcuts-col` lists so they visually align.
+/// - If a key only exists in one column, add it as its own row in that column
+///   only — no placeholder/blank row in the other column.
+///
+/// **Ordering convention:**
+/// 1. Shared-key rows first (both columns filled on the same row).
+/// 2. Global-only rows next (right cell visually empty but no explicit blank).
+/// 3. Palette-only rows fill the remaining right-column rows.
+///
+/// Currently shared: `⌘W` (row 2), `⌃N` (row 3), `⌃P` (row 4), `⌘1–9` (row 5).
+/// When adding a new shortcut that exists in both contexts, insert it in the
+/// shared block at the top and keep both column lists in sync by row position.
 pub fn html() -> &'static str {
     r#"<!DOCTYPE html>
 <html>
@@ -106,11 +125,16 @@ pub fn html() -> &'static str {
 
   #columns {
     display: flex;
-    gap: 24px;
+    gap: 0;
   }
 
   .col {
+    flex: 1;
     min-width: 0;
+  }
+
+  .col + .col {
+    border-left: 0.5px solid var(--divider);
   }
 
   .col-title {
@@ -119,7 +143,7 @@ pub fn html() -> &'static str {
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-dim);
-    margin-bottom: 8px;
+    padding: 0 10px 8px;
   }
 
   .shortcuts {
@@ -127,6 +151,16 @@ pub fn html() -> &'static str {
     border: 0.5px solid var(--divider);
     border-radius: 8px;
     overflow: hidden;
+    display: flex;
+  }
+
+  .shortcuts-col {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .shortcuts-col + .shortcuts-col {
+    border-left: 0.5px solid var(--divider);
   }
 
   .row {
@@ -135,6 +169,7 @@ pub fn html() -> &'static str {
     justify-content: space-between;
     padding: 5px 10px;
     gap: 12px;
+    min-height: 28px;
   }
 
   .row + .row {
@@ -147,6 +182,10 @@ pub fn html() -> &'static str {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .row-label.dim {
+    color: var(--text-dim);
   }
 
   .keys {
@@ -189,37 +228,36 @@ pub fn html() -> &'static str {
       </button>
     </div>
     <div id="columns">
-      <!-- Global -->
-      <div class="col">
-        <div class="col-title">Global</div>
-        <div class="shortcuts">
+      <div class="shortcuts">
+        <!-- Left column: Global -->
+        <div class="shortcuts-col">
+          <div class="col-title">Global</div>
           <div class="row"><span class="row-label">Command palette</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
           <div class="row"><span class="row-label">Close tab</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
+          <div class="row"><span class="row-label">Next tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
+          <div class="row"><span class="row-label">Prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
+          <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
+          <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Reload</span><span class="keys"><kbd>⌘</kbd><kbd>R</kbd></span></div>
           <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
           <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
           <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
           <div class="row"><span class="row-label">Shortcuts</span><span class="keys"><kbd>⌘</kbd><kbd>/</kbd></span></div>
-          <div class="row"><span class="row-label">Next tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
-          <div class="row"><span class="row-label">Prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
-          <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
-          <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
         </div>
-      </div>
-      <!-- Command Palette -->
-      <div class="col">
-        <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
-        <div class="shortcuts">
-          <div class="row"><span class="row-label">Navigate</span><span class="keys"><kbd>↑</kbd><kbd>↓</kbd></span></div>
+        <!-- Right column: Command Palette — shared-key rows aligned to left column -->
+        <div class="shortcuts-col">
+          <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
+          <div class="row"><span class="row-label dim">—</span></div>
+          <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
+          <div class="row"><span class="row-label">Move down</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
+          <div class="row"><span class="row-label">Move up</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
+          <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Jump 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
-          <div class="row"><span class="row-label">Close tab</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>
           <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd>⌃</kbd><kbd>K</kbd>/<kbd>U</kbd></span></div>
-          <div class="row"><span class="row-label">Paste</span><span class="keys"><kbd>⌘</kbd><kbd>V</kbd></span></div>
         </div>
       </div>
     </div>

@@ -426,6 +426,19 @@ pub fn html() -> &'static str {
       return true;
     }
 
+    if (isMacCmd && e.key.toLowerCase() === 'w') {
+      e.preventDefault();
+      if (filtered.length > 0 && sel >= 0 && sel < filtered.length) {
+        const item = filtered[sel];
+        if (item.kind === 'tab') {
+          window.ipc.postMessage(JSON.stringify({ type: 'close_tab', tab_id: item.tab_id }));
+        } else if (item.kind === 'history') {
+          window.ipc.postMessage(JSON.stringify({ type: 'remove_history', url: item.url }));
+        }
+      }
+      return true;
+    }
+
     if (isMacCmd && e.key.toLowerCase() === 'v') {
       navigator.clipboard.readText().then(text => {
         if (!text) return;
