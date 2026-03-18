@@ -184,20 +184,25 @@ pub fn html() -> &'static str {
   #stats {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     font-size: 10px;
     color: var(--text-dim);
     flex-shrink: 0;
     margin-left: 12px;
     margin-right: 8px;
     letter-spacing: -0.1px;
+    font-variant-numeric: tabular-nums;
   }
   .stat { white-space: nowrap; }
-  #stats .dot { opacity: 0.5; }
-
+  .stat-val {
+    display: inline-block;
+    width: 4.5ch;
+    text-align: right;
+    overflow: hidden;
+  }
   /* ── System stats: CPU% and RSS memory of the active tab's WebContent process ── */
   #sys-stats {
-    display: none; /* hidden until first sample arrives */
+    display: flex;
     align-items: center;
     gap: 5px;
     font-size: 10px;
@@ -206,11 +211,13 @@ pub fn html() -> &'static str {
     margin-left: 4px;
     margin-right: 4px;
     letter-spacing: -0.1px;
+    font-variant-numeric: tabular-nums;
+    visibility: hidden;
     opacity: 0;
     transition: opacity 0.3s ease;
   }
   #sys-stats.visible {
-    display: flex;
+    visibility: visible;
     opacity: 1;
   }
   .sys-chip {
@@ -294,13 +301,12 @@ pub fn html() -> &'static str {
     </div>
   </div>
   <div id="stats">
-    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">⬇</span><span id="size"></span></span>
-    <span class="dot" id="dot">·</span>
-    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">⏱</span><span id="time"></span></span>
+    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">⬇</span><span class="stat-val" id="size">&mdash;</span></span>
+    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">⏱</span><span class="stat-val" id="time">&mdash;</span></span>
   </div>
   <div id="sys-stats">
-    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">⚡</span><span id="cpu-stat"></span></span>
-    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">◉</span><span id="mem-stat"></span></span>
+    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">⚡</span><span class="stat-val" id="cpu-stat"></span></span>
+    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">◉</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
   <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
@@ -333,7 +339,8 @@ pub fn html() -> &'static str {
   const faviconEl    = document.getElementById('favicon');
   const sizeEl       = document.getElementById('size');
   const timeEl       = document.getElementById('time');
-  const dotEl        = document.getElementById('dot');
+  const sizeChipEl   = document.getElementById('size-chip');
+  const timeChipEl   = document.getElementById('time-chip');
   const sysStatsEl   = document.getElementById('sys-stats');
   const cpuStatEl    = document.getElementById('cpu-stat');
   const memStatEl    = document.getElementById('mem-stat');
@@ -360,16 +367,34 @@ pub fn html() -> &'static str {
   }
 
   function formatSize(bytes) {
-    if (bytes <= 0) return '';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes <= 0) return '\u2014';
+    if (bytes < 1024) return bytes + 'B';
+    var kb = bytes / 1024;
+    if (kb < 10) return kb.toFixed(1) + 'K';
+    if (kb < 1000) return Math.round(kb) + 'K';
+    var mb = bytes / (1024 * 1024);
+    if (mb < 10) return mb.toFixed(1) + 'M';
+    if (mb < 1000) return Math.round(mb) + 'M';
+    var gb = bytes / (1024 * 1024 * 1024);
+    return gb.toFixed(1) + 'G';
   }
 
   function formatTime(ms) {
-    if (ms <= 0) return '';
-    if (ms < 1000) return Math.round(ms) + ' ms';
-    return (ms / 1000).toFixed(1) + ' s';
+    if (ms <= 0) return '\u2014';
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    var s = ms / 1000;
+    if (s < 10) return s.toFixed(1) + 's';
+    return Math.round(s) + 's';
+  }
+
+  function detailSize(bytes) {
+    if (bytes <= 0) return 'Page transfer size';
+    return bytes.toLocaleString() + ' bytes';
+  }
+
+  function detailTime(ms) {
+    if (ms <= 0) return 'Page load time';
+    return ms.toLocaleString() + ' ms';
   }
 
   function renderUrl(url) {
@@ -395,9 +420,10 @@ pub fn html() -> &'static str {
   }
 
   function updateStats(sizeBytes, timeMs) {
-    if (sizeBytes > 0) sizeEl.textContent = formatSize(sizeBytes);
-    if (timeMs > 0)    timeEl.textContent = formatTime(timeMs);
-    dotEl.style.display = (sizeEl.textContent && timeEl.textContent) ? '' : 'none';
+    sizeEl.textContent = formatSize(sizeBytes);
+    timeEl.textContent = formatTime(timeMs);
+    sizeChipEl.title = detailSize(sizeBytes);
+    timeChipEl.title = detailTime(timeMs);
   }
 
   window.__update = function(url, secure, title, sizeBytes, timeMs) {
@@ -425,9 +451,10 @@ pub fn html() -> &'static str {
   };
 
   window.__clear = function() {
-    sizeEl.textContent = '';
-    timeEl.textContent = '';
-    dotEl.style.display = 'none';
+    sizeEl.textContent = '\u2014';
+    timeEl.textContent = '\u2014';
+    sizeChipEl.title = 'Page transfer size';
+    timeChipEl.title = 'Page load time';
   };
 
   window.__sysStats = function(cpuPct, memMb) {
