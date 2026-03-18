@@ -164,56 +164,7 @@ if let Some(wv) = webviews.remove(&tab_id) {
 - `register(ptr, callback)` per WebView, `unregister(ptr)` on close
 - `inject_from_webview(ptr)` once after first WebView created
 
-## Keyboard Shortcut Map
-
-**This is the canonical list. Keep it in sync with `src/main.rs` (CGEventTap block) and `src/overlay_html.rs` (handleEditingHotkeys). Any new shortcut must be added here.**
-
-### Global (CGEventTap — `src/main.rs`)
-
-| Shortcut | Action | AppEvent |
-|---|---|---|
-| `⌘K` | Open command palette (spotlight-style) | `ToggleOverlay` |
-| `⌘W` | Close current tab | `CloseTab(0)` |
-| `⌘R` | Reload current page | `Reload` |
-| `⌘Q` | Quit | `Quit` |
-| `⌘⇧A` | Toggle AI assistant sidebar | `ToggleSidebar` |
-| `⌘⇧I` | Toggle DevTools | `ToggleDevTools` |
-| `⌃N` | Next tab | `NextTab` |
-| `⌃P` | Previous tab | `PrevTab` |
-
-> `⌃N` / `⌃P` and `⌘W` are suppressed while the overlay is open (guarded by `overlay_state`).
-
-### Command Palette (`src/overlay_html.rs` — `handleEditingHotkeys`)
-
-| Shortcut | Action |
-|---|---|
-| `↑` / `↓` | Move selection |
-| `⌃N` / `⌃P` | Move selection (Emacs-style) |
-| `Return` | Open / navigate / switch to tab |
-| `Esc` | Close palette |
-| `⌘W` | Close selected tab |
-| `⌃A` | Cursor to start of input |
-| `⌃E` | Cursor to end of input |
-| `⌃K` | Delete from cursor to end of line |
-| `⌃U` | Delete from cursor to start of line |
-| `⌘V` | Paste from clipboard |
-| `Home` / `End` | Cursor to start / end |
-
-### AI Sidebar (`src/sidebar_html.rs`)
-
-| Shortcut | Action |
-|---|---|
-| `Return` | Send prompt |
-| `⇧Return` | Insert newline |
-
-### Rule for developers
-
-When adding or changing a shortcut:
-1. Update the CGEventTap block in `src/main.rs` (global) **or** `handleEditingHotkeys` in `src/overlay_html.rs` (palette)
-2. Update the table above in this file
-3. Update the **Keyboard shortcuts** section in `README.md`
-
-All three must stay in sync. The code is the source of truth; the tables are the human-readable mirror.
+**Keyboard shortcuts** — global shortcuts live in the CGEventTap block in `src/main.rs`; palette shortcuts in `handleEditingHotkeys` in `src/overlay_html.rs`. When adding a shortcut, update both the code and `README.md` (user-facing shortcut list).
 
 ## Debugging Starting Points
 

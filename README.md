@@ -121,16 +121,13 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘K` | Open command palette |
 | `⌘W` | Close current tab |
 | `⌘R` | Reload current page |
-| `⌘[` | Go back |
-| `⌘]` | Go forward |
+| `⌘F` | Toggle find-in-page bar |
+| `⌘/` | Show keyboard shortcuts |
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧I` | Toggle DevTools |
-| `⌘/` | Show keyboard shortcuts |
-| `⌘1` – `⌘9` | Open fast-access slot 1–9 |
-| `⌘0` | Open fast-access slot 10 |
-| `⌘⇧1` – `⌘⇧9` | Save current page to slot 1–9 |
-| `⌘⇧0` | Save current page to slot 10 |
+| `⌘1` – `⌘9`, `⌘0` | Open fast-access slot 1–10 |
+| `⌘⇧1` – `⌘⇧9`, `⌘⇧0` | Save current page to slot 1–10 |
 | `⌃N` | Next tab (MRU order) |
 | `⌃P` | Previous tab (MRU order) |
 
@@ -156,16 +153,14 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 | `↵` | Confirm selection (open / switch / search) |
 | `⌘↵` | Force navigate: open as URL if it looks like one, otherwise search |
 | `⌘⇧↵` | Send query to AI sidebar |
-| `⌘1` – `⌘9` | Jump directly to result 1–9 (tabs and history only) |
-| `⌘0` | Jump directly to result 10 |
+| `⌘W` | Close selected tab / remove selected history entry |
+| `⌘1` – `⌘9`, `⌘0` | Jump directly to result 1–10 (tabs and history only) |
 | `Esc` | Close palette |
-| `⌘W` | Close the selected tab |
-| `⌃A` | Move cursor to start of input |
-| `⌃E` | Move cursor to end of input |
+| `⌃A` / `Home` | Move cursor to start of input |
+| `⌃E` / `End` | Move cursor to end of input |
 | `⌃K` | Delete from cursor to end of line |
 | `⌃U` | Delete from cursor to start of line |
 | `⌘V` | Paste from clipboard |
-| `Home` / `End` | Move cursor to start / end |
 
 ### AI sidebar (`⌘⇧A`)
 
@@ -175,6 +170,8 @@ The sidebar overlays the page on the right — the page content underneath is no
 |---|---|
 | `↵` | Send prompt |
 | `⇧↵` | Insert newline |
+| `↵` *(agent input)* | Apply agent tag |
+| `Esc` *(agent input)* | Show agent chip |
 
 ---
 
