@@ -116,9 +116,10 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Take a screenshot of a tab
+    /// Take a screenshot of a tab (viewport or full page)
     Screenshot {
         tab_id: Option<usize>,
+        full_page: bool,
         response: oneshot::Sender<Result<String, String>>,
     },
 }
@@ -223,6 +224,18 @@ pub struct TypeRequest {
     pub selector: String,
     #[schemars(description = "Text to type")]
     pub text: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScreenshotRequest {
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
+    pub tab_id: Option<usize>,
+    #[schemars(
+        description = "Capture the entire scrollable page instead of just the visible viewport. (default: false)"
+    )]
+    pub full_page: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -708,11 +721,11 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Take a screenshot of a tab's web page. Saves PNG to a temp file and copies it to the clipboard so the user can paste it anywhere. Returns the file path. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Take a screenshot of a tab's web page and copy it to the clipboard so the user can paste it anywhere. Set full_page to true to capture the entire scrollable page (not just the visible viewport). Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_screenshot(
         &self,
-        Parameters(req): Parameters<TabIdRequest>,
+        Parameters(req): Parameters<ScreenshotRequest>,
     ) -> Result<CallToolResult, McpError> {
         let (tx, rx) = oneshot::channel();
 
@@ -720,6 +733,7 @@ impl McpServer {
             .command_tx
             .send(McpCommand::Screenshot {
                 tab_id: req.tab_id,
+                full_page: req.full_page.unwrap_or(false),
                 response: tx,
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -729,9 +743,7 @@ impl McpServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
-            Ok(path) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Screenshot saved to {path} and copied to clipboard"
-            ))])),
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }

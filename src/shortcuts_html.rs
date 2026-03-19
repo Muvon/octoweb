@@ -239,6 +239,8 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Reload</span><span class="keys"><kbd>⌘</kbd><kbd>R</kbd></span></div>
+          <div class="row"><span class="row-label">Screenshot</span><span class="keys"><kbd>⌘</kbd><kbd>S</kbd></span></div>
+          <div class="row"><span class="row-label">Full page shot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></span></div>
           <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
           <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
           <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
@@ -254,6 +256,8 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
+          <div class="row"><span class="row-label dim">—</span></div>
+          <div class="row"><span class="row-label dim">—</span></div>
           <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>

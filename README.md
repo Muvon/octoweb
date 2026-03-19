@@ -96,6 +96,7 @@ Claude Desktop / octomind / any MCP client
 | `browser_execute_js` | Run arbitrary JavaScript in the page |
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an input by CSS selector |
+| `browser_screenshot` | Take a screenshot (`full_page: true` for entire scrollable page) |
 
 Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
 
@@ -121,6 +122,8 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘K` | Open command palette |
 | `⌘W` | Close current tab |
 | `⌘R` | Reload current page |
+| `⌘S` | Screenshot (viewport) — copy to clipboard |
+| `⌘⇧S` | Screenshot (full page) — copy to clipboard |
 | `⌘F` | Toggle find-in-page bar |
 | `⌘/` | Show keyboard shortcuts |
 | `⌘Q` | Quit |

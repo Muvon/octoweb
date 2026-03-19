@@ -14,6 +14,7 @@ tao = "0.34"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSMenu", "NSMenuItem"] }
+objc2-core-foundation = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSString", "NSURL"] }
 
 # Global hotkey — CGEventTap intercepts Cmd+K even when WKWebView has focus

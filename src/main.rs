@@ -82,6 +82,8 @@ enum AppEvent {
     FindPrev,                       // previous match (⇧Enter in find bar)
     FindCount(usize, usize),        // (current, total) — match count from tab WebView
     WebContentTerminated(usize),    // (tab_id) — WebContent XPC process killed by OS
+    Screenshot,                     // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
+    ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     Quit,
 }
 fn main() {
@@ -864,6 +866,7 @@ fn main() {
                 const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
                 const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
+                const S_KEYCODE: i64 = 1;  // s (Cmd+S = screenshot, Cmd+Shift+S = full page screenshot)
                 const ESC_KEYCODE: i64 = 53; // Escape
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
@@ -907,6 +910,12 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::Reload);
+                    CallbackResult::Drop
+                } else if cmd && shift && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ScreenshotFullPage);
+                    CallbackResult::Drop
+                } else if cmd && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::Screenshot);
                     CallbackResult::Drop
                 } else if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
                     // Esc closes find bar regardless of which WebView has focus
@@ -1501,102 +1510,95 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::Screenshot { tab_id, response } => {
+                    McpCommand::Screenshot { tab_id, full_page, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
-                            let response_cb = response.clone();
 
-                            // WKWebView.takeSnapshot(with:completionHandler:)
-                            // completionHandler: ^(NSImage * _Nullable image, NSError * _Nullable error)
-                            let handler = block2::RcBlock::new(move |image: *mut objc2::runtime::AnyObject, error: *mut objc2::runtime::AnyObject| {
-                                let Some(tx) = response_cb.lock().unwrap().take() else { return };
-
-                                if image.is_null() {
-                                    let msg = if !error.is_null() {
-                                        unsafe {
-                                            let desc: *mut objc2::runtime::AnyObject = objc2::msg_send![&*error, localizedDescription];
-                                            if desc.is_null() {
-                                                "Screenshot failed".to_string()
-                                            } else {
-                                                let bytes: *const u8 = objc2::msg_send![&*desc, UTF8String];
-                                                std::ffi::CStr::from_ptr(bytes.cast()).to_string_lossy().into_owned()
+                            if full_page {
+                                // Full page: createPDF → PDFDocument → stitch → PNG
+                                let response_cb = response.clone();
+                                let handler = block2::RcBlock::new(move |pdf_data: *mut objc2::runtime::AnyObject, error: *mut objc2::runtime::AnyObject| {
+                                    let Some(tx) = response_cb.lock().unwrap().take() else { return };
+                                    if pdf_data.is_null() {
+                                        let msg = if !error.is_null() {
+                                            unsafe {
+                                                let desc: *mut objc2::runtime::AnyObject = objc2::msg_send![&*error, localizedDescription];
+                                                if desc.is_null() { "createPDF failed".to_string() }
+                                                else {
+                                                    let bytes: *const u8 = objc2::msg_send![&*desc, UTF8String];
+                                                    std::ffi::CStr::from_ptr(bytes.cast()).to_string_lossy().into_owned()
+                                                }
                                             }
+                                        } else { "createPDF returned nil".to_string() };
+                                        let _ = tx.send(Err(msg));
+                                        return;
+                                    }
+                                    unsafe {
+                                        let final_image = pdf_data_to_nsimage(pdf_data);
+                                        if final_image.is_null() {
+                                            let _ = tx.send(Err("Failed to render PDF to image".to_string()));
+                                            return;
                                         }
-                                    } else {
-                                        "Screenshot returned nil image".to_string()
-                                    };
-                                    let _ = tx.send(Err(msg));
-                                    return;
-                                }
-
+                                        let png_data = nsimage_to_png_data(final_image);
+                                        if png_data.is_null() {
+                                            let _ = tx.send(Err("Failed to encode PNG".to_string()));
+                                            return;
+                                        }
+                                        copy_png_to_clipboard(png_data);
+                                        tracing::debug!("Full page screenshot copied to clipboard");
+                                        let _ = tx.send(Ok("Screenshot copied to clipboard".to_string()));
+                                    }
+                                });
                                 unsafe {
-                                    // NSImage → TIFF → NSBitmapImageRep → PNG data
-                                    let tiff: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, TIFFRepresentation];
-                                    if tiff.is_null() {
-                                        let _ = tx.send(Err("Failed to get TIFF data".to_string()));
-                                        return;
-                                    }
-                                    let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
-                                        objc2::class!(NSBitmapImageRep),
-                                        imageRepWithData: &*tiff
+                                    let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+                                    let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+                                    let _: () = objc2::msg_send![
+                                        &*wv_obj,
+                                        createPDFWithConfiguration: nil,
+                                        completionHandler: &*handler
                                     ];
-                                    if rep.is_null() {
-                                        let _ = tx.send(Err("Failed to create bitmap rep".to_string()));
-                                        return;
-                                    }
-                                    // NSBitmapImageFileTypePNG = 4
-                                    let empty_dict: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSDictionary), dictionary];
-                                    let png_data: *mut objc2::runtime::AnyObject = objc2::msg_send![
-                                        &*rep,
-                                        representationUsingType: 4u64,
-                                        properties: &*empty_dict
-                                    ];
-                                    if png_data.is_null() {
-                                        let _ = tx.send(Err("Failed to encode PNG".to_string()));
-                                        return;
-                                    }
-
-                                    // Get raw bytes from NSData
-                                    let length: usize = objc2::msg_send![&*png_data, length];
-                                    let bytes_ptr: *const u8 = objc2::msg_send![&*png_data, bytes];
-                                    let png_bytes = std::slice::from_raw_parts(bytes_ptr, length);
-
-                                    // Write to temp file
-                                    let ts = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis();
-                                    let path = std::env::temp_dir().join(format!("octoweb-screenshot-{ts}.png"));
-                                    if let Err(e) = std::fs::write(&path, png_bytes) {
-                                        let _ = tx.send(Err(format!("Failed to write file: {e}")));
-                                        return;
-                                    }
-
-                                    // Copy to clipboard as PNG
-                                    let pb: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
-                                    let _: () = objc2::msg_send![&*pb, clearContents];
-                                    let png_type: *mut objc2::runtime::AnyObject = objc2::msg_send![
-                                        objc2::class!(NSString),
-                                        stringWithUTF8String: c"public.png".as_ptr()
-                                    ];
-                                    let _: bool = objc2::msg_send![&*pb, setData: &*png_data, forType: &*png_type];
-
-                                    let path_str = path.to_string_lossy().into_owned();
-                                    tracing::debug!(path = %path_str, "Screenshot saved and copied to clipboard");
-                                    let _ = tx.send(Ok(path_str));
                                 }
-                            });
-
-                            unsafe {
-                                let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
-                                let nil: *const objc2::runtime::AnyObject = std::ptr::null();
-                                let _: () = objc2::msg_send![
-                                    &*wv_obj,
-                                    takeSnapshotWithConfiguration: nil,
-                                    completionHandler: &*handler
-                                ];
+                            } else {
+                                // Viewport: takeSnapshot → PNG
+                                let response_cb = response.clone();
+                                let handler = block2::RcBlock::new(move |image: *mut objc2::runtime::AnyObject, error: *mut objc2::runtime::AnyObject| {
+                                    let Some(tx) = response_cb.lock().unwrap().take() else { return };
+                                    if image.is_null() {
+                                        let msg = if !error.is_null() {
+                                            unsafe {
+                                                let desc: *mut objc2::runtime::AnyObject = objc2::msg_send![&*error, localizedDescription];
+                                                if desc.is_null() { "Screenshot failed".to_string() }
+                                                else {
+                                                    let bytes: *const u8 = objc2::msg_send![&*desc, UTF8String];
+                                                    std::ffi::CStr::from_ptr(bytes.cast()).to_string_lossy().into_owned()
+                                                }
+                                            }
+                                        } else { "Screenshot returned nil image".to_string() };
+                                        let _ = tx.send(Err(msg));
+                                        return;
+                                    }
+                                    unsafe {
+                                        let png_data = nsimage_to_png_data(image);
+                                        if png_data.is_null() {
+                                            let _ = tx.send(Err("Failed to encode PNG".to_string()));
+                                            return;
+                                        }
+                                        copy_png_to_clipboard(png_data);
+                                        tracing::debug!("Viewport screenshot copied to clipboard");
+                                        let _ = tx.send(Ok("Screenshot copied to clipboard".to_string()));
+                                    }
+                                });
+                                unsafe {
+                                    let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+                                    let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+                                    let _: () = objc2::msg_send![
+                                        &*wv_obj,
+                                        takeSnapshotWithConfiguration: nil,
+                                        completionHandler: &*handler
+                                    ];
+                                }
                             }
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
@@ -2311,6 +2313,23 @@ fn main() {
                 }
             }
 
+            // ── Screenshot (⌘S) — viewport → clipboard ─────────────────────
+            Event::UserEvent(AppEvent::Screenshot) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    let ns_win_ptr = browser_win.ns_window() as usize;
+                    screenshot_to_clipboard(wv_ptr, ns_win_ptr);
+                }
+            }
+
+            // ── Full page screenshot (⌘⇧S) — full page → clipboard ──────────
+            Event::UserEvent(AppEvent::ScreenshotFullPage) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    screenshot_full_page_to_clipboard(wv_ptr);
+                }
+            }
+
             // ── Media playing state changed ───────────────────────────────────
             Event::UserEvent(AppEvent::MediaPlaying(tab_id, is_playing)) => {
                 tabs.lock().unwrap().set_playing_audio(tab_id, is_playing);
@@ -2474,6 +2493,237 @@ fn main() {
             _ => {}
         }
     });
+}
+
+// ── Screenshot helpers ────────────────────────────────────────────────────
+/// Convert an NSImage to PNG NSData. Returns null on failure.
+unsafe fn nsimage_to_png_data(
+    image: *mut objc2::runtime::AnyObject,
+) -> *mut objc2::runtime::AnyObject {
+    let tiff: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, TIFFRepresentation];
+    if tiff.is_null() {
+        return std::ptr::null_mut();
+    }
+    let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        objc2::class!(NSBitmapImageRep),
+        imageRepWithData: &*tiff
+    ];
+    if rep.is_null() {
+        return std::ptr::null_mut();
+    }
+    let empty_dict: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSDictionary), dictionary];
+    // NSBitmapImageFileTypePNG = 4
+    let png_data: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        &*rep,
+        representationUsingType: 4u64,
+        properties: &*empty_dict
+    ];
+    png_data
+}
+
+/// Copy PNG NSData to the system clipboard.
+unsafe fn copy_png_to_clipboard(png_data: *mut objc2::runtime::AnyObject) {
+    if png_data.is_null() {
+        return;
+    }
+    let pb: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
+    let _: () = objc2::msg_send![&*pb, clearContents];
+    let png_type: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        objc2::class!(NSString),
+        stringWithUTF8String: c"public.png".as_ptr()
+    ];
+    let _: bool = objc2::msg_send![&*pb, setData: &*png_data, forType: &*png_type];
+}
+
+/// Viewport screenshot: takeSnapshot → PNG → clipboard.
+/// `ns_win_ptr` is the NSWindow pointer to restore key-window focus after the
+/// async snapshot completes — takeSnapshot can temporarily steal key-window
+/// status, which sets app_focused=false and breaks all keybindings.
+fn screenshot_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
+    let handler = block2::RcBlock::new(
+        move |image: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
+            if image.is_null() {
+                tracing::error!("Viewport screenshot failed: nil image");
+            } else {
+                unsafe {
+                    let png_data = nsimage_to_png_data(image);
+                    if png_data.is_null() {
+                        tracing::error!("Viewport screenshot: failed to encode PNG");
+                    } else {
+                        copy_png_to_clipboard(png_data);
+                        tracing::debug!("Screenshot copied to clipboard");
+                    }
+                }
+            }
+            // Restore key-window focus unconditionally — takeSnapshot can cause the
+            // window to lose key status, which permanently breaks keybindings.
+            unsafe {
+                let ns_win: *mut objc2::runtime::AnyObject =
+                    ns_win_ptr as *mut objc2::runtime::AnyObject;
+                let _: () = objc2::msg_send![ns_win, makeKeyWindow];
+            }
+        },
+    );
+
+    unsafe {
+        let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+        let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+        let _: () = objc2::msg_send![
+            &*wv_obj,
+            takeSnapshotWithConfiguration: nil,
+            completionHandler: &*handler
+        ];
+    }
+}
+
+/// Convert raw PDF NSData into a stitched NSImage (all pages vertically).
+/// Returns null on failure. Caller must use the returned pointer before it's released.
+unsafe fn pdf_data_to_nsimage(
+    pdf_data: *mut objc2::runtime::AnyObject,
+) -> *mut objc2::runtime::AnyObject {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    let pdf_doc: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(PDFDocument), alloc];
+    let pdf_doc: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        pdf_doc,
+        initWithData: &*pdf_data
+    ];
+    if pdf_doc.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let page_count: usize = objc2::msg_send![&*pdf_doc, pageCount];
+    if page_count == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let screen: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSScreen), mainScreen];
+    let scale: f64 = if screen.is_null() {
+        2.0
+    } else {
+        objc2::msg_send![&*screen, backingScaleFactor]
+    };
+
+    let mut total_height: f64 = 0.0;
+    let mut max_width: f64 = 0.0;
+    for i in 0..page_count {
+        let page: *mut objc2::runtime::AnyObject = objc2::msg_send![&*pdf_doc, pageAtIndex: i];
+        let bounds: CGRect = objc2::msg_send![&*page, boundsForBox: 0isize];
+        total_height += bounds.size.height;
+        if bounds.size.width > max_width {
+            max_width = bounds.size.width;
+        }
+    }
+
+    let px_w = (max_width * scale).ceil();
+    let px_h = (total_height * scale).ceil();
+    let size = CGSize {
+        width: px_w,
+        height: px_h,
+    };
+
+    let final_image: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSImage), alloc];
+    let final_image: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        final_image, initWithSize: size
+    ];
+
+    let _: () = objc2::msg_send![&*final_image, lockFocus];
+
+    let white: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSColor), whiteColor];
+    let _: () = objc2::msg_send![&*white, setFill];
+    let full_rect = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size,
+    };
+    let _: () = objc2_app_kit::NSRectFill(full_rect);
+
+    let mut y_offset = px_h;
+    for i in 0..page_count {
+        let page: *mut objc2::runtime::AnyObject = objc2::msg_send![&*pdf_doc, pageAtIndex: i];
+        let bounds: CGRect = objc2::msg_send![&*page, boundsForBox: 0isize];
+        let page_px_w = bounds.size.width * scale;
+        let page_px_h = bounds.size.height * scale;
+        y_offset -= page_px_h;
+
+        let thumb_size = CGSize {
+            width: page_px_w,
+            height: page_px_h,
+        };
+        let thumb: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            &*page,
+            thumbnailOfSize: thumb_size,
+            forBox: 0isize
+        ];
+        if thumb.is_null() {
+            continue;
+        }
+
+        let dest_rect = CGRect {
+            origin: CGPoint {
+                x: 0.0,
+                y: y_offset,
+            },
+            size: CGSize {
+                width: page_px_w,
+                height: page_px_h,
+            },
+        };
+        let _: () = objc2::msg_send![
+            &*thumb,
+            drawInRect: dest_rect,
+            fromRect: CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize { width: 0.0, height: 0.0 },
+            },
+            operation: 2u64,
+            fraction: 1.0f64
+        ];
+    }
+
+    let _: () = objc2::msg_send![&*final_image, unlockFocus];
+    final_image
+}
+
+/// Full page screenshot: createPDF → stitch → PNG → clipboard.
+fn screenshot_full_page_to_clipboard(wv_ptr: usize) {
+    let handler = block2::RcBlock::new(
+        move |pdf_data: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
+            if pdf_data.is_null() {
+                tracing::error!("Full page screenshot failed: createPDF returned nil");
+                return;
+            }
+            unsafe {
+                let final_image = pdf_data_to_nsimage(pdf_data);
+                if final_image.is_null() {
+                    tracing::error!("Full page screenshot: failed to render PDF to image");
+                    return;
+                }
+                let png_data = nsimage_to_png_data(final_image);
+                if png_data.is_null() {
+                    tracing::error!("Full page screenshot: failed to encode PNG");
+                    return;
+                }
+                copy_png_to_clipboard(png_data);
+                tracing::debug!("Full page screenshot copied to clipboard");
+            }
+        },
+    );
+
+    unsafe {
+        let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+        let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+        let _: () = objc2::msg_send![
+            &*wv_obj,
+            createPDFWithConfiguration: nil,
+            completionHandler: &*handler
+        ];
+    }
 }
 
 /// Save session state and exit the event loop.
