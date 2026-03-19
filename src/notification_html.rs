@@ -188,9 +188,9 @@ pub fn html() -> &'static str {
     </svg>
   </button>
   <div class="row" id="content">
-    <span class="app-icon">🐙</span>
+    <span class="app-icon" id="icon">🐙</span>
     <div class="content">
-      <div class="title">Octomind</div>
+      <div class="title" id="title">Octomind</div>
       <div class="preview" id="preview">New message from AI assistant</div>
     </div>
   </div>
@@ -199,8 +199,12 @@ pub fn html() -> &'static str {
 (function() {
   const toast = document.getElementById('toast');
   const preview = document.getElementById('preview');
+  const iconEl = document.getElementById('icon');
+  const titleEl = document.getElementById('title');
   const closeBtn = document.querySelector('.close-btn');
   const content = document.getElementById('content');
+  let dismissTimer = null;
+  let currentMode = 'acp'; // 'acp' or 'download'
 
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -209,21 +213,36 @@ pub fn html() -> &'static str {
   });
 
   content.addEventListener('click', () => {
-    window.ipc.postMessage(JSON.stringify({ type: 'open_sidebar' }));
+    if (currentMode === 'acp') {
+      window.ipc.postMessage(JSON.stringify({ type: 'open_sidebar' }));
+    } else {
+      window.ipc.postMessage(JSON.stringify({ type: 'dismiss_notification' }));
+    }
     hide();
   });
 
   function hide() {
+    if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
     toast.classList.remove('show');
     toast.classList.add('hide');
   }
 
-  window.__show = function(text) {
+  // icon/title/autoDismissMs are optional — defaults to ACP style
+  window.__show = function(text, icon, title, autoDismissMs) {
+    iconEl.textContent = icon || '\uD83D\uDC19';
+    titleEl.textContent = title || 'Octomind';
     preview.textContent = text || 'New message from AI assistant';
+    currentMode = (icon && icon !== '\uD83D\uDC19') ? 'download' : 'acp';
     toast.classList.remove('hide');
-    // Force reflow so transition fires from the start position
     void toast.offsetWidth;
     toast.classList.add('show');
+    if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+    if (autoDismissMs > 0) {
+      dismissTimer = setTimeout(() => {
+        window.ipc.postMessage(JSON.stringify({ type: 'dismiss_notification' }));
+        hide();
+      }, autoDismissMs);
+    }
   };
 
   window.__hide = function() {

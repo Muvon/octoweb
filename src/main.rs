@@ -70,18 +70,18 @@ enum AppEvent {
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
-    DownloadStarted(usize),    // (tab_id) — navigation became a download, close the tab
+    DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
-    DismissNotification,       // user clicked X on notification toast
-    ToggleShortcuts,           // ⌘/ — toggle keyboard shortcuts overlay
-    HideShortcuts,             // JS Esc / backdrop click in shortcuts overlay
-    ToggleFindBar,             // ⌘F — toggle find-in-page bar
-    HideFindBar,               // Esc / close button in find bar
-    FindInPage(String),        // search query from find bar input
-    FindNext,                  // next match (Enter in find bar)
-    FindPrev,                  // previous match (⇧Enter in find bar)
-    FindCount(usize, usize),   // (current, total) — match count from tab WebView
-    WebContentTerminated(usize), // (tab_id) — WebContent XPC process killed by OS
+    DismissNotification,            // user clicked X on notification toast
+    ToggleShortcuts,                // ⌘/ — toggle keyboard shortcuts overlay
+    HideShortcuts,                  // JS Esc / backdrop click in shortcuts overlay
+    ToggleFindBar,                  // ⌘F — toggle find-in-page bar
+    HideFindBar,                    // Esc / close button in find bar
+    FindInPage(String),             // search query from find bar input
+    FindNext,                       // next match (Enter in find bar)
+    FindPrev,                       // previous match (⇧Enter in find bar)
+    FindCount(usize, usize),        // (current, total) — match count from tab WebView
+    WebContentTerminated(usize),    // (tab_id) — WebContent XPC process killed by OS
     Quit,
 }
 fn main() {
@@ -297,9 +297,16 @@ fn main() {
                     let _ = p4.send_event(AppEvent::OpenInNewTab(url));
                     wry::NewWindowResponse::Deny
                 })
-                .with_download_started_handler(move |_url, _path| {
-                    // Navigation became a download — tell main loop to close the tab
-                    let _ = p5.send_event(AppEvent::DownloadStarted(tab_id));
+                .with_download_started_handler(move |url, _path| {
+                    // Extract filename from URL for the toast notification
+                    let filename = url
+                        .rsplit('/')
+                        .next()
+                        .and_then(|s| s.split('?').next())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("file")
+                        .to_string();
+                    let _ = p5.send_event(AppEvent::DownloadStarted(tab_id, filename));
                     true // allow the download
                 })
                 .with_download_completed_handler(move |_url, path, success| {
@@ -2117,18 +2124,26 @@ fn main() {
                 }
             }
 
-            // ── Download started — close the tab that became a download ──────
-            Event::UserEvent(AppEvent::DownloadStarted(tab_id)) => {
-                tracing::debug!(tab_id, "Download started, closing download tab");
-                let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
+            // ── Download started — show toast, keep the tab open ────────────
+            Event::UserEvent(AppEvent::DownloadStarted(_tab_id, filename)) => {
+                tracing::debug!(%filename, "Download started");
+                let msg = format!("Downloading: {filename}…");
+                let escaped = webview_utils::escape_js_template(&msg);
+                if !notification_visible {
+                    let _ = notification_wv.set_visible(true);
+                    notification_visible = true;
+                }
+                let _ = notification_wv.evaluate_script(&format!(
+                    "window.__show && window.__show(`{escaped}`, `\u{2B07}\u{FE0F}`, `Download`)"
+                ));
             }
 
             // ── Download completed — show notification toast ─────────────────
             Event::UserEvent(AppEvent::DownloadCompleted(filename, success)) => {
-                let msg = if success {
-                    format!("Downloaded: {filename}")
+                let (msg, icon) = if success {
+                    (format!("Downloaded: {filename}"), "\u{2705}")
                 } else {
-                    format!("Download failed: {filename}")
+                    (format!("Download failed: {filename}"), "\u{274C}")
                 };
                 tracing::debug!(%msg, "Download completed");
                 let escaped = webview_utils::escape_js_template(&msg);
@@ -2137,7 +2152,7 @@ fn main() {
                     notification_visible = true;
                 }
                 let _ = notification_wv.evaluate_script(&format!(
-                    "window.__show && window.__show(`{escaped}`)"
+                    "window.__show && window.__show(`{escaped}`, `{icon}`, `Download`, 4000)"
                 ));
             }
 
