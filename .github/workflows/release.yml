@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  APP_NAME: Octoweb
+  BUNDLE_ID: com.muvon.octoweb
+  BINARY_NAME: octoweb
+  SIGN_IDENTITY: "Developer ID Application: MUVON COMPANY LIMITED (34TUP8A7GK)"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-15-arm64
+            arch: aarch64
+            artifact_name: "${{ env.APP_NAME }}-${{ github.ref_name }}-aarch64-apple-darwin"
+          - platform: macos-15-x86_64
+            arch: x86_64
+            artifact_name: "${{ env.APP_NAME }}-${{ github.ref_name }}-x86_64-apple-darwin"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build release
+        run: |
+          cargo build --release --locked
+        env:
+          CARGO_BUILD_JOBS: 4
+
+      - name: Build app bundle
+        run: |
+          # Create .app bundle structure
+          APP_BUNDLE="${{ runner.temp }}/${{ env.APP_NAME }}.app"
+          mkdir -p "$APP_BUNDLE/Contents/MacOS"
+          mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+          # Copy binary
+          cp "target/release/${{ env.BINARY_NAME }}" "$APP_BUNDLE/Contents/MacOS/${{ env.BINARY_NAME }}"
+
+          # Copy assets
+          cp "assets/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+          cp "assets/icon.icns" "$APP_BUNDLE/Contents/Resources/icon.icns"
+
+          # Update Info.plist with version
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ github.ref_name }}" "$APP_BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$APP_BUNDLE/Contents/Info.plist"
+
+          # Sign (if cert available)
+          if [ -n "${{ secrets.CERTIFICATE_FOR_MACOS }}" ]; then
+            echo "${{ secrets.CERTIFICATE_FOR_MACOS }}" | base64 --decode -o certificate.p12
+            echo "${{ secrets.CERTIFICATE_PASSWORD }}" | \
+              xargs security import certificate.p12 -P
+            rm certificate.p12
+
+            codesign --force --sign "${{ env.SIGN_IDENTITY }}" \
+              --entitlements "assets/entitlements.plist" \
+              --options runtime \
+              "$APP_BUNDLE/Contents/MacOS/${{ env.BINARY_NAME }}"
+
+            codesign --force --sign "${{ env.SIGN_IDENTITY }}" \
+              "$APP_BUNDLE"
+          fi
+
+      - name: Create archive
+        run: |
+          ARCHIVE_NAME="${{ matrix.artifact_name }}.tar.gz"
+          tar -czf "$ARCHIVE_NAME" -C "${{ runner.temp }}" "${{ env.APP_NAME }}.app"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+
+      - name: Compute checksum
+        run: |
+          echo "${{ matrix.artifact_name }}.tar.gz sha256:"
+          shasum -a 256 "${{ env.ARCHIVE_NAME }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ env.ARCHIVE_NAME }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -laR artifacts/
+
+      - name: Create checksums file
+        run: |
+          cd artifacts
+          find . -name "*.tar.gz" -exec shasum -a 256 {} \; > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
