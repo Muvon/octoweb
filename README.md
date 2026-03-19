@@ -241,4 +241,4 @@ It won't replace your main browser. It might become the browser you reach for wh
 
 ## License
 
-MIT
+Apache 2.0
