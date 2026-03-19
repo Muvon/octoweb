@@ -1,5 +1,6 @@
-//! Injects `didFailProvisionalNavigation:withError:` and `didFailNavigation:withError:`
-//! into wry's `WryNavigationDelegate` class at runtime via `class_addMethod`.
+//! Injects `didFailProvisionalNavigation:withError:`, `didFailNavigation:withError:`,
+//! and `webContentProcessDidTerminate:` into wry's `WryNavigationDelegate` class at
+//! runtime via `class_addMethod`.
 //!
 //! wry 0.54 does not implement these WKNavigationDelegate methods, so DNS failures,
 //! timeouts, SSL errors, etc. produce a blank page with no callback. This patch adds
@@ -18,12 +19,19 @@ use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
 
 type ErrorCallback = Box<dyn Fn(String, i64) + Send>;
+type TerminationCallback = Box<dyn Fn() + Send>;
 
 // Global registry: WKWebView pointer (as usize) → error callback
 static REGISTRY: OnceLock<Mutex<HashMap<usize, ErrorCallback>>> = OnceLock::new();
+// Separate registry for WebContent process termination callbacks
+static TERMINATION_REGISTRY: OnceLock<Mutex<HashMap<usize, TerminationCallback>>> = OnceLock::new();
 
 fn registry() -> &'static Mutex<HashMap<usize, ErrorCallback>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn termination_registry() -> &'static Mutex<HashMap<usize, TerminationCallback>> {
+    TERMINATION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register an error callback for a WKWebView instance.
@@ -37,6 +45,21 @@ pub fn register(ptr: usize, callback: impl Fn(String, i64) + Send + 'static) {
 /// Remove the callback for a WKWebView that is being destroyed.
 pub fn unregister(ptr: usize) {
     registry().lock().unwrap().remove(&ptr);
+}
+
+/// Register a callback for when the WebContent process is terminated by the OS.
+/// This fires when WKWebView's XPC process dies (memory pressure, GPU crash, etc.).
+pub fn register_termination(ptr: usize, callback: impl Fn() + Send + 'static) {
+    tracing::debug!(ptr, "Registering process-termination callback");
+    termination_registry()
+        .lock()
+        .unwrap()
+        .insert(ptr, Box::new(callback));
+}
+
+/// Remove the termination callback for a WKWebView that is being destroyed.
+pub fn unregister_termination(ptr: usize) {
+    termination_registry().lock().unwrap().remove(&ptr);
 }
 
 /// Inject error methods by getting the delegate class from a WebView instance.
@@ -99,7 +122,21 @@ pub fn inject_from_webview(webview_ptr: usize) {
             types.as_ptr(),
         );
 
-        tracing::debug!("Nav-error methods injected");
+        // webView:webContentProcessDidTerminate: — fires when the WebContent
+        // XPC process is killed by the OS (memory pressure, GPU crash, watchdog).
+        // Signature: void (self, sel, webview) → "v@:@"
+        let term_types = c"v@:@";
+        objc2::ffi::class_addMethod(
+            delegate_class as *mut _,
+            sel!(webView:webContentProcessDidTerminate:),
+            std::mem::transmute::<
+                extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+                unsafe extern "C-unwind" fn(),
+            >(did_terminate),
+            term_types.as_ptr(),
+        );
+
+        tracing::debug!("Nav-error + termination methods injected");
         DONE.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -127,6 +164,20 @@ extern "C-unwind" fn did_fail(
     error: *mut AnyObject,
 ) {
     fire_error_callback(webview, error);
+}
+
+/// C callback for `webView:webContentProcessDidTerminate:`.
+/// Fires when the WebContent XPC process is killed (memory pressure, GPU crash,
+/// watchdog timeout). During WebRTC video calls this is the most common crash vector.
+extern "C-unwind" fn did_terminate(_delegate: *mut AnyObject, _sel: Sel, webview: *mut AnyObject) {
+    if webview.is_null() {
+        return;
+    }
+    let ptr = webview as usize;
+    tracing::warn!(ptr, "WebContent process terminated — will attempt reload");
+    if let Some(cb) = termination_registry().lock().unwrap().get(&ptr) {
+        cb();
+    }
 }
 
 fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {

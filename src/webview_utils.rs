@@ -80,11 +80,19 @@ pub const MEDIA_TRACK_SCRIPT: &str = r#"
 (function() {
   'use strict';
 
-  // Track which media elements are currently playing
-  var playing = new Set();
+  // Track playing media via WeakRef — no strong references to DOM elements,
+  // so removed elements are GC'd naturally without a MutationObserver.
+  // This avoids the heavy subtree MutationObserver that fires on every DOM
+  // mutation during WebRTC calls (Google Meet churns DOM heavily).
+  var nextId = 0;
+  var playing = new Map();  // id → WeakRef<Element>
   var lastState = false;
 
   function sendState() {
+    // Prune dead WeakRefs on each state check
+    playing.forEach(function(ref, id) {
+      if (!ref.deref()) playing.delete(id);
+    });
     var nowPlaying = playing.size > 0;
     if (nowPlaying !== lastState) {
       lastState = nowPlaying;
@@ -98,41 +106,44 @@ pub const MEDIA_TRACK_SCRIPT: &str = r#"
     return tag === 'VIDEO' || tag === 'AUDIO';
   }
 
+  // Map element → id for O(1) removal on pause/ended
+  var elToId = new WeakMap();
+
+  function addPlaying(el) {
+    if (!elToId.has(el)) {
+      var id = nextId++;
+      elToId.set(el, id);
+      playing.set(id, new WeakRef(el));
+    }
+    sendState();
+  }
+
+  function removePlaying(el) {
+    if (elToId.has(el)) {
+      var id = elToId.get(el);
+      playing.delete(id);
+    }
+    sendState();
+  }
+
   // Capture phase catches events before they can be stopPropagation'd.
   // Media events (play/pause/ended) don't bubble, but they DO get captured.
   document.addEventListener('play', function(e) {
-    if (isMedia(e.target)) { playing.add(e.target); sendState(); }
+    if (isMedia(e.target)) addPlaying(e.target);
   }, true);
 
   document.addEventListener('pause', function(e) {
-    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+    if (isMedia(e.target)) removePlaying(e.target);
   }, true);
 
   document.addEventListener('ended', function(e) {
-    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+    if (isMedia(e.target)) removePlaying(e.target);
   }, true);
 
   // Emptied/error — media element reset or failed
   document.addEventListener('emptied', function(e) {
-    if (isMedia(e.target)) { playing.delete(e.target); sendState(); }
+    if (isMedia(e.target)) removePlaying(e.target);
   }, true);
-
-  // Clean up removed elements so the Set doesn't hold stale refs
-  var observer = new MutationObserver(function(mutations) {
-    var changed = false;
-    mutations.forEach(function(mutation) {
-      mutation.removedNodes.forEach(function(node) {
-        if (node.nodeType !== 1) return;
-        if (isMedia(node) && playing.delete(node)) changed = true;
-        var children = node.querySelectorAll ? node.querySelectorAll('audio, video') : [];
-        for (var i = 0; i < children.length; i++) {
-          if (playing.delete(children[i])) changed = true;
-        }
-      });
-    });
-    if (changed) sendState();
-  });
-  observer.observe(document.documentElement || document, { childList: true, subtree: true });
 })();
 "#;
 

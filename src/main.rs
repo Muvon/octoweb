@@ -80,6 +80,7 @@ enum AppEvent {
     FindNext,                  // next match (Enter in find bar)
     FindPrev,                  // previous match (⇧Enter in find bar)
     FindCount(usize, usize),   // (current, total) — match count from tab WebView
+    WebContentTerminated(usize), // (tab_id) — WebContent XPC process killed by OS
     Quit,
 }
 fn main() {
@@ -362,6 +363,10 @@ fn main() {
             let p = proxy.clone();
             nav_error_patch::register(wv_ptr, move |url, code| {
                 let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
+            });
+            let pt = proxy.clone();
+            nav_error_patch::register_termination(wv_ptr, move || {
+                let _ = pt.send_event(AppEvent::WebContentTerminated(tab_id));
             });
             let _ = wv.set_visible(true);
             tab_webviews.insert(tab_id, wv);
@@ -710,6 +715,8 @@ fn main() {
     // Last values sent to the address bar — skip evaluate_script when unchanged
     // to avoid accumulating leaked WKWebView JS evaluation contexts (wry#1489).
     let mut sys_stats_last_sent: Option<(u32, u64)> = None;
+    // Tabs with active media playback — used to throttle sys_stats polling
+    let mut media_playing_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
@@ -949,6 +956,10 @@ fn main() {
             nav_error_patch::register(wv_ptr, move |url, code| {
                 let _ = p.send_event(AppEvent::NavigationError(id, url, code.to_string()));
             });
+            let pt = proxy.clone();
+            nav_error_patch::register_termination(wv_ptr, move || {
+                let _ = pt.send_event(AppEvent::WebContentTerminated(id));
+            });
             tab_webviews.insert(id, wv);
             id
         }};
@@ -973,6 +984,10 @@ fn main() {
                     nav_error_patch::register(wv_ptr, move |url, code| {
                         let _ =
                             p.send_event(AppEvent::NavigationError(target, url, code.to_string()));
+                    });
+                    let pt = proxy.clone();
+                    nav_error_patch::register_termination(wv_ptr, move || {
+                        let _ = pt.send_event(AppEvent::WebContentTerminated(target));
                     });
                     let _ = wv.set_visible(false);
                     tab_webviews.insert(target, wv);
@@ -1098,10 +1113,13 @@ fn main() {
                 progress_hide_at = None;
             }
         }
-        // ── Sample active tab's WebContent process stats every 2 s ────────
+        // ── Sample active tab's WebContent process stats ─────────────────
+        // Throttle to 5 s during media playback to reduce evaluate_script overhead
         let now = std::time::Instant::now();
         if now >= sys_stats_next_at {
-            sys_stats_next_at = now + std::time::Duration::from_secs(2);
+            let media_active = media_playing_tabs.contains(&active_wv_id);
+            let interval = if media_active { 5 } else { 2 };
+            sys_stats_next_at = now + std::time::Duration::from_secs(interval);
             if let Some(wv) = tab_webviews.get(&active_wv_id) {
                 let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                 if let Some(pid) = tab_stats::webview_pid(wv_ptr) {
@@ -1113,9 +1131,11 @@ fn main() {
                         };
                         sys_stats_last = Some(tab_stats::TabStatsSample { cpu_ns, ts: now });
                         let mem_mb = rss / (1024 * 1024);
+                        // Coarsen during media: round to nearest 5 MB to reduce updates
+                        let mem_mb = if media_active { (mem_mb / 5) * 5 } else { mem_mb };
                         let cpu_i = cpu_pct.round() as u32;
                         // Skip evaluate_script when values unchanged — avoids leaking
-                        // WKWebView JS evaluation contexts on every 2 s tick (wry#1489).
+                        // WKWebView JS evaluation contexts on every tick (wry#1489).
                         if sys_stats_last_sent != Some((cpu_i, mem_mb)) {
                             sys_stats_last_sent = Some((cpu_i, mem_mb));
                             let _ = address_bar_wv.evaluate_script(&format!(
@@ -1754,6 +1774,7 @@ fn main() {
                     if let Some(wv) = tab_webviews.get(&id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
+                        nav_error_patch::unregister_termination(wv_ptr);
                     }
                     tab_webviews.remove(&id);
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
@@ -2243,6 +2264,22 @@ fn main() {
                 }
             }
 
+            // ── WebContent process terminated (OS killed XPC process) ────────
+            Event::UserEvent(AppEvent::WebContentTerminated(tab_id)) => {
+                let url = tabs.lock().unwrap().tabs().iter()
+                    .find(|t| t.id == tab_id)
+                    .map(|t| t.url.clone())
+                    .unwrap_or_default();
+                tracing::warn!(tab_id, %url, "WebContent process terminated — reloading");
+                if let Some(wv) = tab_webviews.get(&tab_id) {
+                    if url.is_empty() || url == "about:blank" {
+                        let _ = wv.load_url("about:blank");
+                    } else {
+                        let _ = wv.load_url(&url);
+                    }
+                }
+            }
+
             // ── Reload current page ───────────────────────────────────────────
             Event::UserEvent(AppEvent::Reload) => {
                 if let Some(wv) = tab_webviews.get(&active_wv_id) {
@@ -2253,6 +2290,11 @@ fn main() {
             // ── Media playing state changed ───────────────────────────────────
             Event::UserEvent(AppEvent::MediaPlaying(tab_id, is_playing)) => {
                 tabs.lock().unwrap().set_playing_audio(tab_id, is_playing);
+                if is_playing {
+                    media_playing_tabs.insert(tab_id);
+                } else {
+                    media_playing_tabs.remove(&tab_id);
+                }
             }
 
             // ── Page info (size + load time) from injected script ─────────────
