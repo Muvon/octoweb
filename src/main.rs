@@ -1766,11 +1766,7 @@ fn main() {
                             pending_swap = Some((old_id, new_id));
                         }
                     }
-                    let next_id = {
-                        let mut tm = tabs.lock().unwrap();
-                        tm.close(id);
-                        tm.active_tab().map(|t| t.id)
-                    };
+                    tabs.lock().unwrap().close(id);
                     if let Some(wv) = tab_webviews.get(&id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
@@ -1779,13 +1775,14 @@ fn main() {
                     tab_webviews.remove(&id);
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
                     mru.retain(|&x| x != id);
-                    match next_id {
+                    // Switch to the most-recently-used tab (MRU[0] after removal)
+                    match mru.first().copied() {
                         Some(next) => {
+                            tabs.lock().unwrap().switch(next);
                             // switch_visible_tab! handles lazy loading (pending_tabs) and
                             // sets active_wv_id + updates address bar — covers both loaded
                             // and not-yet-loaded tabs.
                             switch_visible_tab!(next);
-                            macos::mru_push(&mut mru, next);
                             if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                         }
                         None => *control_flow = ControlFlow::Exit,

@@ -71,12 +71,13 @@ impl TabManager {
         id
     }
 
-    /// Close a tab by id. Switches to the previous tab if it was active.
+    /// Close a tab by id. Clears active_id if the closed tab was active
+    /// (caller picks the next tab via MRU).
     pub fn close(&mut self, id: usize) {
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
             self.tabs.remove(pos);
             if self.active_id == Some(id) {
-                self.active_id = self.tabs.get(pos.saturating_sub(1)).map(|t| t.id);
+                self.active_id = None;
             }
         }
     }
