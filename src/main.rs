@@ -1,6 +1,7 @@
 mod acp;
 mod address_bar_html;
 mod browser;
+mod cold_open;
 mod config;
 mod error_page_html;
 mod find_bar_html;
@@ -99,6 +100,7 @@ fn main() {
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
 
     let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
+    cold_open::install();
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
@@ -276,12 +278,13 @@ fn main() {
                 })
                 .with_on_page_load_handler(move |event, url| {
                     use wry::PageLoadEvent;
+                    let url = url.to_string();
                     match event {
                         PageLoadEvent::Started => {
+                            let _ = p1.send_event(AppEvent::BrowserUrlChanged(tab_id, url));
                             let _ = p1.send_event(AppEvent::PageLoadStarted(tab_id));
                         }
                         PageLoadEvent::Finished => {
-                            let _ = p1.send_event(AppEvent::BrowserUrlChanged(tab_id, url.to_string()));
                             let _ = p1.send_event(AppEvent::PageLoadFinished(tab_id));
                         }
                     }
@@ -1096,6 +1099,13 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         // Never spin (Poll) — use a bounded wake time so ACP/progress events are
         // still responsive (≤16 ms latency) without burning CPU during WebRTC calls.
+
+        // Drain URLs captured before the event loop callback was registered (cold launch).
+        // Checked every tick — macOS may deliver the URL after the run loop starts.
+        for url in cold_open::take() {
+            tracing::debug!(url = %url, "cold_open: draining URL");
+            let _ = proxy.send_event(AppEvent::NavigateTo(url));
+        }
         let next_wake = if let Some(hide_at) = progress_hide_at {
             sys_stats_next_at.min(hide_at)
         } else {
@@ -2153,6 +2163,8 @@ fn main() {
                 tabs.lock().unwrap().update_url(tab_id, url.clone());
                 if tab_id == active_wv_id {
                     update_address_bar_url!(url);
+                    // Reset window title — TitleChanged will set the real one once the page loads.
+                    browser_win.set_title(&url);
                 }
             }
 

@@ -117,6 +117,7 @@ impl TabManager {
                 self.history.pop_front();
             }
             tab.url = url;
+            tab.title = String::new();
             tab.page_bytes = 0;
             tab.page_time_ms = 0;
         }
