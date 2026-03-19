@@ -62,5 +62,44 @@
     <!-- Suppress dock icon bounce on launch -->
     <key>LSUIElement</key>
     <false/>
+
+    <!-- Register as a web browser — required for "Default web browser" in System Settings -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>Web site URL</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>http</string>
+                <string>https</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- Handle HTML document types — also needed for browser recognition -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>HTML document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.html</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>XHTML document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.xhtml</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

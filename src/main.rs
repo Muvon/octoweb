@@ -2304,6 +2304,17 @@ fn main() {
                 }
             }
 
+            // ── OS opened URLs (default browser / open command) ─────────
+            Event::Opened { urls } => {
+                for url in urls {
+                    let raw = url.to_string();
+                    tracing::debug!(url = %raw, "OS opened URL");
+                    let _ = proxy.send_event(AppEvent::NavigateTo(raw));
+                }
+                // Bring window to front when opened externally
+                browser_win.set_focus();
+            }
+
             // ── Window events ─────────────────────────────────────────────
             Event::WindowEvent {
                 window_id,
