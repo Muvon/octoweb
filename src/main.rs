@@ -1029,6 +1029,12 @@ fn main() {
             if let Some(wv) = tab_webviews.get(&target) {
                 let _ = wv.set_visible(true);
             }
+            // Hide progress bar when switching away from a loading tab
+            if progress_visible {
+                let _ = progress_wv.set_visible(false);
+                progress_visible = false;
+                progress_hide_at = None;
+            }
             active_wv_id = target;
             // Update address bar with the new tab's URL
             let url = tabs
@@ -1914,6 +1920,7 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = mru[(pos + 1) % mru.len()];
                 switch_visible_tab!(target);
+                macos::mru_push(&mut mru, target);
                 browser_win.set_focus();
             }
 
@@ -1929,6 +1936,7 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = if pos == 0 { *mru.last().unwrap() } else { mru[pos - 1] };
                 switch_visible_tab!(target);
+                macos::mru_push(&mut mru, target);
                 browser_win.set_focus();
             }
 
