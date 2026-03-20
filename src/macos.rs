@@ -65,6 +65,24 @@ pub fn init_env() {
     tracing::debug!(shell, imported, "inherited user shell environment");
 }
 
+/// Hand a URL with a custom scheme (e.g. `tg://`, `figma://`, `mailto:`) to
+/// macOS so the registered app can handle it. Returns `true` if the OS accepted
+/// the URL (an app was found and launched).
+pub fn open_external_url(url: &str) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+
+    let ns_str = NSString::from_str(url);
+    let Some(ns_url) = NSURL::URLWithString(&ns_str) else {
+        tracing::warn!(url, "open_external_url: invalid URL");
+        return false;
+    };
+    let workspace = NSWorkspace::sharedWorkspace();
+    let ok = workspace.openURL(&ns_url);
+    tracing::debug!(url, ok, "open_external_url");
+    ok
+}
+
 /// Set the macOS dock/app icon from the embedded PNG.
 pub fn set_app_icon() {
     use objc2_app_kit::{NSApplication, NSImage};

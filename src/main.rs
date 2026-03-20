@@ -221,6 +221,15 @@ fn main() {
                 .with_initialization_script(webview_utils::PAGE_INFO_SCRIPT)
                 // Find-in-page: CSS Custom Highlight API for zero-DOM-mutation search.
                 .with_initialization_script(webview_utils::FIND_IN_PAGE_SCRIPT)
+                // Intercept navigation to external URL schemes (tg://, figma://, mailto:, etc.)
+                // and hand them off to macOS instead of loading them in the WebView.
+                .with_navigation_handler(|nav_url: String| {
+                    if url::is_external_scheme(&nav_url) {
+                        macos::open_external_url(&nav_url);
+                        return false; // prevent WebView from navigating
+                    }
+                    true
+                })
                 .with_ipc_handler(move |msg| {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                         match v["type"].as_str() {
@@ -1325,6 +1334,17 @@ fn main() {
                     McpCommand::Navigate { url, tab_id, new_tab, background, response } => {
                         tracing::debug!(url = %url, ?tab_id, new_tab, background, "MCP navigate");
 
+                        // External scheme → hand off to macOS, not loadable in WebView
+                        if url::is_external_scheme(&url) {
+                            let ok = macos::open_external_url(&url);
+                            let _ = response.send(if ok {
+                                Ok(active_wv_id)
+                            } else {
+                                Err(format!("No app registered for URL: {url}"))
+                            });
+                            continue;
+                        }
+
                         if new_tab {
                             // Open a new tab with its own WebView
                             let resolved = url::resolve_url(&url, &search_engine);
@@ -1752,6 +1772,12 @@ fn main() {
             Event::UserEvent(AppEvent::NavigateTo(raw)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
+                if url::is_external_scheme(&raw) {
+                    macos::open_external_url(&raw);
+                    browser_win.set_focus();
+                    return;
+                }
                 let url = url::resolve_url(&raw, &search_engine);
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently *visible* tab on screen while new one loads.
@@ -1795,6 +1821,12 @@ fn main() {
 
             // ── Open in new tab: Cmd+click or target=_blank ───────────────
             Event::UserEvent(AppEvent::OpenInNewTab(url)) => {
+                // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
+                if url::is_external_scheme(&url) {
+                    macos::open_external_url(&url);
+                    browser_win.set_focus();
+                    return;
+                }
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently visible tab on screen while new one loads.
                 // Clean up orphaned tab if a swap was already pending.
@@ -2362,6 +2394,12 @@ fn main() {
             }
 
             Event::UserEvent(AppEvent::NavigationError(tab_id, url, error)) => {
+                // External scheme that slipped through → try opening with macOS
+                if url::is_external_scheme(&url) {
+                    macos::open_external_url(&url);
+                    browser_win.set_focus();
+                    return;
+                }
                 // Hide progress bar immediately on error (only if active tab)
                 if tab_id == active_wv_id && progress_visible {
                     let _ = progress_wv.set_visible(false);

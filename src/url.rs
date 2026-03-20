@@ -82,6 +82,33 @@ fn looks_like_domain(input: &str) -> bool {
     })
 }
 
+/// Returns `true` if the URL uses a scheme that should be opened by an external
+/// macOS app rather than loaded inside the browser (e.g. `tg://`, `figma://`,
+/// `mailto:`, `tel:`, `slack://`).
+///
+/// We whitelist the schemes the browser handles natively; everything else is external.
+pub fn is_external_scheme(url: &str) -> bool {
+    let Some(idx) = url.find(':') else {
+        return false;
+    };
+    let scheme = &url[..idx];
+    if scheme.is_empty() {
+        return false;
+    }
+    // Must be a valid scheme (ASCII alphanumeric + '+' / '-' / '.')
+    if !scheme
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+    {
+        return false;
+    }
+    // Schemes the browser handles natively — everything else is external.
+    !matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "about" | "data" | "blob" | "javascript" | "file"
+    )
+}
+
 /// Percent-encode a query string for use in a URL (encodes everything except unreserved chars)
 fn encode_uri(s: &str) -> String {
     use std::fmt::Write;
