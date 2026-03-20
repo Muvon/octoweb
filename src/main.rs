@@ -5,6 +5,7 @@ mod cold_open;
 mod config;
 mod error_page_html;
 mod find_bar_html;
+mod hibernation;
 mod macos;
 mod mcp;
 mod nav_error_patch;
@@ -1173,6 +1174,54 @@ fn main() {
             }
         }
 
+        // ── Tab hibernation: offload idle tabs under memory pressure ─────
+        // Piggybacks on the sys_stats timer — checked every 2 s.
+        // Under memory pressure, destroys WebViews of idle background tabs
+        // (moving them to pending_tabs for lazy reload on next switch).
+        {
+            let pressure = hibernation::system_memory_pressure();
+            if pressure != hibernation::MemoryPressure::Normal {
+                let victims = {
+                    let tm = tabs.lock().unwrap();
+                    hibernation::pick_victims(
+                        tm.tabs(),
+                        &tab_webviews,
+                        &pending_tabs,
+                        &mru,
+                        active_wv_id,
+                        &media_playing_tabs,
+                        pressure,
+                    )
+                };
+                for victim_id in victims {
+                    // Save URL so switch_visible_tab! can restore later
+                    let url = tabs.lock().unwrap()
+                        .tabs()
+                        .iter()
+                        .find(|t| t.id == victim_id)
+                        .map(|t| t.url.clone())
+                        .unwrap_or_default();
+                    if url.is_empty() {
+                        continue;
+                    }
+                    // Unregister nav error callbacks before destroying WebView
+                    if let Some(wv) = tab_webviews.get(&victim_id) {
+                        let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                        nav_error_patch::unregister(wv_ptr);
+                        nav_error_patch::unregister_termination(wv_ptr);
+                    }
+                    tab_webviews.remove(&victim_id); // WebView dropped → XPC process freed
+                    pending_tabs.insert(victim_id, url.clone());
+                    tracing::debug!(
+                        tab_id = victim_id,
+                        url = %url,
+                        pressure = ?pressure,
+                        "hibernated tab under memory pressure",
+                    );
+                }
+            }
+        }
+
         // Set dock icon and app menu once — must happen after tao has initialized NSApplication.
         if !icon_set {
             macos::set_app_icon();
@@ -1700,8 +1749,26 @@ fn main() {
                 let url = url::resolve_url(&raw, &search_engine);
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently *visible* tab on screen while new one loads.
-                // If a swap is already pending, the visible tab is the old one from that swap.
-                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
+                // If a swap is already pending, the visible tab is the old one from that swap;
+                // the old new_id tab is now orphaned — clean it up.
+                let visible_id = if let Some((old, orphan)) = pending_swap.take() {
+                    // Orphaned tab: was loading but superseded by this new navigation.
+                    if orphan != old {
+                        tabs.lock().unwrap().close(orphan);
+                        if let Some(wv) = tab_webviews.get(&orphan) {
+                            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                            nav_error_patch::unregister(wv_ptr);
+                            nav_error_patch::unregister_termination(wv_ptr);
+                        }
+                        tab_webviews.remove(&orphan);
+                        pending_tabs.remove(&orphan);
+                        mru.retain(|&x| x != orphan);
+                        tracing::debug!(orphan, "NavigateTo: cleaned up orphaned tab");
+                    }
+                    old
+                } else {
+                    active_wv_id
+                };
                 spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
@@ -1724,7 +1791,24 @@ fn main() {
             Event::UserEvent(AppEvent::OpenInNewTab(url)) => {
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently visible tab on screen while new one loads.
-                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
+                // Clean up orphaned tab if a swap was already pending.
+                let visible_id = if let Some((old, orphan)) = pending_swap.take() {
+                    if orphan != old {
+                        tabs.lock().unwrap().close(orphan);
+                        if let Some(wv) = tab_webviews.get(&orphan) {
+                            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                            nav_error_patch::unregister(wv_ptr);
+                            nav_error_patch::unregister_termination(wv_ptr);
+                        }
+                        tab_webviews.remove(&orphan);
+                        pending_tabs.remove(&orphan);
+                        mru.retain(|&x| x != orphan);
+                        tracing::debug!(orphan, "OpenInNewTab: cleaned up orphaned tab");
+                    }
+                    old
+                } else {
+                    active_wv_id
+                };
                 spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
@@ -2228,6 +2312,13 @@ fn main() {
                     }
                 }
                 if tab_id == active_wv_id {
+                    // Dismiss find bar — highlights are per-page and become stale on navigation
+                    if find_bar_visible {
+                        let _ = find_bar_wv.set_visible(false);
+                        let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                        find_bar_visible = false;
+                        find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                    }
                     // Check if this is about:blank — skip progress bar for instant pages
                     let url = tabs.lock().unwrap().tabs().iter()
                         .find(|t| t.id == tab_id)

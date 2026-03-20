@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// A single browser tab (metadata only — the WebView is owned separately)
 #[derive(Debug, Clone)]
@@ -10,6 +10,8 @@ pub struct Tab {
     pub is_playing_audio: bool,
     pub page_bytes: u64,
     pub page_time_ms: u64,
+    /// When this tab was last the active (visible) tab.
+    pub last_active_at: Instant,
 }
 
 /// A history entry
@@ -51,6 +53,7 @@ impl TabManager {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            last_active_at: Instant::now(),
         });
         self.active_id = Some(id);
         id
@@ -66,6 +69,7 @@ impl TabManager {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            last_active_at: Instant::now(),
         });
         self.active_id = Some(id);
         id
@@ -85,6 +89,12 @@ impl TabManager {
     /// Switch active tab
     pub fn switch(&mut self, id: usize) {
         if self.tabs.iter().any(|t| t.id == id) {
+            // Stamp the outgoing tab so hibernation knows when it was last viewed
+            if let Some(old_id) = self.active_id {
+                if let Some(old_tab) = self.tabs.iter_mut().find(|t| t.id == old_id) {
+                    old_tab.last_active_at = Instant::now();
+                }
+            }
             self.active_id = Some(id);
         }
     }

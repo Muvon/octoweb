@@ -230,13 +230,22 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
   (document.head || document.documentElement).appendChild(s);
 
   // --- Text node cache ---
-  // Walk DOM once per search; invalidate on mutation so next search rebuilds.
+  // Walk DOM fresh for each search to avoid stale nodes from late-loading
+  // content (lazy images, SPA hydration, deferred scripts).
+  // MutationObserver invalidates between searches for repeated queries.
   // TreeWalker with numeric whatToShow (not a filter function) is ~10x faster —
   // the browser applies it natively without JS callback overhead.
   let textNodeCache = null;
+  let observerAttached = false;
 
-  function getTextNodes() {
-    if (textNodeCache) return textNodeCache;
+  function attachObserver() {
+    if (observerAttached || !document.body) return;
+    new MutationObserver(function() { textNodeCache = null; })
+      .observe(document.body, { childList: true, subtree: true });
+    observerAttached = true;
+  }
+
+  function collectTextNodes() {
     const root = document.body;
     if (!root) return [];
     const nodes = [];
@@ -246,15 +255,24 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
       const tag = node.parentElement && node.parentElement.tagName;
       if (tag !== 'SCRIPT' && tag !== 'STYLE' && tag !== 'NOSCRIPT') nodes.push(node);
     }
-    textNodeCache = nodes;
     return nodes;
   }
 
-  // Invalidate cache when DOM changes (e.g. SPA navigation, lazy content).
-  // Guard against document.body being null at injection time.
+  function getTextNodes(forceRefresh) {
+    if (forceRefresh || !textNodeCache) {
+      textNodeCache = collectTextNodes();
+      // Attach observer on first real walk (body guaranteed to exist now).
+      attachObserver();
+    }
+    return textNodeCache;
+  }
+
+  // Deferred observer setup: body may not exist at injection time
+  // (with_initialization_script runs at document start).
   if (document.body) {
-    new MutationObserver(function() { textNodeCache = null; })
-      .observe(document.body, { childList: true, subtree: true });
+    attachObserver();
+  } else {
+    document.addEventListener('DOMContentLoaded', attachObserver, { once: true });
   }
 
   // --- Highlight helpers ---
@@ -275,14 +293,24 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
     }));
   }
 
+  // Check if a Range is still attached to the live DOM.
+  function isRangeValid(r) {
+    try {
+      const sc = r.startContainer;
+      return sc.isConnected !== false && r.getBoundingClientRect().height > 0;
+    } catch (_) { return false; }
+  }
+
   function highlightCurrent() {
     if (currentIdx >= 0 && currentIdx < ranges.length) {
+      const r = ranges[currentIdx];
       // Clear first so WebKit repaints the old position before setting the new one.
       clearHighlight(CURRENT_NAME);
-      CSS.highlights.set(CURRENT_NAME, new Highlight(ranges[currentIdx]));
-      const rect = ranges[currentIdx].getBoundingClientRect();
+      if (!isRangeValid(r)) return;
+      CSS.highlights.set(CURRENT_NAME, new Highlight(r));
+      const rect = r.getBoundingClientRect();
       if (rect.top < 0 || rect.bottom > window.innerHeight) {
-        ranges[currentIdx].startContainer.parentElement
+        r.startContainer.parentElement
           ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     } else {
@@ -301,9 +329,11 @@ pub const FIND_IN_PAGE_SCRIPT: &str = r#"
 
     if (!query) { postCount(); return; }
 
+    // Always walk DOM fresh — eliminates stale-cache race when page is
+    // still loading or DOM mutated between observer ticks.
     const lower = query.toLowerCase();
     const qLen  = query.length;
-    const nodes = getTextNodes();
+    const nodes = getTextNodes(true);
 
     for (let ni = 0; ni < nodes.length; ni++) {
       const text = nodes[ni].textContent.toLowerCase();
