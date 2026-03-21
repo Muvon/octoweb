@@ -83,10 +83,10 @@ enum AppEvent {
     FindPrev,                       // previous match (⇧Enter in find bar)
     FindCount(usize, usize),        // (current, total) — match count from tab WebView
     WebContentTerminated(usize),    // (tab_id) — WebContent XPC process killed by OS
-    ScrollDown,                         // ⌃D — scroll down one full screen
-    ScrollUp,                           // ⌃U — scroll up one full screen
-    ScrollTop,                          // ⌃T — scroll to top of page
-    ScrollBottom,                       // ⌃B — scroll to bottom of page
+    ScrollDown,                     // ⌃D — scroll down one full screen
+    ScrollUp,                       // ⌃U — scroll up one full screen
+    ScrollTop,                      // ⌃T — scroll to top of page
+    ScrollBottom,                   // ⌃B — scroll to bottom of page
     Screenshot,                     // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
     ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     Quit,

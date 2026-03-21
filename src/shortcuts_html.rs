@@ -18,9 +18,12 @@
 /// 1. Shared-key rows first (both columns filled on the same row).
 /// 2. Column-specific rows after — each column lists its own extras.
 ///
-/// Currently shared: `⌘W` (row 1), `⌃N` (row 2), `⌃P` (row 3), `⌘1–9` (row 4).
+/// Currently shared: `⌘W` (row 1), `⌃N/P` (row 2), `⌘1–9` (row 3).
 /// When adding a new shortcut that exists in both contexts, insert it in the
 /// shared block at the top and keep both column lists in sync by row position.
+///
+/// **Compactness rule:** related pairs share a row with `/` separator
+/// (e.g. "Scroll ↕" for ⌃D/⌃U). Keeps the panel tight.
 pub fn html() -> &'static str {
     r#"<!DOCTYPE html>
 <html>
@@ -232,15 +235,12 @@ pub fn html() -> &'static str {
         <div class="shortcuts-col">
           <div class="col-title">Global</div>
           <div class="row"><span class="row-label">Close tab</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
-          <div class="row"><span class="row-label">Next tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
-          <div class="row"><span class="row-label">Prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
+          <div class="row"><span class="row-label">Next / prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Command palette</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
           <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
-          <div class="row"><span class="row-label">Scroll down</span><span class="keys"><kbd>⌃</kbd><kbd>D</kbd></span></div>
-          <div class="row"><span class="row-label">Scroll up</span><span class="keys"><kbd>⌃</kbd><kbd>U</kbd></span></div>
-          <div class="row"><span class="row-label">Page top</span><span class="keys"><kbd>⌃</kbd><kbd>T</kbd></span></div>
-          <div class="row"><span class="row-label">Page bottom</span><span class="keys"><kbd>⌃</kbd><kbd>B</kbd></span></div>
+          <div class="row"><span class="row-label">Scroll down / up</span><span class="keys"><kbd>⌃</kbd><kbd>D</kbd>/<kbd>U</kbd></span></div>
+          <div class="row"><span class="row-label">Page top / bottom</span><span class="keys"><kbd>⌃</kbd><kbd>T</kbd>/<kbd>B</kbd></span></div>
           <div class="row"><span class="row-label">Reload</span><span class="keys"><kbd>⌘</kbd><kbd>R</kbd></span></div>
           <div class="row"><span class="row-label">Find in page</span><span class="keys"><kbd>⌘</kbd><kbd>F</kbd></span></div>
           <div class="row"><span class="row-label">Screenshot</span><span class="keys"><kbd>⌘</kbd><kbd>S</kbd></span></div>
@@ -254,8 +254,7 @@ pub fn html() -> &'static str {
         <div class="shortcuts-col">
           <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
-          <div class="row"><span class="row-label">Move down</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
-          <div class="row"><span class="row-label">Move up</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
+          <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
