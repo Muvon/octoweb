@@ -133,6 +133,10 @@ The agent can now navigate pages, extract content, and interact with the browser
 | `⌘⇧1` – `⌘⇧9`, `⌘⇧0` | Save current page to slot 1–10 |
 | `⌃N` | Next tab (MRU order) |
 | `⌃P` | Previous tab (MRU order) |
+| `⌃D` | Scroll half page down |
+| `⌃U` | Scroll half page up |
+| `⌃T` | Scroll to top of page |
+| `⌃B` | Scroll to bottom of page |
 
 ### Fast-access slots
 

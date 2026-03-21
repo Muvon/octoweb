@@ -11,15 +11,14 @@
 /// **Row alignment rule:**
 /// - If the same key binding has an action in BOTH columns, place it on the
 ///   SAME row index in both `.shortcuts-col` lists so they visually align.
-/// - If a key only exists in one column, add it as its own row in that column
-///   only — no placeholder/blank row in the other column.
+/// - If a key only exists in one column, add it after the shared rows —
+///   columns may have different lengths, no placeholder rows needed.
 ///
 /// **Ordering convention:**
 /// 1. Shared-key rows first (both columns filled on the same row).
-/// 2. Global-only rows next (right cell visually empty but no explicit blank).
-/// 3. Palette-only rows fill the remaining right-column rows.
+/// 2. Column-specific rows after — each column lists its own extras.
 ///
-/// Currently shared: `⌘W` (row 2), `⌃N` (row 3), `⌃P` (row 4), `⌘1–9` (row 5).
+/// Currently shared: `⌘W` (row 1), `⌃N` (row 2), `⌃P` (row 3), `⌘1–9` (row 4).
 /// When adding a new shortcut that exists in both contexts, insert it in the
 /// shared block at the top and keep both column lists in sync by row position.
 pub fn html() -> &'static str {
@@ -232,32 +231,34 @@ pub fn html() -> &'static str {
         <!-- Left column: Global -->
         <div class="shortcuts-col">
           <div class="col-title">Global</div>
-          <div class="row"><span class="row-label">Command palette</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
           <div class="row"><span class="row-label">Close tab</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
           <div class="row"><span class="row-label">Next tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
           <div class="row"><span class="row-label">Prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
+          <div class="row"><span class="row-label">Command palette</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
           <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
+          <div class="row"><span class="row-label">Scroll down</span><span class="keys"><kbd>⌃</kbd><kbd>D</kbd></span></div>
+          <div class="row"><span class="row-label">Scroll up</span><span class="keys"><kbd>⌃</kbd><kbd>U</kbd></span></div>
+          <div class="row"><span class="row-label">Page top</span><span class="keys"><kbd>⌃</kbd><kbd>T</kbd></span></div>
+          <div class="row"><span class="row-label">Page bottom</span><span class="keys"><kbd>⌃</kbd><kbd>B</kbd></span></div>
           <div class="row"><span class="row-label">Reload</span><span class="keys"><kbd>⌘</kbd><kbd>R</kbd></span></div>
+          <div class="row"><span class="row-label">Find in page</span><span class="keys"><kbd>⌘</kbd><kbd>F</kbd></span></div>
           <div class="row"><span class="row-label">Screenshot</span><span class="keys"><kbd>⌘</kbd><kbd>S</kbd></span></div>
           <div class="row"><span class="row-label">Full page shot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></span></div>
-          <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
           <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
           <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
           <div class="row"><span class="row-label">Shortcuts</span><span class="keys"><kbd>⌘</kbd><kbd>/</kbd></span></div>
+          <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
         </div>
         <!-- Right column: Command Palette — shared-key rows aligned to left column -->
         <div class="shortcuts-col">
           <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
-          <div class="row"><span class="row-label dim">—</span></div>
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
           <div class="row"><span class="row-label">Move down</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd></span></div>
           <div class="row"><span class="row-label">Move up</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label dim">—</span></div>
-          <div class="row"><span class="row-label dim">—</span></div>
           <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>↵</kbd></span></div>
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>

@@ -83,6 +83,10 @@ enum AppEvent {
     FindPrev,                       // previous match (⇧Enter in find bar)
     FindCount(usize, usize),        // (current, total) — match count from tab WebView
     WebContentTerminated(usize),    // (tab_id) — WebContent XPC process killed by OS
+    ScrollDown,                         // ⌃D — scroll down one full screen
+    ScrollUp,                           // ⌃U — scroll up one full screen
+    ScrollTop,                          // ⌃T — scroll to top of page
+    ScrollBottom,                       // ⌃B — scroll to bottom of page
     Screenshot,                     // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
     ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     Quit,
@@ -880,6 +884,10 @@ fn main() {
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
                 const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
                 const S_KEYCODE: i64 = 1;  // s (Cmd+S = screenshot, Cmd+Shift+S = full page screenshot)
+                const D_KEYCODE: i64 = 2;  // d (Ctrl+D = scroll half down)
+                const U_KEYCODE: i64 = 32; // u (Ctrl+U = scroll half up)
+                const T_KEYCODE: i64 = 17; // t (Ctrl+T = scroll to top)
+                const B_KEYCODE: i64 = 11; // b (Ctrl+B = scroll to bottom)
                 const ESC_KEYCODE: i64 = 53; // Escape
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
@@ -920,6 +928,18 @@ fn main() {
                     } else {
                         let _ = p.send_event(AppEvent::NextTab);
                     }
+                    CallbackResult::Drop
+                } else if ctrl && keycode == D_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ScrollDown);
+                    CallbackResult::Drop
+                } else if ctrl && keycode == U_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ScrollUp);
+                    CallbackResult::Drop
+                } else if ctrl && keycode == T_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ScrollTop);
+                    CallbackResult::Drop
+                } else if ctrl && keycode == B_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ScrollBottom);
                     CallbackResult::Drop
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::Reload);
@@ -2441,6 +2461,28 @@ fn main() {
                     } else {
                         let _ = wv.load_url(&url);
                     }
+                }
+            }
+
+            // ── Page scroll (⌃D / ⌃U / ⌃T / ⌃B) ─────────────────────────────
+            Event::UserEvent(AppEvent::ScrollDown) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.scrollBy({top:window.innerHeight,behavior:'smooth'})");
+                }
+            }
+            Event::UserEvent(AppEvent::ScrollUp) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.scrollBy({top:-window.innerHeight,behavior:'smooth'})");
+                }
+            }
+            Event::UserEvent(AppEvent::ScrollTop) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.scrollTo({top:0,behavior:'smooth'})");
+                }
+            }
+            Event::UserEvent(AppEvent::ScrollBottom) => {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})");
                 }
             }
 
