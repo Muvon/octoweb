@@ -331,7 +331,7 @@ pub fn html() -> &'static str {
       <div id="action-badge">↵ Open</div>
     </div>
     <div id="results"></div>
-    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘9</kbd> jump · <kbd>↵</kbd> confirm · <kbd>⌘↵</kbd> open/search · <kbd>⌘⇧↵</kbd> ask AI · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
+    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘0</kbd> jump · <kbd>↵</kbd> confirm · <kbd>⌘↵</kbd> open/search · <kbd>⌘⇧↵</kbd> ask AI · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
   </div>
 </div>
 
@@ -416,10 +416,10 @@ pub fn html() -> &'static str {
     const isMacCmd = e.metaKey && !e.ctrlKey && !e.altKey;
     const isCtrl = e.ctrlKey && !e.metaKey && !e.altKey;
 
-    // ⌘1-⌘9, ⌘0 → jump to item 1-9, 10 (only for tabs/history, not actions)
+    // ⌘1-⌘9, ⌘0 → jump to item at index 1-9, 10 (skip 0 — Enter handles it)
     if (isMacCmd && /^[0-9]$/.test(e.key)) {
       e.preventDefault();
-      var idx = e.key === '0' ? 9 : parseInt(e.key, 10) - 1;
+      var idx = e.key === '0' ? 10 : parseInt(e.key, 10);
       if (idx < filtered.length) {
         var target = filtered[idx];
         if (target.kind === 'tab' || target.kind === 'history') {
@@ -735,7 +735,7 @@ pub fn html() -> &'static str {
     const kindLabel = esc(item.pill || kindLabelFor(item));
     const selected = idx === sel ? ' selected' : '';
     const isJumpable = item.kind === 'tab' || item.kind === 'history';
-    const shortcutNum = isJumpable ? (idx < 9 ? String(idx + 1) : idx === 9 ? '0' : '') : '';
+    const shortcutNum = isJumpable ? (idx >= 1 && idx <= 9 ? String(idx) : idx === 10 ? '0' : '') : '';
     const actionShortcut = item.kind === 'ask' ? '⌘⇧↵' : (item.kind === 'search' || item.kind === 'url') ? '⌘↵' : '';
     const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>'
                        : actionShortcut ? '<span class="shortcut-badge">' + actionShortcut + '</span>'
