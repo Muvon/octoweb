@@ -1,6 +1,6 @@
-/// Floating quick-slots footer bar — always visible at the bottom of the browser window.
+/// Static quick-slots footer bar — pinned at the bottom of the browser window.
 ///
-/// Shows up to 10 slots (⌘1–⌘0) as small glass pills with favicon + title.
+/// Page content ends above this bar (not overlaid). Same treatment as the title bar.
 /// Hover reveals ✕ to remove. Clicks open the slot URL.
 ///
 /// IPC messages sent to Rust:

@@ -186,10 +186,14 @@ fn main() {
     const ADDRESS_BAR_H_LOGICAL: f64 = 32.0;
     let address_bar_h = (ADDRESS_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
 
+    const FOOTER_H_LOGICAL: f64 = 36.0;
+    let footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
+
     let make_webview = {
         let browser_win = Arc::clone(&browser_win);
         let proxy = proxy.clone();
         let bar_h = address_bar_h;
+        let ft_h = footer_h;
         move |tab_id: usize, url: &str| -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
@@ -200,7 +204,7 @@ fn main() {
             let sz = browser_win.inner_size();
             let bounds = wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(0u32, bar_h).into(),
-                size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h)).into(),
+                size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h + ft_h)).into(),
             };
             WebViewBuilder::new()
                 .with_url(url)
@@ -778,9 +782,7 @@ fn main() {
     let _ = notification_wv.set_visible(false);
     let mut notification_visible = false;
 
-    // ── Quick-slots footer bar (thin strip at bottom of browser window) ───
-    const FOOTER_H_LOGICAL: f64 = 36.0;
-    let footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
+    // ── Quick-slots footer bar (static strip at bottom — page content ends above it) ──
     let footer_wv = WebViewBuilder::new()
         .with_html(quickslots_html::html())
         .with_transparent(true)
@@ -2569,7 +2571,7 @@ fn main() {
                     // Resize active tab to full width (offset below address bar)
                     let bounds = wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(address_bar_h)).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(address_bar_h + footer_h)).into(),
                     };
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         let _ = wv.set_bounds(bounds);
