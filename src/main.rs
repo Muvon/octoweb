@@ -204,7 +204,8 @@ fn main() {
             let sz = browser_win.inner_size();
             let bounds = wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(0u32, bar_h).into(),
-                size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h + ft_h)).into(),
+                size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h + ft_h))
+                    .into(),
             };
             WebViewBuilder::new()
                 .with_url(url)
@@ -1954,7 +1955,6 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = mru[(pos + 1) % mru.len()];
                 switch_visible_tab!(target);
-                macos::mru_push(&mut mru, target);
                 browser_win.set_focus();
             }
 
@@ -1970,7 +1970,6 @@ fn main() {
                 let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
                 let target = if pos == 0 { *mru.last().unwrap() } else { mru[pos - 1] };
                 switch_visible_tab!(target);
-                macos::mru_push(&mut mru, target);
                 browser_win.set_focus();
             }
 
