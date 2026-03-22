@@ -313,10 +313,16 @@ fn main() {
                 .with_document_title_changed_handler(move |title| {
                     let _ = p2.send_event(AppEvent::TitleChanged(tab_id, title));
                 })
-                .with_new_window_req_handler(move |url, _features| {
-                    // Cmd+click or target=_blank — open in a new tab instead of a new window.
-                    let _ = p4.send_event(AppEvent::OpenInNewTab(url));
-                    wry::NewWindowResponse::Deny
+                .with_new_window_req_handler(move |url, features| {
+                    if features.size.is_some() {
+                        // Popup with explicit dimensions (OAuth, login flows) —
+                        // allow wry to create a real window so window.opener is preserved.
+                        wry::NewWindowResponse::Allow
+                    } else {
+                        // Regular target=_blank — open in a new tab.
+                        let _ = p4.send_event(AppEvent::OpenInNewTab(url));
+                        wry::NewWindowResponse::Deny
+                    }
                 })
                 .with_download_started_handler(move |url, _path| {
                     // Extract filename from URL for the toast notification
