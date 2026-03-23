@@ -224,6 +224,8 @@ fn main() {
                 // Tries <link rel="icon"> first (highest quality), falls back to /favicon.ico.
                 // Posts IPC only once per domain per session (deduplication in Rust).
                 .with_initialization_script(webview_utils::FAVICON_FETCH_SCRIPT)
+                // Track same-document URL changes (SPA pushState/replaceState/popstate).
+                .with_initialization_script(webview_utils::URL_CHANGE_SCRIPT)
                 // Track audio/video playback state and notify Rust via IPC.
                 .with_initialization_script(webview_utils::MEDIA_TRACK_SCRIPT)
                 // Collect page load stats (size, time) via PerformanceNavigationTiming.
@@ -292,6 +294,17 @@ fn main() {
                                 let current = v["current"].as_u64().unwrap_or(0) as usize;
                                 let total = v["total"].as_u64().unwrap_or(0) as usize;
                                 let _ = p3.send_event(AppEvent::FindCount(current, total));
+                            }
+                            // Same-document navigation (SPA pushState/replaceState/popstate).
+                            // Reuses BrowserUrlChanged so the address bar + tab history update
+                            // exactly as they do for full page loads.
+                            Some("url_changed") => {
+                                if let Some(url) = v["url"].as_str() {
+                                    let _ = p3.send_event(AppEvent::BrowserUrlChanged(
+                                        tab_id,
+                                        url.to_string(),
+                                    ));
+                                }
                             }
                             _ => {}
                         }

@@ -95,15 +95,18 @@ pub fn html() -> &'static str {
 
   #favicon.visible { display: block; }
 
+  /* Title and URL share the available space equally — each gets exactly 50%.
+     overflow:hidden on each half ensures neither can push the other out. */
   #text-stack {
     display: flex;
     flex-direction: row;
     align-items: center;
     min-width: 0;
-    gap: 0;
+    flex: 1;
+    overflow: hidden;
   }
 
-  /* Title — clickable to copy */
+  /* Title — clickable to copy, fixed 50% of text-stack */
   #title-row {
     display: flex;
     align-items: center;
@@ -111,8 +114,9 @@ pub fn html() -> &'static str {
     cursor: pointer;
     border-radius: 3px;
     padding: 2px 5px;
-    flex-shrink: 1;
+    flex: 0 0 50%;
     min-width: 0;
+    overflow: hidden;
     transition: background 0.12s ease;
   }
   #title-row:hover  { background: var(--hover-bg); }
@@ -137,7 +141,7 @@ pub fn html() -> &'static str {
     opacity: 0.5;
   }
 
-  /* URL — clickable to copy */
+  /* URL — clickable to copy, fixed 50% of text-stack */
   #url-row {
     display: flex;
     align-items: center;
@@ -145,8 +149,9 @@ pub fn html() -> &'static str {
     cursor: pointer;
     border-radius: 3px;
     padding: 2px 5px;
-    flex-shrink: 2;
+    flex: 0 0 calc(50% - 14px); /* subtract sep width so total stays 100% */
     min-width: 0;
+    overflow: hidden;
     transition: background 0.12s ease;
   }
   #url-row:hover  { background: var(--hover-bg); }
@@ -510,8 +515,8 @@ pub fn html() -> &'static str {
     document.getElementById('badge').classList.toggle('show', !!show);
   };
 
-  // Initial state
-  dotEl.style.display = 'none';
+  // Initial state — badge hidden
+  document.getElementById('badge').classList.remove('show');
 })();
 </script>
 </body>

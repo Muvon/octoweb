@@ -73,6 +73,37 @@ pub const FAVICON_FETCH_SCRIPT: &str = r#"
 })();
 "#;
 
+/// JS injected at document-start to track same-document URL changes (SPAs, hash nav).
+/// Patches `history.pushState` / `replaceState` and listens to `popstate` so that
+/// client-side navigations fire `{ type: "url_changed", url }` IPC — the same event
+/// the Rust side uses to update the address bar and tab history.
+pub const URL_CHANGE_SCRIPT: &str = r#"
+(function() {
+  'use strict';
+
+  function notify(url) {
+    window.ipc.postMessage(JSON.stringify({ type: 'url_changed', url: url }));
+  }
+
+  // Patch pushState / replaceState — they don't fire any DOM event by default.
+  function wrap(method) {
+    var orig = history[method];
+    history[method] = function() {
+      var ret = orig.apply(this, arguments);
+      notify(location.href);
+      return ret;
+    };
+  }
+  wrap('pushState');
+  wrap('replaceState');
+
+  // popstate fires on back/forward and explicit history.go() calls.
+  window.addEventListener('popstate', function() {
+    notify(location.href);
+  });
+})();
+"#;
+
 /// Tracks audio/video playback state and notifies Rust via IPC.
 /// Uses document-level capture-phase listeners to catch all media events,
 /// including dynamically added elements (YouTube, SPAs, etc.).
