@@ -23,7 +23,7 @@ mod webview_utils;
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use tao::{
@@ -34,6 +34,7 @@ use tao::{
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::WindowBuilder,
 };
+use wry::http::Response;
 use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewExtMacOS};
 
 use browser::TabManager;
@@ -114,6 +115,12 @@ fn main() {
     // Tracks whether the browser window is the frontmost app.
     // CGEventTap fires system-wide, so we gate all hotkeys on this flag.
     let app_focused = Arc::new(AtomicBool::new(false));
+
+    // ── System stats for custom protocol (avoids evaluate_script leak) ─────
+    // JS polls via fetch('octoweb-sys://stats') instead of evaluate_script.
+    // wry#1489: WKWebView JS evaluation contexts leak on every evaluate_script call.
+    let sys_stats_cpu = Arc::new(AtomicU32::new(0));
+    let sys_stats_mem = Arc::new(AtomicU64::new(0));
 
     // ── Browser window ────────────────────────────────────────────────────
     let browser_win = WindowBuilder::new()
@@ -669,6 +676,20 @@ fn main() {
                 }
             }
         })
+        .with_custom_protocol("octoweb-sys".into(), {
+            let cpu = Arc::clone(&sys_stats_cpu);
+            let mem = Arc::clone(&sys_stats_mem);
+            move |_webview_id, _request| {
+                let cpu_pct = cpu.load(Ordering::Relaxed);
+                let mem_mb = mem.load(Ordering::Relaxed);
+                let json = format!("{{\"cpu_pct\":{},\"mem_mb\":{}}}", cpu_pct, mem_mb);
+                Response::builder()
+                    .header("Content-Type", "application/json")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(json.into_bytes().into())
+                    .unwrap()
+            }
+        })
         .build_as_child(&*browser_win)
         .expect("Failed to create address bar WebView");
     // Initialize address bar with the active tab's URL, title, and favicon from session.
@@ -762,9 +783,6 @@ fn main() {
     // Sampled every 2 s from the active tab's WebContent XPC process.
     let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
     let mut sys_stats_next_at = std::time::Instant::now();
-    // Last values sent to the address bar — skip evaluate_script when unchanged
-    // to avoid accumulating leaked WKWebView JS evaluation contexts (wry#1489).
-    let mut sys_stats_last_sent: Option<(u32, u64)> = None;
     // Tabs with active media playback — used to throttle sys_stats polling
     let mut media_playing_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -1198,7 +1216,8 @@ fn main() {
             }
         }
         // ── Sample active tab's WebContent process stats ─────────────────
-        // Throttle to 5 s during media playback to reduce evaluate_script overhead
+        // Store in atomics for custom protocol polling (avoids evaluate_script leak).
+        // JS polls via fetch('octoweb-sys://stats') — no WKWebView JS context leak.
         let now = std::time::Instant::now();
         if now >= sys_stats_next_at {
             let media_active = media_playing_tabs.contains(&active_wv_id);
@@ -1215,17 +1234,10 @@ fn main() {
                         };
                         sys_stats_last = Some(tab_stats::TabStatsSample { cpu_ns, ts: now });
                         let mem_mb = rss / (1024 * 1024);
-                        // Coarsen during media: round to nearest 5 MB to reduce updates
-                        let mem_mb = if media_active { (mem_mb / 5) * 5 } else { mem_mb };
                         let cpu_i = cpu_pct.round() as u32;
-                        // Skip evaluate_script when values unchanged — avoids leaking
-                        // WKWebView JS evaluation contexts on every tick (wry#1489).
-                        if sys_stats_last_sent != Some((cpu_i, mem_mb)) {
-                            sys_stats_last_sent = Some((cpu_i, mem_mb));
-                            let _ = address_bar_wv.evaluate_script(&format!(
-                                "window.__sysStats && window.__sysStats({cpu_i}, {mem_mb})"
-                            ));
-                        }
+                        // Store in atomics for custom protocol polling
+                        sys_stats_cpu.store(cpu_i, Ordering::Relaxed);
+                        sys_stats_mem.store(mem_mb, Ordering::Relaxed);
                     }
                 }
             }
@@ -1244,6 +1256,7 @@ fn main() {
                         tm.tabs(),
                         &tab_webviews,
                         &pending_tabs,
+                        pending_swap,
                         &mru,
                         active_wv_id,
                         &media_playing_tabs,
@@ -1268,6 +1281,7 @@ fn main() {
                         nav_error_patch::unregister_termination(wv_ptr);
                     }
                     tab_webviews.remove(&victim_id); // WebView dropped → XPC process freed
+                    media_playing_tabs.remove(&victim_id);  // Clean up stale media state
                     pending_tabs.insert(victim_id, url.clone());
                     tracing::debug!(
                         tab_id = victim_id,
@@ -1918,7 +1932,8 @@ fn main() {
                 macos::mru_push(&mut mru, tab_id);
                 // Reset stats so first sample after switch starts fresh (no stale CPU delta)
                 sys_stats_last = None;
-                sys_stats_last_sent = None;
+                sys_stats_cpu.store(0, Ordering::Relaxed);
+                sys_stats_mem.store(0, Ordering::Relaxed);
                 sys_stats_next_at = std::time::Instant::now();
                 let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
@@ -1956,6 +1971,7 @@ fn main() {
                         nav_error_patch::unregister_termination(wv_ptr);
                     }
                     tab_webviews.remove(&id);
+                    media_playing_tabs.remove(&id);  // Clean up stale media state
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
                     mru.retain(|&x| x != id);
                     // Switch to the most-recently-used tab (MRU[0] after removal)
@@ -2420,7 +2436,8 @@ fn main() {
                     let _ = address_bar_wv.evaluate_script("window.__clear && window.__clear()");
                     let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
                     sys_stats_last = None;
-                    sys_stats_last_sent = None;
+                    sys_stats_cpu.store(0, Ordering::Relaxed);
+                    sys_stats_mem.store(0, Ordering::Relaxed);
                 }
             }
 

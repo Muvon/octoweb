@@ -472,6 +472,23 @@ pub fn html() -> &'static str {
     sysStatsEl.classList.add('visible');
   };
 
+  // Poll system stats via custom protocol (avoids evaluate_script leak — wry#1489)
+  // Each evaluate_script call leaks a WKWebView JS evaluation context.
+  // Using fetch('octoweb-sys://stats') avoids this leak entirely.
+  (function pollSysStats() {
+    fetch('octoweb-sys://stats')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        window.__sysStats(data.cpu_pct, data.mem_mb);
+      })
+      .catch(function() {
+        // Silently ignore — tab may have switched or WebView not ready
+      })
+      .finally(function() {
+        setTimeout(pollSysStats, 2000);
+      });
+  })();
+
   window.__stats = function(sizeBytes, timeMs) {
     updateStats(sizeBytes, timeMs);
   };

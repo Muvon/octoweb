@@ -179,10 +179,15 @@ fn hibernation_score(
 /// Returns tab IDs sorted by score (highest first), up to the limit
 /// dictated by pressure level. Only considers tabs that have a live WebView
 /// (not already pending/hibernated).
+///
+/// `pending_swap` contains (old_visible_id, new_loading_id) for tabs mid-transition.
+/// Both tabs are protected from hibernation until the swap completes.
+#[allow(clippy::too_many_arguments)]
 pub fn pick_victims(
     tabs: &[Tab],
     tab_webviews: &HashMap<usize, WebView>,
     pending_tabs: &HashMap<usize, String>,
+    pending_swap: Option<(usize, usize)>,
     mru: &[usize],
     active_id: usize,
     media_playing: &HashSet<usize>,
@@ -197,11 +202,21 @@ pub fn pick_victims(
     let now = Instant::now();
     let mru_len = mru.len();
 
+    // Tabs involved in a pending swap are mid-transition — don't hibernate
+    let (swap_old, swap_new) = match pending_swap {
+        Some((old, new)) => (Some(old), Some(new)),
+        None => (None, None),
+    };
+
     let mut scored: Vec<(usize, f32)> = tabs
         .iter()
         .filter(|t| {
             // Only consider tabs with a live WebView (not already hibernated/pending)
             tab_webviews.contains_key(&t.id) && !pending_tabs.contains_key(&t.id)
+        })
+        .filter(|t| {
+            // Exclude tabs involved in pending_swap
+            swap_old != Some(t.id) && swap_new != Some(t.id)
         })
         .filter_map(|t| {
             let mru_pos = mru.iter().position(|&id| id == t.id).unwrap_or(mru_len);
