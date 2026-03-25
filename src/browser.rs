@@ -52,13 +52,13 @@ impl TabManager {
     }
 
     /// Register a new tab with the given URL, returns its id.
-    pub fn open(&mut self, url: String) -> usize {
+    pub fn open(&mut self, _url: String) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         self.tabs.push(Tab {
             id,
             title: String::new(),
-            url,
+            url: String::new(), // Set by update_url on first navigation
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
@@ -68,13 +68,13 @@ impl TabManager {
         id
     }
     /// Register a new tab with a pre-filled title (used for session restore).
-    pub fn open_with_title(&mut self, url: String, title: String) -> usize {
+    pub fn open_with_title(&mut self, _url: String, title: String) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         self.tabs.push(Tab {
             id,
             title,
-            url,
+            url: String::new(), // Set by update_url on first navigation
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
