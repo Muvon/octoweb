@@ -898,6 +898,7 @@ fn main() {
     // rdev's raw_callback) asserts it must run on the main thread. We use
     // CGEventTap directly — it runs on the main CFRunLoop, no extra thread.
     let _tap = {
+        use core_foundation::base::TCFType;
         use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
         use core_graphics::event::{
             CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
@@ -908,6 +909,10 @@ fn main() {
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let focused_state = Arc::clone(&app_focused);
+        // Stores the raw CFMachPortRef so the callback can re-enable the tap
+        // if macOS disables it due to timeout (see TapDisabledByTimeout below).
+        let tap_port = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tap_port_cb = Arc::clone(&tap_port);
         // keyCode 40 = k, flagsChanged catches modifier-only events separately.
         // We check the CGEventFlags for Command inside the callback.
         let tap = CGEventTap::new(
@@ -916,6 +921,23 @@ fn main() {
             CGEventTapOptions::Default, // active tap — lets us consume specific keys
             vec![CGEventType::KeyDown],
             move |_proxy, _etype, event| {
+                // macOS disables active event taps that take too long to respond.
+                // When that happens, it sends TapDisabledByTimeout — re-enable immediately.
+                // CGEventType doesn't impl PartialEq, so compare raw discriminants.
+                let etype_raw = _etype as u32;
+                if etype_raw == CGEventType::TapDisabledByTimeout as u32
+                    || etype_raw == CGEventType::TapDisabledByUserInput as u32
+                {
+                    let port = tap_port_cb.load(Ordering::Relaxed);
+                    if port != 0 {
+                        extern "C" {
+                            fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
+                        }
+                        unsafe { CGEventTapEnable(port as *mut std::ffi::c_void, true) };
+                        tracing::warn!("CGEventTap was disabled by macOS — re-enabled");
+                    }
+                    return CallbackResult::Keep;
+                }
                 // Only act when octoweb is the frontmost application.
                 if !focused_state.load(Ordering::Relaxed) {
                     return CallbackResult::Keep;
@@ -1023,8 +1045,12 @@ fn main() {
         )
             .expect("CGEventTap::new failed — go to System Settings → Privacy & Security → Accessibility and enable your terminal app");
 
+        // Store the raw mach port ref so the callback can re-enable the tap.
+        tap_port.store(
+            tap.mach_port().as_concrete_TypeRef() as usize,
+            Ordering::Relaxed,
+        );
         tap.enable();
-
         // Schedule the tap's mach port on the main run loop so it fires
         // on the same thread as AppKit (no TSM thread-assertion crash).
         let loop_src = tap
@@ -2593,7 +2619,8 @@ fn main() {
             Event::UserEvent(AppEvent::ScreenshotFullPage) => {
                 if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-                    screenshot_full_page_to_clipboard(wv_ptr);
+                    let ns_win_ptr = browser_win.ns_window() as usize;
+                    screenshot_full_page_to_clipboard(wv_ptr, ns_win_ptr);
                 }
             }
 
@@ -2958,26 +2985,35 @@ unsafe fn pdf_data_to_nsimage(
 }
 
 /// Full page screenshot: createPDF → stitch → PNG → clipboard.
-fn screenshot_full_page_to_clipboard(wv_ptr: usize) {
+/// `ns_win_ptr` is the NSWindow pointer to restore key-window focus after the
+/// async createPDF completes — same issue as viewport screenshot.
+fn screenshot_full_page_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
     let handler = block2::RcBlock::new(
         move |pdf_data: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
             if pdf_data.is_null() {
                 tracing::error!("Full page screenshot failed: createPDF returned nil");
-                return;
+            } else {
+                unsafe {
+                    let final_image = pdf_data_to_nsimage(pdf_data);
+                    if final_image.is_null() {
+                        tracing::error!("Full page screenshot: failed to render PDF to image");
+                    } else {
+                        let png_data = nsimage_to_png_data(final_image);
+                        if png_data.is_null() {
+                            tracing::error!("Full page screenshot: failed to encode PNG");
+                        } else {
+                            copy_png_to_clipboard(png_data);
+                            tracing::debug!("Full page screenshot copied to clipboard");
+                        }
+                    }
+                }
             }
+            // Restore key-window focus unconditionally — createPDF can cause the
+            // window to lose key status, which permanently breaks keybindings.
             unsafe {
-                let final_image = pdf_data_to_nsimage(pdf_data);
-                if final_image.is_null() {
-                    tracing::error!("Full page screenshot: failed to render PDF to image");
-                    return;
-                }
-                let png_data = nsimage_to_png_data(final_image);
-                if png_data.is_null() {
-                    tracing::error!("Full page screenshot: failed to encode PNG");
-                    return;
-                }
-                copy_png_to_clipboard(png_data);
-                tracing::debug!("Full page screenshot copied to clipboard");
+                let ns_win: *mut objc2::runtime::AnyObject =
+                    ns_win_ptr as *mut objc2::runtime::AnyObject;
+                let _: () = objc2::msg_send![ns_win, makeKeyWindow];
             }
         },
     );
