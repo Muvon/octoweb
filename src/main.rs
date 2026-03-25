@@ -3,6 +3,7 @@ mod address_bar_html;
 mod browser;
 mod cold_open;
 mod config;
+mod crash_report;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
@@ -103,6 +104,12 @@ fn main() {
 
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
     macos::init_env();
+
+    // ── Crash diagnostics (must be early — before anything that can panic) ────
+    crash_report::rotate_log();
+    crash_report::install_panic_hook();
+    crash_report::install_signal_handlers();
+    crash_report::log_startup();
 
     let cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
@@ -786,6 +793,10 @@ fn main() {
     // Tabs with active media playback — used to throttle sys_stats polling
     let mut media_playing_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
+    // ── Crash diagnostics: periodic health log ────────────────────────────
+    let app_start_instant = std::time::Instant::now();
+    let mut health_log_next_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
     const NOTIF_H_LOGICAL: f64 = 64.0;
@@ -1241,6 +1252,33 @@ fn main() {
                     }
                 }
             }
+        }
+
+        // ── Crash diagnostics: periodic health snapshot ──────────────────
+        if now >= health_log_next_at {
+            health_log_next_at = now + std::time::Duration::from_secs(30);
+            let active_rss_mb = sys_stats_mem.load(Ordering::Relaxed);
+            let main_rss_mb = crash_report::main_process_rss() / (1024 * 1024);
+            let pressure = hibernation::system_memory_pressure();
+            let pressure_str = match pressure {
+                hibernation::MemoryPressure::Normal => "normal",
+                hibernation::MemoryPressure::Warning => "warning",
+                hibernation::MemoryPressure::Critical => "critical",
+            };
+            let (tab_count, active_url) = {
+                let tm = tabs.lock().unwrap();
+                let count = tm.tabs().len();
+                let url = tm.active_tab().map(|t| t.url.clone()).unwrap_or_default();
+                (count, url)
+            };
+            crash_report::log_health(&crash_report::HealthSnapshot {
+                uptime_secs: app_start_instant.elapsed().as_secs(),
+                tab_count,
+                active_rss_mb,
+                main_rss_mb,
+                pressure: pressure_str,
+                active_url: &active_url,
+            });
         }
 
         // ── Tab hibernation: offload idle tabs under memory pressure ─────
@@ -2491,6 +2529,19 @@ fn main() {
                     .map(|t| t.url.clone())
                     .unwrap_or_default();
                 tracing::warn!(tab_id, %url, "WebContent process terminated — reloading");
+                // Log to crash.log for post-mortem analysis.
+                let (pid, rss_mb) = tab_webviews.get(&tab_id)
+                    .map(|wv| {
+                        let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                        let pid = tab_stats::webview_pid(wv_ptr);
+                        let rss_mb = pid
+                            .and_then(tab_stats::sample_pid)
+                            .map(|(rss, _)| rss / (1024 * 1024))
+                            .unwrap_or(0);
+                        (pid, rss_mb)
+                    })
+                    .unwrap_or((None, 0));
+                crash_report::log_webcontent_terminated(tab_id, &url, pid, rss_mb);
                 if let Some(wv) = tab_webviews.get(&tab_id) {
                     if url.is_empty() || url == "about:blank" {
                         let _ = wv.load_url("about:blank");
@@ -2965,5 +3016,6 @@ fn save_and_exit(
     drop(tm);
     config::save_session(&session_tabs, &active_url);
     config::save_favicons(favicon_cache);
+    crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
 }
