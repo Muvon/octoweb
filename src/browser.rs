@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// A single browser tab (metadata only — the WebView is owned separately)
@@ -14,11 +15,19 @@ pub struct Tab {
     pub last_active_at: Instant,
 }
 
-/// A history entry
+/// A history entry — serialized to history.json for cross-session persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub title: String,
     pub url: String,
     pub visited_at: u64,
+    /// How many times this URL has been visited (across all sessions).
+    #[serde(default = "default_visit_count")]
+    pub visit_count: u32,
+}
+
+fn default_visit_count() -> u32 {
+    1
 }
 
 /// Manages tab metadata and browsing history.
@@ -112,19 +121,39 @@ impl TabManager {
         }
     }
 
-    /// Update the URL of a tab on navigation — pushes a history entry immediately.
+    /// Update the URL of a tab on navigation — upserts a history entry.
+    /// If the URL already exists in history, increments its visit count and
+    /// updates visited_at. Otherwise pushes a new entry. This keeps history
+    /// deduplicated at write time so the deque never fills with duplicates.
     pub fn update_url(&mut self, id: usize, url: String) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             if tab.url == url {
                 return; // same URL re-fired (iframe, redirect) — skip
             }
-            self.history.push_back(HistoryEntry {
-                title: tab.title.clone(),
-                url: url.clone(),
-                visited_at: unix_now(),
-            });
-            if self.history.len() > self.max_history {
-                self.history.pop_front();
+            let now = unix_now();
+            let key = url.trim_end_matches('/');
+            if let Some(entry) = self
+                .history
+                .iter_mut()
+                .find(|e| e.url.trim_end_matches('/') == key)
+            {
+                // URL already in history — update in place, move to back for recency
+                entry.visited_at = now;
+                entry.visit_count += 1;
+                // Move to back so newest-first iteration works correctly
+                let updated = entry.clone();
+                self.history.retain(|e| e.url.trim_end_matches('/') != key);
+                self.history.push_back(updated);
+            } else {
+                self.history.push_back(HistoryEntry {
+                    title: tab.title.clone(),
+                    url: url.clone(),
+                    visited_at: now,
+                    visit_count: 1,
+                });
+                if self.history.len() > self.max_history {
+                    self.history.pop_front();
+                }
             }
             tab.url = url;
             tab.title = String::new();
@@ -168,6 +197,36 @@ impl TabManager {
             .retain(|e| e.url.trim_end_matches('/') != normalized);
     }
 
+    /// Seed history from persisted data (called once at startup, before the event loop).
+    /// Persisted entries are the older baseline. Any live entries already in the deque
+    /// (shouldn't exist at startup, but defensive) stay and are merged by URL.
+    /// Duplicate URLs: live entry wins on visited_at, counts are summed.
+    pub fn seed_history(&mut self, mut entries: Vec<HistoryEntry>) {
+        // Merge any live entries (defensive — normally empty at startup)
+        for live in self.history.drain(..) {
+            let key = live.url.trim_end_matches('/');
+            if let Some(existing) = entries
+                .iter_mut()
+                .find(|e| e.url.trim_end_matches('/') == key)
+            {
+                // Live entry is newer — keep its visited_at, sum counts
+                existing.visited_at = existing.visited_at.max(live.visited_at);
+                existing.visit_count += live.visit_count;
+            } else {
+                entries.push(live);
+            }
+        }
+        // Sort oldest-first so deque front = oldest, back = newest
+        entries.sort_by_key(|e| e.visited_at);
+        for e in entries {
+            self.history.push_back(e);
+        }
+        // Trim to cap — oldest entries fall off the front
+        while self.history.len() > self.max_history {
+            self.history.pop_front();
+        }
+    }
+
     /// Ensure history is contiguous in memory. Call before `history()` when
     /// you also need other immutable borrows (e.g. `tabs()`).
     pub fn ensure_contiguous(&mut self) {
@@ -179,17 +238,6 @@ impl TabManager {
         let (a, b) = self.history.as_slices();
         debug_assert!(b.is_empty(), "call ensure_contiguous() first");
         a
-    }
-
-    /// Pre-computed visit counts for all URLs in history.
-    /// Single O(n) pass — use instead of per-URL `visit_count()` in hot paths.
-    pub fn visit_counts(&self) -> HashMap<String, u32> {
-        let mut counts = HashMap::new();
-        for entry in &self.history {
-            let key = entry.url.trim_end_matches('/').to_string();
-            *counts.entry(key).or_insert(0) += 1;
-        }
-        counts
     }
 }
 

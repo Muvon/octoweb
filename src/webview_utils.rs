@@ -178,18 +178,31 @@ pub const MEDIA_TRACK_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Serialize open tabs + recent history into a JSON array for the overlay JS.
+/// Build the JSON array of items for the overlay palette.
+///
+/// Tabs come first (always shown). History is already deduplicated by URL in
+/// memory (update_url upserts), so we just iterate newest-first, skip open-tab
+/// URLs, and cap at 200 entries. visit_count is stored on each HistoryEntry.
+///
 /// Favicons come from the local cache (base64 data-URIs) — no external requests.
 pub fn build_items_json(
     tabs: &[browser::Tab],
     history: &[browser::HistoryEntry],
-    visit_counts: &std::collections::HashMap<String, u32>,
     favicons: &HashMap<String, String>,
 ) -> String {
     let mut items: Vec<serde_json::Value> = Vec::new();
+
+    // ── Tabs ──────────────────────────────────────────────────────────────────
+    let open_urls: std::collections::HashSet<&str> =
+        tabs.iter().map(|t| t.url.trim_end_matches('/')).collect();
+
     for tab in tabs {
-        let key = tab.url.trim_end_matches('/');
-        let visits = visit_counts.get(key).copied().unwrap_or(0);
+        // Look up this tab's visit count from history (it's stored there)
+        let visits = history
+            .iter()
+            .find(|e| e.url.trim_end_matches('/') == tab.url.trim_end_matches('/'))
+            .map(|e| e.visit_count)
+            .unwrap_or(0);
         items.push(serde_json::json!({
             "kind": "tab",
             "tab_id": tab.id,
@@ -197,24 +210,31 @@ pub fn build_items_json(
             "url": tab.url,
             "favicon": cached_favicon(&tab.url, favicons),
             "visit_count": visits,
+            "visited_at": 0u64,  // tabs are live — recency handled in JS as "now"
         }));
     }
-    let open_urls: std::collections::HashSet<&str> =
-        tabs.iter().map(|t| t.url.trim_end_matches('/')).collect();
-    for entry in history.iter().rev().take(200) {
-        if !open_urls.contains(entry.url.trim_end_matches('/')) {
-            let key = entry.url.trim_end_matches('/');
-            let visits = visit_counts.get(key).copied().unwrap_or(0);
-            items.push(serde_json::json!({
-                "kind": "history",
-                "title": entry.title,
-                "url": entry.url,
-                "favicon": cached_favicon(&entry.url, favicons),
-                "visit_count": visits,
-                "visited_at": entry.visited_at,
-            }));
+
+    // ── History ───────────────────────────────────────────────────────────────
+    // Newest-first (iter().rev()), skip URLs already shown as tabs, cap at 200.
+    let mut history_count = 0;
+    for entry in history.iter().rev() {
+        if history_count >= 200 {
+            break;
         }
+        if open_urls.contains(entry.url.trim_end_matches('/')) {
+            continue;
+        }
+        items.push(serde_json::json!({
+            "kind": "history",
+            "title": entry.title,
+            "url": entry.url,
+            "favicon": cached_favicon(&entry.url, favicons),
+            "visit_count": entry.visit_count,
+            "visited_at": entry.visited_at,
+        }));
+        history_count += 1;
     }
+
     serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
 }
 

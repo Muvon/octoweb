@@ -114,6 +114,14 @@ fn main() {
     let cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
 
+    // Restore browsing history from previous sessions before any navigation occurs.
+    {
+        let persisted = config::load_history();
+        if !persisted.is_empty() {
+            tabs.lock().unwrap().seed_history(persisted);
+        }
+    }
+
     let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
     cold_open::install();
     let proxy = event_loop.create_proxy();
@@ -1161,9 +1169,8 @@ fn main() {
             if overlay_visible {
                 let json = {
                     let mut tm = tabs.lock().unwrap();
-                    let vc = tm.visit_counts();
                     tm.ensure_contiguous();
-                    webview_utils::build_items_json(tm.tabs(), tm.history(), &vc, &favicon_cache)
+                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache)
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
                     "window.__refreshItems && window.__refreshItems({json})"
@@ -1874,9 +1881,8 @@ fn main() {
                     }
                     let json = {
                         let mut tm = tabs.lock().unwrap();
-                        let vc = tm.visit_counts();
                         tm.ensure_contiguous();
-                        webview_utils::build_items_json(tm.tabs(), tm.history(), &vc, &favicon_cache)
+                        webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache)
                     };
                     let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setItems && window.__setItems({json})"
@@ -3035,7 +3041,7 @@ fn save_and_exit(
     favicon_cache: &std::collections::HashMap<String, String>,
     control_flow: &mut ControlFlow,
 ) {
-    let tm = tabs.lock().unwrap();
+    let mut tm = tabs.lock().unwrap();
     let session_tabs: Vec<config::SessionTab> = tm
         .tabs()
         .iter()
@@ -3049,9 +3055,11 @@ fn save_and_exit(
         .map(|t| t.url.as_str())
         .unwrap_or("")
         .to_string();
-    drop(tm);
+    tm.ensure_contiguous();
     config::save_session(&session_tabs, &active_url);
     config::save_favicons(favicon_cache);
+    config::save_history(tm.history());
+    drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
 }

@@ -603,18 +603,28 @@ pub fn html() -> &'static str {
     const q = raw.toLowerCase();
 
     if (!raw) {
-      filtered = items
-        .filter(i => i.kind === 'tab')
-        .slice()
-        .sort((a, b) => (b.visit_count || 0) - (a.visit_count || 0))
-        .slice(0, 12);
+      // Empty query: show tabs + recent history combined, sorted by recency then frequency.
+      // Tabs get a small boost since they're already open and immediately actionable.
+      const candidates = items.filter(i => i.kind === 'tab' || i.kind === 'history');
+      candidates.sort((a, b) => {
+        const recencyA = a.kind === 'tab' ? Date.now() / 1000 : (a.visited_at || 0);
+        const recencyB = b.kind === 'tab' ? Date.now() / 1000 : (b.visited_at || 0);
+        const freqA = (a.visit_count || 0) + (a.kind === 'tab' ? 5 : 0);
+        const freqB = (b.visit_count || 0) + (b.kind === 'tab' ? 5 : 0);
+        // Primary: recency (last 24h treated as equally fresh, then decay)
+        const ageDiffSecs = recencyB - recencyA;
+        if (Math.abs(ageDiffSecs) > 86400) return ageDiffSecs > 0 ? 1 : -1;
+        // Secondary: frequency within the same recency band
+        return freqB - freqA;
+      });
+      filtered = candidates.slice(0, 12);
       sel = 0;
       renderItems();
       updateBadge();
       return;
     }
 
-    const list = fuzzyFilter(q, items);
+    const list = fuzzyRrf(q, items);
     const urlLike = isLikelyUrl(raw);
     const openAction = {
       kind: 'url',
@@ -795,21 +805,60 @@ pub fn html() -> &'static str {
     return url.replace(/^https?:\/\//, '').replace(/\/$/, '') || url;
   }
 
-  function fuzzyFilter(q, list) {
-    // fuzzysort handles space-separated tokens natively (like fzf)
-    const results = fuzzysort.go(q, list, {
-      keys: ['title', 'url'],
-      limit: 50,
-    });
+  // Reciprocal Rank Fusion search over tabs + history.
+  //
+  // Three independent rank lists are fused:
+  //   1. Fuzzy match rank  — fuzzysort score over title + url (relevance to query)
+  //   2. Recency rank      — by visited_at descending (how recently visited)
+  //   3. Frequency rank    — by visit_count descending (how often visited)
+  //
+  // RRF formula: score = Σ 1/(k + rank_i), k=60 (standard constant dampens top-rank dominance).
+  // Tabs get +0.05 on the final score — a mild nudge since they're already open,
+  // not a multiplier that buries history regardless of relevance.
+  //
+  // Result: a URL visited 50 times last week beats a tab opened 5 minutes ago
+  // for a query that matches it well. Relevance + habit + recency all matter.
+  function fuzzyRrf(q, list) {
+    const K = 60;
 
-    // Re-sort with visit count and kind boosts
-    const scored = results.map(r => {
-      const item = r.obj;
-      const fzScore = r.score;  // 0 (perfect) to -Infinity (worst)
-      const visits = item.visit_count || 0;
-      const visitBoost = visits > 0 ? Math.log2(visits + 1) * 0.05 : 0;
-      const kindBoost = item.kind === 'tab' ? 0.3 : item.kind === 'history' ? 0.05 : 0;
-      return { item, score: fzScore + visitBoost + kindBoost };
+    // ── Rank 1: fuzzy match ───────────────────────────────────────────────────
+    const fuzzyResults = fuzzysort.go(q, list, { keys: ['title', 'url'], limit: 100 });
+    if (fuzzyResults.length === 0) return [];
+
+    // Map item → fuzzy rank (0-indexed, lower = better match)
+    const fuzzyRank = new Map();
+    fuzzyResults.forEach((r, i) => fuzzyRank.set(r.obj, i));
+
+    // Only score items that passed the fuzzy filter
+    const candidates = fuzzyResults.map(r => r.obj);
+
+    // ── Rank 2: recency ───────────────────────────────────────────────────────
+    // Tabs have no visited_at — treat them as "just now" so they're not penalised.
+    const nowSecs = Date.now() / 1000;
+    const byRecency = candidates
+      .slice()
+      .sort((a, b) => {
+        const ta = a.kind === 'tab' ? nowSecs : (a.visited_at || 0);
+        const tb = b.kind === 'tab' ? nowSecs : (b.visited_at || 0);
+        return tb - ta;
+      });
+    const recencyRank = new Map(byRecency.map((item, i) => [item, i]));
+
+    // ── Rank 3: frequency ─────────────────────────────────────────────────────
+    const byFreq = candidates
+      .slice()
+      .sort((a, b) => (b.visit_count || 0) - (a.visit_count || 0));
+    const freqRank = new Map(byFreq.map((item, i) => [item, i]));
+
+    // ── Fuse ──────────────────────────────────────────────────────────────────
+    const scored = candidates.map(item => {
+      const rFuzzy   = fuzzyRank.get(item)   ?? candidates.length;
+      const rRecency = recencyRank.get(item) ?? candidates.length;
+      const rFreq    = freqRank.get(item)    ?? candidates.length;
+      const rrf = 1 / (K + rFuzzy) + 1 / (K + rRecency) + 1 / (K + rFreq);
+      // Mild open-tab nudge — not a kind-based hard separation
+      const tabBoost = item.kind === 'tab' ? 0.05 : 0;
+      return { item, score: rrf + tabBoost };
     });
 
     scored.sort((a, b) => b.score - a.score);

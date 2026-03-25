@@ -104,6 +104,40 @@ fn favicons_path() -> PathBuf {
         .join("favicons.json")
 }
 
+// ── History persistence ────────────────────────────────────────────────────────
+// Full browsing history (title, url, visited_at) persisted across sessions.
+// Capped at max_history entries on load — oldest entries are dropped first.
+
+pub fn save_history(entries: &[crate::browser::HistoryEntry]) {
+    let path = history_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match serde_json::to_string(entries) {
+        Ok(s) => {
+            if let Err(e) = fs::write(&path, s) {
+                tracing::warn!(error = %e, "Failed to write history");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize history"),
+    }
+}
+
+pub fn load_history() -> Vec<crate::browser::HistoryEntry> {
+    let path = history_path();
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        .join("octoweb")
+        .join("history.json")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// URL to load on startup
