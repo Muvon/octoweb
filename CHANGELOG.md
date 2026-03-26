@@ -1,0 +1,107 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [0.1.0] - 2026-03-26
+
+### 📋 Release Summary
+
+This release introduces comprehensive crash diagnostics, smart tab hibernation under memory pressure, and full-page screenshot capture with clipboard support (b1730570, 7c55614f, 1d3ef8e7). Enhanced navigation includes Safari-style deferred tab swapping, persistent search history with improved ranking, and new keyboard shortcuts for quick actions and tab jumping (2ba350ff, 1f8c1185, ae2d3eb1, 4395a238). Multiple stability improvements address WebContent crashes, media playback issues, and focus management across macOS and webview components (ce5d71e2, e278123e, d3700ab2, 628dcc94).
+
+
+### ✨ New Features & Enhancements
+
+- **search**: persist history and replace fuzzy filter with RRF ranking `1f8c1185`
+- **crash**: add black-box crash diagnostics and reporting `b1730570`
+- **ui**: add SPA same-document navigation support `e2e97791`
+- **help**: add scroll and find shortcuts `44c1cb65`
+- **url**: handle external app schemes on macOS `e5d8dd9f`
+- **hibernation**: add smart tab hibernation under memory pressure `7c55614f`
+- **screenshot**: add viewport and full page capture with clipboard `1d3ef8e7`
+- **notification**: add download mode with auto-dismiss `90abffd2`
+- **cold-open**: capture URLs delivered before event loop starts `fe4f2651`
+- **mac**: register app as default web browser `f37ebf1f`
+- **webview**: add find-in-page with CSS Custom Highlight API `11b2c7a5`
+- **ui**: add page load stats to address bar with icons `8094bb5c`
+- **ui**: show WebContent memory and CPU in address bar `1d1a227a`
+- **webview**: enable devtools for debugging `0f908e84`
+- **ui**: restore tab title and favicon on startup `fbbc5b82`
+- **session**: restore tabs with titles and backward-compatible format `e5b50a1e`
+- **ui**: add keyboard shortcuts overlay `946f37fd`
+- **quickslots**: add save current page to empty slots `c7c890b5`
+- **download**: add download started and completed events `a19636c4`
+- **macos**: add block2 dependency for Objective-C blocks `77533891`
+- **ui**: add new session button to restart chat with same agent `4ce2358d`
+- **acp**: add tool tracking and cancellation `a10aa510`
+- **notification**: add manual dismiss button and remove auto-dismiss `b8d52a23`
+- **macOS**: add camera and microphone permissions for web media `fba87083`
+- **mcp**: add tab management and page content tools `a3d42f19`
+- **ui**: show ACP notifications when sidebar closed `3a92926d`
+- **tabs**: add Safari-style deferred tab swap for smoother loading `2ba350ff`
+- **search**: improve fuzzy matching with domain and word bonuses `1a6b1159`
+- **ui**: add AskAI overlay with keyboard shortcuts `ec0f4613`
+- **ui**: add keyboard shortcuts for URL quick-slots `4395a238`
+- **ui**: add keyboard shortcuts ⌘1-⌘9 to jump to items `ae2d3eb1`
+
+### 🔧 Improvements & Optimizations
+
+- **shortcuts**: pair related shortcuts with slash separator `e09c129e`
+- **overlay**: replace custom fuzzy filter with fuzzysort `b076527d`
+- **find**: remove debounce and cache text nodes for faster search `9f648c1a`
+- **shortcuts**: align shared key rows between columns `08d2b26b`
+- **address-bar**: improve stats display formatting and layout `7ac30e66`
+- **webview**: defer background tab creation `4d75359e`
+- **sidebar**: adjust header height and padding `aa4015ed`
+- **ui**: adjust progress bar and input alignment `771de648`
+- **ui**: add macOS window corner radius to glass panels `2afbf157`
+- **browser**: optimize history and URL handling `0b772ec1`
+- **newtab**: replace flexbox with grid layout for slots `e2a3f697`
+- **main**: extract macros for tab and UI operations `af588cd8`
+- **ui**: convert sidebar to overlay window `a9db3dea`
+- modularize codebase and add structured tracing `2e29a1ad`
+
+### 🐛 Bug Fixes & Stability
+
+- **macos**: disable automatic termination to prevent unwanted app quit `a4ad9c47`
+- **browser**: defer URL assignment until navigation `efc447c3`
+- **macOS**: re-enable CGEventTap after timeout and restore window focus `b2aae9f1`
+- **stats**: prevent WKWebView leak in stats collection `7562cb63`
+- **popup**: distinguish popup windows from regular new tab requests `2f047e5d`
+- **keybindings**: require shift+cmd+q to quit `881313d9`
+- **overlay**: correct keyboard jump shortcuts to use 1-0 for items 1-10 `63a345a5`
+- **macos**: remove duplicate MRU updates on tab navigation `dbee91f5`
+- **ui**: reserve space for footer bar in webview bounds `bb818c8d`
+- **ui**: hide progress bar when switching tabs `3efd4d5f`
+- **tab**: clear active_id on close and switch via MRU `a809ec50`
+- **media**: handle WebContent crashes during playback `ce5d71e2`
+- **ui**: show progress bar immediately on navigation `626cb9a5`
+- **webview**: ensure WebKit repaints highlight before setting new position `8b7096d7`
+- **find**: remove no matches display logic `f81801d7`
+- **event-loop**: eliminate CPU spinning and WKWebView JS leaks `4b9cd408`
+- **find**: clear highlights immediately on empty query `fa70dc78`
+- **ui**: skip progress bar for about:blank pages `c3586e8e`
+- **webview**: handle unicode characters in JS template escaping `f774183b`
+- **nav**: ignore NSURLErrorCancelled during navigation `628dcc94`
+- **focus**: prevent stealing focus when app is not active `d3700ab2`
+- **clipboard**: enable copy in WKWebView via native pasteboard `66c66033`
+- **sidebar**: restore keyboard focus when toggling visibility `3f61a4a5`
+- **overlay**: add missing keyboard shortcuts for ask/search/url actions `33dda299`
+- **quick-slot**: switch to existing tab instead of duplicating `0347b374`
+- **notification**: reposition toast from center to right edge `281ea199`
+- **tabs**: cancel deferred swap when switching tabs `761c98d5`
+- **webview**: improve media tracking reliability for SPAs `e278123e`
+- **macos**: import full user shell environment for .app bundles `b37de1cc`
+- **macos**: expand PATH for .app bundle compatibility `0a29197d`
+
+### 📚 Documentation & Examples
+
+- change license from MIT to Apache 2.0 `293e3e2e`
+- consolidate keyboard shortcut docs and sync README `f79efb2a`
+- **mcp**: clarify tab targeting descriptions `54f95efc`
+- **readme**: document command palette instant-jump shortcuts `32886091`
+- **readme**: expand AI assistant and MCP server documentation `42f4f68b`
+- expand architecture and module organization in INSTRUCTIONS `7646374d`
+
+### 🔄 Other Changes
+
+5 maintenance, dependency, and tooling updates not listed individually.
