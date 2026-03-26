@@ -678,37 +678,9 @@ pub fn html() -> &'static str {
       return;
     }
 
-    // Group by kind
-    const tabs = filtered.filter(i => i.kind === 'tab');
-    const history = filtered.filter(i => i.kind === 'history');
-    const actions = filtered.filter(i => i.kind !== 'tab' && i.kind !== 'history');
-
+    // Flat render in score order — kind shown via the pill badge on each item.
     let html = '';
-
-    if (tabs.length > 0) {
-      html += '<div class="section-header">Open Tabs</div>';
-      tabs.forEach((item, i) => {
-        const globalIdx = filtered.indexOf(item);
-        html += renderItem(item, globalIdx);
-      });
-    }
-
-    if (history.length > 0) {
-      html += '<div class="section-header">History</div>';
-      history.forEach((item, i) => {
-        const globalIdx = filtered.indexOf(item);
-        html += renderItem(item, globalIdx);
-      });
-    }
-
-    if (actions.length > 0) {
-      html += '<div class="section-header">Actions</div>';
-      actions.forEach((item, i) => {
-        const globalIdx = filtered.indexOf(item);
-        html += renderItem(item, globalIdx);
-      });
-    }
-
+    filtered.forEach((item, idx) => { html += renderItem(item, idx); });
     resultsEl.innerHTML = html;
 
     // Attach event listeners
