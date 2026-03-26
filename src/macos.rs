@@ -1,6 +1,32 @@
 //! macOS-specific setup: environment init, dock icon, Edit menu, MRU list,
 //! automatic termination disable.
 
+/// Set the app's preferred language to English for WKWebView's Accept-Language header.
+///
+/// By default, WKWebView sends all system preferred languages in Accept-Language.
+/// If the user has multiple languages (e.g., en, en-TH, ru-TH, th), sites may suggest
+/// content in those languages. This forces English-only by setting NSUserDefaults
+/// AppleLanguages before any WebView is created.
+///
+/// Must be called before any WKWebView instantiation.
+pub fn set_english_locale() {
+    // Set AppleLanguages to ["en"] so WKWebView sends "Accept-Language: en" only.
+    // Without this, WKWebView uses the system's full language list (e.g., en, en-TH, ru-TH, th)
+    // which causes sites to suggest content in those languages.
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        let en: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"en".as_ptr()];
+        let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: en];
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("AppleLanguages");
+        let _: () = msg_send![defaults, setObject: arr, forKey: &*key];
+    }
+    tracing::debug!("set AppleLanguages to [\"en\"] for WKWebView Accept-Language header");
+}
+
 /// Disable macOS automatic termination.
 ///
 /// macOS may automatically quit apps that have no visible windows or are

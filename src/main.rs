@@ -102,6 +102,10 @@ fn main() {
         )
         .init();
 
+    // Set English as the preferred language for WKWebView's Accept-Language header.
+    // Must be called before any WebView is created.
+    macos::set_english_locale();
+
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
     macos::init_env();
 

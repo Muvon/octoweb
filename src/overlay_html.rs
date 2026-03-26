@@ -822,7 +822,7 @@ pub fn html() -> &'static str {
     const K = 60;
 
     // ── Rank 1: fuzzy match ───────────────────────────────────────────────────
-    const fuzzyResults = fuzzysort.go(q, list, { keys: ['title', 'url'], limit: 100 });
+    const fuzzyResults = fuzzysort.go(q, list, { keys: ['title', 'url'], limit: 100, threshold: 0.3 });
     if (fuzzyResults.length === 0) return [];
 
     // Map item → fuzzy rank (0-indexed, lower = better match)
