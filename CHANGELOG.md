@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.1] - 2026-03-26
+
+### 📋 Release Summary
+
+This release improves search accuracy by prioritizing exact domain matches and enhances macOS compatibility with consistent English locale handling (d858b39c, 3f245319). Additional stability improvements and streamlined result presentation deliver a more reliable browsing experience.
+
+
+### ✨ New Features & Enhancements
+
+- **search**: prioritize exact domain matches in fuzzy ranking `d858b39c`
+- **macos**: force English locale for WKWebView Accept-Language header `3f245319`
+
+### 🔧 Improvements & Optimizations
+
+- **release**: add homebrew tap notification job `97e80a07`
+- **overlay**: remove grouped sections and render flat by score `1fcea3cd`
+
+### 🐛 Bug Fixes & Stability
+
+- **crash_report**: cast signal handler to pointer before usize conversion `52d314b3`
+
 All notable changes to this project will be documented in this file.
 
 ## [0.1.0] - 2026-03-26
