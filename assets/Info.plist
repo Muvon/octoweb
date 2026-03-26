@@ -59,6 +59,10 @@
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
 
+    <!-- Disable automatic termination - browsers should persist -->
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+
     <!-- Suppress dock icon bounce on launch -->
     <key>LSUIElement</key>
     <false/>

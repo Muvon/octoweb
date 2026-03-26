@@ -1,4 +1,18 @@
-//! macOS-specific setup: environment init, dock icon, Edit menu, MRU list.
+//! macOS-specific setup: environment init, dock icon, Edit menu, MRU list,
+//! automatic termination disable.
+
+/// Disable macOS automatic termination.
+///
+/// macOS may automatically quit apps that have no visible windows or are
+/// backgrounded for too long. For a browser with tabs, this is undesirable.
+/// This function opts out of automatic termination both programmatically
+/// and should be paired with NSSupportsAutomaticTermination=false in Info.plist.
+pub fn disable_automatic_termination() {
+    use objc2_foundation::{NSProcessInfo, NSString};
+    NSProcessInfo::processInfo()
+        .disableAutomaticTermination(&NSString::from_str("Browser with active tabs"));
+    tracing::debug!("disabled automatic termination");
+}
 
 /// Import the user's full shell environment into this process.
 ///

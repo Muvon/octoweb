@@ -1368,6 +1368,7 @@ fn main() {
         if !icon_set {
             macos::set_app_icon();
             macos::setup_edit_menu();
+            macos::disable_automatic_termination();
             icon_set = true;
         }
 
