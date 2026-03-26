@@ -17,10 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-15-arm64
+          - platform: macos-15
             arch: aarch64
             artifact_name: "Octoweb-${{ github.ref_name }}-aarch64-apple-darwin"
-          - platform: macos-15-x86_64
+          - platform: macos-15-intel
             arch: x86_64
             artifact_name: "Octoweb-${{ github.ref_name }}-x86_64-apple-darwin"
 
