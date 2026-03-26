@@ -823,6 +823,7 @@ pub fn html() -> &'static str {
     const freqRank = new Map(byFreq.map((item, i) => [item, i]));
 
     // ── Fuse ──────────────────────────────────────────────────────────────────
+    const qLower = q.toLowerCase();
     const scored = candidates.map(item => {
       const rFuzzy   = fuzzyRank.get(item)   ?? candidates.length;
       const rRecency = recencyRank.get(item) ?? candidates.length;
@@ -830,7 +831,11 @@ pub fn html() -> &'static str {
       const rrf = 1 / (K + rFuzzy) + 1 / (K + rRecency) + 1 / (K + rFreq);
       // Mild open-tab nudge — not a kind-based hard separation
       const tabBoost = item.kind === 'tab' ? 0.05 : 0;
-      return { item, score: rrf + tabBoost };
+      // Exact domain match: query == hostname (e.g. "x.com" typed → x.com/* floats above
+      // airwallex.com/* even if airwallex has higher visit_count/recency).
+      const host = cleanHost(item.url || '');
+      const exactBoost = host === qLower ? 1.0 : host.startsWith(qLower + '/') ? 0.5 : 0;
+      return { item, score: rrf + tabBoost + exactBoost };
     });
 
     scored.sort((a, b) => b.score - a.score);
