@@ -310,7 +310,7 @@ pub fn install_signal_handlers() {
     for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT] {
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = signal_handler as usize;
+            sa.sa_sigaction = signal_handler as *const () as usize;
             sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND; // one-shot: re-raise kills us
             libc::sigemptyset(&mut sa.sa_mask);
             libc::sigaction(sig, &sa, std::ptr::null_mut());
