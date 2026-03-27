@@ -126,6 +126,38 @@ pub const COMBINED_SCRIPT: &str = r#"
     document.addEventListener('emptied', function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
   }());
 
+  // ── Autoplay blocking — strip autoplay + defer preload on media elements ──
+  // Only targets elements with the `autoplay` attribute (explicit site-initiated
+  // autoplay). Removing it and setting preload="none" prevents the browser from
+  // fetching media bytes until the user interacts — saving network, CPU, and
+  // GPU memory on news/media-heavy pages (typically 3-5 autoplay videos/page).
+  (function () {
+    function block(el) {
+      if (!el || el.nodeType !== 1) return;
+      if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
+        if (el.hasAttribute('autoplay')) {
+          el.removeAttribute('autoplay');
+          el.setAttribute('preload', 'none');
+          if (!el.paused) el.pause();
+        }
+      } else {
+        var kids = el.querySelectorAll('video[autoplay],audio[autoplay]');
+        for (var i = 0; i < kids.length; i++) {
+          kids[i].removeAttribute('autoplay');
+          kids[i].setAttribute('preload', 'none');
+        }
+      }
+    }
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var ns = muts[i].addedNodes;
+        for (var j = 0; j < ns.length; j++) block(ns[j]);
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    if (document.body) block(document.body);
+    else document.addEventListener('DOMContentLoaded', function () { block(document.body); }, { once: true });
+  }());
+
   // ── Find in page — CSS Custom Highlight API, zero DOM mutation ────────────
   // Guard prevents double-init on navigate-within-document.
   if (!window.__findInPage) {

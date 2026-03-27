@@ -29,7 +29,7 @@ const BLOCK_LIST_JSON: &str = include_str!("../assets/blocklist.json");
 
 /// Identifier used to store/look up the compiled rule list in WebKit's cache.
 /// Increment the suffix when the blocklist content changes to force recompilation.
-const RULE_LIST_ID: &str = "octoweb-blocklist-v1";
+const RULE_LIST_ID: &str = "octoweb-blocklist-v2";
 
 /// Compiled WKContentRuleList retained pointer, stored as usize for
 /// thread-agnostic storage (the object is only accessed on the main thread).

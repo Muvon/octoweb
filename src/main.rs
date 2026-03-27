@@ -118,6 +118,17 @@ fn main() {
         content_rules::init(mtm);
     }
 
+    // Pre-warm the WebContent XPC process so the first tab doesn't pay the
+    // process-launch cost (~150-300ms cold start). The XPC process would be
+    // launched on first WebView creation anyway — calling _warmup just moves
+    // that cost to overlap with the rest of startup setup.
+    unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"WKWebView");
+        if let Some(cls) = cls {
+            let _: () = objc2::msg_send![cls, _warmup];
+        }
+    }
+
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
     macos::init_env();
 
@@ -397,6 +408,24 @@ fn main() {
             // applied when the completion block fires.
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             content_rules::apply_to_webview(wv_ptr);
+
+            // Disable Google Safe Browsing lookup. This fires an async network
+            // request to Google on every navigation to check for phishing —
+            // removing it saves ~50-100ms per page load. The WKPreferences
+            // object inside configuration is a live shared reference (not a
+            // copy), so this affects the running WebView immediately.
+            unsafe {
+                use objc2::runtime::AnyObject;
+                use objc2::msg_send;
+                let wv_raw = wv_ptr as *mut AnyObject;
+                let config: *mut AnyObject = msg_send![wv_raw, configuration];
+                if !config.is_null() {
+                    let prefs: *mut AnyObject = msg_send![config, preferences];
+                    if !prefs.is_null() {
+                        let _: () = msg_send![prefs, setFraudulentWebsiteWarningEnabled: false];
+                    }
+                }
+            }
             wv
         }
     };

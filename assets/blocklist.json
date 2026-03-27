@@ -75,5 +75,23 @@
   {"trigger":{"url-filter":"yahoo\\.com\\/p\\.js"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"clarity\\.ms"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"analytics\\.tiktok\\.com"},"action":{"type":"block"}},
-  {"trigger":{"url-filter":"business-api\\.tiktok\\.com"},"action":{"type":"block"}}
+  {"trigger":{"url-filter":"business-api\\.tiktok\\.com"},"action":{"type":"block"}},
+
+  {"trigger":{"url-filter":"chartbeat\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"cdn\\.parsely\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"bat\\.r\\.msn\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"js\\.intercomcdn\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"js\\.driftt\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"ct\\.pinterest\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"cdn\\.bizible\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"munchkin\\.marketo\\.net"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"js\\.hsleadflows\\.net"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"js\\.hsforms\\.net\\/forms\\/"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"cdn\\.cookielaw\\.org"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"cdn\\.onetrust\\.com"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"cdn\\.branch\\.io"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"static\\.klaviyo\\.com"},"action":{"type":"block"}},
+
+  {"trigger":{"url-filter":".*"},"action":{"type":"css-display-none","selector":"ins.adsbygoogle, div[id^='div-gpt-ad'], div[class^='adngin-'], [id^='adngin-'], [data-ad-slot], [data-google-ad-id], #ad-container, #ads-container, .ad-banner, .ad-slot, .ad-unit, .ads-wrapper, .advertisement, .advertising-banner"}},
+  {"trigger":{"url-filter":".*"},"action":{"type":"css-display-none","selector":".OUTBRAIN, #rc-widget, .rc-widget, .mgid-widget, #mgid-iframe, .zergnet-widget, .taboola-widget, #taboola-below-article-thumbnails, .ob-widget, [id^='outbrain_widget']"}}
 ]
