@@ -172,6 +172,76 @@ fn hibernation_score(
     Some(time_w * 0.70 + mem_w * 0.20 + mru_w * 0.10)
 }
 
+// ── Proactive thresholds ─────────────────────────────────────────────────────
+
+/// Idle seconds after which a tab is "frozen" and always hibernated.
+const FROZEN_IDLE_SECS: u64 = 600; // 10 minutes
+/// Idle seconds after which a "cold" tab is hibernated when resources are scarce.
+const COLD_IDLE_SECS: u64 = 180; // 3 minutes
+/// Background tab count above which cold tabs are hibernated.
+const COLD_TAB_THRESHOLD: usize = 6;
+/// RSS in bytes above which a cold tab is hibernated regardless of tab count.
+const COLD_RSS_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MB
+
+/// Proactive hibernation — runs on a 60 s timer regardless of memory pressure.
+///
+/// Two tiers:
+/// - **Frozen** (idle > 10 min): always hibernate, no conditions.
+/// - **Cold** (idle > 3 min): hibernate if too many background tabs OR this
+///   tab's WebContent process uses more than 100 MB RSS.
+///
+/// Protected tabs (active, audio-playing, about:blank, pending-swap) are skipped.
+pub fn pick_proactive_victims(
+    tabs: &[Tab],
+    tab_webviews: &HashMap<usize, WebView>,
+    pending_tabs: &HashMap<usize, String>,
+    pending_swap: Option<(usize, usize)>,
+    active_id: usize,
+    media_playing: &HashSet<usize>,
+) -> Vec<usize> {
+    let now = Instant::now();
+    // How many background WebViews exist (exclude the active one).
+    let background_count = tab_webviews.len().saturating_sub(1);
+
+    let (swap_old, swap_new) = match pending_swap {
+        Some((old, new)) => (Some(old), Some(new)),
+        None => (None, None),
+    };
+
+    tabs.iter()
+        .filter(|t| {
+            tab_webviews.contains_key(&t.id) && !pending_tabs.contains_key(&t.id)
+        })
+        .filter(|t| swap_old != Some(t.id) && swap_new != Some(t.id))
+        .filter(|t| {
+            if t.id == active_id { return false; }
+            if t.is_playing_audio || media_playing.contains(&t.id) { return false; }
+            if t.url == "about:blank" { return false; }
+
+            let idle = now.duration_since(t.last_active_at).as_secs();
+
+            // Frozen: idle > 10 min — always hibernate.
+            if idle > FROZEN_IDLE_SECS { return true; }
+
+            // Cold: idle > 3 min — hibernate if resources are scarce.
+            if idle > COLD_IDLE_SECS {
+                if background_count > COLD_TAB_THRESHOLD { return true; }
+                // Sample this tab's RSS; hibernate if heavy.
+                let rss = tab_webviews.get(&t.id).and_then(|wv| {
+                    let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    let pid = tab_stats::webview_pid(ptr)?;
+                    let (rss, _) = tab_stats::sample_pid(pid)?;
+                    Some(rss)
+                }).unwrap_or(0);
+                if rss > COLD_RSS_THRESHOLD { return true; }
+            }
+
+            false
+        })
+        .map(|t| t.id)
+        .collect()
+}
+
 // ── Victim selection ─────────────────────────────────────────────────────────
 
 /// Pick tabs to hibernate based on current memory pressure.

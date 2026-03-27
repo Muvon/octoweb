@@ -16,6 +16,7 @@ block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSWorkspace"] }
 objc2-core-foundation = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSString", "NSURL"] }
+objc2-web-kit = { version = "0.3", features = ["WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "block2"] }
 
 # Global hotkey — CGEventTap intercepts Cmd+K even when WKWebView has focus
 # Must stay on main thread (TSM APIs require it on macOS 15+)

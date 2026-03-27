@@ -1,6 +1,7 @@
 mod acp;
 mod address_bar_html;
 mod browser;
+mod content_rules;
 mod cold_open;
 mod config;
 mod crash_report;
@@ -22,7 +23,7 @@ mod tab_stats;
 mod url;
 mod webview_utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Mutex,
@@ -106,6 +107,17 @@ fn main() {
     // Must be called before any WebView is created.
     macos::set_english_locale();
 
+    // Start compiling the content blocker (WKContentRuleList) asynchronously.
+    // The completion block fires on the main thread after the event loop starts
+    // and applies the rule list to all tab WebViews. On subsequent launches
+    // WebKit loads from its disk cache — effectively instant.
+    // Must be called on the main thread, before the event loop.
+    {
+        // SAFETY: we are on the main thread here (before the event loop starts).
+        let mtm = unsafe { objc2_foundation::MainThreadMarker::new_unchecked() };
+        content_rules::init(mtm);
+    }
+
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
     macos::init_env();
 
@@ -118,12 +130,18 @@ fn main() {
     let cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
 
-    // Restore browsing history from previous sessions before any navigation occurs.
+    // Restore browsing history in a background thread so startup isn't blocked
+    // by JSON deserialization of up to 1000 history entries. The thread finishes
+    // in <50ms on typical hardware; history is available well before the user
+    // can open the overlay (Cmd+K) for the first time.
     {
-        let persisted = config::load_history();
-        if !persisted.is_empty() {
-            tabs.lock().unwrap().seed_history(persisted);
-        }
+        let tabs_for_history = Arc::clone(&tabs);
+        std::thread::spawn(move || {
+            let persisted = config::load_history();
+            if !persisted.is_empty() {
+                tabs_for_history.lock().unwrap().seed_history(persisted);
+            }
+        });
     }
 
     let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
@@ -237,7 +255,7 @@ fn main() {
                 size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h + ft_h))
                     .into(),
             };
-            WebViewBuilder::new()
+            let wv = WebViewBuilder::new()
                 .with_url(url)
                 .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
@@ -246,18 +264,9 @@ fn main() {
                 .with_background_throttling(BackgroundThrottlingPolicy::Suspend)
                 // Safari-compatible UA so sites serve optimised WebKit assets; octoweb tag for identification
                 .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Octoweb/1.0")
-                // Fetch and cache favicon as base64 data-URI on every page load.
-                // Tries <link rel="icon"> first (highest quality), falls back to /favicon.ico.
-                // Posts IPC only once per domain per session (deduplication in Rust).
-                .with_initialization_script(webview_utils::FAVICON_FETCH_SCRIPT)
-                // Track same-document URL changes (SPA pushState/replaceState/popstate).
-                .with_initialization_script(webview_utils::URL_CHANGE_SCRIPT)
-                // Track audio/video playback state and notify Rust via IPC.
-                .with_initialization_script(webview_utils::MEDIA_TRACK_SCRIPT)
-                // Collect page load stats (size, time) via PerformanceNavigationTiming.
-                .with_initialization_script(webview_utils::PAGE_INFO_SCRIPT)
-                // Find-in-page: CSS Custom Highlight API for zero-DOM-mutation search.
-                .with_initialization_script(webview_utils::FIND_IN_PAGE_SCRIPT)
+                // Single merged script: page stats + favicon + URL tracking +
+                // media tracking + find-in-page. One JSC compile pass instead of five.
+                .with_initialization_script(webview_utils::COMBINED_SCRIPT)
                 // Intercept navigation to external URL schemes (tg://, figma://, mailto:, etc.)
                 // and hand them off to macOS instead of loading them in the WebView.
                 .with_navigation_handler(|nav_url: String| {
@@ -382,7 +391,13 @@ fn main() {
                     let _ = p6.send_event(AppEvent::DownloadCompleted(filename, success));
                 })
                 .build_as_child(&*browser_win)
-                .expect("Failed to create tab WebView")
+                .expect("Failed to create tab WebView");
+            // Apply compiled content rules to this WebView. If the async
+            // compilation hasn't finished yet, the pointer is queued and
+            // applied when the completion block fires.
+            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+            content_rules::apply_to_webview(wv_ptr);
+            wv
         }
     };
 
@@ -397,7 +412,17 @@ fn main() {
     let mut pending_swap: Option<(usize, usize)> = None;
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
+    // favicon_order tracks insertion order for FIFO eviction at 500 entries —
+    // prevents unbounded memory growth during long browsing sessions.
+    const FAVICON_CAP: usize = 500;
     let mut favicon_cache: HashMap<String, String> = config::load_favicons();
+    let mut favicon_order: VecDeque<String> = favicon_cache.keys().cloned().collect();
+    // Trim any pre-existing over-cap entries (shouldn't happen, but safe).
+    while favicon_order.len() > FAVICON_CAP {
+        if let Some(oldest) = favicon_order.pop_front() {
+            favicon_cache.remove(&oldest);
+        }
+    }
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -808,6 +833,13 @@ fn main() {
     // ── Crash diagnostics: periodic health log ────────────────────────────
     let app_start_instant = std::time::Instant::now();
     let mut health_log_next_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
+    // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
+    // Complementary to the reactive hibernation (which only fires under pressure).
+    // Hibernates frozen (idle > 10 min) tabs always, and cold (idle > 3 min)
+    // tabs when too many background WebViews are alive or a tab is memory-heavy.
+    let mut proactive_hiber_next_at =
+        std::time::Instant::now() + std::time::Duration::from_secs(60);
 
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
@@ -1365,6 +1397,44 @@ fn main() {
                         "hibernated tab under memory pressure",
                     );
                 }
+            }
+        }
+
+        // ── Proactive hibernation: freeze idle / cold tabs every 60 s ────────
+        // Runs regardless of memory pressure — reclaims resources before the OS
+        // has to ask us to. Same victim-destruction logic as the reactive path.
+        if now >= proactive_hiber_next_at {
+            proactive_hiber_next_at = now + std::time::Duration::from_secs(60);
+            let victims = {
+                let tm = tabs.lock().unwrap();
+                hibernation::pick_proactive_victims(
+                    tm.tabs(),
+                    &tab_webviews,
+                    &pending_tabs,
+                    pending_swap,
+                    active_wv_id,
+                    &media_playing_tabs,
+                )
+            };
+            for victim_id in victims {
+                let url = tabs.lock().unwrap()
+                    .tabs()
+                    .iter()
+                    .find(|t| t.id == victim_id)
+                    .map(|t| t.url.clone())
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    continue;
+                }
+                if let Some(wv) = tab_webviews.get(&victim_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    nav_error_patch::unregister(wv_ptr);
+                    nav_error_patch::unregister_termination(wv_ptr);
+                }
+                tab_webviews.remove(&victim_id);
+                media_playing_tabs.remove(&victim_id);
+                pending_tabs.insert(victim_id, url.clone());
+                tracing::debug!(tab_id = victim_id, url = %url, "proactively hibernated idle tab");
             }
         }
 
@@ -2441,10 +2511,21 @@ fn main() {
             }
 
             // ── Favicon fetched from page — store in cache ────────────────
-            // Only update + save when we get a new domain (avoids redundant disk writes).
+            // Only update + save when we get a new/changed entry (avoids redundant writes).
+            // FIFO eviction at FAVICON_CAP keeps memory bounded.
             Event::UserEvent(AppEvent::FaviconFetched(domain, data_uri)) => {
                 if favicon_cache.get(&domain).map(|s| s.as_str()) != Some(&data_uri) {
+                    let is_new = !favicon_cache.contains_key(&domain);
+                    if is_new && favicon_order.len() >= FAVICON_CAP {
+                        // Evict oldest entry to stay within cap.
+                        if let Some(oldest) = favicon_order.pop_front() {
+                            favicon_cache.remove(&oldest);
+                        }
+                    }
                     favicon_cache.insert(domain.clone(), data_uri.clone());
+                    if is_new {
+                        favicon_order.push_back(domain.clone());
+                    }
                     config::save_favicons(&favicon_cache);
                 }
                 // Push to address bar ONLY if this domain matches the active tab's domain
