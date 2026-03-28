@@ -791,11 +791,9 @@ pub fn spawn_mcp_server() -> McpHandle {
             // Stateless JSON-RPC mode: no sessions, plain JSON responses.
             // Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
             use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
-            let config = StreamableHttpServerConfig {
-                json_response: true,
-                stateful_mode: false,
-                ..Default::default()
-            };
+            let mut config = StreamableHttpServerConfig::default();
+            config.json_response = true;
+            config.stateful_mode = false;
 
             let service = StreamableHttpService::new(
                 server_factory,
