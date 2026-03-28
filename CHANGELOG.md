@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0] - 2026-03-28
+
+### 📋 Release Summary
+
+This release brings significant improvements to privacy and performance. Enhanced tracker blocking, autoplay prevention, and WebKit content blocking give users better control over their browsing experience. Tab management has been improved with frozen snapshots and proactive hibernation for better resource usage (7aecc161, f2fa86f9, acba3a27, 4f12c157).
+
+
+### ✨ New Features & Enhancements
+
+- **acp**: add exponential backoff reconnection `7aecc161`
+- **tabs**: add frozen tab snapshots and speculative preconnect `f2fa86f9`
+- **blocklist**: expand tracker blocking and add autoplay prevention `acba3a27`
+- add WebKit content blocking and proactive tab hibernation `4f12c157`
+
+### 🔧 Improvements & Optimizations
+
+- reformat code with rustfmt `4ea6a809`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.1.1] - 2026-03-26
 
 ### 📋 Release Summary
