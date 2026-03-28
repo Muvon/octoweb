@@ -74,6 +74,7 @@ enum AppEvent {
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
+    AcpReconnect,              // scheduled reconnection attempt after error
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,            // user clicked X on notification toast
@@ -964,6 +965,12 @@ fn main() {
     })
     .ok();
 
+    // ACP reconnection state — exponential backoff on connection failures
+    let mut acp_retry_count: u32 = 0;
+    const ACP_MAX_RETRIES: u32 = 5;
+    const ACP_BASE_DELAY_SECS: u64 = 1;
+    const ACP_MAX_DELAY_SECS: u64 = 30;
+
     // ── MCP server — exposes browser control tools on localhost:3434 ───────
     let mut mcp_handle = Some(mcp::spawn_mcp_server());
 
@@ -1501,6 +1508,7 @@ fn main() {
             for ev in handle.poll() {
                 match ev {
                     acp::AgentEvent::Connected => {
+                        acp_retry_count = 0; // reset retry count on successful connection
                         let _ = sidebar_wv.evaluate_script(
                             "window.__setConnected && window.__setConnected()"
                         );
@@ -1556,21 +1564,45 @@ fn main() {
                         );
                     }
                     acp::AgentEvent::Error(err) => {
-                        let escaped = webview_utils::escape_js_template(&err);
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__appendError && window.__appendError(`{escaped}`)"
-                    ));
-                        if !sidebar_visible {
-                            let _ = address_bar_wv.evaluate_script(
-                                "window.__setBadge && window.__setBadge(true)"
+                        tracing::warn!(error = %err, "ACP connection error");
+                        // Schedule reconnection with exponential backoff
+                        if acp_retry_count < ACP_MAX_RETRIES {
+                            acp_retry_count += 1;
+                            let delay = std::cmp::min(
+                                ACP_BASE_DELAY_SECS * 2u64.pow(acp_retry_count - 1),
+                                ACP_MAX_DELAY_SECS,
                             );
-                            if !notification_visible {
-                                let _ = notification_wv.set_visible(true);
-                                notification_visible = true;
-                            }
-                            let _ = notification_wv.evaluate_script(&format!(
-                                "window.__show && window.__show(`{escaped}`)"
+                            tracing::info!(retry = acp_retry_count, delay_s = delay, "scheduling ACP reconnection");
+                            // Show connecting status in UI
+                            let _ = sidebar_wv.evaluate_script(
+                                "window.__setConnecting && window.__setConnecting()"
+                            );
+                            // Schedule reconnection after delay
+                            let proxy_clone = acp_proxy.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(delay));
+                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect);
+                            });
+                        } else {
+                            // Max retries exceeded — show error state
+                            tracing::error!("ACP max reconnection retries exceeded");
+                            let _ = sidebar_wv.evaluate_script("window.__setError && window.__setError()");
+                            let escaped = webview_utils::escape_js_template(&err);
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__appendError && window.__appendError(`{escaped}`)"
                             ));
+                            if !sidebar_visible {
+                                let _ = address_bar_wv.evaluate_script(
+                                    "window.__setBadge && window.__setBadge(true)"
+                                );
+                                if !notification_visible {
+                                    let _ = notification_wv.set_visible(true);
+                                    notification_visible = true;
+                                }
+                                let _ = notification_wv.evaluate_script(&format!(
+                                    "window.__show && window.__show(`{escaped}`)"
+                                ));
+                            }
                         }
                     }
                 }
@@ -2305,6 +2337,7 @@ fn main() {
                     );
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
+                        acp_retry_count = 0; // reset retry count on manual open
                         acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                             let p = acp_proxy.clone();
                             move || { let _ = p.send_event(AppEvent::AcpWake); }
@@ -2341,6 +2374,7 @@ fn main() {
             // ── ACP restart with new agent command ─────────────────────────────────
             Event::UserEvent(AppEvent::AcpRestart(tag)) => {
                 acp_tag = tag.clone();
+                acp_retry_count = 0; // reset retry count on manual restart
                 acp_handle = None; // drop old handle (kills subprocess)
                 acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                     let p = acp_proxy.clone();
@@ -2359,6 +2393,7 @@ fn main() {
 
             // ── ACP new session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpNewSession) => {
+                acp_retry_count = 0; // reset retry count on new session
                 acp_handle = None; // drop old handle (kills subprocess)
                 acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                     let p = acp_proxy.clone();
@@ -2437,6 +2472,16 @@ fn main() {
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
+
+            // ── ACP reconnection attempt (scheduled after error) ──
+            Event::UserEvent(AppEvent::AcpReconnect) => {
+                tracing::info!(retry = acp_retry_count, "attempting ACP reconnection");
+                acp_handle = None; // drop old handle if any
+                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+                    let p = acp_proxy.clone();
+                    move || { let _ = p.send_event(AppEvent::AcpWake); }
+                }).ok();
+            }
 
             // ── Dismiss notification toast ─────────────────────────────────────
             Event::UserEvent(AppEvent::DismissNotification) => {
@@ -2815,10 +2860,10 @@ fn main() {
             // ── Favicon cache loaded from disk (background thread) ──────────────
             Event::UserEvent(AppEvent::FaviconCacheLoaded(cache)) => {
                 for (domain, data) in cache {
-                    if !favicon_cache.contains_key(&domain) {
-                        favicon_order.push_back(domain.clone());
-                        favicon_cache.insert(domain, data);
-                    }
+                    favicon_cache.entry(domain.clone()).or_insert_with(|| {
+                        favicon_order.push_back(domain);
+                        data
+                    });
                 }
                 while favicon_order.len() > FAVICON_CAP {
                     if let Some(oldest) = favicon_order.pop_front() {
