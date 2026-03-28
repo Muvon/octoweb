@@ -209,31 +209,44 @@ pub fn pick_proactive_victims(
     };
 
     tabs.iter()
-        .filter(|t| {
-            tab_webviews.contains_key(&t.id) && !pending_tabs.contains_key(&t.id)
-        })
+        .filter(|t| tab_webviews.contains_key(&t.id) && !pending_tabs.contains_key(&t.id))
         .filter(|t| swap_old != Some(t.id) && swap_new != Some(t.id))
         .filter(|t| {
-            if t.id == active_id { return false; }
-            if t.is_playing_audio || media_playing.contains(&t.id) { return false; }
-            if t.url == "about:blank" { return false; }
+            if t.id == active_id {
+                return false;
+            }
+            if t.is_playing_audio || media_playing.contains(&t.id) {
+                return false;
+            }
+            if t.url == "about:blank" {
+                return false;
+            }
 
             let idle = now.duration_since(t.last_active_at).as_secs();
 
             // Frozen: idle > 10 min — always hibernate.
-            if idle > FROZEN_IDLE_SECS { return true; }
+            if idle > FROZEN_IDLE_SECS {
+                return true;
+            }
 
             // Cold: idle > 3 min — hibernate if resources are scarce.
             if idle > COLD_IDLE_SECS {
-                if background_count > COLD_TAB_THRESHOLD { return true; }
+                if background_count > COLD_TAB_THRESHOLD {
+                    return true;
+                }
                 // Sample this tab's RSS; hibernate if heavy.
-                let rss = tab_webviews.get(&t.id).and_then(|wv| {
-                    let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-                    let pid = tab_stats::webview_pid(ptr)?;
-                    let (rss, _) = tab_stats::sample_pid(pid)?;
-                    Some(rss)
-                }).unwrap_or(0);
-                if rss > COLD_RSS_THRESHOLD { return true; }
+                let rss = tab_webviews
+                    .get(&t.id)
+                    .and_then(|wv| {
+                        let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                        let pid = tab_stats::webview_pid(ptr)?;
+                        let (rss, _) = tab_stats::sample_pid(pid)?;
+                        Some(rss)
+                    })
+                    .unwrap_or(0);
+                if rss > COLD_RSS_THRESHOLD {
+                    return true;
+                }
             }
 
             false

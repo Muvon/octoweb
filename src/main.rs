@@ -1,9 +1,9 @@
 mod acp;
 mod address_bar_html;
 mod browser;
-mod content_rules;
 mod cold_open;
 mod config;
+mod content_rules;
 mod crash_report;
 mod error_page_html;
 mod find_bar_html;
@@ -116,17 +116,6 @@ fn main() {
         // SAFETY: we are on the main thread here (before the event loop starts).
         let mtm = unsafe { objc2_foundation::MainThreadMarker::new_unchecked() };
         content_rules::init(mtm);
-    }
-
-    // Pre-warm the WebContent XPC process so the first tab doesn't pay the
-    // process-launch cost (~150-300ms cold start). The XPC process would be
-    // launched on first WebView creation anyway — calling _warmup just moves
-    // that cost to overlap with the rest of startup setup.
-    unsafe {
-        let cls = objc2::runtime::AnyClass::get(c"WKWebView");
-        if let Some(cls) = cls {
-            let _: () = objc2::msg_send![cls, _warmup];
-        }
     }
 
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
@@ -415,8 +404,8 @@ fn main() {
             // object inside configuration is a live shared reference (not a
             // copy), so this affects the running WebView immediately.
             unsafe {
-                use objc2::runtime::AnyObject;
                 use objc2::msg_send;
+                use objc2::runtime::AnyObject;
                 let wv_raw = wv_ptr as *mut AnyObject;
                 let config: *mut AnyObject = msg_send![wv_raw, configuration];
                 if !config.is_null() {

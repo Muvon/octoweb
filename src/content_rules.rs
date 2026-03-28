@@ -102,8 +102,8 @@ pub fn apply_to_webview(wv_ptr: usize) {
 
 fn compile(store: &WKContentRuleListStore, identifier: &NSString) {
     let json = NSString::from_str(BLOCK_LIST_JSON);
-    let compile_block =
-        block2::RcBlock::new(|list: *mut WKContentRuleList, error: *mut objc2_foundation::NSError| {
+    let compile_block = block2::RcBlock::new(
+        |list: *mut WKContentRuleList, error: *mut objc2_foundation::NSError| {
             if list.is_null() {
                 let desc: *mut AnyObject = if error.is_null() {
                     std::ptr::null_mut()
@@ -115,7 +115,8 @@ fn compile(store: &WKContentRuleListStore, identifier: &NSString) {
             }
             tracing::debug!("content rules: compilation succeeded");
             store_and_apply(list);
-        });
+        },
+    );
 
     unsafe {
         store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
