@@ -92,6 +92,8 @@ enum AppEvent {
     ScrollBottom,                   // ⌃B — scroll to bottom of page
     Screenshot,                     // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
     ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
+    SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
+    FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
     Quit,
 }
 fn main() {
@@ -432,15 +434,25 @@ fn main() {
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
     // favicon_order tracks insertion order for FIFO eviction at 500 entries —
     // prevents unbounded memory growth during long browsing sessions.
+    // Loaded in a background thread (same pattern as history) to keep startup fast.
     const FAVICON_CAP: usize = 500;
-    let mut favicon_cache: HashMap<String, String> = config::load_favicons();
-    let mut favicon_order: VecDeque<String> = favicon_cache.keys().cloned().collect();
-    // Trim any pre-existing over-cap entries (shouldn't happen, but safe).
-    while favicon_order.len() > FAVICON_CAP {
-        if let Some(oldest) = favicon_order.pop_front() {
-            favicon_cache.remove(&oldest);
-        }
+    let mut favicon_cache: HashMap<String, String> = HashMap::new();
+    let mut favicon_order: VecDeque<String> = VecDeque::new();
+    {
+        let p = proxy.clone();
+        std::thread::spawn(move || {
+            let cache = config::load_favicons();
+            let _ = p.send_event(AppEvent::FaviconCacheLoaded(cache));
+        });
     }
+
+    // Frozen tab snapshots: tab_id → base64 PNG data-URI captured on tab hide.
+    // Used for instant visual restore when switching to a hibernated tab.
+    let mut tab_snapshots: HashMap<usize, String> = HashMap::new();
+    // Deferred navigation: tab_id → real URL.  Set when a hibernated tab is
+    // restored with a snapshot — the snapshot HTML loads first, then on
+    // PageLoadFinished we navigate to the real URL.
+    let mut deferred_nav: HashMap<usize, String> = HashMap::new();
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -1158,11 +1170,21 @@ fn main() {
     macro_rules! switch_visible_tab {
         ($target:expr) => {{
             let target = $target;
-            // Lazy load: create WebView if this tab was pending
+            // Capture a frozen snapshot of the outgoing tab (async — fires callback later).
+            // Only for live WebViews that aren't about:blank / newtab / error pages.
+            if active_wv_id != target {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    capture_tab_snapshot(wv_ptr, active_wv_id, proxy.clone());
+                }
+            }
+            // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
             if !tab_webviews.contains_key(&target) {
                 if let Some(url) = pending_tabs.remove(&target) {
-                    let wv = make_webview(target, &url);
-                    if url == "about:blank" {
+                    let has_snapshot = tab_snapshots.contains_key(&target);
+                    let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
+                    let wv = make_webview(target, load_url);
+                    if !has_snapshot && url == "about:blank" {
                         let html = newtab_html::html(&quickslots::to_json(&quick_slots));
                         let _ = wv.load_html(&html);
                     }
@@ -1177,6 +1199,16 @@ fn main() {
                     nav_error_patch::register_termination(wv_ptr, move || {
                         let _ = pt.send_event(AppEvent::WebContentTerminated(target));
                     });
+                    // If a snapshot exists, show it immediately — deferred navigation to
+                    // the real URL happens on PageLoadFinished once the snapshot renders.
+                    if let Some(snap) = tab_snapshots.remove(&target) {
+                        let html = format!(
+                            "<html><head><style>*{{margin:0;padding:0}}body{{overflow:hidden}}img{{display:block;width:100vw;height:100vh;object-fit:cover;object-position:top left}}</style></head><body><img src=\"{}\"></body></html>",
+                            snap
+                        );
+                        let _ = wv.load_html(&html);
+                        deferred_nav.insert(target, url);
+                    }
                     let _ = wv.set_visible(false);
                     tab_webviews.insert(target, wv);
                 }
@@ -1984,6 +2016,36 @@ fn main() {
                     overlay_win.set_focus();
                     overlay_visible = true;
                     overlay_hotkey_visible.store(true, Ordering::Relaxed);
+
+                    // Prefetch DNS for top visited domains — macOS DNS cache is
+                    // system-wide, so resolving here benefits subsequent tab navigations.
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let domains: Vec<String> = {
+                            let tm = tabs.lock().unwrap();
+                            let mut seen = std::collections::HashSet::new();
+                            tm.history()
+                                .iter()
+                                .filter_map(|h| {
+                                    webview_utils::extract_domain(&h.url)
+                                        .map(|d| d.to_string())
+                                })
+                                .filter(|d| seen.insert(d.clone()))
+                                .take(10)
+                                .collect()
+                        };
+                        if !domains.is_empty() {
+                            let js: String = domains
+                                .iter()
+                                .map(|d| {
+                                    format!(
+                                        "{{var l=document.createElement('link');l.rel='dns-prefetch';l.href='https://{}';document.head.appendChild(l);}}",
+                                        d
+                                    )
+                                })
+                                .collect();
+                            let _ = wv.evaluate_script(&js);
+                        }
+                    }
                 }
             }
 
@@ -2136,6 +2198,8 @@ fn main() {
                     tab_webviews.remove(&id);
                     media_playing_tabs.remove(&id);  // Clean up stale media state
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
+                    tab_snapshots.remove(&id);
+                    deferred_nav.remove(&id);
                     mru.retain(|&x| x != id);
                     // Switch to the most-recently-used tab (MRU[0] after removal)
                     match mru.first().copied() {
@@ -2617,6 +2681,15 @@ fn main() {
 
             Event::UserEvent(AppEvent::PageLoadFinished(tab_id)) => {
                 tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadFinished");
+                // Deferred navigation: snapshot HTML just rendered — now load the real URL.
+                // The snapshot stays visible (WebKit paint-holding) until the real page paints.
+                if let Some(url) = deferred_nav.remove(&tab_id) {
+                    if let Some(wv) = tab_webviews.get(&tab_id) {
+                        let _ = wv.load_url(&url);
+                    }
+                    // Don't hide progress bar yet — the real page load will fire its own events.
+                    return;
+                }
                 if tab_id == active_wv_id && progress_visible {
                     let _ = progress_wv.evaluate_script("window.__finish && window.__finish()");
                     // Hide after CSS fade completes (width 0.2s + opacity 0.3s delay 0.1s = 600ms, +50ms buffer)
@@ -2732,6 +2805,27 @@ fn main() {
                     let ns_win_ptr = browser_win.ns_window() as usize;
                     screenshot_full_page_to_clipboard(wv_ptr, ns_win_ptr);
                 }
+            }
+
+            // ── Frozen tab snapshot captured (async callback) ──────────────────
+            Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri)) => {
+                tab_snapshots.insert(tab_id, data_uri);
+            }
+
+            // ── Favicon cache loaded from disk (background thread) ──────────────
+            Event::UserEvent(AppEvent::FaviconCacheLoaded(cache)) => {
+                for (domain, data) in cache {
+                    if !favicon_cache.contains_key(&domain) {
+                        favicon_order.push_back(domain.clone());
+                        favicon_cache.insert(domain, data);
+                    }
+                }
+                while favicon_order.len() > FAVICON_CAP {
+                    if let Some(oldest) = favicon_order.pop_front() {
+                        favicon_cache.remove(&oldest);
+                    }
+                }
+                tracing::debug!(count = favicon_cache.len(), "favicon cache loaded from disk");
             }
 
             // ── Media playing state changed ───────────────────────────────────
@@ -2897,6 +2991,51 @@ fn main() {
             _ => {}
         }
     });
+}
+
+// ── Frozen tab snapshot ───────────────────────────────────────────────────
+/// Capture a viewport snapshot of the given WKWebView and send it back as a
+/// base64 PNG data-URI via `AppEvent::SnapshotCaptured`. Used to show instant
+/// frozen content when switching to a hibernated tab.
+fn capture_tab_snapshot(
+    wv_ptr: usize,
+    tab_id: usize,
+    proxy: tao::event_loop::EventLoopProxy<AppEvent>,
+) {
+    let handler = block2::RcBlock::new(
+        move |image: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
+            if image.is_null() {
+                return;
+            }
+            unsafe {
+                let png_data = nsimage_to_png_data(image);
+                if png_data.is_null() {
+                    return;
+                }
+                // Use NSData's built-in base64 encoder (no extra crate needed).
+                let b64_nsstr: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![&*png_data, base64EncodedStringWithOptions: 0u64];
+                if b64_nsstr.is_null() {
+                    return;
+                }
+                let utf8: *const u8 = objc2::msg_send![&*b64_nsstr, UTF8String];
+                let cstr = std::ffi::CStr::from_ptr(utf8 as *const std::ffi::c_char);
+                let b64 = cstr.to_string_lossy();
+                let data_uri = format!("data:image/png;base64,{b64}");
+                let _ = proxy.send_event(AppEvent::SnapshotCaptured(tab_id, data_uri));
+            }
+        },
+    );
+
+    unsafe {
+        let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
+        let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+        let _: () = objc2::msg_send![
+            &*wv_obj,
+            takeSnapshotWithConfiguration: nil,
+            completionHandler: &*handler
+        ];
+    }
 }
 
 // ── Screenshot helpers ────────────────────────────────────────────────────

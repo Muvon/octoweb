@@ -158,6 +158,36 @@ pub const COMBINED_SCRIPT: &str = r#"
     else document.addEventListener('DOMContentLoaded', function () { block(document.body); }, { once: true });
   }());
 
+  // ── Speculative preconnect — DNS+TCP+TLS warmup on link hover ─────────────
+  // When the pointer hovers a cross-origin link for 150 ms, inject <link
+  // rel="preconnect"> and <link rel="dns-prefetch"> for that origin. This
+  // resolves DNS + establishes TCP/TLS before the user clicks — saving
+  // 100-300 ms of connection setup on the subsequent navigation.
+  (function () {
+    var _t = null, _done = {};
+    document.addEventListener('pointerover', function (e) {
+      var a = e.target.closest && e.target.closest('a[href]');
+      if (!a) return;
+      try {
+        var o = new URL(a.href, location.href).origin;
+        if (o === location.origin || o === 'null' || _done[o]) return;
+        clearTimeout(_t);
+        _t = setTimeout(function () {
+          _done[o] = 1;
+          var d = document.createElement('link');
+          d.rel = 'dns-prefetch'; d.href = o;
+          document.head.appendChild(d);
+          var c = document.createElement('link');
+          c.rel = 'preconnect'; c.href = o;
+          document.head.appendChild(c);
+        }, 150);
+      } catch (e) {}
+    }, true);
+    document.addEventListener('pointerout', function (e) {
+      if (e.target.closest && e.target.closest('a[href]')) clearTimeout(_t);
+    }, true);
+  }());
+
   // ── Find in page — CSS Custom Highlight API, zero DOM mutation ────────────
   // Guard prevents double-init on navigate-within-document.
   if (!window.__findInPage) {
