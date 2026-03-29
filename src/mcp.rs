@@ -297,8 +297,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -331,8 +334,11 @@ impl McpServer {
 
         tracing::debug!("MCP get_tabs command sent");
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         tracing::debug!(?result, "MCP get_tabs response");
@@ -364,8 +370,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -394,8 +403,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -424,8 +436,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -456,8 +471,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -484,8 +502,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -515,8 +536,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -538,8 +562,11 @@ impl McpServer {
             .send(McpCommand::GetCurrentTab { response: tx })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -569,8 +596,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -598,8 +628,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -627,8 +660,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -652,8 +688,11 @@ impl McpServer {
             .send(McpCommand::GetPlayingTabs { response: tx })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -681,8 +720,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -710,8 +752,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
@@ -738,8 +783,11 @@ impl McpServer {
             })
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let result = rx
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
+            .map_err(|_| {
+                McpError::internal_error("browser did not respond within 30 s".to_string(), None)
+            })?
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {

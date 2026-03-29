@@ -74,7 +74,7 @@ enum AppEvent {
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
-    AcpReconnect,              // scheduled reconnection attempt after error
+    AcpReconnect(u64), // scheduled reconnection attempt after error (carries generation to ignore stale timers)
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,            // user clicked X on notification toast
@@ -967,6 +967,9 @@ fn main() {
 
     // ACP reconnection state — exponential backoff on connection failures
     let mut acp_retry_count: u32 = 0;
+    // Generation counter: incremented on every intentional reconnect so stale
+    // sleep-thread timers (from prior error backoffs) are ignored when they fire.
+    let mut acp_reconnect_gen: u64 = 0;
     const ACP_MAX_RETRIES: u32 = 5;
     const ACP_BASE_DELAY_SECS: u64 = 1;
     const ACP_MAX_DELAY_SECS: u64 = 30;
@@ -1577,11 +1580,14 @@ fn main() {
                             let _ = sidebar_wv.evaluate_script(
                                 "window.__setConnecting && window.__setConnecting()"
                             );
+                            // Bump generation so any previously scheduled timer is ignored.
+                            acp_reconnect_gen += 1;
+                            let gen = acp_reconnect_gen;
                             // Schedule reconnection after delay
                             let proxy_clone = acp_proxy.clone();
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_secs(delay));
-                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect);
+                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect(gen));
                             });
                         } else {
                             // Max retries exceeded — show error state
@@ -2338,6 +2344,7 @@ fn main() {
                     // Connect ACP if not yet connected
                     if acp_handle.is_none() {
                         acp_retry_count = 0; // reset retry count on manual open
+                        acp_reconnect_gen += 1; // invalidate any pending backoff timers
                         acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                             let p = acp_proxy.clone();
                             move || { let _ = p.send_event(AppEvent::AcpWake); }
@@ -2375,6 +2382,7 @@ fn main() {
             Event::UserEvent(AppEvent::AcpRestart(tag)) => {
                 acp_tag = tag.clone();
                 acp_retry_count = 0; // reset retry count on manual restart
+                acp_reconnect_gen += 1; // invalidate any pending backoff timers
                 acp_handle = None; // drop old handle (kills subprocess)
                 acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                     let p = acp_proxy.clone();
@@ -2394,6 +2402,7 @@ fn main() {
             // ── ACP new session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpNewSession) => {
                 acp_retry_count = 0; // reset retry count on new session
+                acp_reconnect_gen += 1; // invalidate any pending backoff timers
                 acp_handle = None; // drop old handle (kills subprocess)
                 acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
                     let p = acp_proxy.clone();
@@ -2474,13 +2483,20 @@ fn main() {
             Event::UserEvent(AppEvent::AcpWake) => {}
 
             // ── ACP reconnection attempt (scheduled after error) ──
-            Event::UserEvent(AppEvent::AcpReconnect) => {
-                tracing::info!(retry = acp_retry_count, "attempting ACP reconnection");
-                acp_handle = None; // drop old handle if any
-                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-                    let p = acp_proxy.clone();
-                    move || { let _ = p.send_event(AppEvent::AcpWake); }
-                }).ok();
+            Event::UserEvent(AppEvent::AcpReconnect(gen)) => {
+                // Ignore stale timers from a previous error cycle — the user may
+                // have manually reconnected (AcpRestart / AcpNewSession) in the
+                // meantime, which already bumped acp_reconnect_gen.
+                if gen != acp_reconnect_gen {
+                    tracing::debug!(gen, current = acp_reconnect_gen, "ignoring stale ACP reconnect timer");
+                } else {
+                    tracing::info!(retry = acp_retry_count, "attempting ACP reconnection");
+                    acp_handle = None; // drop old handle if any
+                    acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
+                        let p = acp_proxy.clone();
+                        move || { let _ = p.send_event(AppEvent::AcpWake); }
+                    }).ok();
+                }
             }
 
             // ── Dismiss notification toast ─────────────────────────────────────
