@@ -534,26 +534,28 @@ fn main() {
             let ow = Arc::clone(&overlay_win);
             let overlay_state = Arc::clone(&overlay_hotkey_visible);
             move |msg| {
+                let dismiss = || {
+                    ow.set_visible(false);
+                    overlay_state.store(false, Ordering::Relaxed);
+                };
+
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
                         Some("overlay_open") => {
                             overlay_state.store(true, Ordering::Relaxed);
                         }
                         Some("overlay_close") | Some("close") => {
-                            ow.set_visible(false);
-                            overlay_state.store(false, Ordering::Relaxed);
+                            dismiss();
                             let _ = p.send_event(AppEvent::HideOverlay);
                         }
                         Some("navigate") => {
-                            ow.set_visible(false);
-                            overlay_state.store(false, Ordering::Relaxed);
+                            dismiss();
                             if let Some(url) = v["url"].as_str() {
                                 let _ = p.send_event(AppEvent::NavigateTo(url.to_string()));
                             }
                         }
                         Some("switch_tab") => {
-                            ow.set_visible(false);
-                            overlay_state.store(false, Ordering::Relaxed);
+                            dismiss();
                             if let Some(tab_id) = v["tab_id"].as_u64() {
                                 let _ = p.send_event(AppEvent::SwitchTab(tab_id as usize));
                             }
@@ -569,8 +571,7 @@ fn main() {
                             }
                         }
                         Some("ask_ai") => {
-                            ow.set_visible(false);
-                            overlay_state.store(false, Ordering::Relaxed);
+                            dismiss();
                             let _ = p.send_event(AppEvent::HideOverlay);
                             if let Some(text) = v["text"].as_str() {
                                 let _ = p.send_event(AppEvent::AskAI(text.to_string()));
@@ -2016,6 +2017,7 @@ fn main() {
         match event {
             // ── Hide overlay (from JS Esc / backdrop click) ───────────────
             Event::UserEvent(AppEvent::HideOverlay) => {
+                objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(false);
                 overlay_win.set_visible(false);
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
@@ -2047,6 +2049,7 @@ fn main() {
             // ── Toggle overlay ────────────────────────────────────────────
             Event::UserEvent(AppEvent::ToggleOverlay) => {
                 if overlay_visible {
+                    objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(false);
                     overlay_win.set_visible(false);
                     overlay_visible = false;
                     overlay_hotkey_visible.store(false, Ordering::Relaxed);
@@ -2066,6 +2069,7 @@ fn main() {
                 ));
                     overlay_win.set_visible(true);
                     overlay_win.set_focus();
+                    objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(true);
                     overlay_visible = true;
                     overlay_hotkey_visible.store(true, Ordering::Relaxed);
 
