@@ -196,7 +196,7 @@ fn main() {
     }
 
     let overlay_win = Arc::new(overlay_win);
-    let _overlay_win_id = overlay_win.id();
+    let overlay_win_id = overlay_win.id();
     // ── Chrome window — borderless transparent layer for persistent UI ────
     // Floats above browser_win; holds sidebar, footer, notification toast.
     // Transparent areas pass clicks through to browser_win underneath.
@@ -3055,16 +3055,17 @@ fn main() {
                     modifiers = *mods;
                 }
 
-                WindowEvent::Focused(focused) if window_id == browser_win_id || window_id == chrome_win_id => {
+                WindowEvent::Focused(focused) if window_id == browser_win_id || window_id == chrome_win_id || window_id == overlay_win_id => {
                     if *focused {
                         app_focused.store(true, Ordering::Relaxed);
                     } else {
-                        // Only mark unfocused if NEITHER window has focus.
-                        // When clicking between browser_win and chrome_win, one gains
-                        // focus before the other loses it, so we defer the check.
+                        // Only mark unfocused if NO app window has focus.
+                        // When clicking between windows, one gains focus before
+                        // the other loses it, so we defer the check.
                         let bf = browser_win.is_focused();
                         let cf = chrome_win.is_focused();
-                        if !bf && !cf {
+                        let of = overlay_win.is_focused();
+                        if !bf && !cf && !of {
                             app_focused.store(false, Ordering::Relaxed);
                         }
                     }
