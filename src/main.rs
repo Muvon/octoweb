@@ -186,10 +186,17 @@ fn main() {
         .with_visible(false)
         .build(&event_loop)
         .expect("Failed to create overlay window");
+    // Set hidesOnDeactivate — window auto-hides when app resigns active (Cmd+Tab, etc.)
+    // This is how Spotlight/Raycast overlays behave.
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ns_win: *mut AnyObject = overlay_win.ns_window() as *mut AnyObject;
+        let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+    }
 
     let overlay_win = Arc::new(overlay_win);
     let _overlay_win_id = overlay_win.id();
-
     // ── Chrome window — borderless transparent layer for persistent UI ────
     // Floats above browser_win; holds sidebar, footer, notification toast.
     // Transparent areas pass clicks through to browser_win underneath.
@@ -587,8 +594,15 @@ fn main() {
         .with_visible(false)
         .build(&event_loop)
         .expect("Failed to create shortcuts window");
-    let shortcuts_win = Arc::new(shortcuts_win);
+    // Set hidesOnDeactivate — window auto-hides when app resigns active (Cmd+Tab, etc.)
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ns_win: *mut AnyObject = shortcuts_win.ns_window() as *mut AnyObject;
+        let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+    }
 
+    let shortcuts_win = Arc::new(shortcuts_win);
     let _shortcuts_wv = WebViewBuilder::new()
         .with_html(shortcuts_html::html())
         .with_transparent(true)
