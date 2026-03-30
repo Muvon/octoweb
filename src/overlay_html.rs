@@ -196,8 +196,7 @@ pub fn html() -> &'static str {
     transition: background 80ms ease;
   }
 
-  .item.selected,
-  .item:hover {
+  .item.selected {
     background: var(--item-selected);
   }
 
@@ -278,7 +277,6 @@ pub fn html() -> &'static str {
     transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
   }
 
-  .item:hover .close-btn,
   .item.selected .close-btn {
     opacity: 1;
   }
@@ -349,6 +347,9 @@ pub fn html() -> &'static str {
   let filtered = [];
   let sel = 0;
   let userQuery = ''; // tracks what the user actually typed (vs autofill)
+  let pointerActive = false; // suppresses mouse until real movement after overlay open / keyboard nav
+  let lastPointerX = 0;
+  let lastPointerY = 0;
 
   const ICONS = {
     search: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
@@ -363,6 +364,7 @@ pub fn html() -> &'static str {
     queryEl.value = '';
     userQuery = '';
     sel = 0;
+    pointerActive = false;
     window.ipc.postMessage(JSON.stringify({ type: 'overlay_open' }));
     render('');
     queryEl.focus();
@@ -640,6 +642,7 @@ pub fn html() -> &'static str {
   function move(dir) {
     if (filtered.length === 0) return;
     sel = (sel + dir + filtered.length) % filtered.length;
+    pointerActive = false;
     renderItems();
     updateBadge();
     autofillFromSelected();
@@ -733,7 +736,17 @@ pub fn html() -> &'static str {
     // Attach event listeners
     resultsEl.querySelectorAll('.item').forEach(row => {
       const idx = parseInt(row.dataset.idx, 10);
-      row.addEventListener('mouseover', () => {
+      row.addEventListener('pointermove', (e) => {
+        if (!pointerActive) {
+          // First pointermove after open/keyboard nav — calibrate position, don't select
+          lastPointerX = e.clientX;
+          lastPointerY = e.clientY;
+          pointerActive = true;
+          return;
+        }
+        if (e.clientX === lastPointerX && e.clientY === lastPointerY) return;
+        lastPointerX = e.clientX;
+        lastPointerY = e.clientY;
         if (sel === idx) return;
         sel = idx;
         // Update highlight only — do not rewrite input on mouse hover
