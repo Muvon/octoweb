@@ -880,7 +880,7 @@ fn main() {
     let app_start_instant = std::time::Instant::now();
     let mut health_log_next_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
-    // ── Debounced history persistence: save 5 s after first mutation ──────
+    // ── Debounced history persistence: save 60 s after first mutation ─────
     let mut history_save_at: Option<std::time::Instant> = None;
 
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
