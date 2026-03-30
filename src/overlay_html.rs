@@ -370,9 +370,10 @@ pub fn html() -> &'static str {
 
   // Refresh items in-place (after tab close / history remove) — keeps current query and selection.
   // Does NOT call render() to avoid the sel=0 reset; rebuilds filtered directly then re-renders.
+  // Uses userQuery (what user typed) not queryEl.value (which may be autofilled URL).
   window.__refreshItems = function(data) {
     items = Array.isArray(data) ? data : [];
-    const q = queryEl.value.trim().toLowerCase();
+    const q = userQuery.trim().toLowerCase();
     if (!q) {
       // Empty query: same sort logic as render()
       const candidates = items.filter(i => i.kind === 'tab' || i.kind === 'history');
@@ -389,7 +390,7 @@ pub fn html() -> &'static str {
     } else {
       // Non-empty query: re-run fuzzy search, keep action items
       const list = fuzzyRrf(q, items);
-      const raw = queryEl.value.trim();
+      const raw = userQuery.trim();
       const urlLike = isLikelyUrl(raw);
       const openAction = { kind: 'url', title: 'Open URL', url: toNavigableUrl(raw), subtitle: toNavigableUrl(raw), pill: 'URL' };
       const searchAction = { kind: 'search', title: 'Search Google', url: raw, query: raw, subtitle: raw, pill: 'Search' };
