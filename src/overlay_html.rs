@@ -348,6 +348,7 @@ pub fn html() -> &'static str {
   let items = [];
   let filtered = [];
   let sel = 0;
+  let userQuery = ''; // tracks what the user actually typed (vs autofill)
 
   const ICONS = {
     search: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>',
@@ -360,20 +361,52 @@ pub fn html() -> &'static str {
   window.__setItems = function(data) {
     items = Array.isArray(data) ? data : [];
     queryEl.value = '';
+    userQuery = '';
     sel = 0;
     window.ipc.postMessage(JSON.stringify({ type: 'overlay_open' }));
     render('');
     queryEl.focus();
   };
 
-  // Refresh items in-place (after tab close / history remove) — keeps current query
+  // Refresh items in-place (after tab close / history remove) — keeps current query and selection.
+  // Does NOT call render() to avoid the sel=0 reset; rebuilds filtered directly then re-renders.
   window.__refreshItems = function(data) {
     items = Array.isArray(data) ? data : [];
-    sel = Math.min(sel, Math.max(filtered.length - 2, 0));
-    render(queryEl.value);
+    const q = queryEl.value.trim().toLowerCase();
+    if (!q) {
+      // Empty query: same sort logic as render()
+      const candidates = items.filter(i => i.kind === 'tab' || i.kind === 'history');
+      candidates.sort((a, b) => {
+        const recencyA = a.kind === 'tab' ? Date.now() / 1000 : (a.visited_at || 0);
+        const recencyB = b.kind === 'tab' ? Date.now() / 1000 : (b.visited_at || 0);
+        const freqA = (a.visit_count || 0) + (a.kind === 'tab' ? 5 : 0);
+        const freqB = (b.visit_count || 0) + (b.kind === 'tab' ? 5 : 0);
+        const ageDiffSecs = recencyB - recencyA;
+        if (Math.abs(ageDiffSecs) > 86400) return ageDiffSecs > 0 ? 1 : -1;
+        return freqB - freqA;
+      });
+      filtered = candidates.slice(0, 12);
+    } else {
+      // Non-empty query: re-run fuzzy search, keep action items
+      const list = fuzzyRrf(q, items);
+      const raw = queryEl.value.trim();
+      const urlLike = isLikelyUrl(raw);
+      const openAction = { kind: 'url', title: 'Open URL', url: toNavigableUrl(raw), subtitle: toNavigableUrl(raw), pill: 'URL' };
+      const searchAction = { kind: 'search', title: 'Search Google', url: raw, query: raw, subtitle: raw, pill: 'Search' };
+      const askAction = { kind: 'ask', title: 'Ask AI', url: '', query: raw, subtitle: raw, pill: 'AI' };
+      const actions = urlLike ? [openAction, searchAction, askAction] : [searchAction, openAction, askAction];
+      filtered = [...list, ...actions].slice(0, 14);
+    }
+    // Clamp selection to new list size, keep position if possible
+    sel = Math.min(sel, Math.max(filtered.length - 1, 0));
+    renderItems();
+    updateBadge();
   };
 
-  queryEl.addEventListener('input', () => render(queryEl.value));
+  queryEl.addEventListener('input', () => {
+    userQuery = queryEl.value;
+    render(queryEl.value);
+  });
   queryEl.addEventListener('keydown', onInputKeyDown);
 
   document.getElementById('backdrop').addEventListener('mousedown', e => {
@@ -591,11 +624,24 @@ pub fn html() -> &'static str {
     return false;
   }
 
+  function autofillFromSelected() {
+    if (filtered.length === 0) return;
+    const item = filtered[sel];
+    if (!item) return;
+    // Show the URL for tab/history items, restore user query for action items.
+    // Skip autofill if the item has no URL (e.g. a tab still loading).
+    const isNavigable = item.kind === 'tab' || item.kind === 'history';
+    const fill = isNavigable && item.url ? item.url : userQuery;
+    queryEl.value = fill;
+    queryEl.setSelectionRange(fill.length, fill.length);
+  }
+
   function move(dir) {
     if (filtered.length === 0) return;
     sel = (sel + dir + filtered.length) % filtered.length;
     renderItems();
     updateBadge();
+    autofillFromSelected();
   }
 
   function render(rawQuery) {
@@ -686,6 +732,15 @@ pub fn html() -> &'static str {
     // Attach event listeners
     resultsEl.querySelectorAll('.item').forEach(row => {
       const idx = parseInt(row.dataset.idx, 10);
+      row.addEventListener('mouseover', () => {
+        if (sel === idx) return;
+        sel = idx;
+        // Update highlight only — do not rewrite input on mouse hover
+        resultsEl.querySelectorAll('.item').forEach((r, i) => {
+          r.classList.toggle('selected', i === sel);
+        });
+        updateBadge();
+      });
       row.addEventListener('mousedown', e => {
         if (e.target && e.target.classList && e.target.classList.contains('close-btn')) return;
         e.preventDefault();
@@ -734,7 +789,7 @@ pub fn html() -> &'static str {
       iconHtml(item) +
       '<div class="item-text">' +
         '<div class="item-title">' + esc(rawTitle) + '</div>' +
-        '<div class="item-url">' + esc(hostname) + '</div>' +
+        (hostname ? '<div class="item-url">' + esc(hostname) + '</div>' : '') +
       '</div>' +
       '<div class="item-meta">' +
         shortcutHtml +
@@ -774,6 +829,11 @@ pub fn html() -> &'static str {
   }
 
   function cleanHost(url) {
+    if (!url) return '';
+    if (url.startsWith('file://')) {
+      // Show just the filename, not the full path
+      return url.split('/').pop() || url.replace('file://', '');
+    }
     return url.replace(/^https?:\/\//, '').replace(/\/$/, '') || url;
   }
 

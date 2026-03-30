@@ -130,6 +130,14 @@ impl TabManager {
             if tab.url == url {
                 return; // same URL re-fired (iframe, redirect) — skip
             }
+            // Don't pollute history with blank/internal pages
+            if url == "about:blank" || url.is_empty() {
+                tab.url = url;
+                tab.title = String::new();
+                tab.page_bytes = 0;
+                tab.page_time_ms = 0;
+                return;
+            }
             let now = unix_now();
             let key = url.trim_end_matches('/');
             if let Some(entry) = self

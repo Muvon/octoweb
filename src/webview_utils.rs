@@ -342,10 +342,14 @@ pub fn build_items_json(
 
     // ── History ───────────────────────────────────────────────────────────────
     // Newest-first (iter().rev()), skip URLs already shown as tabs, cap at 200.
+    // Skip blank/internal pages — they're noise in the palette.
     let mut history_count = 0;
     for entry in history.iter().rev() {
         if history_count >= 200 {
             break;
+        }
+        if entry.url.is_empty() || entry.url == "about:blank" {
+            continue;
         }
         if open_urls.contains(entry.url.trim_end_matches('/')) {
             continue;
