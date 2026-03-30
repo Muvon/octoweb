@@ -113,10 +113,16 @@ pub fn save_history(entries: &[crate::browser::HistoryEntry]) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let tmp = path.with_extension("json.tmp");
     match serde_json::to_string(entries) {
         Ok(s) => {
-            if let Err(e) = fs::write(&path, s) {
-                tracing::warn!(error = %e, "Failed to write history");
+            if let Err(e) = fs::write(&tmp, &s) {
+                tracing::warn!(error = %e, "Failed to write history tmp");
+                return;
+            }
+            // Atomic rename — APFS guarantees this won't corrupt history.json on crash
+            if let Err(e) = fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, "Failed to rename history tmp");
             }
         }
         Err(e) => tracing::warn!(error = %e, "Failed to serialize history"),

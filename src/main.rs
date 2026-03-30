@@ -880,6 +880,9 @@ fn main() {
     let app_start_instant = std::time::Instant::now();
     let mut health_log_next_at = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
+    // ── Debounced history persistence: save 5 s after first mutation ──────
+    let mut history_save_at: Option<std::time::Instant> = None;
+
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
     // Complementary to the reactive hibernation (which only fires under pressure).
     // Hibernates frozen (idle > 10 min) tabs always, and cold (idle > 3 min)
@@ -1353,11 +1356,14 @@ fn main() {
             tracing::debug!(url = %url, "cold_open: draining URL");
             let _ = proxy.send_event(AppEvent::NavigateTo(url));
         }
-        let next_wake = if let Some(hide_at) = progress_hide_at {
+        let mut next_wake = if let Some(hide_at) = progress_hide_at {
             sys_stats_next_at.min(hide_at)
         } else {
             sys_stats_next_at
         };
+        if let Some(save_at) = history_save_at {
+            next_wake = next_wake.min(save_at);
+        }
         *control_flow = ControlFlow::WaitUntil(
             next_wake.min(std::time::Instant::now() + std::time::Duration::from_millis(16)),
         );
@@ -1423,6 +1429,19 @@ fn main() {
                 pressure: pressure_str,
                 active_url: &active_url,
             });
+        }
+
+        // ── Debounced history save ──────────────────────────────────────
+        if let Some(save_at) = history_save_at {
+            if now >= save_at {
+                history_save_at = None;
+                let snapshot: Vec<browser::HistoryEntry> = {
+                    let mut tm = tabs.lock().unwrap();
+                    tm.ensure_contiguous();
+                    tm.history().to_vec()
+                };
+                std::thread::spawn(move || config::save_history(&snapshot));
+            }
         }
 
         // ── Tab hibernation: offload idle tabs under memory pressure ─────
@@ -1672,7 +1691,9 @@ fn main() {
                                 let resolved = url::resolve_url(&url, &search_engine);
                                 let escaped = resolved.replace('\\', "\\\\").replace('\'', "\\'");
                                 let _ = wv.evaluate_script(&format!("window.location.href = '{escaped}'"));
-                                tabs.lock().unwrap().update_url(target_id, resolved);
+                                if tabs.lock().unwrap().update_url(target_id, resolved) {
+                                    history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                                }
                                 let _ = response.send(Ok(target_id));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
@@ -2276,7 +2297,9 @@ fn main() {
 
             // ── Remove history entry (from overlay × button) ────────────────
             Event::UserEvent(AppEvent::RemoveHistory(url)) => {
-                tabs.lock().unwrap().remove_history(&url);
+                if tabs.lock().unwrap().remove_history(&url) {
+                    history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                }
                 // Refresh overlay so the removed entry disappears
                 refresh_overlay!();
             }
@@ -2651,7 +2674,9 @@ fn main() {
 
             // ── Title update ──────────────────────────────────────────────
             Event::UserEvent(AppEvent::TitleChanged(tab_id, title)) => {
-                tabs.lock().unwrap().update_title(tab_id, title.clone());
+                if tabs.lock().unwrap().update_title(tab_id, title.clone()) {
+                    history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                }
                 if tab_id == active_wv_id {
                     browser_win.set_title(&title);
                     let escaped = webview_utils::escape_js_template(&title);
@@ -2663,7 +2688,9 @@ fn main() {
 
             // ── URL update from page load ─────────────────────────────────
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
-                tabs.lock().unwrap().update_url(tab_id, url.clone());
+                if tabs.lock().unwrap().update_url(tab_id, url.clone()) {
+                    history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                }
                 if tab_id == active_wv_id {
                     update_address_bar_url!(url);
                     // Reset window title — TitleChanged will set the real one once the page loads.

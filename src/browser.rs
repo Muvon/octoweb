@@ -109,15 +109,18 @@ impl TabManager {
     }
 
     /// Update the title of a tab; backfills the most recent history entry for its URL.
-    pub fn update_title(&mut self, id: usize, title: String) {
+    pub fn update_title(&mut self, id: usize, title: String) -> bool {
         let url = if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             tab.title = title.clone();
             tab.url.clone()
         } else {
-            return;
+            return false;
         };
         if let Some(entry) = self.history.iter_mut().rev().find(|e| e.url == url) {
             entry.title = title;
+            true
+        } else {
+            false
         }
     }
 
@@ -125,10 +128,10 @@ impl TabManager {
     /// If the URL already exists in history, increments its visit count and
     /// updates visited_at. Otherwise pushes a new entry. This keeps history
     /// deduplicated at write time so the deque never fills with duplicates.
-    pub fn update_url(&mut self, id: usize, url: String) {
+    pub fn update_url(&mut self, id: usize, url: String) -> bool {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             if tab.url == url {
-                return; // same URL re-fired (iframe, redirect) — skip
+                return false; // same URL re-fired (iframe, redirect) — skip
             }
             // Don't pollute history with blank/internal pages
             if url == "about:blank" || url.is_empty() {
@@ -136,7 +139,7 @@ impl TabManager {
                 tab.title = String::new();
                 tab.page_bytes = 0;
                 tab.page_time_ms = 0;
-                return;
+                return false;
             }
             let now = unix_now();
             let key = url.trim_end_matches('/');
@@ -167,7 +170,9 @@ impl TabManager {
             tab.title = String::new();
             tab.page_bytes = 0;
             tab.page_time_ms = 0;
+            return true;
         }
+        false
     }
 
     pub fn active_id(&self) -> Option<usize> {
@@ -199,10 +204,12 @@ impl TabManager {
     }
 
     /// Remove all history entries matching the given URL.
-    pub fn remove_history(&mut self, url: &str) {
+    pub fn remove_history(&mut self, url: &str) -> bool {
         let normalized = url.trim_end_matches('/');
+        let before = self.history.len();
         self.history
             .retain(|e| e.url.trim_end_matches('/') != normalized);
+        self.history.len() != before
     }
 
     /// Seed history from persisted data (called once at startup, before the event loop).
