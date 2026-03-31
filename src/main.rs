@@ -147,8 +147,9 @@ fn main() {
         });
     }
 
+    cold_open::install_early(); // capture kAEGetURL before tao drops it
     let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
-    cold_open::install();
+    cold_open::install(); // hook application:openURLs: for warm launch
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
