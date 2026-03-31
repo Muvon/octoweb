@@ -184,6 +184,16 @@ pub fn log_health(snap: &HealthSnapshot<'_>) {
     ));
 }
 
+// ── Exit trigger log ─────────────────────────────────────────────────────────
+
+/// Log what triggered the app exit with backtrace.
+pub fn log_exit_trigger(source: &str) {
+    let bt = std::backtrace::Backtrace::force_capture();
+    append_line(&format!(
+        "EXIT_TRIGGER source=\"{source}\"\n|  backtrace:\n{bt}"
+    ));
+}
+
 // ── WebContent termination log ────────────────────────────────────────────────
 
 /// Log when macOS kills a WebContent XPC process.

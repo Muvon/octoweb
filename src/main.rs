@@ -2669,6 +2669,7 @@ fn main() {
 
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
+                crash_report::log_exit_trigger("Quit");
                 save_and_exit(&tabs, &favicon_cache, control_flow);
             }
 
@@ -2973,6 +2974,7 @@ fn main() {
             } => match win_event {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
+                        crash_report::log_exit_trigger("CloseRequested");
                         save_and_exit(&tabs, &favicon_cache, control_flow);
                     } else if window_id == chrome_win_id {
                         // Chrome window should not be closed independently — ignore.
