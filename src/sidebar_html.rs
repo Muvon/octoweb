@@ -1093,7 +1093,7 @@ pub fn html() -> &'static str {
 </div>
 
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
-<script src="octoweb-lib://marked.min.js"></script>
+<script src="octoweb-lib://localhost/marked.min.js"></script>
 <script>
   // Configure marked: safe defaults, no mangling
   if (typeof marked !== 'undefined') {
@@ -1639,22 +1639,24 @@ pub fn html() -> &'static str {
 
   async function ensureDocLibs() {
     if (docLibsLoaded) return;
-    // mammoth (DOCX)
-    await new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = 'octoweb-lib://mammoth.browser.min.js';
-      s.onload = resolve;
-      s.onerror = reject;
-      document.head.appendChild(s);
-    });
-    // pdf.js — load as classic script (not ES module) via fetch+eval
-    const pdfSrc = await fetch('octoweb-lib://pdf.min.mjs').then(r => r.text());
-    // Convert ES module to global: strip export, assign to window
-    const patched = pdfSrc.replace(/export\s*\{[^}]*\}/, '');
-    new Function(patched)();
-    if (typeof pdfjsLib !== 'undefined') {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'octoweb-lib://pdf.worker.min.mjs';
+    // Load scripts sequentially — each sets a global (pdfjsLib, mammoth)
+    async function loadScript(url) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
     }
+    // pdf.js v3 UMD — sets globalThis.pdfjsLib
+    await loadScript('octoweb-lib://localhost/pdf.min.js');
+    // Worker: blob URL so pdf.js can load it without network access
+    const workerSrc = await fetch('octoweb-lib://localhost/pdf.worker.min.js').then(r => r.text());
+    const workerBlob = new Blob([workerSrc], { type: 'application/javascript' });
+    pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
+    // mammoth (DOCX) — sets window.mammoth
+    await loadScript('octoweb-lib://localhost/mammoth.browser.min.js');
     docLibsLoaded = true;
   }
 
@@ -1663,7 +1665,7 @@ pub fn html() -> &'static str {
     const buf = await file.arrayBuffer();
     const name = file.name.toLowerCase();
     if (name.endsWith('.pdf')) {
-      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      const pdf = await window.pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
       let text = '';
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
@@ -1737,9 +1739,15 @@ pub fn html() -> &'static str {
       for (const doc of docs) {
         try {
           const extracted = await extractDocText(doc.file);
-          docPrefix += '<doc filename="' + doc.name + '">\n' + extracted + '\n</doc>\n\n';
+          if (extracted) {
+            docPrefix += '<doc filename="' + doc.name + '">\n' + extracted + '\n</doc>\n\n';
+          } else {
+            docPrefix += '<doc filename="' + doc.name + '">\n[Document was empty or could not be parsed]\n</doc>\n\n';
+          }
         } catch (e) {
-          docPrefix += '<doc filename="' + doc.name + '">\n[Failed to extract: ' + e.message + ']\n</doc>\n\n';
+          const msg = e && (e.message || e.toString()) || 'unknown error';
+          console.error('Doc extraction failed:', e);
+          docPrefix += '<doc filename="' + doc.name + '">\n[Failed to extract: ' + msg + ']\n</doc>\n\n';
         }
       }
     }

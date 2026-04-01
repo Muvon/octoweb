@@ -659,12 +659,12 @@ fn main() {
         .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
             let path = request.uri().path().trim_start_matches('/');
             let (data, mime): (&[u8], &str) = match path {
-                "pdf.min.mjs" => (
-                    include_bytes!("../assets/lib/pdf.min.mjs"),
+                "pdf.min.js" => (
+                    include_bytes!("../assets/lib/pdf.min.js"),
                     "application/javascript",
                 ),
-                "pdf.worker.min.mjs" => (
-                    include_bytes!("../assets/lib/pdf.worker.min.mjs"),
+                "pdf.worker.min.js" => (
+                    include_bytes!("../assets/lib/pdf.worker.min.js"),
                     "application/javascript",
                 ),
                 "mammoth.browser.min.js" => (

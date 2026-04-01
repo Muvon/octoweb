@@ -333,7 +333,7 @@ pub fn html() -> &'static str {
   </div>
 </div>
 
-<script src="octoweb-lib://fuzzysort.min.js"></script>
+<script src="octoweb-lib://localhost/fuzzysort.min.js"></script>
 <script>
 (function() {
   const queryEl = document.getElementById('query');
