@@ -1030,7 +1030,7 @@ fn main() {
                 }
             }
         })
-        .build_as_child(&*chrome_win)
+        .build_as_child(&*browser_win)
         .expect("Failed to create quickslots footer WebView");
     // Initialize footer with saved slots
     {
