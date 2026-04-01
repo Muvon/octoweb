@@ -436,6 +436,14 @@ pub fn html() -> &'static str {
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
+  .msg-label .msg-tools {
+    font-size: 9.5px;
+    font-weight: 400;
+    letter-spacing: 0.01em;
+    color: var(--text-tertiary);
+    opacity: 0.5;
+    margin-left: 2px;
+  }
   .msg.user  .msg-label { justify-content: flex-end; }
   .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
   .msg.error .msg-label .msg-who { color: var(--dot-err); opacity: 0.85; }
@@ -1294,9 +1302,18 @@ pub fn html() -> &'static str {
   }
 
   // Called once Done arrives — stores raw, appends copy btn inside bubble, collapses if tall
-  function finishAgentBubble(bubble, rawText) {
+  function finishAgentBubble(bubble, rawText, toolCount) {
     const wrap = bubble.closest('.msg');
     wrap.dataset.raw = rawText;
+
+    // Show tool count in header if any tools were used
+    if (toolCount > 0) {
+      const toolsEl = wrap.querySelector('.msg-tools');
+      if (toolsEl) {
+        toolsEl.textContent = '· ' + toolCount + ' tools';
+        toolsEl.style.display = 'inline';
+      }
+    }
 
     // Copy button sits inside the bubble, bottom-right corner
     bubble.appendChild(makeCopyBtn(wrap));
@@ -1327,8 +1344,13 @@ pub fn html() -> &'static str {
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
+    // Placeholder for tool count (populated on finish)
+    const tools = document.createElement('span');
+    tools.className = 'msg-tools';
+    tools.style.display = 'none';
     label.appendChild(who);
     label.appendChild(time);
+    label.appendChild(tools);
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
     wrap.appendChild(label);
@@ -1373,6 +1395,7 @@ pub fn html() -> &'static str {
   let activityStart = 0;       // Date.now() when thinking began
   let activityTimer = null;    // setInterval id for elapsed display
   const toolRows = {};         // id → { el, startTime, timerEl }
+  let toolCount = 0;           // total tools used in current response
 
   const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
 
@@ -1401,6 +1424,7 @@ pub fn html() -> &'static str {
   }
 
   window.__toolStart = function(id, title, kind) {
+    toolCount++;
     // Create row
     const row = document.createElement('div');
     row.className = 'tool-row';
@@ -1458,6 +1482,7 @@ pub fn html() -> &'static str {
     if (on) {
       currentAgentBubble = null;
       currentAgentRaw = '';
+      toolCount = 0;
       clearActivity();
       activityStart = Date.now();
       // Header with 3-dot bounce + elapsed
@@ -1468,10 +1493,12 @@ pub fn html() -> &'static str {
       activityTimer = setInterval(tickActivity, 1000);
       scrollToBottom();
     } else {
+      // Save tool count before clearing
+      const savedToolCount = toolCount;
       clearActivity();
       if (currentAgentBubble) {
         // Done — finalize: store raw for copy, add copy btn, collapse if tall
-        finishAgentBubble(currentAgentBubble, currentAgentRaw);
+        finishAgentBubble(currentAgentBubble, currentAgentRaw, savedToolCount);
         currentAgentBubble = null;
         currentAgentRaw = '';
       }
