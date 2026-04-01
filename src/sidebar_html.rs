@@ -443,6 +443,12 @@ pub fn html() -> &'static str {
     color: var(--text-tertiary);
     opacity: 0.5;
     margin-left: 2px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .msg-label .msg-tools:hover {
+    opacity: 0.8;
+    text-decoration: underline;
   }
   .msg.user  .msg-label { justify-content: flex-end; }
   .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
@@ -910,6 +916,139 @@ pub fn html() -> &'static str {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.7; }
   }
+
+  /* Tool details modal */
+  #tool-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(4px);
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    animation: modal-fade-in 0.15s ease;
+  }
+  #tool-modal.show { display: flex; }
+  @keyframes modal-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  #tool-modal .modal-content {
+    background: var(--bg);
+    border-radius: 12px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    animation: modal-slide-up 0.2s ease;
+  }
+  @keyframes modal-slide-up {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  #tool-modal .modal-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  #tool-modal .modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  #tool-modal .modal-close {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    transition: background 0.15s, color 0.15s;
+  }
+  #tool-modal .modal-close:hover {
+    background: var(--hover-bg);
+    color: var(--text-primary);
+  }
+  #tool-modal .modal-body {
+    padding: 12px 20px 20px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  #tool-modal .modal-tools-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #tool-modal .modal-tool-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--hover-bg);
+    border-radius: 8px;
+  }
+  #tool-modal .modal-tool-kind {
+    width: 22px; height: 22px;
+    border-radius: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  #tool-modal .modal-tool-kind.read     { background: #34c759; color: #fff; }
+  #tool-modal .modal-tool-kind.edit    { background: #007aff; color: #fff; }
+  #tool-modal .modal-tool-kind.delete  { background: #ff3b30; color: #fff; }
+  #tool-modal .modal-tool-kind.search  { background: #5856d6; color: #fff; }
+  #tool-modal .modal-tool-kind.execute { background: #ff9500; color: #fff; }
+  #tool-modal .modal-tool-kind.think   { background: #af52de; color: #fff; }
+  #tool-modal .modal-tool-kind.fetch   { background: #00c7be; color: #fff; }
+  #tool-modal .modal-tool-kind.move    { background: #ff2d55; color: #fff; }
+  #tool-modal .modal-tool-kind.other   { background: #8e8e93; color: #fff; }
+  #tool-modal .modal-tool-title {
+    flex: 1;
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #tool-modal .modal-tool-status {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  #tool-modal .modal-tool-status.completed {
+    background: rgba(52,199,89,0.15);
+    color: #34c759;
+  }
+  #tool-modal .modal-tool-status.failed {
+    background: rgba(255,59,48,0.15);
+    color: #ff3b30;
+  }
+  #tool-modal .modal-tool-status.running {
+    background: rgba(0,122,255,0.15);
+    color: #007aff;
+  }
+  #tool-modal .modal-tool-duration {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+    min-width: 36px;
+    text-align: right;
+  }
   #hint {
     font-size: 10.5px;
     color: var(--text-tertiary);
@@ -1098,6 +1237,19 @@ pub fn html() -> &'static str {
     <div id="hint">Return to send · Shift+Return for newline</div>
   </div>
 
+</div>
+
+<!-- Tool details modal -->
+<div id="tool-modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span class="modal-title">Tool Details</span>
+      <button class="modal-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-tools-list"></div>
+    </div>
+  </div>
 </div>
 
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
@@ -1301,8 +1453,8 @@ pub fn html() -> &'static str {
     return btn;
   }
 
-  // Called once Done arrives — stores raw, appends copy btn inside bubble, collapses if tall
-  function finishAgentBubble(bubble, rawText, toolCount) {
+  // Called once Done arrives — stores raw, appends copy btn, collapses if tall
+  function finishAgentBubble(bubble, rawText, toolCount, details) {
     const wrap = bubble.closest('.msg');
     wrap.dataset.raw = rawText;
 
@@ -1312,6 +1464,14 @@ pub fn html() -> &'static str {
       if (toolsEl) {
         toolsEl.textContent = '· ' + toolCount + ' tools';
         toolsEl.style.display = 'inline';
+        toolsEl.style.cursor = 'pointer';
+        // Store details and make clickable
+        messageToolDetails.set(wrap, details);
+        toolsEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const details = messageToolDetails.get(wrap);
+          if (details) showToolModal(details);
+        });
       }
     }
 
@@ -1396,6 +1556,7 @@ pub fn html() -> &'static str {
   let activityTimer = null;    // setInterval id for elapsed display
   const toolRows = {};         // id → { el, startTime, timerEl }
   let toolCount = 0;           // total tools used in current response
+  let toolDetails = [];        // [{kind, title, status, duration}] for current response
 
   const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
 
@@ -1425,6 +1586,7 @@ pub fn html() -> &'static str {
 
   window.__toolStart = function(id, title, kind) {
     toolCount++;
+    toolDetails.push({ id, kind, title, status: 'running', duration: 0 });
     // Create row
     const row = document.createElement('div');
     row.className = 'tool-row';
@@ -1446,18 +1608,24 @@ pub fn html() -> &'static str {
     row.appendChild(tm);
     thinking.appendChild(row);
 
-    toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false };
+    toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false, idx: toolDetails.length - 1 };
     scrollToBottom();
   };
 
   window.__toolUpdate = function(id, title, status) {
     const t = toolRows[id];
     if (!t) return;
-    if (title) t.el.querySelector('.tool-title').textContent = title;
+    if (title) {
+      t.el.querySelector('.tool-title').textContent = title;
+      toolDetails[t.idx].title = title;
+    }
     if (status === 'completed') {
       t.finished = true;
       t.el.classList.add('done');
-      t.timerEl.textContent = fmtElapsed(Date.now() - t.startTime);
+      const duration = Date.now() - t.startTime;
+      t.timerEl.textContent = fmtElapsed(duration);
+      toolDetails[t.idx].status = 'completed';
+      toolDetails[t.idx].duration = duration;
       // Replace timer with checkmark
       const check = document.createElement('span');
       check.className = 'tool-check';
@@ -1466,6 +1634,8 @@ pub fn html() -> &'static str {
     } else if (status === 'failed') {
       t.finished = true;
       t.el.classList.add('failed');
+      toolDetails[t.idx].status = 'failed';
+      toolDetails[t.idx].duration = Date.now() - t.startTime;
       const fail = document.createElement('span');
       fail.className = 'tool-fail';
       fail.textContent = '✗';
@@ -1483,6 +1653,7 @@ pub fn html() -> &'static str {
       currentAgentBubble = null;
       currentAgentRaw = '';
       toolCount = 0;
+      toolDetails = [];
       clearActivity();
       activityStart = Date.now();
       // Header with 3-dot bounce + elapsed
@@ -1495,10 +1666,11 @@ pub fn html() -> &'static str {
     } else {
       // Save tool count before clearing
       const savedToolCount = toolCount;
+      const savedToolDetails = [...toolDetails];
       clearActivity();
       if (currentAgentBubble) {
         // Done — finalize: store raw for copy, add copy btn, collapse if tall
-        finishAgentBubble(currentAgentBubble, currentAgentRaw, savedToolCount);
+        finishAgentBubble(currentAgentBubble, currentAgentRaw, savedToolCount, savedToolDetails);
         currentAgentBubble = null;
         currentAgentRaw = '';
       }
@@ -1827,6 +1999,44 @@ pub fn html() -> &'static str {
   document.getElementById('close-btn').addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'sidebar_close' }));
   });
+
+  // ── Tool Details Modal ───────────────────────────────────────────────────
+  const toolModal = document.getElementById('tool-modal');
+  const toolModalBody = toolModal.querySelector('.modal-body');
+  const toolModalClose = toolModal.querySelector('.modal-close');
+
+  function showToolModal(details) {
+    const list = toolModal.querySelector('.modal-tools-list');
+    list.innerHTML = '';
+    for (const t of details) {
+      const row = document.createElement('div');
+      row.className = 'modal-tool-row';
+      row.innerHTML = `
+        <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
+        <span class="modal-tool-title">${t.title}</span>
+        <span class="modal-tool-status ${t.status}">${t.status}</span>
+        <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
+      `;
+      list.appendChild(row);
+    }
+    toolModal.classList.add('show');
+  }
+
+  function hideToolModal() {
+    toolModal.classList.remove('show');
+  }
+
+  toolModalClose.addEventListener('click', hideToolModal);
+  toolModal.addEventListener('click', e => {
+    if (e.target === toolModal) hideToolModal();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && toolModal.classList.contains('show')) hideToolModal();
+  });
+
+  // Store tool details per message for modal access
+  const messageToolDetails = new Map();
+  window._messageToolDetails = messageToolDetails;
 </script>
 </body>
 </html>"#
