@@ -792,9 +792,10 @@ impl McpServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
-            Ok(b64_png) => Ok(CallToolResult::success(vec![
-                Content::image(b64_png, "image/png"),
-            ])),
+            Ok(b64_png) => Ok(CallToolResult::success(vec![Content::image(
+                b64_png,
+                "image/png",
+            )])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }

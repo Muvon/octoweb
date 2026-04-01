@@ -53,11 +53,11 @@ enum AppEvent {
     NavigateTo(String),
     SwitchTab(usize),
     CloseTab(usize),
-    PrevTab,                                // Ctrl+P — switch to previous tab in MRU order
-    NextTab,                                // Ctrl+N — switch to next tab in MRU order
-    ToggleSidebar,                          // Cmd+Shift+A — toggle AI assistant sidebar
-    AcpPrompt(String),                      // user typed a prompt in the sidebar
-    AcpCancel,                              // user clicked stop button — cancel current prompt
+    PrevTab,                                  // Ctrl+P — switch to previous tab in MRU order
+    NextTab,                                  // Ctrl+N — switch to next tab in MRU order
+    ToggleSidebar,                            // Cmd+Shift+A — toggle AI assistant sidebar
+    AcpPrompt(String, Vec<(String, String)>), // user typed a prompt + optional images (base64, mime)
+    AcpCancel,                                // user clicked stop button — cancel current prompt
     AcpRestart(String), // change agent tag (e.g. "octoweb:assistant") and reconnect
     AcpNewSession,      // restart session with same agent tag (clear chat)
     AskAI(String),      // overlay ⌘⇧Enter — open sidebar + send prompt
@@ -662,8 +662,19 @@ fn main() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
                         Some("acp_prompt") => {
-                            if let Some(text) = v["text"].as_str() {
-                                let _ = p.send_event(AppEvent::AcpPrompt(text.to_string()));
+                            let text = v["text"].as_str().unwrap_or("").to_string();
+                            let mut images = Vec::new();
+                            if let Some(arr) = v["images"].as_array() {
+                                for img in arr {
+                                    if let (Some(data), Some(mime)) =
+                                        (img["data"].as_str(), img["mimeType"].as_str())
+                                    {
+                                        images.push((data.to_string(), mime.to_string()));
+                                    }
+                                }
+                            }
+                            if !text.is_empty() || !images.is_empty() {
+                                let _ = p.send_event(AppEvent::AcpPrompt(text, images));
                             }
                         }
                         Some("acp_cancel") => {
@@ -1552,6 +1563,12 @@ fn main() {
                             "window.__setConnected && window.__setConnected()"
                         );
                     }
+                    acp::AgentEvent::Image { data, mime_type } => {
+                        // Pass base64 image to sidebar — use template literal to avoid quote issues
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__appendImage && window.__appendImage(`{mime_type}`,`{data}`)"
+                        ));
+                    }
                     acp::AgentEvent::Chunk(chunk) => {
                         let escaped = webview_utils::escape_js_template(&chunk);
                         let _ = sidebar_wv.evaluate_script(&format!(
@@ -2421,9 +2438,9 @@ fn main() {
             }
 
             // ── ACP events ─────────────────────────────────────────────────────
-            Event::UserEvent(AppEvent::AcpPrompt(text)) => {
+            Event::UserEvent(AppEvent::AcpPrompt(text, images)) => {
                 if let Some(ref handle) = acp_handle {
-                    if !handle.send_prompt(text) {
+                    if !handle.send_prompt(text, images) {
                         // Channel dead — ACP thread exited without error event
                         acp_handle = None;
                         let _ = sidebar_wv.evaluate_script(

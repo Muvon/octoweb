@@ -20,6 +20,8 @@ pub enum AgentEvent {
     Connected,
     /// A text chunk from the agent's response (streaming).
     Chunk(String),
+    /// An image from the agent's response.
+    Image { data: String, mime_type: String },
     /// A new tool call started (id, title, kind).
     ToolStart {
         id: String,
@@ -38,6 +40,12 @@ pub enum AgentEvent {
     Cancelled,
     /// Agent or connection error.
     Error(String),
+}
+
+/// A prompt with optional image attachments.
+pub struct PromptMessage {
+    pub text: String,
+    pub images: Vec<(String, String)>, // (base64_data, mime_type)
 }
 
 /// Minimal Client impl — handles streaming text chunks and auto-approves permissions.
@@ -124,14 +132,27 @@ impl acp::Client for BrowserClient {
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
         match args.update {
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
-                let text = match content {
-                    acp::ContentBlock::Text(t) => t.text,
-                    acp::ContentBlock::ResourceLink(r) => r.uri,
-                    _ => return Ok(()),
-                };
-                if !text.is_empty() {
-                    let _ = self.tx.send(AgentEvent::Chunk(text));
-                    (self.wake)();
+                match content {
+                    acp::ContentBlock::Text(t) => {
+                        if !t.text.is_empty() {
+                            let _ = self.tx.send(AgentEvent::Chunk(t.text));
+                            (self.wake)();
+                        }
+                    }
+                    acp::ContentBlock::Image(img) => {
+                        let _ = self.tx.send(AgentEvent::Image {
+                            data: img.data,
+                            mime_type: img.mime_type,
+                        });
+                        (self.wake)();
+                    }
+                    acp::ContentBlock::ResourceLink(r) => {
+                        if !r.uri.is_empty() {
+                            let _ = self.tx.send(AgentEvent::Chunk(r.uri));
+                            (self.wake)();
+                        }
+                    }
+                    _ => {}
                 }
             }
             acp::SessionUpdate::ToolCall(tc) => {
@@ -173,7 +194,7 @@ pub struct AcpHandle {
     /// Receive `AgentEvent`s from the background ACP thread.
     pub rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     /// Send prompts to the background ACP thread.
-    prompt_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    prompt_tx: tokio::sync::mpsc::UnboundedSender<PromptMessage>,
     /// Signal the ACP thread to cancel the current prompt.
     cancel_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
@@ -187,7 +208,7 @@ impl AcpHandle {
     /// poke the main event loop out of `ControlFlow::Wait`.
     pub fn connect(cmd: &str, wake: impl Fn() + Send + Sync + 'static) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PromptMessage>();
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
 
@@ -244,11 +265,10 @@ impl AcpHandle {
         events
     }
 
-    /// Send a user prompt to the agent. Non-blocking — chunks arrive via `rx`.
-    /// Sends `AgentEvent::Done` when the agent finishes, or `AgentEvent::Error` on failure.
+    /// Send a user prompt (with optional images) to the agent.
     /// Returns false if the channel is dead (ACP thread exited).
-    pub fn send_prompt(&self, text: String) -> bool {
-        self.prompt_tx.send(text).is_ok()
+    pub fn send_prompt(&self, text: String, images: Vec<(String, String)>) -> bool {
+        self.prompt_tx.send(PromptMessage { text, images }).is_ok()
     }
 
     /// Cancel the current prompt. The agent will stop and `AgentEvent::Cancelled` is sent.
@@ -260,7 +280,7 @@ impl AcpHandle {
 async fn init_session(
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
-    mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
     mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     program: String,
     args: Vec<String>,
@@ -324,11 +344,13 @@ async fn init_session(
     wake();
 
     // Process prompts sequentially — one at a time.
-    while let Some(text) = prompt_rx.recv().await {
-        let prompt_fut = conn.prompt(acp::PromptRequest::new(
-            session_id.clone(),
-            vec![text.into()],
-        ));
+    while let Some(msg) = prompt_rx.recv().await {
+        let mut content: Vec<acp::ContentBlock> = Vec::new();
+        for (data, mime) in msg.images {
+            content.push(acp::ContentBlock::Image(acp::ImageContent::new(data, mime)));
+        }
+        content.push(msg.text.into());
+        let prompt_fut = conn.prompt(acp::PromptRequest::new(session_id.clone(), content));
 
         // Use tokio::select! to allow cancellation and timeout mid-prompt
         tokio::select! {

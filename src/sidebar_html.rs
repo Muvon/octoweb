@@ -773,6 +773,51 @@ pub fn html() -> &'static str {
     border-radius: 2px;
   }
 
+  #attach-btn {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s;
+    padding: 0;
+  }
+  #attach-btn:hover { background: var(--input-border); color: var(--text-primary); }
+  #attach-btn:active { transform: scale(0.88); }
+
+  #image-preview {
+    display: none;
+    gap: 6px;
+    padding: 6px 8px 0;
+    flex-wrap: wrap;
+  }
+  #image-preview.visible { display: flex; }
+  .img-thumb {
+    position: relative;
+    width: 48px; height: 48px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--input-border);
+  }
+  .img-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .img-thumb .rm {
+    position: absolute; top: -1px; right: -1px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(0,0,0,0.6); color: #fff;
+    font-size: 10px; line-height: 16px; text-align: center;
+    cursor: pointer; border: none; padding: 0;
+  }
+
+  .msg-bubble img.chat-img {
+    max-width: 100%;
+    border-radius: 8px;
+    margin-top: 6px;
+    display: block;
+  }
+
   #send-btn {
     width: 30px; height: 30px;
     border-radius: 50%;
@@ -951,6 +996,13 @@ pub fn html() -> &'static str {
         autocomplete="off"
         spellcheck="false"
       ></textarea>
+      <input type="file" id="file-input" accept="image/*" multiple style="display:none">
+      <button id="attach-btn" title="Attach image" aria-label="Attach image">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M14 8.5l-5.5 5.5a4 4 0 0 1-5.66-5.66l5.5-5.5a2.67 2.67 0 0 1 3.77 3.77l-5.49 5.49a1.33 1.33 0 0 1-1.89-1.88L10.5 4.5"
+                stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button id="send-btn" title="Send (Return)" aria-label="Send">
         <svg class="send-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M6 10V2M2 6L6 2L10 6"
@@ -962,6 +1014,7 @@ pub fn html() -> &'static str {
         </svg>
       </button>
     </div>
+    <div id="image-preview"></div>
     <div id="queue-list"></div>
     <div id="hint">Return to send · Shift+Return for newline</div>
   </div>
@@ -1230,6 +1283,21 @@ pub fn html() -> &'static str {
     scrollToBottom();
   };
 
+  window.__appendImage = function(mimeType, b64data) {
+    if (!currentAgentBubble) {
+      currentAgentBubble = startAgentBubble();
+      currentAgentRaw    = '';
+      isThinking = false;
+      thinking.className = '';
+      clearActivity();
+    }
+    const img = document.createElement('img');
+    img.className = 'chat-img';
+    img.src = 'data:' + mimeType + ';base64,' + b64data;
+    currentAgentBubble.appendChild(img);
+    scrollToBottom();
+  };
+
   // ── Activity feed state ──────────────────────────────────────────────────────────────
   let activityStart = 0;       // Date.now() when thinking began
   let activityTimer = null;    // setInterval id for elapsed display
@@ -1354,7 +1422,7 @@ pub fn html() -> &'static str {
 
   function renderQueue() {
     queueList.innerHTML = '';
-    msgQueue.forEach((text, i) => {
+    msgQueue.forEach((entry, i) => {
       const item = document.createElement('div');
       item.className = 'queue-item';
 
@@ -1364,7 +1432,7 @@ pub fn html() -> &'static str {
 
       const txt = document.createElement('span');
       txt.className = 'queue-item-text';
-      txt.textContent = text;
+      txt.textContent = entry.text + (entry.images.length ? ` [${entry.images.length} img]` : '');
 
       const rm = document.createElement('button');
       rm.className = 'queue-remove';
@@ -1395,33 +1463,104 @@ pub fn html() -> &'static str {
     const next = msgQueue.shift();
     renderQueue();
     updateInputLock();
-    dispatchPrompt(next);
+    dispatchPrompt(next.text, next.images);
   }
 
-  function dispatchPrompt(text) {
-    appendMessage('user', text);
+  function dispatchPrompt(text, images) {
+    const bubble = appendMessage('user', text);
+    // Show attached images in user bubble
+    if (images && images.length) {
+      for (const img of images) {
+        const el = document.createElement('img');
+        el.className = 'chat-img';
+        el.src = 'data:' + img.mimeType + ';base64,' + img.data;
+        bubble.appendChild(el);
+      }
+    }
     window.__setThinking(true);
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', text }));
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', text, images: images || [] }));
   }
+
+  // ── Image attachments ──────────────────────────────────────────────────
+  let pendingImages = []; // [{data: base64, mimeType: string}]
+  const imagePreview = document.getElementById('image-preview');
+  const fileInput = document.getElementById('file-input');
+  const attachBtn = document.getElementById('attach-btn');
+
+  function addImageFromFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const b64 = reader.result.split(',')[1]; // strip data:...;base64, prefix
+      pendingImages.push({ data: b64, mimeType: file.type });
+      renderImagePreview();
+      updateSendBtn();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function renderImagePreview() {
+    imagePreview.innerHTML = '';
+    if (!pendingImages.length) {
+      imagePreview.classList.remove('visible');
+      return;
+    }
+    imagePreview.classList.add('visible');
+    pendingImages.forEach((img, i) => {
+      const thumb = document.createElement('div');
+      thumb.className = 'img-thumb';
+      const el = document.createElement('img');
+      el.src = 'data:' + img.mimeType + ';base64,' + img.data;
+      thumb.appendChild(el);
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '×';
+      rm.onclick = () => { pendingImages.splice(i, 1); renderImagePreview(); updateSendBtn(); };
+      thumb.appendChild(rm);
+      imagePreview.appendChild(thumb);
+    });
+  }
+
+  function updateSendBtn() {
+    sendBtn.classList.toggle('active', input.value.trim().length > 0 || pendingImages.length > 0);
+  }
+
+  attachBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    for (const f of fileInput.files) addImageFromFile(f);
+    fileInput.value = '';
+  });
+
+  input.addEventListener('paste', e => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        addImageFromFile(item.getAsFile());
+        return;
+      }
+    }
+  });
 
   // ── Send ────────────────────────────────────────────────────────────────
   function send() {
     const text = input.value.trim();
-    if (!text) return;
+    const images = pendingImages.slice();
+    if (!text && !images.length) return;
     input.value = '';
     input.style.height = 'auto';
+    pendingImages = [];
+    renderImagePreview();
     sendBtn.classList.remove('active');
 
     if (!isThinking) {
-      // Agent is free — send immediately
-      dispatchPrompt(text);
+      dispatchPrompt(text, images);
     } else if (msgQueue.length < MAX_QUEUE) {
-      // Queue it
-      msgQueue.push(text);
+      msgQueue.push({ text, images });
       renderQueue();
       updateInputLock();
     }
-    // If queue full and input is locked, this branch is unreachable (input locked)
   }
 
   // Stop button — cancel current prompt
@@ -1445,7 +1584,7 @@ pub fn html() -> &'static str {
   input.addEventListener('input', () => {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-    sendBtn.classList.toggle('active', input.value.trim().length > 0);
+    updateSendBtn();
   });
 
   // Hook into __setThinking to drain queue when agent becomes free
