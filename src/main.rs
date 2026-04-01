@@ -530,6 +530,26 @@ fn main() {
     let overlay_wv = WebViewBuilder::new()
         .with_html(overlay_html::html())
         .with_transparent(true)
+        .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
+            let path = request.uri().path().trim_start_matches('/');
+            let (data, mime): (&[u8], &str) = match path {
+                "fuzzysort.min.js" => (
+                    include_bytes!("../assets/lib/fuzzysort.min.js"),
+                    "application/javascript",
+                ),
+                _ => {
+                    return Response::builder()
+                        .status(404)
+                        .body(Vec::new().into())
+                        .unwrap()
+                }
+            };
+            Response::builder()
+                .header("Content-Type", mime)
+                .header("Access-Control-Allow-Origin", "*")
+                .body(data.to_vec().into())
+                .unwrap()
+        })
         .with_ipc_handler({
             let p = proxy.clone();
             let ow = Arc::clone(&overlay_win);
@@ -649,6 +669,14 @@ fn main() {
                 ),
                 "mammoth.browser.min.js" => (
                     include_bytes!("../assets/lib/mammoth.browser.min.js"),
+                    "application/javascript",
+                ),
+                "marked.min.js" => (
+                    include_bytes!("../assets/lib/marked.min.js"),
+                    "application/javascript",
+                ),
+                "fuzzysort.min.js" => (
+                    include_bytes!("../assets/lib/fuzzysort.min.js"),
                     "application/javascript",
                 ),
                 _ => {

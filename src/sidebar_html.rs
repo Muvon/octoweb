@@ -1092,8 +1092,8 @@ pub fn html() -> &'static str {
 
 </div>
 
-<!-- marked.js — lightweight MD parser, no network needed after first load -->
-<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+<!-- marked.js — lightweight MD parser, served from embedded binary -->
+<script src="octoweb-lib://marked.min.js"></script>
 <script>
   // Configure marked: safe defaults, no mangling
   if (typeof marked !== 'undefined') {
