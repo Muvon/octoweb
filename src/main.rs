@@ -1542,9 +1542,10 @@ fn main() {
         }
 
         // Drain ACP events and forward to the UI on every tick.
-        if let Some(ref mut handle) = acp_handle {
-            for ev in handle.poll() {
-                match ev {
+        // Collect into owned Vec first so we can drop the handle on error.
+        let acp_events = acp_handle.as_mut().map(|h| h.poll()).unwrap_or_default();
+        for ev in acp_events {
+            match ev {
                     acp::AgentEvent::Connected => {
                         acp_retry_count = 0; // reset retry count on successful connection
                         let _ = sidebar_wv.evaluate_script(
@@ -1603,6 +1604,8 @@ fn main() {
                     }
                     acp::AgentEvent::Error(err) => {
                         tracing::warn!(error = %err, "ACP connection error");
+                        // Drop dead handle immediately so prompts aren't silently lost
+                        acp_handle = None;
                         // Schedule reconnection with exponential backoff
                         if acp_retry_count < ACP_MAX_RETRIES {
                             acp_retry_count += 1;
@@ -1648,7 +1651,6 @@ fn main() {
                     }
                 }
             }
-        }
 
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
@@ -1949,8 +1951,14 @@ fn main() {
                                             return;
                                         }
                                         copy_png_to_clipboard(png_data);
-                                        tracing::debug!("Full page screenshot copied to clipboard");
-                                        let _ = tx.send(Ok("Screenshot copied to clipboard".to_string()));
+                                        // Return base64-encoded PNG so MCP can pass it as an image
+                                        let length: usize = objc2::msg_send![&*png_data, length];
+                                        let bytes: *const u8 = objc2::msg_send![&*png_data, bytes];
+                                        let slice = std::slice::from_raw_parts(bytes, length);
+                                        use base64::Engine;
+                                        let b64 = base64::engine::general_purpose::STANDARD.encode(slice);
+                                        tracing::debug!(len = b64.len(), "Full page screenshot captured");
+                                        let _ = tx.send(Ok(b64));
                                     }
                                 });
                                 unsafe {
@@ -1988,8 +1996,14 @@ fn main() {
                                             return;
                                         }
                                         copy_png_to_clipboard(png_data);
-                                        tracing::debug!("Viewport screenshot copied to clipboard");
-                                        let _ = tx.send(Ok("Screenshot copied to clipboard".to_string()));
+                                        // Return base64-encoded PNG so MCP can pass it as an image
+                                        let length: usize = objc2::msg_send![&*png_data, length];
+                                        let bytes: *const u8 = objc2::msg_send![&*png_data, bytes];
+                                        let slice = std::slice::from_raw_parts(bytes, length);
+                                        use base64::Engine;
+                                        let b64 = base64::engine::general_purpose::STANDARD.encode(slice);
+                                        tracing::debug!(len = b64.len(), "Viewport screenshot captured");
+                                        let _ = tx.send(Ok(b64));
                                     }
                                 });
                                 unsafe {
@@ -2409,7 +2423,13 @@ fn main() {
             // ── ACP events ─────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::AcpPrompt(text)) => {
                 if let Some(ref handle) = acp_handle {
-                    handle.send_prompt(text);
+                    if !handle.send_prompt(text) {
+                        // Channel dead — ACP thread exited without error event
+                        acp_handle = None;
+                        let _ = sidebar_wv.evaluate_script(
+                            "window.__setError && window.__setError()"
+                        );
+                    }
                 }
             }
 

@@ -246,8 +246,9 @@ impl AcpHandle {
 
     /// Send a user prompt to the agent. Non-blocking — chunks arrive via `rx`.
     /// Sends `AgentEvent::Done` when the agent finishes, or `AgentEvent::Error` on failure.
-    pub fn send_prompt(&self, text: String) {
-        let _ = self.prompt_tx.send(text);
+    /// Returns false if the channel is dead (ACP thread exited).
+    pub fn send_prompt(&self, text: String) -> bool {
+        self.prompt_tx.send(text).is_ok()
     }
 
     /// Cancel the current prompt. The agent will stop and `AgentEvent::Cancelled` is sent.
@@ -274,6 +275,20 @@ async fn init_session(
 
     let outgoing = child.stdin.take().unwrap().compat_write();
     let incoming = child.stdout.take().unwrap().compat();
+
+    // Monitor subprocess — if it exits unexpectedly, notify the main thread.
+    let tx_exit = tx.clone();
+    let wake_exit = std::sync::Arc::clone(&wake);
+    tokio::task::spawn_local(async move {
+        let status = child.wait().await;
+        let msg = match status {
+            Ok(s) if s.success() => "agent process exited".to_string(),
+            Ok(s) => format!("agent process exited with {s}"),
+            Err(e) => format!("agent process error: {e}"),
+        };
+        let _ = tx_exit.send(AgentEvent::Error(msg));
+        wake_exit();
+    });
 
     let (conn, handle_io) = acp::ClientSideConnection::new(
         BrowserClient {
@@ -315,7 +330,7 @@ async fn init_session(
             vec![text.into()],
         ));
 
-        // Use tokio::select! to allow cancellation mid-prompt
+        // Use tokio::select! to allow cancellation and timeout mid-prompt
         tokio::select! {
             res = prompt_fut => {
                 match res {
@@ -336,6 +351,13 @@ async fn init_session(
                     .await;
                 // Send cancelled event
                 let _ = tx.send(AgentEvent::Cancelled);
+                wake();
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+                // 5 min timeout — agent is stuck, surface the error
+                let _ = tx.send(AgentEvent::Error(
+                    "agent did not respond within 5 minutes".into(),
+                ));
                 wake();
             }
         }

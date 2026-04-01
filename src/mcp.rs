@@ -116,7 +116,8 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Take a screenshot of a tab (viewport or full page)
+    /// Take a screenshot of a tab (viewport or full page).
+    /// Ok variant carries base64-encoded PNG data.
     Screenshot {
         tab_id: Option<usize>,
         full_page: bool,
@@ -791,7 +792,9 @@ impl McpServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         match result {
-            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(msg)])),
+            Ok(b64_png) => Ok(CallToolResult::success(vec![
+                Content::image(b64_png, "image/png"),
+            ])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
