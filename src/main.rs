@@ -636,6 +636,34 @@ fn main() {
     let sidebar_wv = WebViewBuilder::new()
         .with_html(sidebar_html::html())
         .with_transparent(true)
+        .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
+            let path = request.uri().path().trim_start_matches('/');
+            let (data, mime): (&[u8], &str) = match path {
+                "pdf.min.mjs" => (
+                    include_bytes!("../assets/lib/pdf.min.mjs"),
+                    "application/javascript",
+                ),
+                "pdf.worker.min.mjs" => (
+                    include_bytes!("../assets/lib/pdf.worker.min.mjs"),
+                    "application/javascript",
+                ),
+                "mammoth.browser.min.js" => (
+                    include_bytes!("../assets/lib/mammoth.browser.min.js"),
+                    "application/javascript",
+                ),
+                _ => {
+                    return Response::builder()
+                        .status(404)
+                        .body(Vec::new().into())
+                        .unwrap()
+                }
+            };
+            Response::builder()
+                .header("Content-Type", mime)
+                .header("Access-Control-Allow-Origin", "*")
+                .body(data.to_vec().into())
+                .unwrap()
+        })
         .with_bounds(wry::Rect {
             position: tao::dpi::PhysicalPosition::new(sz0.width.saturating_sub(sidebar_w), 0u32)
                 .into(),

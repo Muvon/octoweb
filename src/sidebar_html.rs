@@ -773,6 +773,10 @@ pub fn html() -> &'static str {
     border-radius: 2px;
   }
 
+  #attach-wrap {
+    position: relative;
+    flex-shrink: 0;
+  }
   #attach-btn {
     width: 30px; height: 30px;
     border-radius: 50%;
@@ -781,12 +785,59 @@ pub fn html() -> &'static str {
     color: var(--text-tertiary);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
     transition: background 0.15s, color 0.15s;
     padding: 0;
   }
   #attach-btn:hover { background: var(--input-border); color: var(--text-primary); }
   #attach-btn:active { transform: scale(0.88); }
+
+  #attach-menu {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    right: 0;
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(40px) saturate(1.6);
+    border: 1px solid var(--input-border);
+    border-radius: 10px;
+    padding: 4px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+    z-index: 10;
+    min-width: 130px;
+  }
+  #attach-menu.visible { display: flex; flex-direction: column; }
+  .attach-option {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px;
+    border: none; background: transparent;
+    color: var(--text-primary);
+    font-family: inherit; font-size: 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s;
+  }
+  .attach-option:hover { background: var(--input-border); }
+  .attach-option svg { color: var(--text-secondary); flex-shrink: 0; }
+
+  .doc-chip {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 8px;
+    background: var(--input-border);
+    border-radius: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    max-width: 160px;
+  }
+  .doc-chip span {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .doc-chip .rm {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: rgba(0,0,0,0.15); color: var(--text-secondary);
+    font-size: 9px; line-height: 14px; text-align: center;
+    cursor: pointer; border: none; padding: 0; flex-shrink: 0;
+  }
 
   #image-preview {
     display: none;
@@ -996,13 +1047,33 @@ pub fn html() -> &'static str {
         autocomplete="off"
         spellcheck="false"
       ></textarea>
-      <input type="file" id="file-input" accept="image/*" multiple style="display:none">
-      <button id="attach-btn" title="Attach image" aria-label="Attach image">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M14 8.5l-5.5 5.5a4 4 0 0 1-5.66-5.66l5.5-5.5a2.67 2.67 0 0 1 3.77 3.77l-5.49 5.49a1.33 1.33 0 0 1-1.89-1.88L10.5 4.5"
-                stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
+      <input type="file" id="file-input-image" accept="image/*" multiple style="display:none">
+      <input type="file" id="file-input-doc" accept=".pdf,.docx,.doc" multiple style="display:none">
+      <div id="attach-wrap">
+        <button id="attach-btn" title="Attach" aria-label="Attach">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <div id="attach-menu">
+          <button class="attach-option" data-type="image">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke="currentColor" stroke-width="1.3"/>
+              <circle cx="5.5" cy="5.5" r="1.5" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M1.5 11l3-3 2 2 3-4 4 5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Image
+          </button>
+          <button class="attach-option" data-type="document">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+              <path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M5.5 8.5h5M5.5 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Document
+          </button>
+        </div>
+      </div>
       <button id="send-btn" title="Send (Return)" aria-label="Send">
         <svg class="send-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
           <path d="M6 10V2M2 6L6 2L10 6"
@@ -1463,11 +1534,26 @@ pub fn html() -> &'static str {
     const next = msgQueue.shift();
     renderQueue();
     updateInputLock();
-    dispatchPrompt(next.text, next.images);
+    dispatchPrompt(next.text, next.images, next.docs);
   }
 
-  function dispatchPrompt(text, images) {
-    const bubble = appendMessage('user', text);
+  function dispatchPrompt(text, images, docs) {
+    // Show user's typed text (without the <doc> prefix) in the bubble
+    const displayText = text.replace(/<doc filename="[^"]*">[\s\S]*?<\/doc>\s*/g, '').trim();
+    const bubble = appendMessage('user', displayText || '(document attached)');
+    // Show doc chips in user bubble
+    if (docs && docs.length) {
+      for (const doc of docs) {
+        const chip = document.createElement('div');
+        chip.className = 'doc-chip';
+        chip.style.marginTop = '4px';
+        chip.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.3"/></svg>';
+        const span = document.createElement('span');
+        span.textContent = doc.name;
+        chip.appendChild(span);
+        bubble.appendChild(chip);
+      }
+    }
     // Show attached images in user bubble
     if (images && images.length) {
       for (const img of images) {
@@ -1484,14 +1570,16 @@ pub fn html() -> &'static str {
   // ── Image attachments ──────────────────────────────────────────────────
   let pendingImages = []; // [{data: base64, mimeType: string}]
   const imagePreview = document.getElementById('image-preview');
-  const fileInput = document.getElementById('file-input');
+  const fileInputImage = document.getElementById('file-input-image');
+  const fileInputDoc = document.getElementById('file-input-doc');
   const attachBtn = document.getElementById('attach-btn');
+  const attachMenu = document.getElementById('attach-menu');
 
   function addImageFromFile(file) {
     if (!file || !file.type.startsWith('image/')) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const b64 = reader.result.split(',')[1]; // strip data:...;base64, prefix
+      const b64 = reader.result.split(',')[1];
       pendingImages.push({ data: b64, mimeType: file.type });
       renderImagePreview();
       updateSendBtn();
@@ -1522,13 +1610,100 @@ pub fn html() -> &'static str {
   }
 
   function updateSendBtn() {
-    sendBtn.classList.toggle('active', input.value.trim().length > 0 || pendingImages.length > 0);
+    sendBtn.classList.toggle('active', input.value.trim().length > 0 || pendingImages.length > 0 || pendingDocs.length > 0);
   }
 
-  attachBtn.addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', () => {
-    for (const f of fileInput.files) addImageFromFile(f);
-    fileInput.value = '';
+  attachBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    attachMenu.classList.toggle('visible');
+  });
+  document.addEventListener('click', () => attachMenu.classList.remove('visible'));
+  attachMenu.addEventListener('click', (e) => e.stopPropagation());
+
+  document.querySelector('.attach-option[data-type="image"]').addEventListener('click', () => {
+    attachMenu.classList.remove('visible');
+    fileInputImage.click();
+  });
+  document.querySelector('.attach-option[data-type="document"]').addEventListener('click', () => {
+    attachMenu.classList.remove('visible');
+    fileInputDoc.click();
+  });
+
+  fileInputImage.addEventListener('change', () => {
+    for (const f of fileInputImage.files) addImageFromFile(f);
+    fileInputImage.value = '';
+  });
+  // ── Document attachments ──────────────────────────────────────────────
+  let pendingDocs = []; // [{file: File, name: string}]
+  let docLibsLoaded = false;
+
+  async function ensureDocLibs() {
+    if (docLibsLoaded) return;
+    // mammoth (DOCX)
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'octoweb-lib://mammoth.browser.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    // pdf.js — load as classic script (not ES module) via fetch+eval
+    const pdfSrc = await fetch('octoweb-lib://pdf.min.mjs').then(r => r.text());
+    // Convert ES module to global: strip export, assign to window
+    const patched = pdfSrc.replace(/export\s*\{[^}]*\}/, '');
+    new Function(patched)();
+    if (typeof pdfjsLib !== 'undefined') {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'octoweb-lib://pdf.worker.min.mjs';
+    }
+    docLibsLoaded = true;
+  }
+
+  async function extractDocText(file) {
+    await ensureDocLibs();
+    const buf = await file.arrayBuffer();
+    const name = file.name.toLowerCase();
+    if (name.endsWith('.pdf')) {
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise;
+      let text = '';
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        text += content.items.map(item => item.str).join(' ') + '\n';
+      }
+      return text.trim();
+    } else {
+      const result = await mammoth.extractRawText({ arrayBuffer: buf });
+      return result.value.trim();
+    }
+  }
+
+  function renderPreview() {
+    renderImagePreview();
+    // Append doc chips
+    for (let i = 0; i < pendingDocs.length; i++) {
+      const chip = document.createElement('div');
+      chip.className = 'doc-chip';
+      chip.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.3"/></svg>';
+      const span = document.createElement('span');
+      span.textContent = pendingDocs[i].name;
+      chip.appendChild(span);
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '×';
+      rm.onclick = () => { pendingDocs.splice(i, 1); renderPreview(); updateSendBtn(); };
+      chip.appendChild(rm);
+      imagePreview.appendChild(chip);
+    }
+    imagePreview.classList.toggle('visible', pendingImages.length > 0 || pendingDocs.length > 0);
+  }
+
+  fileInputDoc.addEventListener('change', () => {
+    for (const f of fileInputDoc.files) {
+      pendingDocs.push({ file: f, name: f.name });
+    }
+    fileInputDoc.value = '';
+    renderPreview();
+    updateSendBtn();
   });
 
   input.addEventListener('paste', e => {
@@ -1544,20 +1719,36 @@ pub fn html() -> &'static str {
   });
 
   // ── Send ────────────────────────────────────────────────────────────────
-  function send() {
+  async function send() {
     const text = input.value.trim();
     const images = pendingImages.slice();
-    if (!text && !images.length) return;
+    const docs = pendingDocs.slice();
+    if (!text && !images.length && !docs.length) return;
     input.value = '';
     input.style.height = 'auto';
     pendingImages = [];
-    renderImagePreview();
+    pendingDocs = [];
+    renderPreview();
     sendBtn.classList.remove('active');
 
+    // Extract doc text (lazy-loads libs on first use)
+    let docPrefix = '';
+    if (docs.length) {
+      for (const doc of docs) {
+        try {
+          const extracted = await extractDocText(doc.file);
+          docPrefix += '<doc filename="' + doc.name + '">\n' + extracted + '\n</doc>\n\n';
+        } catch (e) {
+          docPrefix += '<doc filename="' + doc.name + '">\n[Failed to extract: ' + e.message + ']\n</doc>\n\n';
+        }
+      }
+    }
+    const fullText = docPrefix + text;
+
     if (!isThinking) {
-      dispatchPrompt(text, images);
+      dispatchPrompt(fullText, images, docs);
     } else if (msgQueue.length < MAX_QUEUE) {
-      msgQueue.push({ text, images });
+      msgQueue.push({ text: fullText, images, docs });
       renderQueue();
       updateInputLock();
     }
