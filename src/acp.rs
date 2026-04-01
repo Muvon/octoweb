@@ -22,17 +22,20 @@ pub enum AgentEvent {
     Chunk(String),
     /// An image from the agent's response.
     Image { data: String, mime_type: String },
-    /// A new tool call started (id, title, kind).
+    /// A new tool call started (id, title, kind, raw_input, locations).
     ToolStart {
         id: String,
         title: String,
         kind: String,
+        raw_input: Option<serde_json::Value>,
+        locations: Vec<String>,
     },
-    /// An existing tool call was updated (id, optional new title, status).
+    /// An existing tool call was updated (id, optional new title, status, raw_output).
     ToolUpdate {
         id: String,
         title: Option<String>,
         status: String,
+        raw_output: Option<serde_json::Value>,
     },
     /// Agent finished responding (conn.prompt() returned).
     Done,
@@ -156,10 +159,17 @@ impl acp::Client for BrowserClient {
                 }
             }
             acp::SessionUpdate::ToolCall(tc) => {
+                let locations: Vec<String> = tc
+                    .locations
+                    .iter()
+                    .map(|l| l.path.to_string_lossy().to_string())
+                    .collect();
                 let _ = self.tx.send(AgentEvent::ToolStart {
                     id: tc.tool_call_id.0.to_string(),
                     title: tc.title,
                     kind: format!("{:?}", tc.kind).to_lowercase(),
+                    raw_input: tc.raw_input.clone(),
+                    locations,
                 });
                 (self.wake)();
             }
@@ -170,8 +180,9 @@ impl acp::Client for BrowserClient {
                 };
                 let _ = self.tx.send(AgentEvent::ToolUpdate {
                     id: upd.tool_call_id.0.to_string(),
-                    title: upd.fields.title,
+                    title: upd.fields.title.clone(),
                     status,
+                    raw_output: upd.fields.raw_output.clone(),
                 });
                 (self.wake)();
             }

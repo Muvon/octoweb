@@ -436,13 +436,17 @@ pub fn html() -> &'static str {
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
   }
+  .msg-label .msg-sep {
+    color: var(--text-tertiary);
+    opacity: 0.5;
+    margin: 0 2px;
+  }
   .msg-label .msg-tools {
     font-size: 9.5px;
     font-weight: 400;
     letter-spacing: 0.01em;
     color: var(--text-tertiary);
     opacity: 0.5;
-    margin-left: 2px;
     cursor: pointer;
     transition: opacity 0.15s;
   }
@@ -938,8 +942,8 @@ pub fn html() -> &'static str {
     background: var(--bg);
     border-radius: 12px;
     width: 90%;
-    max-width: 600px;
-    max-height: 80vh;
+    max-width: 700px;
+    max-height: 85vh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 20px 60px rgba(0,0,0,0.3);
@@ -990,12 +994,25 @@ pub fn html() -> &'static str {
     gap: 8px;
   }
   #tool-modal .modal-tool-row {
+    background: var(--hover-bg);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  #tool-modal .modal-tool-header {
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 10px 12px;
-    background: var(--hover-bg);
-    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #tool-modal .modal-tool-header:hover {
+    background: rgba(0,0,0,0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    #tool-modal .modal-tool-header:hover {
+      background: rgba(255,255,255,0.06);
+    }
   }
   #tool-modal .modal-tool-kind {
     width: 22px; height: 22px;
@@ -1049,6 +1066,70 @@ pub fn html() -> &'static str {
     min-width: 36px;
     text-align: right;
   }
+  #tool-modal .modal-tool-chevron {
+    color: var(--text-tertiary);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+  }
+  #tool-modal .modal-tool-row.expanded .modal-tool-chevron {
+    transform: rotate(90deg);
+  }
+  #tool-modal .modal-tool-details {
+    display: none;
+    padding: 0 12px 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 0;
+  }
+  #tool-modal .modal-tool-row.expanded .modal-tool-details {
+    display: block;
+  }
+  #tool-modal .detail-section {
+    margin-top: 10px;
+  }
+  #tool-modal .detail-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  #tool-modal .detail-location {
+    font-size: 12px;
+    color: var(--text-primary);
+    font-family: 'SF Mono', Monaco, monospace;
+    background: rgba(0,0,0,0.04);
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (prefers-color-scheme: dark) {
+    #tool-modal .detail-location {
+      background: rgba(255,255,255,0.06);
+    }
+  }
+  #tool-modal .detail-code {
+    font-size: 11px;
+    font-family: 'SF Mono', Monaco, monospace;
+    background: rgba(0,0,0,0.04);
+    padding: 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-primary);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  @media (prefers-color-scheme: dark) {
+    #tool-modal .detail-code {
+      background: rgba(255,255,255,0.06);
+    }
+  }
+
   #hint {
     font-size: 10.5px;
     color: var(--text-tertiary);
@@ -1251,6 +1332,7 @@ pub fn html() -> &'static str {
     </div>
   </div>
 </div>
+
 
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
 <script src="octoweb-lib://localhost/marked.min.js"></script>
@@ -1460,9 +1542,11 @@ pub fn html() -> &'static str {
 
     // Show tool count in header if any tools were used
     if (toolCount > 0) {
+      const sepEl = wrap.querySelector('.msg-sep');
+      if (sepEl) sepEl.style.display = 'inline';
       const toolsEl = wrap.querySelector('.msg-tools');
       if (toolsEl) {
-        toolsEl.textContent = '· ' + toolCount + ' tools';
+        toolsEl.textContent = toolCount + ' tools';
         toolsEl.style.display = 'inline';
         toolsEl.style.cursor = 'pointer';
         // Store details and make clickable
@@ -1505,11 +1589,16 @@ pub fn html() -> &'static str {
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
     // Placeholder for tool count (populated on finish)
+    const sep = document.createElement('span');
+    sep.className = 'msg-sep';
+    sep.textContent = '·';
+    sep.style.display = 'none';
     const tools = document.createElement('span');
     tools.className = 'msg-tools';
     tools.style.display = 'none';
     label.appendChild(who);
     label.appendChild(time);
+    label.appendChild(sep);
     label.appendChild(tools);
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
@@ -1584,9 +1673,9 @@ pub fn html() -> &'static str {
     }
   }
 
-  window.__toolStart = function(id, title, kind) {
+  window.__toolStart = function(id, title, kind, rawInput, locations) {
     toolCount++;
-    toolDetails.push({ id, kind, title, status: 'running', duration: 0 });
+    toolDetails.push({ id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null });
     // Create row
     const row = document.createElement('div');
     row.className = 'tool-row';
@@ -1612,12 +1701,15 @@ pub fn html() -> &'static str {
     scrollToBottom();
   };
 
-  window.__toolUpdate = function(id, title, status) {
+  window.__toolUpdate = function(id, title, status, rawOutput) {
     const t = toolRows[id];
     if (!t) return;
     if (title) {
       t.el.querySelector('.tool-title').textContent = title;
       toolDetails[t.idx].title = title;
+    }
+    if (rawOutput !== undefined && rawOutput !== null) {
+      toolDetails[t.idx].rawOutput = rawOutput;
     }
     if (status === 'completed') {
       t.finished = true;
@@ -2011,16 +2103,55 @@ pub fn html() -> &'static str {
     for (const t of details) {
       const row = document.createElement('div');
       row.className = 'modal-tool-row';
+      row.dataset.id = t.id;
       row.innerHTML = `
-        <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
-        <span class="modal-tool-title">${t.title}</span>
-        <span class="modal-tool-status ${t.status}">${t.status}</span>
-        <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
+        <div class="modal-tool-header">
+          <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
+          <span class="modal-tool-title">${escapeHtml(t.title)}</span>
+          <span class="modal-tool-status ${t.status}">${t.status}</span>
+          <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
+          <span class="modal-tool-chevron">▶</span>
+        </div>
+        <div class="modal-tool-details">
+          ${buildToolDetails(t)}
+        </div>
       `;
+      row.querySelector('.modal-tool-header').addEventListener('click', () => {
+        row.classList.toggle('expanded');
+      });
       list.appendChild(row);
     }
     toolModal.classList.add('show');
   }
+
+  function formatJson(val) {
+    if (val === null || val === undefined) return null;
+    try { return JSON.stringify(val, null, 2); } catch(e) { return String(val); }
+  }
+
+  function buildToolDetails(t) {
+    let html = '';
+    // Locations
+    if (t.locations && t.locations.length > 0) {
+      html += '<div class="detail-section"><div class="detail-section-title">Locations</div>';
+      for (const l of t.locations) {
+        html += `<div class="detail-location">${escapeHtml(l)}</div>`;
+      }
+      html += '</div>';
+    }
+    // Input
+    const inputJson = formatJson(t.rawInput);
+    if (inputJson) {
+      html += '<div class="detail-section"><div class="detail-section-title">Input</div><pre class="detail-code">' + escapeHtml(inputJson) + '</pre></div>';
+    }
+    // Output
+    const outputJson = formatJson(t.rawOutput);
+    if (outputJson) {
+      html += '<div class="detail-section"><div class="detail-section-title">Output</div><pre class="detail-code">' + escapeHtml(outputJson) + '</pre></div>';
+    }
+    return html;
+  }
+
 
   function hideToolModal() {
     toolModal.classList.remove('show');

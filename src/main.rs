@@ -1644,20 +1644,29 @@ fn main() {
                             ));
                         }
                     }
-                    acp::AgentEvent::ToolStart { id, title, kind } => {
+                    acp::AgentEvent::ToolStart { id, title, kind, raw_input, locations } => {
                         let eid = webview_utils::escape_js_template(&id);
                         let etitle = webview_utils::escape_js_template(&title);
                         let ekind = webview_utils::escape_js_template(&kind);
+                        let raw_input_json = raw_input
+                            .as_ref()
+                            .and_then(|v| serde_json::to_string(v).ok())
+                            .unwrap_or_else(|| "null".to_string());
+                        let locations_json = serde_json::to_string(&locations).unwrap_or_else(|_| "[]".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__toolStart && window.__toolStart(`{eid}`,`{etitle}`,`{ekind}`)"
+                            "window.__toolStart && window.__toolStart(`{eid}`,`{etitle}`,`{ekind}`,{raw_input_json},{locations_json})"
                         ));
                     }
-                    acp::AgentEvent::ToolUpdate { id, title, status } => {
+                    acp::AgentEvent::ToolUpdate { id, title, status, raw_output } => {
                         let eid = webview_utils::escape_js_template(&id);
                         let etitle = webview_utils::escape_js_template(title.as_deref().unwrap_or(""));
                         let estatus = webview_utils::escape_js_template(&status);
+                        let raw_output_json = raw_output
+                            .as_ref()
+                            .and_then(|v| serde_json::to_string(v).ok())
+                            .unwrap_or_else(|| "null".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`)"
+                            "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`,{raw_output_json})"
                         ));
                     }
                     acp::AgentEvent::Done => {
