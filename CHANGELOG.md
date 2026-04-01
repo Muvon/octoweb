@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.0] - 2026-04-01
+
+### 📋 Release Summary
+
+This release adds improved crash reporting with exit diagnostics, enhanced history autosave with atomic writes, and smarter overlay behavior including auto-hide when the app loses focus. Several bug fixes improve focus handling, browser tab stability, and prevent stale timers (938f9b42, 0b5ffcf5, 21a81d85).
+
+
+### ✨ New Features & Enhancements
+
+- **crash-report**: add exit trigger logging with backtrace `554a7ff8`
+- **history**: add atomic writes and debounce saves `ead932cd`
+- **overlay**: add auto-hide when app loses focus `904e499f`
+- **overlay**: smarter autofill and selection tracking `5f3c6eeb`
+
+### 🔧 Improvements & Optimizations
+
+- **overlay**: extract dismiss closure and control cursor visibility `3504014c`
+
+### 🐛 Bug Fixes & Stability
+
+- **cold_open**: capture kAEGetURL before EventLoop::new() `954711d4`
+- correct debounce comment from 5s to 60s `8d7ca7c0`
+- **focus**: include overlay window in focus tracking logic `938f9b42`
+- **overlay**: suppress hover selection until pointer movement `46e891d4`
+- **browser**: store URL when opening tabs instead of relying on update_url `0b5ffcf5`
+- **agents**: prevent stale timers and add browser timeouts `21a81d85`
+
 ## [0.2.0] - 2026-03-28
 
 ### 📋 Release Summary
