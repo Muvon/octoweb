@@ -301,6 +301,41 @@ pub const COMBINED_SCRIPT: &str = r#"
     };
   }
 
+  // ── Inline AI edit: selection capture & replacement ──────────────────
+  window.__inlineEditCapture = function() {
+    var el = document.activeElement;
+    var sel = window.getSelection();
+    var text = '';
+
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      text = el.value.substring(el.selectionStart, el.selectionEnd);
+      // Always memorize the element and cursor position — even without selection
+      window.__octoweb_edit = { type: 'input', element: el, start: el.selectionStart, end: el.selectionEnd };
+    } else if (sel && sel.rangeCount > 0) {
+      text = sel.toString();
+      window.__octoweb_edit = { type: 'range', range: sel.getRangeAt(0).cloneRange() };
+    }
+
+    _ipc({ type: 'inline_edit_ready', text: text });
+  };
+
+  window.__inlineEditReplace = function(newText) {
+    var edit = window.__octoweb_edit;
+    if (!edit) return;
+
+    if (edit.type === 'input') {
+      var el = edit.element;
+      el.value = el.value.substring(0, edit.start) + newText + el.value.substring(edit.end);
+      el.selectionStart = el.selectionEnd = edit.start + newText.length;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (edit.type === 'range') {
+      edit.range.deleteContents();
+      edit.range.insertNode(document.createTextNode(newText));
+    }
+
+    window.__octoweb_edit = null;
+  };
+
 }());
 "#;
 

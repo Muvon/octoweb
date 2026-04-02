@@ -8,6 +8,7 @@ mod crash_report;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
+mod inline_edit_html;
 mod macos;
 mod mcp;
 mod nav_error_patch;
@@ -95,6 +96,10 @@ enum AppEvent {
     ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
     FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
+    InlineEditRequest,               // ⌘⇧E — capture selection, show modal
+    InlineEditReady(String),         // JS sent selected text via IPC
+    InlineEditSubmit(String),        // user submitted prompt in modal
+    InlineEditClose,                 // user closed modal (Esc / close btn)
     ZoomIn,                          // ⌘= — increase page zoom
     ZoomOut,                         // ⌘- — decrease page zoom
     ZoomReset,                       // ⌘0 — reset page zoom to 100%
@@ -343,6 +348,11 @@ fn main() {
                                 let current = v["current"].as_u64().unwrap_or(0) as usize;
                                 let total = v["total"].as_u64().unwrap_or(0) as usize;
                                 let _ = p3.send_event(AppEvent::FindCount(current, total));
+                            }
+                            Some("inline_edit_ready") => {
+                                if let Some(text) = v["text"].as_str() {
+                                    let _ = p3.send_event(AppEvent::InlineEditReady(text.to_string()));
+                                }
                             }
                             // Same-document navigation (SPA pushState/replaceState/popstate).
                             // Reuses BrowserUrlChanged so the address bar + tab history update
@@ -940,6 +950,50 @@ fn main() {
     let _ = find_bar_wv.set_visible(false);
     let mut find_bar_visible = false;
 
+    // ── Inline AI edit modal (⌘⇧E) ──────────────────────────────────────
+    const INLINE_EDIT_W_LOGICAL: f64 = 350.0;
+    const INLINE_EDIT_H_LOGICAL: f64 = 36.0;
+    let inline_edit_w = (INLINE_EDIT_W_LOGICAL * browser_win.scale_factor()) as u32;
+    let inline_edit_h = (INLINE_EDIT_H_LOGICAL * browser_win.scale_factor()) as u32;
+    let inline_edit_wv = WebViewBuilder::new()
+        .with_html(inline_edit_html::html())
+        .with_transparent(true)
+        .with_bounds(wry::Rect {
+            position: tao::dpi::PhysicalPosition::new(
+                (sz0.width.saturating_sub(inline_edit_w)) / 2,
+                address_bar_h,
+            )
+            .into(),
+            size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
+        })
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("inline_edit_submit") => {
+                            if let Some(prompt) = v["prompt"].as_str() {
+                                let _ =
+                                    p.send_event(AppEvent::InlineEditSubmit(prompt.to_string()));
+                            }
+                        }
+                        Some("inline_edit_close") => {
+                            let _ = p.send_event(AppEvent::InlineEditClose);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create inline edit WebView");
+    let _ = inline_edit_wv.set_visible(false);
+    let mut inline_edit_visible = false;
+    let mut inline_edit_selected_text = String::new();
+    let mut inline_edit_tab_id: usize = 0;
+    let mut inline_edit_acp: Option<acp::AcpHandle> = None;
+    let mut inline_edit_response = String::new();
+
     // ── Per-tab WebContent process stats (CPU%, RSS) ───────────────────────
     // Sampled every 2 s from the active tab's WebContent XPC process.
     let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
@@ -1131,6 +1185,7 @@ fn main() {
                 const U_KEYCODE: i64 = 32; // u (Ctrl+U = scroll half up)
                 const T_KEYCODE: i64 = 17; // t (Ctrl+T = scroll to top)
                 const B_KEYCODE: i64 = 11; // b (Ctrl+B = scroll to bottom)
+                const E_KEYCODE: i64 = 14; // e (⌘⇧E = inline AI edit)
                 const EQUAL_KEYCODE: i64 = 24; // =/+ (⌘= = zoom in)
                 const MINUS_KEYCODE: i64 = 27; // -/_ (⌘- = zoom out)
                 const ESC_KEYCODE: i64 = 53; // Escape
@@ -1147,6 +1202,9 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == A_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleSidebar);
+                    CallbackResult::Drop
+                } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::InlineEditRequest);
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == I_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleDevTools);
@@ -1755,6 +1813,52 @@ fn main() {
                 }
             }
 
+        // Drain inline-edit ACP events.
+        let inline_events = inline_edit_acp.as_mut().map(|h| h.poll()).unwrap_or_default();
+        for ev in inline_events {
+            match ev {
+                acp::AgentEvent::Chunk(chunk) => {
+                    inline_edit_response.push_str(&chunk);
+                }
+                acp::AgentEvent::Done => {
+                    // Parse <text>...</text> from response; fallback to full response
+                    let result = if let (Some(start), Some(end)) = (
+                        inline_edit_response.find("<text>"),
+                        inline_edit_response.rfind("</text>"),
+                    ) {
+                        inline_edit_response[start + 6..end].to_string()
+                    } else {
+                        inline_edit_response.clone()
+                    };
+
+                    // Replace text in the original tab
+                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                        let escaped = webview_utils::escape_js_template(&result);
+                        let _ = wv.evaluate_script(&format!(
+                            "window.__inlineEditReplace && window.__inlineEditReplace(`{escaped}`)"
+                        ));
+                    }
+
+                    // Hide modal, clean up
+                    let _ = inline_edit_wv.set_visible(false);
+                    let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                    inline_edit_visible = false;
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                }
+                acp::AgentEvent::Error(err) => {
+                    tracing::warn!(error = %err, "inline edit ACP error");
+                    let escaped = webview_utils::escape_js_template(&err);
+                    let _ = inline_edit_wv.evaluate_script(&format!(
+                        "window.__setError && window.__setError(`{escaped}`)"
+                    ));
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                }
+                _ => {} // Ignore Connected, ToolStart, etc.
+            }
+        }
+
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
             while let Some(cmd) = handle.poll() {
@@ -2344,6 +2448,15 @@ fn main() {
                         let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
                     }
                 }
+                // Hide inline edit modal on tab switch — selection is per-tab
+                if inline_edit_visible {
+                    let _ = inline_edit_wv.set_visible(false);
+                    let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                    inline_edit_visible = false;
+                    if let Some(ref h) = inline_edit_acp { h.cancel(); }
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                }
                 if tab_id == active_wv_id {
                     if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                     return;
@@ -2884,6 +2997,15 @@ fn main() {
                         find_bar_visible = false;
                         find_bar_hotkey_visible.store(false, Ordering::Relaxed);
                     }
+                    // Dismiss inline edit — selection becomes stale on navigation
+                    if inline_edit_visible {
+                        let _ = inline_edit_wv.set_visible(false);
+                        let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                        inline_edit_visible = false;
+                        if let Some(ref h) = inline_edit_acp { h.cancel(); }
+                        inline_edit_acp = None;
+                        inline_edit_response.clear();
+                    }
                     // Check if this is about:blank — skip progress bar for instant pages
                     let url = tabs.lock().unwrap().tabs().iter()
                         .find(|t| t.id == tab_id)
@@ -3030,6 +3152,73 @@ fn main() {
                 zoom_level = 1.0;
                 for wv in tab_webviews.values() {
                     let _ = wv.zoom(zoom_level);
+                }
+            }
+
+            // ── Inline AI edit (⌘⇧E) ──────────────────────────────────────
+            Event::UserEvent(AppEvent::InlineEditRequest) => {
+                if inline_edit_visible {
+                    // Already open — close it (toggle behavior)
+                    let _ = inline_edit_wv.set_visible(false);
+                    let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                    inline_edit_visible = false;
+                    if let Some(ref h) = inline_edit_acp { h.cancel(); }
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                    browser_win.set_focus();
+                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.__inlineEditCapture && window.__inlineEditCapture()");
+                }
+            }
+            Event::UserEvent(AppEvent::InlineEditReady(text)) => {
+                inline_edit_selected_text = text;
+                inline_edit_tab_id = active_wv_id;
+                // Reposition centered, below address bar
+                let sz = browser_win.inner_size();
+                let _ = inline_edit_wv.set_bounds(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::new(
+                        (sz.width.saturating_sub(inline_edit_w)) / 2,
+                        address_bar_h,
+                    )
+                    .into(),
+                    size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
+                });
+                let _ = inline_edit_wv.set_visible(true);
+                inline_edit_visible = true;
+                unsafe {
+                    use objc2::msg_send;
+                    use objc2::runtime::AnyObject;
+                    let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                    let _: () = msg_send![ns_win, makeKeyWindow];
+                }
+                let _ = inline_edit_wv.focus();
+                let _ = inline_edit_wv.evaluate_script("window.__focus && window.__focus()");
+            }
+            Event::UserEvent(AppEvent::InlineEditSubmit(prompt)) => {
+                let _ = inline_edit_wv.evaluate_script("window.__setProcessing && window.__setProcessing(true)");
+                let formatted = if inline_edit_selected_text.is_empty() {
+                    prompt
+                } else {
+                    format!("{}\n<text>{}</text>", prompt, inline_edit_selected_text)
+                };
+                inline_edit_response.clear();
+                inline_edit_acp = acp::AcpHandle::connect(
+                    "octomind acp assistant:general",
+                    { let p = acp_proxy.clone(); move || { let _ = p.send_event(AppEvent::AcpWake); } }
+                ).ok();
+                if let Some(ref h) = inline_edit_acp {
+                    h.send_prompt(formatted, vec![]);
+                }
+            }
+            Event::UserEvent(AppEvent::InlineEditClose) => {
+                if inline_edit_visible {
+                    let _ = inline_edit_wv.set_visible(false);
+                    let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                    inline_edit_visible = false;
+                    if let Some(ref h) = inline_edit_acp { h.cancel(); }
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                    browser_win.set_focus();
                 }
             }
 

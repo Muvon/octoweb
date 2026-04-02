@@ -246,6 +246,7 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">Screenshot</span><span class="keys"><kbd>⌘</kbd><kbd>S</kbd></span></div>
           <div class="row"><span class="row-label">Full page shot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></span></div>
           <div class="row"><span class="row-label">Zoom in / out / reset</span><span class="keys"><kbd>⌘</kbd><kbd>+</kbd>/<kbd>-</kbd>/<kbd>0</kbd></span></div>
+          <div class="row"><span class="row-label">AI edit selection</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>E</kbd></span></div>
           <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
           <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
           <div class="row"><span class="row-label">Shortcuts</span><span class="keys"><kbd>⌘</kbd><kbd>/</kbd></span></div>
