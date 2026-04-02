@@ -1896,7 +1896,7 @@ fn main() {
                         inline_edit_response.find("<text>"),
                         inline_edit_response.rfind("</text>"),
                     ) {
-                        inline_edit_response[start + 6..end].to_string()
+                        inline_edit_response[start + 6..end].trim().to_string()
                     } else {
                         inline_edit_response.clone()
                     };
