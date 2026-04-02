@@ -313,6 +313,12 @@ pub fn html() -> &'static str {
     <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">⚡</span><span class="stat-val" id="cpu-stat"></span></span>
     <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">◉</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
+  <button id="settings-btn" class="bar-btn" title="Settings (⌘,)">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+      <path d="M6.6 1.2h2.8l.4 1.9.5.2 1.7-.9 2 2-.9 1.7.2.5 1.9.4v2.8l-1.9.4-.2.5.9 1.7-2 2-1.7-.9-.5.2-.4 1.9H6.6l-.4-1.9-.5-.2-1.7.9-2-2 .9-1.7-.2-.5L.8 9.2V6.4l1.9-.4.2-.5-.9-1.7 2-2 1.7.9.5-.2.4-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
+      <circle cx="8" cy="7.8" r="2" stroke="currentColor" stroke-width="1.2" fill="none"/>
+    </svg>
+  </button>
   <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.2 5.6c0-.9.7-1.6 1.8-1.6 1 0 1.8.7 1.8 1.6 0 .7-.4 1.1-1.1 1.6-.6.4-.9.7-.9 1.3v.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -515,6 +521,11 @@ pub fn html() -> &'static str {
   // Spotlight / command palette
   document.getElementById('spotlight-btn').addEventListener('click', function() {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_overlay' }));
+  });
+
+  // Settings
+  document.getElementById('settings-btn').addEventListener('click', function() {
+    window.ipc.postMessage(JSON.stringify({ type: 'toggle_settings' }));
   });
 
   // Keyboard shortcuts

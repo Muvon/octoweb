@@ -250,6 +250,7 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
           <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
           <div class="row"><span class="row-label">Shortcuts</span><span class="keys"><kbd>⌘</kbd><kbd>/</kbd></span></div>
+          <div class="row"><span class="row-label">Settings</span><span class="keys"><kbd>⌘</kbd><kbd>,</kbd></span></div>
           <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
         </div>
         <!-- Right column: Command Palette — shared-key rows aligned to left column -->

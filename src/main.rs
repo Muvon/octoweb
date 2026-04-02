@@ -18,6 +18,7 @@ mod overlay_html;
 mod progress_bar_html;
 mod quickslots;
 mod quickslots_html;
+mod settings_html;
 mod shortcuts_html;
 mod sidebar_html;
 mod tab_stats;
@@ -79,6 +80,9 @@ enum AppEvent {
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,            // user clicked X on notification toast
+    ToggleSettings,                 // ⌘, — toggle settings modal
+    HideSettings,                   // JS Esc / backdrop click in settings modal
+    UpdateConfig(String, String),   // (key, value) — config field changed in settings UI
     ToggleShortcuts,                // ⌘/ — toggle keyboard shortcuts overlay
     HideShortcuts,                  // JS Esc / backdrop click in shortcuts overlay
     ToggleFindBar,                  // ⌘F — toggle find-in-page bar
@@ -140,7 +144,7 @@ fn main() {
     crash_report::install_signal_handlers();
     crash_report::log_startup();
 
-    let cfg = Config::load();
+    let mut cfg = Config::load();
     let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
 
     // Restore browsing history in a background thread so startup isn't blocked
@@ -659,6 +663,54 @@ fn main() {
         .build(&*shortcuts_win)
         .expect("Failed to create shortcuts WebView");
 
+    // ── Settings modal (⌘,) ────────────────────────────────────────────────
+    let settings_win = WindowBuilder::new()
+        .with_title("")
+        .with_inner_size(LogicalSize::new(cfg.window_width, cfg.window_height))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_visible(false)
+        .build(&event_loop)
+        .expect("Failed to create settings window");
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ns_win: *mut AnyObject = settings_win.ns_window() as *mut AnyObject;
+        let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+    }
+    let settings_win = Arc::new(settings_win);
+    let settings_wv = WebViewBuilder::new()
+        .with_html(settings_html::html())
+        .with_transparent(true)
+        .with_ipc_handler({
+            let p = proxy.clone();
+            let sw = Arc::clone(&settings_win);
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("settings_close") => {
+                            sw.set_visible(false);
+                            let _ = p.send_event(AppEvent::HideSettings);
+                        }
+                        Some("settings_update") => {
+                            if let (Some(key), Some(val)) = (v["key"].as_str(), v["value"].as_str())
+                            {
+                                let _ = p.send_event(AppEvent::UpdateConfig(
+                                    key.to_string(),
+                                    val.to_string(),
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build(&*settings_win)
+        .expect("Failed to create settings WebView");
+    let mut settings_visible = false;
+
     // ── Sidebar WebView (child of browser_win, right-edge panel) ──────────
     // Hidden by default; shown/hidden via ToggleSidebar.
     // SIDEBAR_W is in logical points; scale to physical pixels for bounds arithmetic.
@@ -841,6 +893,9 @@ fn main() {
                                     let _: bool = msg_send![pb, writeObjects: arr];
                                 }
                             }
+                        }
+                        Some("toggle_settings") => {
+                            let _ = p.send_event(AppEvent::ToggleSettings);
                         }
                         Some("toggle_shortcuts") => {
                             let _ = p.send_event(AppEvent::ToggleShortcuts);
@@ -1188,6 +1243,7 @@ fn main() {
                 const N_KEYCODE: i64 = 45; // n
                 const A_KEYCODE: i64 = 0;  // a (Cmd+Shift+A = toggle sidebar)
                 const I_KEYCODE: i64 = 34; // i (Cmd+Shift+I = toggle devtools)
+                const COMMA_KEYCODE: i64 = 43; // , (Cmd+, = settings)
                 const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
                 const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
                 const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
@@ -1219,6 +1275,9 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == I_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleDevTools);
+                    CallbackResult::Drop
+                } else if cmd && keycode == COMMA_KEYCODE {
+                    let _ = p.send_event(AppEvent::ToggleSettings);
                     CallbackResult::Drop
                 } else if cmd && keycode == SLASH_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleShortcuts);
@@ -2293,6 +2352,52 @@ fn main() {
             }
 
             // ── Toggle shortcuts overlay ──────────────────────────────────
+            // ── Settings modal (⌘,) ──────────────────────────────────────
+            Event::UserEvent(AppEvent::ToggleSettings) => {
+                if settings_visible {
+                    settings_win.set_visible(false);
+                    settings_visible = false;
+                } else {
+                    let sz = browser_win.inner_size();
+                    settings_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
+                    if let Ok(pos) = browser_win.outer_position() {
+                        settings_win.set_outer_position(pos);
+                    }
+                    // Inject current config values into the UI
+                    let config_json = serde_json::to_string(&cfg).unwrap_or_default();
+                    let _ = settings_wv.evaluate_script(&format!(
+                        "window.__setConfig && window.__setConfig({})", config_json
+                    ));
+                    settings_win.set_visible(true);
+                    settings_win.set_focus();
+                    settings_visible = true;
+                }
+            }
+            Event::UserEvent(AppEvent::HideSettings) => {
+                settings_win.set_visible(false);
+                settings_visible = false;
+            }
+            Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
+                match key.as_str() {
+                    "home_page" => cfg.home_page = val,
+                    "search_engine" => cfg.search_engine = val,
+                    "max_history" => {
+                        if let Ok(n) = val.parse::<usize>() { cfg.max_history = n; }
+                    }
+                    "window_width" => {
+                        if let Ok(n) = val.parse::<u32>() { cfg.window_width = n; }
+                    }
+                    "window_height" => {
+                        if let Ok(n) = val.parse::<u32>() { cfg.window_height = n; }
+                    }
+                    "ai_edit_auto_hide" => {
+                        cfg.ai_edit_auto_hide = val == "true";
+                    }
+                    _ => {}
+                }
+                cfg.save();
+            }
+
             Event::UserEvent(AppEvent::ToggleShortcuts) => {
                 if shortcuts_visible {
                     shortcuts_win.set_visible(false);
@@ -3382,6 +3487,8 @@ fn main() {
                         overlay_hotkey_visible.store(false, Ordering::Relaxed);
                         shortcuts_win.set_visible(false);
                         shortcuts_visible = false;
+                        settings_win.set_visible(false);
+                        settings_visible = false;
                     }
                 }
 
@@ -3393,6 +3500,9 @@ fn main() {
                     }
                     if shortcuts_visible {
                         shortcuts_win.set_inner_size(*sz);
+                    }
+                    if settings_visible {
+                        settings_win.set_inner_size(*sz);
                     }
                     // Resize sidebar to track window height and stay at right edge
                     if sidebar_visible {
