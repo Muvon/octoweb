@@ -1,12 +1,13 @@
-/// Keyboard shortcuts help overlay — compact 2-column frosted glass panel.
+/// Keyboard shortcuts help overlay — compact 3-column frosted glass panel.
 ///
 /// Shown via `⌘/` or the `?` button in the address bar.
 /// IPC: `{ type: "shortcuts_close" }` on Esc or backdrop click.
 ///
 /// ## Layout rules
 ///
-/// Two columns inside a single `.shortcuts` flex box: **Global** (left) and
-/// **Command Palette** (right). Both columns are `flex: 1` — always equal width.
+/// Three columns inside a single `.shortcuts` flex box: **Global** (left),
+/// **Command Palette** (middle), and **AI Editor** (right).
+/// All columns are `flex: 1` — always equal width.
 ///
 /// **Row alignment rule:**
 /// - If the same key binding has an action in BOTH columns, place it on the
@@ -253,7 +254,7 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">Settings</span><span class="keys"><kbd>⌘</kbd><kbd>,</kbd></span></div>
           <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
         </div>
-        <!-- Right column: Command Palette — shared-key rows aligned to left column -->
+        <!-- Middle column: Command Palette — shared-key rows aligned to left column -->
         <div class="shortcuts-col">
           <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
@@ -265,6 +266,19 @@ pub fn html() -> &'static str {
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>
           <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd>⌃</kbd><kbd>K</kbd>/<kbd>U</kbd></span></div>
+        </div>
+        <!-- Right column: AI Editor — shared-key rows aligned -->
+        <div class="shortcuts-col">
+          <div class="col-title">AI Editor <span style="opacity:0.5">⌘⇧E</span></div>
+          <div class="row"><span class="row-label dim">&nbsp;</span></div>
+          <div class="row"><span class="row-label">History older / newer</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd>/<kbd>N</kbd></span></div>
+          <div class="row"><span class="row-label dim">&nbsp;</span></div>
+          <div class="row"><span class="row-label">Submit</span><span class="keys"><kbd>↵</kbd></span></div>
+          <div class="row"><span class="row-label">Reverse search</span><span class="keys"><kbd>⌃</kbd><kbd>R</kbd></span></div>
+          <div class="row"><span class="row-label">Accept completion</span><span class="keys"><kbd>⌃</kbd><kbd>E</kbd></span></div>
+          <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
+          <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>
+          <div class="row"><span class="row-label">Erase to start</span><span class="keys"><kbd>⌃</kbd><kbd>U</kbd></span></div>
         </div>
       </div>
     </div>
