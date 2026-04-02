@@ -160,7 +160,10 @@ pub fn html() -> &'static str {
     <div id="spinner"></div>
     <span id="error-msg"></span>
     <div class="sep"></div>
-    <button id="close" title="Close (Esc)">
+    <button id="hide" title="Hide (keep processing)" style="display:none">
+      <svg viewBox="0 0 10 10"><polyline points="1,4 5,8 9,4"/></svg>
+    </button>
+    <button id="close" title="Cancel (Esc)">
       <svg viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8"/><line x1="8" y1="2" x2="2" y2="8"/></svg>
     </button>
   </div>
@@ -171,11 +174,16 @@ pub fn html() -> &'static str {
   var spinner = document.getElementById('spinner');
   var errorMsg = document.getElementById('error-msg');
   var bar = document.getElementById('bar');
+  var hideBtn = document.getElementById('hide');
   var lastH = 0;
 
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
   }
+
+  hideBtn.addEventListener('click', function() {
+    ipc({ type: 'inline_edit_hide' });
+  });
 
   function autoResize() {
     input.style.height = '22px';
@@ -215,6 +223,7 @@ pub fn html() -> &'static str {
     input.style.height = '22px';
     input.disabled = false;
     spinner.classList.remove('active');
+    hideBtn.style.display = 'none';
     errorMsg.style.display = 'none';
     lastH = 0;
   };
@@ -222,6 +231,7 @@ pub fn html() -> &'static str {
   window.__setProcessing = function(on) {
     input.disabled = on;
     spinner.classList.toggle('active', on);
+    hideBtn.style.display = on ? '' : 'none';
     errorMsg.style.display = 'none';
   };
 

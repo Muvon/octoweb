@@ -156,6 +156,9 @@ pub struct Config {
     pub window_width: u32,
     /// Initial window height
     pub window_height: u32,
+    /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
+    #[serde(default)]
+    pub ai_edit_auto_hide: bool,
 }
 
 impl Default for Config {
@@ -166,6 +169,7 @@ impl Default for Config {
             max_history: 1000,
             window_width: 1280,
             window_height: 800,
+            ai_edit_auto_hide: false,
         }
     }
 }

@@ -100,6 +100,7 @@ enum AppEvent {
     InlineEditReady(String, f64, f64), // (text, x, y) — selected text + cursor position
     InlineEditSubmit(String),        // user submitted prompt in modal
     InlineEditClose,                 // user closed modal (Esc / close btn)
+    InlineEditHide,                  // hide modal but keep processing
     InlineEditResize(f64),           // modal content height changed
     ZoomIn,                          // ⌘= — increase page zoom
     ZoomOut,                         // ⌘- — decrease page zoom
@@ -982,6 +983,9 @@ fn main() {
                         Some("inline_edit_close") => {
                             let _ = p.send_event(AppEvent::InlineEditClose);
                         }
+                        Some("inline_edit_hide") => {
+                            let _ = p.send_event(AppEvent::InlineEditHide);
+                        }
                         Some("inline_edit_resize") => {
                             if let Some(h) = v["height"].as_f64() {
                                 let _ = p.send_event(AppEvent::InlineEditResize(h));
@@ -1838,12 +1842,15 @@ fn main() {
                         inline_edit_response.clone()
                     };
 
-                    // Replace text in the original tab
+                    // Replace text in the original tab + reset cursor
                     if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
                         let escaped = webview_utils::escape_js_template(&result);
                         let _ = wv.evaluate_script(&format!(
                             "window.__inlineEditReplace && window.__inlineEditReplace(`{escaped}`)"
                         ));
+                        let _ = wv.evaluate_script(
+                            "document.documentElement.style.cursor=''"
+                        );
                     }
 
                     // Hide modal, clean up
@@ -1855,6 +1862,12 @@ fn main() {
                 }
                 acp::AgentEvent::Error(err) => {
                     tracing::warn!(error = %err, "inline edit ACP error");
+                    // Reset cursor on target tab
+                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                        let _ = wv.evaluate_script(
+                            "document.documentElement.style.cursor=''"
+                        );
+                    }
                     let escaped = webview_utils::escape_js_template(&err);
                     let _ = inline_edit_wv.evaluate_script(&format!(
                         "window.__setError && window.__setError(`{escaped}`)"
@@ -3221,6 +3234,30 @@ fn main() {
                 ).ok();
                 if let Some(ref h) = inline_edit_acp {
                     h.send_prompt(formatted, vec![]);
+                }
+                // Auto-hide modal if configured
+                if cfg.ai_edit_auto_hide {
+                    let _ = inline_edit_wv.set_visible(false);
+                    inline_edit_visible = false;
+                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                        let _ = wv.evaluate_script(
+                            "document.documentElement.style.cursor='wait'"
+                        );
+                    }
+                    browser_win.set_focus();
+                }
+            }
+            Event::UserEvent(AppEvent::InlineEditHide) => {
+                if inline_edit_visible {
+                    let _ = inline_edit_wv.set_visible(false);
+                    inline_edit_visible = false;
+                    // Set loading cursor on the target tab while processing continues
+                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                        let _ = wv.evaluate_script(
+                            "document.documentElement.style.cursor='wait'"
+                        );
+                    }
+                    browser_win.set_focus();
                 }
             }
             Event::UserEvent(AppEvent::InlineEditResize(h)) => {
