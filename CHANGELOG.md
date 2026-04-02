@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0] - 2026-04-02
+
+### 📋 Release Summary
+
+This update introduces powerful AI editing capabilities including multi-modal image support, persistent prompt history, and a new inline editor with dedicated shortcuts (fd4ddc72, 96362396, 62294b7d, 5e29bbf5, d1ea76eb, 44722aa6). The user experience is further enhanced with interactive PDF and DOCX support, fuzzy search, and a comprehensive settings interface for better workspace customization (283f66fd, 68b5edab, 5f50040b, a678e789, 182f1f79, 327ccd81). General refinements to tool monitoring and UI positioning ensure a more stable and responsive experience (1fed407c, 0516a8d6, f9e748f4, 1898076b, 184bd1ea, 866d1595).
+
+
+### 🚨 Breaking Changes
+
+⚠️ **Important**: This release contains breaking changes that may require code updates.
+
+- **acp**: add raw tool data and UI details `fd4ddc72`
+- **acp**: add multi-modal image support `96362396`
+- **agents**: improve monitoring and screenshots `62294b7d`
+
+### ✨ New Features & Enhancements
+
+- **shortcuts**: add AI Editor column to overlay `5e29bbf5`
+- **ai**: implement persistent prompt history `d1ea76eb`
+- **ui**: add custom window dragging via IPC `182f1f79`
+- **settings**: add settings view and config UI `a678e789`
+- **inline-edit**: add auto and manual modal hiding `f9e748f4`
+- **editor**: improve inline edit UI and positioning `1898076b`
+- **ai**: add inline text editing via Cmd+Shift+E `44722aa6`
+- **zoom**: add page zoom controls and shortcuts `327ccd81`
+- **sidebar**: add tool execution details modal `1fed407c`
+- **sidebar**: show tool usage count in headers `0516a8d6`
+- **pdf**: add interactive document rendering `283f66fd`
+- **search**: add fuzzy search and markdown `5f50040b`
+- **sidebar**: add PDF and DOCX attachment support `68b5edab`
+
+### 🐛 Bug Fixes & Stability
+
+- **editor**: trim whitespace from edit response `184bd1ea`
+- **webview**: use browser window as footer parent `866d1595`
+
 ## [0.3.0] - 2026-04-01
 
 ### 📋 Release Summary
