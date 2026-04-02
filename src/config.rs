@@ -144,6 +144,44 @@ fn history_path() -> PathBuf {
         .join("history.json")
 }
 
+// ── Prompt history persistence ────────────────────────────────────────────────
+// Inline AI edit (⌘⇧E) prompt history — MRU-first Vec<String>.
+
+pub fn save_prompt_history(entries: &[String]) {
+    let path = prompt_history_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string(entries) {
+        Ok(s) => {
+            if let Err(e) = fs::write(&tmp, &s) {
+                tracing::warn!(error = %e, "Failed to write prompt history tmp");
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, "Failed to rename prompt history tmp");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize prompt history"),
+    }
+}
+
+pub fn load_prompt_history() -> Vec<String> {
+    let path = prompt_history_path();
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn prompt_history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        .join("octoweb")
+        .join("prompt_history.json")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// URL to load on startup
@@ -159,6 +197,13 @@ pub struct Config {
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
+    /// Max prompt history entries to keep for inline AI edit (⌘⇧E)
+    #[serde(default = "default_max_prompt_history")]
+    pub max_prompt_history: usize,
+}
+
+fn default_max_prompt_history() -> usize {
+    50
 }
 
 impl Default for Config {
@@ -170,6 +215,7 @@ impl Default for Config {
             window_width: 1280,
             window_height: 800,
             ai_edit_auto_hide: false,
+            max_prompt_history: 50,
         }
     }
 }

@@ -167,6 +167,7 @@ fn main() {
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
+    let inline_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     // Tracks whether the browser window is the frontmost app.
     // CGEventTap fires system-wide, so we gate all hotkeys on this flag.
     let app_focused = Arc::new(AtomicBool::new(false));
@@ -1072,6 +1073,8 @@ fn main() {
     let mut inline_edit_tab_id: usize = 0;
     let mut inline_edit_acp: Option<acp::AcpHandle> = None;
     let mut inline_edit_response = String::new();
+    let mut prompt_history: Vec<String> = config::load_prompt_history();
+    prompt_history.truncate(cfg.max_prompt_history);
 
     // ── Per-tab WebContent process stats (CPU%, RSS) ───────────────────────
     // Sampled every 2 s from the active tab's WebContent XPC process.
@@ -1214,6 +1217,7 @@ fn main() {
         let p = proxy.clone();
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
+        let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
         let focused_state = Arc::clone(&app_focused);
         // Stores the raw CFMachPortRef so the callback can re-enable the tap
         // if macOS disables it due to timeout (see TapDisabledByTimeout below).
@@ -1301,30 +1305,30 @@ fn main() {
                 } else if cmd && !shift && keycode == Q_KEYCODE {
                     let _ = p.send_event(AppEvent::Quit);
                     CallbackResult::Drop
-                } else if ctrl && keycode == P_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == P_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     if find_bar_state.load(Ordering::Relaxed) {
                         let _ = p.send_event(AppEvent::FindPrev);
                     } else {
                         let _ = p.send_event(AppEvent::PrevTab);
                     }
                     CallbackResult::Drop
-                } else if ctrl && keycode == N_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == N_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     if find_bar_state.load(Ordering::Relaxed) {
                         let _ = p.send_event(AppEvent::FindNext);
                     } else {
                         let _ = p.send_event(AppEvent::NextTab);
                     }
                     CallbackResult::Drop
-                } else if ctrl && keycode == D_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == D_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ScrollDown);
                     CallbackResult::Drop
-                } else if ctrl && keycode == U_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == U_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ScrollUp);
                     CallbackResult::Drop
-                } else if ctrl && keycode == T_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == T_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ScrollTop);
                     CallbackResult::Drop
-                } else if ctrl && keycode == B_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                } else if ctrl && keycode == B_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ScrollBottom);
                     CallbackResult::Drop
                 } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
@@ -2406,6 +2410,12 @@ fn main() {
                     "ai_edit_auto_hide" => {
                         cfg.ai_edit_auto_hide = val == "true";
                     }
+                    "max_prompt_history" => {
+                        if let Ok(n) = val.parse::<usize>() {
+                            cfg.max_prompt_history = n;
+                            prompt_history.truncate(n);
+                        }
+                    }
                     _ => {}
                 }
                 cfg.save();
@@ -3045,7 +3055,7 @@ fn main() {
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
-                save_and_exit(&tabs, &favicon_cache, control_flow);
+                save_and_exit(&tabs, &favicon_cache, &prompt_history, control_flow);
             }
 
             // ── Title update ──────────────────────────────────────────────
@@ -3300,6 +3310,7 @@ fn main() {
                     let _ = inline_edit_wv.set_visible(false);
                     let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                     inline_edit_visible = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(ref h) = inline_edit_acp { h.cancel(); }
                     inline_edit_acp = None;
                     inline_edit_response.clear();
@@ -3329,6 +3340,7 @@ fn main() {
                 });
                 let _ = inline_edit_wv.set_visible(true);
                 inline_edit_visible = true;
+                inline_edit_hotkey_visible.store(true, Ordering::Relaxed);
                 unsafe {
                     use objc2::msg_send;
                     use objc2::runtime::AnyObject;
@@ -3337,8 +3349,23 @@ fn main() {
                 }
                 let _ = inline_edit_wv.focus();
                 let _ = inline_edit_wv.evaluate_script("window.__focus && window.__focus()");
+                // Inject prompt history into the modal JS
+                let hist_json = serde_json::to_string(&prompt_history).unwrap_or_else(|_| "[]".into());
+                let _ = inline_edit_wv.evaluate_script(&format!(
+                    "window.__setHistory && window.__setHistory({hist_json})"
+                ));
             }
             Event::UserEvent(AppEvent::InlineEditSubmit(prompt)) => {
+                // Record in prompt history (MRU dedup)
+                if let Some(pos) = prompt_history.iter().position(|p| p == &prompt) {
+                    prompt_history.remove(pos);
+                }
+                prompt_history.insert(0, prompt.clone());
+                prompt_history.truncate(cfg.max_prompt_history);
+                {
+                    let snapshot = prompt_history.clone();
+                    std::thread::spawn(move || config::save_prompt_history(&snapshot));
+                }
                 let _ = inline_edit_wv.evaluate_script("window.__setProcessing && window.__setProcessing(true)");
                 let formatted = if inline_edit_selected_text.is_empty() {
                     prompt
@@ -3357,6 +3384,7 @@ fn main() {
                 if cfg.ai_edit_auto_hide {
                     let _ = inline_edit_wv.set_visible(false);
                     inline_edit_visible = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
                         let _ = wv.evaluate_script(
                             "document.documentElement.style.cursor='wait'"
@@ -3369,6 +3397,7 @@ fn main() {
                 if inline_edit_visible {
                     let _ = inline_edit_wv.set_visible(false);
                     inline_edit_visible = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     // Set loading cursor on the target tab while processing continues
                     if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
                         let _ = wv.evaluate_script(
@@ -3397,6 +3426,7 @@ fn main() {
                     let _ = inline_edit_wv.set_visible(false);
                     let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                     inline_edit_visible = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(ref h) = inline_edit_acp { h.cancel(); }
                     inline_edit_acp = None;
                     inline_edit_response.clear();
@@ -3490,7 +3520,7 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
-                        save_and_exit(&tabs, &favicon_cache, control_flow);
+                        save_and_exit(&tabs, &favicon_cache, &prompt_history, control_flow);
                     } else if window_id == chrome_win_id {
                         // Chrome window should not be closed independently — ignore.
                     } else {
@@ -3911,6 +3941,7 @@ fn screenshot_full_page_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
 fn save_and_exit(
     tabs: &Arc<Mutex<browser::TabManager>>,
     favicon_cache: &std::collections::HashMap<String, String>,
+    prompt_history: &[String],
     control_flow: &mut ControlFlow,
 ) {
     let mut tm = tabs.lock().unwrap();
@@ -3931,6 +3962,7 @@ fn save_and_exit(
     config::save_session(&session_tabs, &active_url);
     config::save_favicons(favicon_cache);
     config::save_history(tm.history());
+    config::save_prompt_history(&prompt_history);
     drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
