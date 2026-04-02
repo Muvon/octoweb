@@ -95,6 +95,9 @@ enum AppEvent {
     ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
     FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
+    ZoomIn,                          // ⌘= — increase page zoom
+    ZoomOut,                         // ⌘- — decrease page zoom
+    ZoomReset,                       // ⌘0 — reset page zoom to 100%
     Quit,
 }
 fn main() {
@@ -1128,6 +1131,8 @@ fn main() {
                 const U_KEYCODE: i64 = 32; // u (Ctrl+U = scroll half up)
                 const T_KEYCODE: i64 = 17; // t (Ctrl+T = scroll to top)
                 const B_KEYCODE: i64 = 11; // b (Ctrl+B = scroll to bottom)
+                const EQUAL_KEYCODE: i64 = 24; // =/+ (⌘= = zoom in)
+                const MINUS_KEYCODE: i64 = 27; // -/_ (⌘- = zoom out)
                 const ESC_KEYCODE: i64 = 53; // Escape
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
@@ -1194,6 +1199,16 @@ fn main() {
                     // Esc closes find bar regardless of which WebView has focus
                     let _ = p.send_event(AppEvent::HideFindBar);
                     CallbackResult::Drop
+                } else if cmd && keycode == EQUAL_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ZoomIn);
+                    CallbackResult::Drop
+                } else if cmd && keycode == MINUS_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ZoomOut);
+                    CallbackResult::Drop
+                } else if cmd && !shift && keycode == 29 && !overlay_state.load(Ordering::Relaxed) {
+                    // ⌘0 = reset zoom (overrides QuickSlotOpen for digit 0)
+                    let _ = p.send_event(AppEvent::ZoomReset);
+                    CallbackResult::Drop
                 } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::ToggleFindBar);
                     CallbackResult::Drop
@@ -1237,6 +1252,7 @@ fn main() {
     let mut sidebar_visible = false;
     let mut shortcuts_visible = false;
     let mut icon_set = false;
+    let mut zoom_level: f64 = 1.0;
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
 
@@ -1257,6 +1273,11 @@ fn main() {
                 let _ = pt.send_event(AppEvent::WebContentTerminated(id));
             });
             tab_webviews.insert(id, wv);
+            if zoom_level != 1.0 {
+                if let Some(wv) = tab_webviews.get(&id) {
+                    let _ = wv.zoom(zoom_level);
+                }
+            }
             id
         }};
     }
@@ -2989,6 +3010,26 @@ fn main() {
             Event::UserEvent(AppEvent::ScrollBottom) => {
                 if let Some(wv) = tab_webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})");
+                }
+            }
+
+            // ── Zoom in / out (⌘= / ⌘-) ────────────────────────────────────
+            Event::UserEvent(AppEvent::ZoomIn) => {
+                zoom_level = (zoom_level + 0.1).min(3.0);
+                for wv in tab_webviews.values() {
+                    let _ = wv.zoom(zoom_level);
+                }
+            }
+            Event::UserEvent(AppEvent::ZoomOut) => {
+                zoom_level = (zoom_level - 0.1).max(0.5);
+                for wv in tab_webviews.values() {
+                    let _ = wv.zoom(zoom_level);
+                }
+            }
+            Event::UserEvent(AppEvent::ZoomReset) => {
+                zoom_level = 1.0;
+                for wv in tab_webviews.values() {
+                    let _ = wv.zoom(zoom_level);
                 }
             }
 
