@@ -173,9 +173,7 @@ pub fn html() -> &'static str {
     padding: 0 12px 0 14px;
     border-bottom: 1px solid var(--divider);
     flex-shrink: 0;
-    -webkit-app-region: drag;
   }
-  #header > * { -webkit-app-region: no-drag; }
 
   #header-title {
     display: flex;

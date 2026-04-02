@@ -859,9 +859,22 @@ fn main() {
         })
         .with_ipc_handler({
             let p = proxy.clone();
+            let bw = Arc::clone(&browser_win);
             move |msg| {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
+                        Some("drag_move") => {
+                            let dx = v["dx"].as_f64().unwrap_or(0.0);
+                            let dy = v["dy"].as_f64().unwrap_or(0.0);
+                            if let Ok(pos) = bw.outer_position() {
+                                let scale = bw.scale_factor();
+                                let lp: tao::dpi::LogicalPosition<f64> = pos.to_logical(scale);
+                                bw.set_outer_position(tao::dpi::LogicalPosition::new(
+                                    lp.x + dx,
+                                    lp.y + dy,
+                                ));
+                            }
+                        }
                         Some("toggle_sidebar") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
                         }

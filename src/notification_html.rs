@@ -37,7 +37,6 @@ pub fn html() -> &'static str {
     border-radius: 14px;
     cursor: pointer;
     user-select: none;
-    -webkit-app-region: no-drag;
 
     /* Glass — macOS Tahoe style */
     background: rgba(255, 255, 255, 0.88);

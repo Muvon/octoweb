@@ -545,6 +545,24 @@ pub fn html() -> &'static str {
 
   // Initial state — badge hidden
   document.getElementById('badge').classList.remove('show');
+
+  // Window drag from title bar background
+  document.getElementById('bar').addEventListener('mousedown', function(e) {
+    if (e.target.closest('#ai-btn, .bar-btn, #page-title, #url')) return;
+    e.preventDefault();
+    var sx = e.screenX, sy = e.screenY;
+    function onMove(ev) {
+      var dx = ev.screenX - sx, dy = ev.screenY - sy;
+      sx = ev.screenX; sy = ev.screenY;
+      if (dx || dy) window.ipc.postMessage(JSON.stringify({ type: 'drag_move', dx: dx, dy: dy }));
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 })();
 </script>
 </body>
