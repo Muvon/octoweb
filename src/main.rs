@@ -97,9 +97,10 @@ enum AppEvent {
     SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
     FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
     InlineEditRequest,               // ⌘⇧E — capture selection, show modal
-    InlineEditReady(String),         // JS sent selected text via IPC
+    InlineEditReady(String, f64, f64), // (text, x, y) — selected text + cursor position
     InlineEditSubmit(String),        // user submitted prompt in modal
     InlineEditClose,                 // user closed modal (Esc / close btn)
+    InlineEditResize(f64),           // modal content height changed
     ZoomIn,                          // ⌘= — increase page zoom
     ZoomOut,                         // ⌘- — decrease page zoom
     ZoomReset,                       // ⌘0 — reset page zoom to 100%
@@ -350,9 +351,10 @@ fn main() {
                                 let _ = p3.send_event(AppEvent::FindCount(current, total));
                             }
                             Some("inline_edit_ready") => {
-                                if let Some(text) = v["text"].as_str() {
-                                    let _ = p3.send_event(AppEvent::InlineEditReady(text.to_string()));
-                                }
+                                let text = v["text"].as_str().unwrap_or("").to_string();
+                                let x = v["x"].as_f64().unwrap_or(0.0);
+                                let y = v["y"].as_f64().unwrap_or(0.0);
+                                let _ = p3.send_event(AppEvent::InlineEditReady(text, x, y));
                             }
                             // Same-document navigation (SPA pushState/replaceState/popstate).
                             // Reuses BrowserUrlChanged so the address bar + tab history update
@@ -979,6 +981,11 @@ fn main() {
                         }
                         Some("inline_edit_close") => {
                             let _ = p.send_event(AppEvent::InlineEditClose);
+                        }
+                        Some("inline_edit_resize") => {
+                            if let Some(h) = v["height"].as_f64() {
+                                let _ = p.send_event(AppEvent::InlineEditResize(h));
+                            }
                         }
                         _ => {}
                     }
@@ -3170,17 +3177,23 @@ fn main() {
                     let _ = wv.evaluate_script("window.__inlineEditCapture && window.__inlineEditCapture()");
                 }
             }
-            Event::UserEvent(AppEvent::InlineEditReady(text)) => {
+            Event::UserEvent(AppEvent::InlineEditReady(text, x, y)) => {
                 inline_edit_selected_text = text;
                 inline_edit_tab_id = active_wv_id;
-                // Reposition centered, below address bar
+                // Position at cursor — coordinates are CSS pixels from tab viewport
+                let scale = browser_win.scale_factor();
                 let sz = browser_win.inner_size();
+                let mut px = (x * scale) as u32;
+                let mut py = (y * scale) as u32 + address_bar_h;
+                // Clamp so modal stays within window bounds
+                if px + inline_edit_w > sz.width {
+                    px = sz.width.saturating_sub(inline_edit_w + 8);
+                }
+                if py + inline_edit_h > sz.height {
+                    py = sz.height.saturating_sub(inline_edit_h + 8);
+                }
                 let _ = inline_edit_wv.set_bounds(wry::Rect {
-                    position: tao::dpi::PhysicalPosition::new(
-                        (sz.width.saturating_sub(inline_edit_w)) / 2,
-                        address_bar_h,
-                    )
-                    .into(),
+                    position: tao::dpi::PhysicalPosition::new(px, py).into(),
                     size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
                 });
                 let _ = inline_edit_wv.set_visible(true);
@@ -3203,11 +3216,25 @@ fn main() {
                 };
                 inline_edit_response.clear();
                 inline_edit_acp = acp::AcpHandle::connect(
-                    "octomind acp assistant:general",
+                    "octomind acp octoweb:editor",
                     { let p = acp_proxy.clone(); move || { let _ = p.send_event(AppEvent::AcpWake); } }
                 ).ok();
                 if let Some(ref h) = inline_edit_acp {
                     h.send_prompt(formatted, vec![]);
+                }
+            }
+            Event::UserEvent(AppEvent::InlineEditResize(h)) => {
+                if inline_edit_visible {
+                    let scale = browser_win.scale_factor();
+                    let new_h = (h * scale) as u32;
+                    let bounds = inline_edit_wv.bounds().unwrap_or(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                        size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
+                    });
+                    let _ = inline_edit_wv.set_bounds(wry::Rect {
+                        position: bounds.position,
+                        size: tao::dpi::PhysicalSize::new(inline_edit_w, new_h).into(),
+                    });
                 }
             }
             Event::UserEvent(AppEvent::InlineEditClose) => {

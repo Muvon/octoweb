@@ -1,6 +1,6 @@
 /// Returns the HTML for the inline AI edit modal (⌘⇧E).
-/// Frosted-glass pill, positioned top-center, dark/light adaptive.
-/// IPC messages: inline_edit_submit, inline_edit_close.
+/// Frosted-glass pill that floats at cursor position, auto-expands with input.
+/// IPC messages: inline_edit_submit, inline_edit_close, inline_edit_resize.
 pub fn html() -> &'static str {
     r#"<!DOCTYPE html>
 <html>
@@ -18,7 +18,7 @@ pub fn html() -> &'static str {
     --btn-active: rgba(0, 0, 0, 0.10);
     --icon: rgba(0, 0, 0, 0.50);
     --sep: rgba(0, 0, 0, 0.08);
-    --shadow: 0 1px 4px rgba(0, 0, 0, 0.06), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+    --shadow: 0 2px 12px rgba(0, 0, 0, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
     --spinner: rgba(0, 0, 0, 0.35);
     --error: rgba(255, 59, 48, 0.8);
   }
@@ -33,7 +33,7 @@ pub fn html() -> &'static str {
       --btn-active: rgba(255, 255, 255, 0.14);
       --icon: rgba(255, 255, 255, 0.50);
       --sep: rgba(255, 255, 255, 0.08);
-      --shadow: 0 1px 4px rgba(0, 0, 0, 0.2), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+      --shadow: 0 2px 12px rgba(0, 0, 0, 0.25), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
       --spinner: rgba(255, 255, 255, 0.35);
       --error: rgba(255, 69, 58, 0.85);
     }
@@ -51,13 +51,13 @@ pub fn html() -> &'static str {
   #bar {
     position: fixed;
     top: 4px;
-    left: 50%;
-    transform: translateX(-50%);
+    left: 4px;
+    right: 4px;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 1px;
-    height: 30px;
-    padding: 0 3px 0 10px;
+    min-height: 30px;
+    padding: 4px 3px 4px 10px;
     background: var(--bg);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
@@ -67,18 +67,31 @@ pub fn html() -> &'static str {
   }
 
   #input {
-    width: 260px;
-    height: 22px;
+    flex: 1;
+    min-height: 22px;
+    max-height: 120px;
     border: none;
     outline: none;
     background: transparent;
     font-size: 12.5px;
+    line-height: 18px;
     letter-spacing: -0.01em;
     color: var(--text);
     font-family: inherit;
+    resize: none;
+    overflow-y: auto;
+    padding: 2px 0;
   }
   #input::placeholder { color: var(--placeholder); }
   #input:disabled { opacity: 0.5; }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex-shrink: 0;
+    padding-top: 1px;
+  }
 
   .sep {
     width: 0.5px;
@@ -142,29 +155,46 @@ pub fn html() -> &'static str {
 </head>
 <body>
 <div id="bar">
-  <input id="input" type="text" placeholder="How should I edit this?" autocomplete="off" spellcheck="false">
-  <div id="spinner"></div>
-  <span id="error-msg"></span>
-  <div class="sep"></div>
-  <button id="close" title="Close (Esc)">
-    <svg viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8"/><line x1="8" y1="2" x2="2" y2="8"/></svg>
-  </button>
+  <textarea id="input" rows="1" placeholder="How should I edit this?" autocomplete="off" spellcheck="false"></textarea>
+  <div class="controls">
+    <div id="spinner"></div>
+    <span id="error-msg"></span>
+    <div class="sep"></div>
+    <button id="close" title="Close (Esc)">
+      <svg viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8"/><line x1="8" y1="2" x2="2" y2="8"/></svg>
+    </button>
+  </div>
 </div>
 <script>
 (function() {
-  const input = document.getElementById('input');
-  const spinner = document.getElementById('spinner');
-  const errorMsg = document.getElementById('error-msg');
+  var input = document.getElementById('input');
+  var spinner = document.getElementById('spinner');
+  var errorMsg = document.getElementById('error-msg');
+  var bar = document.getElementById('bar');
+  var lastH = 0;
 
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
   }
 
+  function autoResize() {
+    input.style.height = '22px';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    // Notify Rust to resize the WebView when bar height changes
+    var h = bar.offsetHeight + 8; // 8 = top padding
+    if (h !== lastH) {
+      lastH = h;
+      ipc({ type: 'inline_edit_resize', height: h });
+    }
+  }
+
+  input.addEventListener('input', autoResize);
+
   input.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
       e.preventDefault();
       ipc({ type: 'inline_edit_close' });
-    } else if (e.key === 'Enter' && input.value.trim()) {
+    } else if (e.key === 'Enter' && !e.shiftKey && input.value.trim()) {
       e.preventDefault();
       ipc({ type: 'inline_edit_submit', prompt: input.value.trim() });
     }
@@ -175,15 +205,18 @@ pub fn html() -> &'static str {
   });
 
   window.__focus = function() {
+    lastH = 0;
     input.focus();
     input.select();
   };
 
   window.__clear = function() {
     input.value = '';
+    input.style.height = '22px';
     input.disabled = false;
     spinner.classList.remove('active');
     errorMsg.style.display = 'none';
+    lastH = 0;
   };
 
   window.__setProcessing = function(on) {

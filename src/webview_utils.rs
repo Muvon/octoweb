@@ -306,17 +306,28 @@ pub const COMBINED_SCRIPT: &str = r#"
     var el = document.activeElement;
     var sel = window.getSelection();
     var text = '';
+    var rect = null;
 
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
       text = el.value.substring(el.selectionStart, el.selectionEnd);
-      // Always memorize the element and cursor position — even without selection
       window.__octoweb_edit = { type: 'input', element: el, start: el.selectionStart, end: el.selectionEnd };
+      rect = el.getBoundingClientRect();
     } else if (sel && sel.rangeCount > 0) {
       text = sel.toString();
-      window.__octoweb_edit = { type: 'range', range: sel.getRangeAt(0).cloneRange() };
+      var range = sel.getRangeAt(0);
+      window.__octoweb_edit = { type: 'range', range: range.cloneRange() };
+      rect = range.getBoundingClientRect();
+      // Collapsed range (no selection) returns zero-size rect — use caret parent
+      if (rect.width === 0 && rect.height === 0 && el) {
+        rect = el.getBoundingClientRect();
+      }
     }
 
-    _ipc({ type: 'inline_edit_ready', text: text });
+    if (!rect && el) { rect = el.getBoundingClientRect(); }
+
+    var x = rect ? rect.left : 0;
+    var y = rect ? rect.bottom + 4 : 0;
+    _ipc({ type: 'inline_edit_ready', text: text, x: x, y: y });
   };
 
   window.__inlineEditReplace = function(newText) {
