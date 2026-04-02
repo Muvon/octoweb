@@ -87,6 +87,13 @@ pub const COMBINED_SCRIPT: &str = r#"
     wrap('replaceState');
     // popstate fires on back/forward and explicit history.go() calls.
     window.addEventListener('popstate', function () { notify(location.href); });
+    // BFCache restore: page was frozen in memory and restored on back/forward.
+    // `pageshow` with `persisted=true` fires instead of load/DOMContentLoaded.
+    // Notify Rust of the URL so the address bar updates, without triggering a
+    // full page load cycle (didCommitNavigation/didFinish don't fire for BFCache).
+    window.addEventListener('pageshow', function (e) {
+      if (e.persisted) { notify(location.href); }
+    });
   }());
 
   // ── Media tracking — WeakRef + capture phase, no MutationObserver ─────────

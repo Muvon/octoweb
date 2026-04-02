@@ -430,11 +430,14 @@ fn main() {
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             content_rules::apply_to_webview(wv_ptr);
 
-            // Disable Google Safe Browsing lookup. This fires an async network
-            // request to Google on every navigation to check for phishing —
-            // removing it saves ~50-100ms per page load. The WKPreferences
-            // object inside configuration is a live shared reference (not a
-            // copy), so this affects the running WebView immediately.
+            // Tune WKPreferences via the live shared reference inside configuration.
+            // - Disable Google Safe Browsing: saves ~50-100ms per navigation.
+            // - Enable page cache (BFCache): instant back/forward like Safari.
+            //   `_usesPageCache` (WKPreferencesPrivate.h, macOS 10.13.4+) freezes
+            //   pages in memory on navigation so swipe-back restores instantly
+            //   instead of reloading. BFCache restores fire JS `pageshow` with
+            //   `persisted=true` but do NOT fire didCommitNavigation/didFinish,
+            //   so our PageLoadStarted/Finished handlers stay clean.
             unsafe {
                 use objc2::msg_send;
                 use objc2::runtime::AnyObject;
@@ -444,6 +447,7 @@ fn main() {
                     let prefs: *mut AnyObject = msg_send![config, preferences];
                     if !prefs.is_null() {
                         let _: () = msg_send![prefs, setFraudulentWebsiteWarningEnabled: false];
+                        let _: () = msg_send![prefs, _setUsesPageCache: true];
                     }
                 }
             }
