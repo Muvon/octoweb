@@ -3962,7 +3962,7 @@ fn save_and_exit(
     config::save_session(&session_tabs, &active_url);
     config::save_favicons(favicon_cache);
     config::save_history(tm.history());
-    config::save_prompt_history(&prompt_history);
+    config::save_prompt_history(prompt_history);
     drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
