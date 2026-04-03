@@ -240,8 +240,12 @@ pub fn html() -> &'static str {
         <button class="toggle" id="ai_edit_auto_hide" data-key="ai_edit_auto_hide"></button>
       </div>
       <div class="row">
-        <span class="row-label">Prompt history size</span>
+        <span class="row-label">Editor prompt history size</span>
         <input type="number" id="max_prompt_history" data-key="max_prompt_history" min="10" step="10">
+      </div>
+      <div class="row">
+        <span class="row-label">Assistant prompt history size</span>
+        <input type="number" id="max_ai_prompt_history" data-key="max_ai_prompt_history" min="10" step="10">
       </div>
     </div>
   </div>

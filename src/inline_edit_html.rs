@@ -2,7 +2,8 @@
 /// Frosted-glass pill that floats at cursor position, auto-expands with input.
 /// Features: prompt history (Ctrl+P/N), reverse search (Ctrl+R), ghost autocomplete (Ctrl+E).
 /// IPC messages: inline_edit_submit, inline_edit_close, inline_edit_resize.
-pub fn html() -> &'static str {
+pub fn html() -> String {
+    let prompt_history_js = crate::prompt_history_js::prompt_history_js();
     r#"<!DOCTYPE html>
 <html>
 <head>
@@ -209,22 +210,8 @@ pub fn html() -> &'static str {
   var ghost = document.getElementById('ghost');
   var lastH = 0;
 
-  // ── Prompt history state ────────────────────────────────────────────────
-  var history = [];       // MRU-first, injected from Rust via __setHistory
-  var histIdx = -1;       // -1 = fresh input, 0+ = navigating history
-  var savedDraft = '';    // user text before entering history nav
-  var ghostText = '';     // full autocomplete match text
-  var searchMode = false; // Ctrl+R reverse-i-search active
-  var searchQuery = '';   // current search query in reverse search
-  var searchIdx = -1;     // start index for next Ctrl+R cycle
-  var defaultPlaceholder = 'How should I edit this?';
-
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
-  }
-
-  function escHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   hideBtn.addEventListener('click', function() {
@@ -241,240 +228,19 @@ pub fn html() -> &'static str {
     }
   }
 
-  // ── Ghost text autocomplete ─────────────────────────────────────────────
+  // ── Prompt history (shared module) ──────────────────────────────────────
+  /* PROMPT_HISTORY_JS */
+  var _ph = createPromptHistory(input, ghost, 'How should I edit this?', autoResize);
 
-  function findPrefixMatch(text) {
-    if (!text) return '';
-    var lower = text.toLowerCase();
-    for (var i = 0; i < history.length; i++) {
-      if (history[i].toLowerCase().indexOf(lower) === 0 && history[i].length > text.length) {
-        return history[i];
-      }
-    }
-    return '';
-  }
-
-  function updateGhost() {
-    var val = input.value;
-    // Only show ghost when typing fresh text, cursor at end, single line visible
-    if (!val || histIdx >= 0 || searchMode || input.selectionStart !== val.length) {
-      ghostText = '';
-      ghost.innerHTML = '';
-      return;
-    }
-    var match = findPrefixMatch(val);
-    if (match) {
-      ghostText = match;
-      var suffix = match.substring(val.length);
-      ghost.innerHTML = '<span style="visibility:hidden">' + escHtml(val) + '</span>' + escHtml(suffix);
-    } else {
-      ghostText = '';
-      ghost.innerHTML = '';
-    }
-  }
-
-  function clearGhost() {
-    ghostText = '';
-    ghost.innerHTML = '';
-  }
-
-  // ── Reverse incremental search (Ctrl+R) ─────────────────────────────────
-
-  function findReverseMatch(query, startFrom) {
-    if (!query) return -1;
-    var lower = query.toLowerCase();
-    for (var i = startFrom; i < history.length; i++) {
-      if (history[i].toLowerCase().indexOf(lower) !== -1) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  function enterSearchMode() {
-    if (!searchMode) {
-      savedDraft = input.value;
-      searchMode = true;
-      searchQuery = '';
-      searchIdx = 0;
-    }
-    updateSearchDisplay();
-  }
-
-  function exitSearchMode(restore) {
-    searchMode = false;
-    input.placeholder = defaultPlaceholder;
-    clearGhost();
-    if (restore) {
-      input.value = savedDraft;
-    } else {
-      // Accept: put matched entry into textarea (or keep query if no match)
-      input.value = searchMatch || searchQuery;
-    }
-    searchMatch = '';
-    searchQuery = '';
-    searchIdx = -1;
-    autoResize();
-  }
-
-  var searchMatch = ''; // the full matched history entry during search
-
-  function updateSearchDisplay() {
-    input.placeholder = "(reverse-i-search)`" + searchQuery + "':";
-    input.value = searchQuery;
-    if (!searchQuery) {
-      searchMatch = '';
-      ghost.innerHTML = '';
-      autoResize();
-      return;
-    }
-    var idx = findReverseMatch(searchQuery, searchIdx);
-    if (idx !== -1) {
-      searchIdx = idx;
-      searchMatch = history[idx];
-      // Show full match as ghost text — dimmed so it's visually distinct
-      ghost.innerHTML = escHtml(searchMatch);
-    } else {
-      searchMatch = '';
-      ghost.innerHTML = '';
-    }
-    autoResize();
-  }
-
-  function cycleSearchNext() {
-    // Ctrl+R pressed again — find next older match
-    if (!searchQuery) return;
-    var idx = findReverseMatch(searchQuery, searchIdx + 1);
-    if (idx !== -1) {
-      searchIdx = idx;
-      searchMatch = history[idx];
-      ghost.innerHTML = escHtml(searchMatch);
-      autoResize();
-    }
-    // If no more matches, stay on current
-  }
-
-  // ── Input event ─────────────────────────────────────────────────────────
-
-  input.addEventListener('input', function() {
-    if (searchMode) {
-      // In search mode, the input event means user typed/deleted in the search query.
-      // We intercept keydown for character input, so this handles edge cases.
-      return;
-    }
-    autoResize();
-    updateGhost();
-  });
-
-  // ── Keyboard handler ────────────────────────────────────────────────────
-
+  // ── Keyboard handler (non-history keys) ─────────────────────────────────
   input.addEventListener('keydown', function(e) {
-    // ── Search mode key handling ──────────────────────────────────────────
-    if (searchMode) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        exitSearchMode(true);
-        return;
-      }
-      if (e.ctrlKey && e.key === 'r') {
-        e.preventDefault();
-        cycleSearchNext();
-        return;
-      }
-      if (e.key === 'Enter') {
-        // Accept match into input, exit search — don't submit yet
-        e.preventDefault();
-        exitSearchMode(false);
-        return;
-      }
-      if (e.ctrlKey && e.key === 'e') {
-        // Accept current search match and exit search mode
-        e.preventDefault();
-        exitSearchMode(false);
-        return;
-      }
-      if (e.key === 'Backspace') {
-        e.preventDefault();
-        if (searchQuery.length > 0) {
-          searchQuery = searchQuery.slice(0, -1);
-          searchIdx = 0; // restart search from beginning
-          updateSearchDisplay();
-        } else {
-          exitSearchMode(true);
-        }
-        return;
-      }
-      // Printable character — append to search query
-      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        e.preventDefault();
-        searchQuery += e.key;
-        searchIdx = 0; // restart from top on new char
-        updateSearchDisplay();
-        return;
-      }
-      // Ignore other keys in search mode
-      e.preventDefault();
-      return;
-    }
-
-    // ── Normal mode key handling ──────────────────────────────────────────
+    if (_ph.isInSearchMode()) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       ipc({ type: 'inline_edit_close' });
     } else if (e.key === 'Enter' && !e.shiftKey && input.value.trim()) {
       e.preventDefault();
       ipc({ type: 'inline_edit_submit', prompt: input.value.trim() });
-    } else if (e.ctrlKey && e.key === 'r') {
-      // Ctrl+R — enter reverse incremental search
-      if (history.length === 0) return;
-      e.preventDefault();
-      enterSearchMode();
-    } else if (e.ctrlKey && e.key === 'p') {
-      // Ctrl+P — previous (older) history entry; fall through to native if no history
-      if (history.length === 0) return;
-      e.preventDefault();
-      if (histIdx === -1) {
-        savedDraft = input.value;
-        histIdx = 0;
-      } else if (histIdx < history.length - 1) {
-        histIdx++;
-      } else {
-        return;
-      }
-      input.value = history[histIdx];
-      clearGhost();
-      autoResize();
-    } else if (e.ctrlKey && e.key === 'n') {
-      // Ctrl+N — next (newer) history entry; fall through to native if not navigating
-      if (histIdx === -1) return;
-      e.preventDefault();
-      if (histIdx > 0) {
-        histIdx--;
-        input.value = history[histIdx];
-      } else {
-        histIdx = -1;
-        input.value = savedDraft;
-      }
-      clearGhost();
-      autoResize();
-    } else if (e.ctrlKey && e.key === 'e') {
-      // Ctrl+E — accept ghost text, or fall through to native end-of-line
-      if (ghostText) {
-        e.preventDefault();
-        input.value = ghostText;
-        clearGhost();
-        histIdx = -1;
-        autoResize();
-      }
-      // No ghost text: let native Ctrl+E (move to end of line) work
-    } else if (e.ctrlKey && e.key === 'u') {
-      // Ctrl+U — erase from cursor to start of line
-      e.preventDefault();
-      var pos = input.selectionStart;
-      input.value = input.value.substring(pos);
-      input.selectionStart = input.selectionEnd = 0;
-      clearGhost();
-      autoResize();
     }
   });
 
@@ -486,14 +252,7 @@ pub fn html() -> &'static str {
 
   window.__focus = function() {
     lastH = 0;
-    histIdx = -1;
-    savedDraft = '';
-    searchMode = false;
-    searchQuery = '';
-    searchIdx = -1;
-    searchMatch = '';
-    clearGhost();
-    input.placeholder = defaultPlaceholder;
+    _ph.resetState();
     input.focus();
     input.select();
   };
@@ -506,14 +265,7 @@ pub fn html() -> &'static str {
     hideBtn.style.display = 'none';
     errorMsg.style.display = 'none';
     lastH = 0;
-    histIdx = -1;
-    savedDraft = '';
-    searchMode = false;
-    searchQuery = '';
-    searchIdx = -1;
-    searchMatch = '';
-    clearGhost();
-    input.placeholder = defaultPlaceholder;
+    _ph.resetState();
   };
 
   window.__setProcessing = function(on) {
@@ -531,18 +283,9 @@ pub fn html() -> &'static str {
     setTimeout(function() { errorMsg.style.display = 'none'; }, 4000);
   };
 
-  window.__setHistory = function(h) {
-    history = h || [];
-    histIdx = -1;
-    savedDraft = '';
-    searchMode = false;
-    searchQuery = '';
-    searchIdx = -1;
-    searchMatch = '';
-    clearGhost();
-  };
+  window.__setHistory = _ph.setHistory;
 })();
 </script>
 </body>
-</html>"#
+</html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
 }

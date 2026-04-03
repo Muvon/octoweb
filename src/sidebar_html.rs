@@ -15,7 +15,8 @@
 ///   { type: "acp_prompt", text: "..." }      — user submitted a prompt
 ///   { type: "sidebar_close" }                — user clicked close
 ///   { type: "acp_set_agent", tag: "..." }    — user changed agent tag
-pub fn html() -> &'static str {
+pub fn html() -> String {
+    let prompt_history_js = crate::prompt_history_js::prompt_history_js();
     r#"<!DOCTYPE html>
 <html>
 <head>
@@ -789,6 +790,34 @@ pub fn html() -> &'static str {
     border-radius: 2px;
   }
 
+  #prompt-ghost-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 20px;
+  }
+  #prompt-ghost-wrap #prompt-input {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    background: transparent;
+  }
+  #prompt-ghost {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    min-height: 20px;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-tertiary);
+    pointer-events: none;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow: hidden;
+    z-index: 0;
+    opacity: 0.5;
+    max-height: 1.5em;
+  }
+
   #attach-wrap {
     position: relative;
     flex-shrink: 0;
@@ -1266,13 +1295,16 @@ pub fn html() -> &'static str {
           <path d="M2.5 13.5h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
         </svg>
       </button>
-      <textarea
-        id="prompt-input"
-        rows="1"
-        placeholder="Ask Octopus…"
-        autocomplete="off"
-        spellcheck="false"
-      ></textarea>
+      <div id="prompt-ghost-wrap">
+        <textarea
+          id="prompt-input"
+          rows="1"
+          placeholder="Ask Octopus…"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <div id="prompt-ghost" aria-hidden="true"></div>
+      </div>
       <input type="file" id="file-input-image" accept="image/*" multiple style="display:none">
       <input type="file" id="file-input-doc" accept=".pdf,.docx,.doc" multiple style="display:none">
       <div id="attach-wrap">
@@ -1351,6 +1383,16 @@ pub fn html() -> &'static str {
   let currentAgentBubble = null;
   let currentAgentRaw    = '';   // accumulate raw MD chunks
   let isThinking = false;
+
+  // ── Prompt history (shared module) ──────────────────────────────────────
+  /* PROMPT_HISTORY_JS */
+  const ghostEl = document.getElementById('prompt-ghost');
+  const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus\u2026', function() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    updateSendBtn();
+  });
+  window.__setHistory = _ph.setHistory;
 
   // ── New session ─────────────────────────────────────────────────────────
   newSessBtn.addEventListener('click', () => {
@@ -2067,7 +2109,7 @@ pub fn html() -> &'static str {
     }
   });
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
@@ -2168,5 +2210,5 @@ pub fn html() -> &'static str {
   window._messageToolDetails = messageToolDetails;
 </script>
 </body>
-</html>"#
+</html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
 }

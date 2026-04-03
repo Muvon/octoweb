@@ -182,6 +182,44 @@ fn prompt_history_path() -> PathBuf {
         .join("prompt_history.json")
 }
 
+// ── AI sidebar prompt history persistence ─────────────────────────────────────
+// AI assistant sidebar prompt history — same MRU-first Vec<String> pattern.
+
+pub fn save_ai_prompt_history(entries: &[String]) {
+    let path = ai_prompt_history_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string(entries) {
+        Ok(s) => {
+            if let Err(e) = fs::write(&tmp, &s) {
+                tracing::warn!(error = %e, "Failed to write AI prompt history tmp");
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, "Failed to rename AI prompt history tmp");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize AI prompt history"),
+    }
+}
+
+pub fn load_ai_prompt_history() -> Vec<String> {
+    let path = ai_prompt_history_path();
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn ai_prompt_history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        .join("octoweb")
+        .join("ai_prompt_history.json")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// URL to load on startup
@@ -200,9 +238,16 @@ pub struct Config {
     /// Max prompt history entries to keep for inline AI edit (⌘⇧E)
     #[serde(default = "default_max_prompt_history")]
     pub max_prompt_history: usize,
+    /// Max prompt history entries to keep for AI sidebar assistant
+    #[serde(default = "default_max_ai_prompt_history")]
+    pub max_ai_prompt_history: usize,
 }
 
 fn default_max_prompt_history() -> usize {
+    50
+}
+
+fn default_max_ai_prompt_history() -> usize {
     50
 }
 
@@ -216,6 +261,7 @@ impl Default for Config {
             window_height: 800,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
+            max_ai_prompt_history: 50,
         }
     }
 }
