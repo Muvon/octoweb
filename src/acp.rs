@@ -56,6 +56,8 @@ pub struct PromptMessage {
 struct BrowserClient {
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    /// Notified on every session_notification — resets the idle timeout.
+    activity: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -133,6 +135,9 @@ impl acp::Client for BrowserClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+        // Reset idle timeout — agent is actively working.
+        self.activity.notify_one();
+
         match args.update {
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
                 match content {
@@ -321,10 +326,12 @@ async fn init_session(
         wake_exit();
     });
 
+    let activity = std::sync::Arc::new(tokio::sync::Notify::new());
     let (conn, handle_io) = acp::ClientSideConnection::new(
         BrowserClient {
             tx: tx.clone(),
             wake: std::sync::Arc::clone(&wake),
+            activity: std::sync::Arc::clone(&activity),
         },
         outgoing,
         incoming,
@@ -363,7 +370,19 @@ async fn init_session(
         content.push(msg.text.into());
         let prompt_fut = conn.prompt(acp::PromptRequest::new(session_id.clone(), content));
 
-        // Use tokio::select! to allow cancellation and timeout mid-prompt
+        // Idle timeout: fires only when the agent sends no activity for 5 minutes.
+        // Resets on every session_notification (chunks, tool starts, tool updates).
+        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        let idle_timeout = async {
+            loop {
+                tokio::select! {
+                    biased; // Check notification first to avoid false timeouts
+                    _ = activity.notified() => continue, // Activity received — restart timer
+                    _ = tokio::time::sleep(IDLE_TIMEOUT) => break, // No activity for 5 min
+                }
+            }
+        };
+
         tokio::select! {
             res = prompt_fut => {
                 match res {
@@ -382,14 +401,13 @@ async fn init_session(
                 let _ = conn
                     .cancel(acp::CancelNotification::new(session_id.clone()))
                     .await;
-                // Send cancelled event
                 let _ = tx.send(AgentEvent::Cancelled);
                 wake();
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-                // 5 min timeout — agent is stuck, surface the error
+            _ = idle_timeout => {
+                // Agent went silent for 5 minutes — considered stuck
                 let _ = tx.send(AgentEvent::Error(
-                    "agent did not respond within 5 minutes".into(),
+                    "agent idle for 5 minutes — no response".into(),
                 ));
                 wake();
             }
