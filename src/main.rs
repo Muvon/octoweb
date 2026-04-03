@@ -2114,9 +2114,20 @@ fn main() {
                                     "(function() {{ const el = document.querySelector({}); if (el) {{ el.click(); return true; }} return false; }})()",
                                     serde_json::to_string(&selector).unwrap_or_default()
                                 );
-                                match wv.evaluate_script(&script) {
-                                    Ok(_) => { let _ = response.send(Ok(())); }
-                                    Err(e) => { let _ = response.send(Err(format!("Click failed: {}", e))); }
+                                let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                                let response_cb = response.clone();
+                                match wv.evaluate_script_with_callback(&script, move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        let found = val.trim() == "true";
+                                        let _ = tx.send(Ok(found));
+                                    }
+                                }) {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        if let Some(tx) = response.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("Click failed: {e}")));
+                                        }
+                                    }
                                 }
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
@@ -2130,13 +2141,24 @@ fn main() {
                         if let Some(id) = target_id {
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function() {{ const el = document.querySelector({}); if (el) {{ el.value = {}; el.dispatchEvent(new Event('input', {{bubbles: true}})); return true; }} return false; }})()",
+                                    "(function() {{ const el = document.querySelector({}); if (el) {{ el.focus(); el.value = {}; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
                                     serde_json::to_string(&selector).unwrap_or_default(),
                                     serde_json::to_string(&text).unwrap_or_default()
                                 );
-                                match wv.evaluate_script(&script) {
-                                    Ok(_) => { let _ = response.send(Ok(())); }
-                                    Err(e) => { let _ = response.send(Err(format!("Type failed: {}", e))); }
+                                let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                                let response_cb = response.clone();
+                                match wv.evaluate_script_with_callback(&script, move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        let found = val.trim() == "true";
+                                        let _ = tx.send(Ok(found));
+                                    }
+                                }) {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        if let Some(tx) = response.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("Type failed: {e}")));
+                                        }
+                                    }
                                 }
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
@@ -2346,6 +2368,143 @@ fn main() {
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("JS error: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::Scroll { tab_id, direction, pixels, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let script = match direction.as_str() {
+                                "top" => "window.scrollTo(0, 0)".to_string(),
+                                "bottom" => "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+                                "up" => match pixels {
+                                    Some(px) => format!("window.scrollBy(0, -{px})"),
+                                    None => "window.scrollBy(0, -(window.innerHeight - 100))".to_string(),
+                                },
+                                "down" => match pixels {
+                                    Some(px) => format!("window.scrollBy(0, {px})"),
+                                    None => "window.scrollBy(0, window.innerHeight - 100)".to_string(),
+                                },
+                                _ => {
+                                    let _ = response.send(Err(format!("Invalid direction: {direction}. Use up, down, top, or bottom.")));
+                                    continue;
+                                }
+                            };
+                            match wv.evaluate_script(&script) {
+                                Ok(()) => { let _ = response.send(Ok(())); }
+                                Err(e) => { let _ = response.send(Err(format!("Scroll failed: {e}"))); }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::PressKey { tab_id, key, selector, modifiers, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let key_json = serde_json::to_string(&key).unwrap_or_default();
+                            let has_shift = modifiers.iter().any(|m| m == "shift");
+                            let has_ctrl = modifiers.iter().any(|m| m == "ctrl");
+                            let has_alt = modifiers.iter().any(|m| m == "alt");
+                            let has_meta = modifiers.iter().any(|m| m == "meta");
+                            let target_expr = if let Some(ref sel) = selector {
+                                format!(
+                                    "document.querySelector({})",
+                                    serde_json::to_string(sel).unwrap_or_default()
+                                )
+                            } else {
+                                "document.activeElement || document.body".to_string()
+                            };
+                            let script = format!(
+                                "(function() {{\
+                                    const el = {target_expr};\
+                                    if (!el) return false;\
+                                    if (el.focus) el.focus();\
+                                    const opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
+                                    el.dispatchEvent(new KeyboardEvent('keydown', opts));\
+                                    el.dispatchEvent(new KeyboardEvent('keyup', opts));\
+                                    return true;\
+                                }})()"
+                            );
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(&script, move |val| {
+                                if let Some(tx) = response_cb.lock().unwrap().take() {
+                                    let found = val.trim() == "true";
+                                    let _ = tx.send(Ok(found));
+                                }
+                            }) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("PressKey failed: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::Wait { tab_id, event, timeout_ms, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let script = match event.as_str() {
+                                "load" => format!(
+                                    "new Promise(r => {{ if (document.readyState === 'complete') r('ready'); else {{ const t = setTimeout(() => r('timeout'), {timeout_ms}); window.addEventListener('load', () => {{ clearTimeout(t); r('ready'); }}, {{once: true}}); }} }})"
+                                ),
+                                "domcontentloaded" => format!(
+                                    "new Promise(r => {{ if (document.readyState !== 'loading') r('ready'); else {{ const t = setTimeout(() => r('timeout'), {timeout_ms}); document.addEventListener('DOMContentLoaded', () => {{ clearTimeout(t); r('ready'); }}, {{once: true}}); }} }})"
+                                ),
+                                // Treat anything else as a CSS selector
+                                selector => {
+                                    let sel_json = serde_json::to_string(selector).unwrap_or_default();
+                                    format!(
+                                        "new Promise(r => {{ if (document.querySelector({sel_json})) return r('ready'); const t = setTimeout(() => {{ if (o) o.disconnect(); r('timeout'); }}, {timeout_ms}); const o = new MutationObserver(() => {{ if (document.querySelector({sel_json})) {{ o.disconnect(); clearTimeout(t); r('ready'); }} }}); o.observe(document.documentElement, {{childList: true, subtree: true}}); }})"
+                                    )
+                                }
+                            };
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(&script, move |val| {
+                                if let Some(tx) = response_cb.lock().unwrap().take() {
+                                    let text = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                    let _ = tx.send(Ok(text));
+                                }
+                            }) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("Wait failed: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::SelectOption { tab_id, selector, value, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let script = format!(
+                                "(function() {{ const el = document.querySelector({}); if (!el || el.tagName !== 'SELECT') return false; const opt = Array.from(el.options).find(o => o.value === {}); if (!opt) return false; el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()",
+                                serde_json::to_string(&selector).unwrap_or_default(),
+                                serde_json::to_string(&value).unwrap_or_default()
+                            );
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(&script, move |val| {
+                                if let Some(tx) = response_cb.lock().unwrap().take() {
+                                    let found = val.trim() == "true";
+                                    let _ = tx.send(Ok(found));
+                                }
+                            }) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("SelectOption failed: {e}")));
                                     }
                                 }
                             }
