@@ -241,6 +241,12 @@ pub struct Config {
     /// Max prompt history entries to keep for AI sidebar assistant
     #[serde(default = "default_max_ai_prompt_history")]
     pub max_ai_prompt_history: usize,
+    /// Enable proactive background learning from browsing history
+    #[serde(default = "default_true")]
+    pub proactive_learning: bool,
+    /// How often to run the learning agent, in minutes
+    #[serde(default = "default_learning_interval")]
+    pub learning_interval_min: u64,
 }
 
 fn default_max_prompt_history() -> usize {
@@ -249,6 +255,14 @@ fn default_max_prompt_history() -> usize {
 
 fn default_max_ai_prompt_history() -> usize {
     50
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_learning_interval() -> u64 {
+    30
 }
 
 impl Default for Config {
@@ -262,6 +276,8 @@ impl Default for Config {
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,
+            proactive_learning: true,
+            learning_interval_min: 30,
         }
     }
 }

@@ -110,6 +110,8 @@ enum AppEvent {
     ZoomIn,                          // ⌘= — increase page zoom
     ZoomOut,                         // ⌘- — decrease page zoom
     ZoomReset,                       // ⌘0 — reset page zoom to 100%
+    LearningWake,                    // background learning agent pokes event loop
+    LearningReady(String),           // active tab content extracted — build prompt and send
     Quit,
 }
 fn main() {
@@ -1207,6 +1209,15 @@ fn main() {
     const ACP_BASE_DELAY_SECS: u64 = 1;
     const ACP_MAX_DELAY_SECS: u64 = 30;
 
+    // ── Proactive learning — background agent that memorizes browsing patterns ─
+    let mut learning_handle: Option<acp::AcpHandle> = None;
+    let mut learning_next_at: Option<std::time::Instant> = if cfg.proactive_learning {
+        // First run after 2 minutes so there's some history to analyze
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(120))
+    } else {
+        None
+    };
+
     // ── MCP server — exposes browser control tools on localhost:3434 ───────
     let mut mcp_handle = Some(mcp::spawn_mcp_server());
 
@@ -1964,6 +1975,45 @@ fn main() {
             }
         }
 
+        // ── Proactive learning: timer check + event drain ─────────────────────
+        if cfg.proactive_learning {
+            if let Some(next) = learning_next_at {
+                if std::time::Instant::now() >= next && learning_handle.is_none() {
+                    // Schedule next run immediately so we don't re-trigger
+                    learning_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(cfg.learning_interval_min * 60));
+                    // Extract active tab's readable text, then fire LearningReady
+                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                        let lp = proxy.clone();
+                        let _ = wv.evaluate_script_with_callback(
+                            "document.body ? document.body.innerText : ''",
+                            move |val| {
+                                let text = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                let _ = lp.send_event(AppEvent::LearningReady(text));
+                            },
+                        );
+                    } else {
+                        let _ = proxy.send_event(AppEvent::LearningReady(String::new()));
+                    }
+                }
+            }
+        }
+        // Drain learning agent events (background — no UI)
+        if let Some(ref mut h) = learning_handle {
+            for ev in h.poll() {
+                match ev {
+                    acp::AgentEvent::Done => {
+                        tracing::info!("proactive learning run completed");
+                        learning_handle = None;
+                    }
+                    acp::AgentEvent::Error(err) => {
+                        tracing::warn!(error = %err, "proactive learning error");
+                        learning_handle = None;
+                    }
+                    _ => {} // Ignore Chunk, ToolStart, etc.
+                }
+            }
+        }
+
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
             while let Some(cmd) = handle.poll() {
@@ -2590,6 +2640,25 @@ fn main() {
                             ai_prompt_history.truncate(n);
                         }
                     }
+                    "proactive_learning" => {
+                        cfg.proactive_learning = val == "true";
+                        if cfg.proactive_learning {
+                            if learning_next_at.is_none() {
+                                learning_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(cfg.learning_interval_min * 60));
+                            }
+                        } else {
+                            learning_next_at = None;
+                            learning_handle = None;
+                        }
+                    }
+                    "learning_interval_min" => {
+                        if let Ok(n) = val.parse::<u64>() {
+                            cfg.learning_interval_min = n.max(5);
+                            if cfg.proactive_learning {
+                                learning_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(cfg.learning_interval_min * 60));
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 cfg.save();
@@ -3101,6 +3170,28 @@ fn main() {
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
+            // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
+            Event::UserEvent(AppEvent::LearningWake) => {}
+
+            // ── Learning ready — active tab text extracted, build prompt and send ──
+            Event::UserEvent(AppEvent::LearningReady(page_text)) => {
+                if learning_handle.is_none() && cfg.proactive_learning {
+                    let mut tm = tabs.lock().unwrap();
+                    tm.ensure_contiguous();
+                    if let Some(prompt) = build_learning_prompt(&tm, active_wv_id, &page_text) {
+                        drop(tm);
+                        tracing::info!(prompt_len = prompt.len(), "starting proactive learning run");
+                        let lp = proxy.clone();
+                        learning_handle = acp::AcpHandle::connect(
+                            "octomind acp octoweb:learning",
+                            move || { let _ = lp.send_event(AppEvent::LearningWake); },
+                        ).ok();
+                        if let Some(ref h) = learning_handle {
+                            h.send_prompt(prompt, vec![]);
+                        }
+                    }
+                }
+            }
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(gen)) => {
@@ -4129,6 +4220,93 @@ fn screenshot_full_page_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
             completionHandler: &*handler
         ];
     }
+}
+
+/// Build a token-budgeted prompt for the proactive learning agent.
+/// Includes open tabs, recent history, and the active tab's readable text.
+fn build_learning_prompt(
+    tabs: &browser::TabManager,
+    active_wv_id: usize,
+    active_tab_text: &str,
+) -> Option<String> {
+    const BUDGET: usize = 16_000; // ~4K tokens
+                                  // Reserve space: ~4K for page content, rest for tabs + history
+    const CONTENT_BUDGET: usize = 4_000;
+
+    let history = tabs.history();
+    let tab_list = tabs.tabs();
+
+    // Skip if no meaningful data
+    if history.is_empty() && tab_list.is_empty() {
+        return None;
+    }
+
+    let mut out = String::with_capacity(BUDGET);
+
+    // Open tabs (compact: title + URL per line)
+    if !tab_list.is_empty() {
+        out.push_str("Open tabs:\n");
+        for t in tab_list {
+            let marker = if t.id == active_wv_id { " *" } else { "" };
+            let line = format!("- {}{} | {}\n", t.title, marker, t.url);
+            if out.len() + line.len() > BUDGET - CONTENT_BUDGET - 2000 {
+                break;
+            }
+            out.push_str(&line);
+        }
+        out.push('\n');
+    }
+
+    // Recent history (most recent first, deduplicated against open tabs)
+    if !history.is_empty() {
+        out.push_str("Recent history:\n");
+        let tab_urls: std::collections::HashSet<&str> =
+            tab_list.iter().map(|t| t.url.as_str()).collect();
+        for entry in history.iter().rev() {
+            // Skip entries already visible in open tabs
+            if tab_urls.contains(entry.url.as_str()) {
+                continue;
+            }
+            let line = format!("- {} | {}\n", entry.title, entry.url);
+            if out.len() + line.len() > BUDGET - CONTENT_BUDGET - 200 {
+                out.push_str("- ...\n");
+                break;
+            }
+            out.push_str(&line);
+        }
+        out.push('\n');
+    }
+
+    // Active tab page text (cleaned, trimmed to budget)
+    if !active_tab_text.is_empty() {
+        out.push_str("Active page text:\n");
+        // Clean: collapse whitespace, strip control chars
+        let cleaned: String = active_tab_text
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .collect();
+        // Collapse runs of 3+ newlines into 2
+        let mut prev_nl = 0u8;
+        let mut trimmed = String::with_capacity(CONTENT_BUDGET);
+        for ch in cleaned.chars() {
+            if ch == '\n' {
+                prev_nl += 1;
+                if prev_nl <= 2 {
+                    trimmed.push(ch);
+                }
+            } else {
+                prev_nl = 0;
+                trimmed.push(ch);
+            }
+            if trimmed.len() >= CONTENT_BUDGET {
+                break;
+            }
+        }
+        out.push_str(trimmed.trim());
+        out.push('\n');
+    }
+
+    Some(out)
 }
 
 /// Save session state and exit the event loop.

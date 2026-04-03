@@ -247,6 +247,14 @@ pub fn html() -> &'static str {
         <span class="row-label">Assistant prompt history size</span>
         <input type="number" id="max_ai_prompt_history" data-key="max_ai_prompt_history" min="10" step="10">
       </div>
+      <div class="row">
+        <span class="row-label">Proactive learning</span>
+        <button class="toggle" id="proactive_learning" data-key="proactive_learning"></button>
+      </div>
+      <div class="row">
+        <span class="row-label">Learning interval (min)</span>
+        <input type="number" id="learning_interval_min" data-key="learning_interval_min" min="5" step="5">
+      </div>
     </div>
   </div>
 </div>
