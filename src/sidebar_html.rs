@@ -966,7 +966,7 @@ pub fn html() -> String {
     to { opacity: 1; }
   }
   #tool-modal .modal-content {
-    background: var(--bg);
+    background: var(--glass-solid);
     border-radius: 12px;
     width: 90%;
     max-width: 700px;
