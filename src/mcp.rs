@@ -395,7 +395,7 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL. By default navigates the user's visible tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user's view — ideal for research. Set tab_id to navigate a specific tab (including background ones) in-place. Returns the tab ID."
+        description = "Navigate to a URL and wait for the page to fully load (including SPA rendering). Blocks until DOM and network are idle — no need to call browser_wait afterwards. By default navigates the user's visible tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user's view — ideal for research. Set tab_id to navigate a specific tab (including background ones) in-place. Returns the tab ID."
     )]
     async fn browser_navigate(
         &self,
@@ -475,7 +475,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Wait for a condition before proceeding. Use after navigation or click to ensure the page is ready. event=\"load\" (default) waits for full page load, \"domcontentloaded\" waits for DOM ready, or pass a CSS selector to wait for a specific element to appear. Returns \"ready\" on success or \"timeout\" if the condition wasn't met. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Wait for a condition before proceeding. Not needed after browser_navigate (which already waits). Useful after browser_click that triggers SPA route changes, or to wait for lazily-loaded content. event=\"load\" (default) waits for full page load, \"domcontentloaded\" waits for DOM ready, or pass a CSS selector to wait for a specific element to appear. Returns \"ready\" on success or \"timeout\" if the condition wasn't met. Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_wait(
         &self,

@@ -495,6 +495,11 @@ fn main() {
     // BrowserUrlChanged events carrying "about:blank" are suppressed so the
     // real URL in TabManager is not clobbered by the transient snapshot load.
     let mut restoring_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // MCP navigate: tab_id → pending oneshot response.
+    // Stored when browser_navigate is called; resolved when PageLoadFinished fires
+    // and the DOM stabilises (SPA hydration complete).
+    let mut mcp_nav_pending: HashMap<usize, tokio::sync::oneshot::Sender<Result<usize, String>>> =
+        HashMap::new();
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -2053,7 +2058,11 @@ fn main() {
                                 macos::mru_push(&mut mru, new_id);
                                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                             }
-                            let _ = response.send(Ok(new_id));
+                            // Defer response until PageLoadFinished + DOM stability
+                            if let Some(old) = mcp_nav_pending.remove(&new_id) {
+                                let _ = old.send(Err("Superseded by new navigation".into()));
+                            }
+                            mcp_nav_pending.insert(new_id, response);
                         } else {
                             // Navigate an existing tab in-place
                             let target_id = tab_id.unwrap_or(active_wv_id);
@@ -2064,7 +2073,11 @@ fn main() {
                                 if tabs.lock().unwrap().update_url(target_id, resolved) {
                                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                                 }
-                                let _ = response.send(Ok(target_id));
+                                // Defer response until PageLoadFinished + DOM stability
+                                if let Some(old) = mcp_nav_pending.remove(&target_id) {
+                                    let _ = old.send(Err("Superseded by new navigation".into()));
+                                }
+                                mcp_nav_pending.insert(target_id, response);
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -2171,7 +2184,7 @@ fn main() {
                         if let Some(id) = target_id {
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function() {{ const el = document.querySelector({}); if (el) {{ el.click(); return true; }} return false; }})()",
+                                    "(function(){{const el=document.querySelector({});if(!el)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});const r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return true}})()",
                                     serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -2201,8 +2214,9 @@ fn main() {
                         if let Some(id) = target_id {
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function() {{ const el = document.querySelector({}); if (el) {{ el.focus(); el.value = {}; el.dispatchEvent(new Event('input', {{bubbles: true}})); el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }} return false; }})()",
+                                    "(function(){{const el=document.querySelector({});if(!el)return false;el.focus();const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(s)s.call(el,{});else el.value={};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
                                     serde_json::to_string(&selector).unwrap_or_default(),
+                                    serde_json::to_string(&text).unwrap_or_default(),
                                     serde_json::to_string(&text).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -2905,6 +2919,9 @@ fn main() {
                     tab_snapshots.remove(&id);
                     deferred_nav.remove(&id);
                     restoring_tabs.remove(&id);
+                    if let Some(response) = mcp_nav_pending.remove(&id) {
+                        let _ = response.send(Err("Tab closed".into()));
+                    }
                     mru.retain(|&x| x != id);
                     // Switch to the most-recently-used tab (MRU[0] after removal)
                     match mru.first().copied() {
@@ -3497,6 +3514,43 @@ fn main() {
                     // Hide after CSS fade completes (width 0.2s + opacity 0.3s delay 0.1s = 600ms, +50ms buffer)
                     progress_hide_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(650));
                 }
+                // MCP navigate: page finished loading — wait for DOM stability
+                // (SPA frameworks render in microtasks/rAF after load).
+                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                    if let Some(wv) = tab_webviews.get(&tab_id) {
+                        let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                        let response_cb = response.clone();
+                        let result_id = tab_id;
+                        // Wait for DOM stability + network idle (like Playwright's networkidle).
+                        // 2 rAF cycles flush SPA render queues, then 500ms of no DOM mutations
+                        // and no resource loads means the page has settled.  Max 10s cap.
+                        let js = concat!(
+                            "new Promise(r=>{let t,s=false;",
+                            "const m=new MutationObserver(()=>b());",
+                            "m.observe(document.documentElement,{childList:true,subtree:true,attributes:true});",
+                            "let p;try{p=new PerformanceObserver(()=>b());p.observe({type:'resource',buffered:false})}catch(e){}",
+                            "function b(){clearTimeout(t);t=setTimeout(f,500)}",
+                            "function f(){if(s)return;s=true;m.disconnect();if(p)p.disconnect();r('ready')}",
+                            "setTimeout(f,10000);",
+                            "requestAnimationFrame(()=>requestAnimationFrame(()=>b()))})"
+                        );
+                        match wv.evaluate_script_with_callback(js, move |_val| {
+                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                let _ = tx.send(Ok(result_id));
+                            }
+                        }) {
+                            Ok(()) => {}
+                            Err(_) => {
+                                // JS failed — respond immediately rather than hang
+                                if let Some(tx) = response.lock().unwrap().take() {
+                                    let _ = tx.send(Ok(tab_id));
+                                }
+                            }
+                        }
+                    } else {
+                        let _ = response.send(Ok(tab_id));
+                    }
+                }
             }
 
             Event::UserEvent(AppEvent::NavigationError(tab_id, url, error)) => {
@@ -3505,6 +3559,10 @@ fn main() {
                     macos::open_external_url(&url);
                     browser_win.set_focus();
                     return;
+                }
+                // Fail pending MCP navigate
+                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                    let _ = response.send(Err(format!("Navigation error: {error}")));
                 }
                 // Hide progress bar immediately on error (only if active tab)
                 if tab_id == active_wv_id && progress_visible {
@@ -3538,6 +3596,10 @@ fn main() {
 
             // ── WebContent process terminated (OS killed XPC process) ────────
             Event::UserEvent(AppEvent::WebContentTerminated(tab_id)) => {
+                // Fail pending MCP navigate
+                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                    let _ = response.send(Err("WebContent process crashed".into()));
+                }
                 // Prefer the deferred URL (mid-snapshot-restore) over TabManager
                 // since the latter may transiently hold "about:blank".
                 let url = deferred_nav.remove(&tab_id)
