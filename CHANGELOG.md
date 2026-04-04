@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.0] - 2026-04-04
+
+### 📋 Release Summary
+
+This update introduces advanced browser automation tools, instant navigation support, and a more proactive AI assistant featuring persistent prompt history (8129da4e, 0aece8d4, 6c97b7e8, 1dc8bb7c, 569bb103). User experience is further refined with new sidebar code-management tools and critical fixes for tab restoration, modal styling, and prompt stability (d215ff09, 0fbd3727, 4e05cdff, 4088d5dd).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: stabilize navigation and interaction `8129da4e`
+- **sidebar**: add code headers and copy button `d215ff09`
+- **learning**: implement proactive background agent `1dc8bb7c`
+- **ai**: add persistent prompt history to assistant `569bb103`
+- **mcp**: expand browser automation tools `0aece8d4`
+- **webview**: enable instant back-forward support `6c97b7e8`
+
+### 🐛 Bug Fixes & Stability
+
+- **sidebar**: use glass-solid modal background `0fbd3727`
+- **tabs**: prevent URL clobbering on restore `4e05cdff`
+- **acp**: prevent timeout during active prompts `4088d5dd`
+
 ## [0.4.0] - 2026-04-02
 
 ### 📋 Release Summary
