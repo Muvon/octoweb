@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1] - 2026-04-04
+
+### 📋 Release Summary
+
+This update improves search usability by ensuring consistent interface focus during navigation (f2d9bbc9). Additionally, system stability and performance have been enhanced by resolving issues related to interrupted connections and hanging requests (2f66801f, 595e5ebb).
+
+
+### 🐛 Bug Fixes & Stability
+
+- **search**: maintain modal focus during tab switch `f2d9bbc9`
+- **acp**: prevent connection leaks on cancel `2f66801f`
+- **mcp**: prevent hanging navigation requests `595e5ebb`
+
 ## [0.5.0] - 2026-04-04
 
 ### 📋 Release Summary
