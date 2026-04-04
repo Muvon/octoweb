@@ -495,11 +495,16 @@ fn main() {
     // BrowserUrlChanged events carrying "about:blank" are suppressed so the
     // real URL in TabManager is not clobbered by the transient snapshot load.
     let mut restoring_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    // MCP navigate: tab_id → pending oneshot response.
+    // MCP navigate: tab_id → (inserted_at, pending oneshot response).
     // Stored when browser_navigate is called; resolved when PageLoadFinished fires
     // and the DOM stabilises (SPA hydration complete).
-    let mut mcp_nav_pending: HashMap<usize, tokio::sync::oneshot::Sender<Result<usize, String>>> =
-        HashMap::new();
+    let mut mcp_nav_pending: HashMap<
+        usize,
+        (
+            std::time::Instant,
+            tokio::sync::oneshot::Sender<Result<usize, String>>,
+        ),
+    > = HashMap::new();
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -1628,6 +1633,9 @@ fn main() {
         if let Some(save_at) = history_save_at {
             next_wake = next_wake.min(save_at);
         }
+        if let Some(earliest) = mcp_nav_pending.values().map(|(t, _)| *t).min() {
+            next_wake = next_wake.min(earliest + std::time::Duration::from_secs(15));
+        }
         *control_flow = ControlFlow::WaitUntil(
             next_wake.min(std::time::Instant::now() + std::time::Duration::from_millis(16)),
         );
@@ -1664,6 +1672,21 @@ fn main() {
                         sys_stats_cpu.store(cpu_i, Ordering::Relaxed);
                         sys_stats_mem.store(mem_mb, Ordering::Relaxed);
                     }
+                }
+            }
+        }
+
+        // ── Safety net: resolve MCP navigations stuck longer than 15s ────
+        {
+            let stale_cutoff = now - std::time::Duration::from_secs(15);
+            let stale_ids: Vec<usize> = mcp_nav_pending.iter()
+                .filter(|(_, (t, _))| *t < stale_cutoff)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in stale_ids {
+                if let Some((_, tx)) = mcp_nav_pending.remove(&id) {
+                    tracing::warn!(tab_id = id, "MCP navigate: resolving stale pending (>15s)");
+                    let _ = tx.send(Ok(id));
                 }
             }
         }
@@ -2059,25 +2082,24 @@ fn main() {
                                 if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
                             }
                             // Defer response until PageLoadFinished + DOM stability
-                            if let Some(old) = mcp_nav_pending.remove(&new_id) {
+                            if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
                                 let _ = old.send(Err("Superseded by new navigation".into()));
                             }
-                            mcp_nav_pending.insert(new_id, response);
+                            mcp_nav_pending.insert(new_id, (std::time::Instant::now(), response));
                         } else {
                             // Navigate an existing tab in-place
                             let target_id = tab_id.unwrap_or(active_wv_id);
                             if let Some(wv) = tab_webviews.get(&target_id) {
                                 let resolved = url::resolve_url(&url, &search_engine);
-                                let escaped = resolved.replace('\\', "\\\\").replace('\'', "\\'");
-                                let _ = wv.evaluate_script(&format!("window.location.href = '{escaped}'"));
+                                let _ = wv.load_url(&resolved);
                                 if tabs.lock().unwrap().update_url(target_id, resolved) {
                                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                                 }
                                 // Defer response until PageLoadFinished + DOM stability
-                                if let Some(old) = mcp_nav_pending.remove(&target_id) {
+                                if let Some((_, old)) = mcp_nav_pending.remove(&target_id) {
                                     let _ = old.send(Err("Superseded by new navigation".into()));
                                 }
-                                mcp_nav_pending.insert(target_id, response);
+                                mcp_nav_pending.insert(target_id, (std::time::Instant::now(), response));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -2919,7 +2941,7 @@ fn main() {
                     tab_snapshots.remove(&id);
                     deferred_nav.remove(&id);
                     restoring_tabs.remove(&id);
-                    if let Some(response) = mcp_nav_pending.remove(&id) {
+                    if let Some((_, response)) = mcp_nav_pending.remove(&id) {
                         let _ = response.send(Err("Tab closed".into()));
                     }
                     mru.retain(|&x| x != id);
@@ -3516,7 +3538,7 @@ fn main() {
                 }
                 // MCP navigate: page finished loading — wait for DOM stability
                 // (SPA frameworks render in microtasks/rAF after load).
-                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     if let Some(wv) = tab_webviews.get(&tab_id) {
                         let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                         let response_cb = response.clone();
@@ -3561,7 +3583,7 @@ fn main() {
                     return;
                 }
                 // Fail pending MCP navigate
-                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err(format!("Navigation error: {error}")));
                 }
                 // Hide progress bar immediately on error (only if active tab)
@@ -3597,7 +3619,7 @@ fn main() {
             // ── WebContent process terminated (OS killed XPC process) ────────
             Event::UserEvent(AppEvent::WebContentTerminated(tab_id)) => {
                 // Fail pending MCP navigate
-                if let Some(response) = mcp_nav_pending.remove(&tab_id) {
+                if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err("WebContent process crashed".into()));
                 }
                 // Prefer the deferred URL (mid-snapshot-restore) over TabManager
