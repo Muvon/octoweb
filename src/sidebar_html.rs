@@ -568,6 +568,55 @@ pub fn html() -> String {
     color: var(--text-primary);
   }
 
+  /* Code block wrapper (custom renderer) */
+  .msg.agent .msg-bubble .code-block {
+    position: relative;
+    margin: 6px 0 8px;
+  }
+  .msg.agent .msg-bubble .code-block .code-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 6px 3px 12px;
+    background: var(--md-code-border);
+    border-radius: 8px 8px 0 0;
+    border: 1px solid var(--md-code-border);
+    border-bottom: none;
+    min-height: 22px;
+  }
+  .code-lang {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .code-copy {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    margin-left: auto;
+    padding: 2px 6px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.12s, background 0.12s;
+  }
+  .code-block:hover .code-copy { opacity: 1; }
+  .code-copy:hover { background: var(--md-code-bg); color: var(--text-primary); }
+  .code-copy.copied { color: #34c759; opacity: 1; }
+  /* pre inside code-block: top corners handled by header */
+  .msg.agent .msg-bubble .code-block pre {
+    margin: 0;
+    border-radius: 0 0 8px 8px;
+    border-top: none;
+  }
+
   /* Blockquote */
   .msg.agent .msg-bubble blockquote {
     border-left: 3px solid var(--md-blockquote);
@@ -1370,6 +1419,32 @@ pub fn html() -> String {
   // Configure marked: safe defaults, no mangling
   if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
+    // Custom renderer: wrap fenced code blocks with header (language label + copy btn)
+    const _copyIcon =
+      '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
+        '<rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>' +
+        '<path d="M3 8H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+      '</svg>';
+    const _checkIcon =
+      '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
+        '<path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '</svg>';
+    marked.use({ renderer: {
+      code({ text, lang }) {
+        const l = (lang || '').split(/\s+/)[0];
+        const label = l ? '<span class="code-lang">' + l + '</span>' : '';
+        return '<div class="code-block">' +
+          '<div class="code-header">' + label +
+            '<button class="code-copy" onclick="__copyCode(this)">' +
+              _copyIcon + '<span>Copy</span>' +
+            '</button>' +
+          '</div>' +
+          '<pre><code' + (l ? ' class="language-' + l + '"' : '') + '>' +
+            text +
+          '</code></pre>' +
+        '</div>';
+      }
+    }});
   }
 
   const messages  = document.getElementById('messages');
@@ -1505,6 +1580,20 @@ pub fn html() -> String {
   function escapeHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
+
+  // Per-code-block copy — called from inline onclick in custom renderer
+  window.__copyCode = function(btn) {
+    const block = btn.closest('.code-block');
+    if (!block) return;
+    const code = block.querySelector('code');
+    if (!code) return;
+    window.ipc.postMessage(JSON.stringify({ type: 'copy_text', text: code.textContent }));
+    btn.classList.add('copied');
+    const span = btn.querySelector('span');
+    const oldLabel = span.textContent;
+    span.textContent = 'Copied';
+    setTimeout(() => { btn.classList.remove('copied'); span.textContent = oldLabel; }, 1800);
+  };
 
   // ── Messages ────────────────────────────────────────────────────────────
   function fmtTime(d) {
