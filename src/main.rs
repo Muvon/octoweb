@@ -491,6 +491,10 @@ fn main() {
     // restored with a snapshot — the snapshot HTML loads first, then on
     // PageLoadFinished we navigate to the real URL.
     let mut deferred_nav: HashMap<usize, String> = HashMap::new();
+    // Tabs currently mid-snapshot-restore.  While a tab is in this set,
+    // BrowserUrlChanged events carrying "about:blank" are suppressed so the
+    // real URL in TabManager is not clobbered by the transient snapshot load.
+    let mut restoring_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -731,7 +735,7 @@ fn main() {
     const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
     let notif_margin = (NOTIF_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
     let sidebar_wv = WebViewBuilder::new()
-        .with_html(&sidebar_html::html())
+        .with_html(sidebar_html::html())
         .with_transparent(true)
         .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
             let path = request.uri().path().trim_start_matches('/');
@@ -1490,6 +1494,7 @@ fn main() {
                         );
                         let _ = wv.load_html(&html);
                         deferred_nav.insert(target, url);
+                        restoring_tabs.insert(target);
                     }
                     let _ = wv.set_visible(false);
                     tab_webviews.insert(target, wv);
@@ -2899,6 +2904,7 @@ fn main() {
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
                     tab_snapshots.remove(&id);
                     deferred_nav.remove(&id);
+                    restoring_tabs.remove(&id);
                     mru.retain(|&x| x != id);
                     // Switch to the most-recently-used tab (MRU[0] after removal)
                     match mru.first().copied() {
@@ -3359,6 +3365,16 @@ fn main() {
 
             // ── URL update from page load ─────────────────────────────────
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
+                // During snapshot restore, suppress about:blank URL changes so the
+                // real URL in TabManager is not clobbered by the transient snapshot load.
+                if restoring_tabs.contains(&tab_id) {
+                    if deferred_nav.contains_key(&tab_id) {
+                        // Still in snapshot phase — suppress entirely
+                        return;
+                    }
+                    // deferred_nav consumed → real URL is now loading, stop suppressing
+                    restoring_tabs.remove(&tab_id);
+                }
                 if tabs.lock().unwrap().update_url(tab_id, url.clone()) {
                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 }
@@ -3501,6 +3517,9 @@ fn main() {
                     let error_html = error_page_html::html(&url, &error);
                     let _ = wv.load_html(&error_html);
                 }
+                // Abandon any deferred snapshot restore — error page replaces it
+                deferred_nav.remove(&tab_id);
+                restoring_tabs.remove(&tab_id);
                 // Complete deferred swap so the error page is visible
                 if let Some((old_id, new_id)) = pending_swap {
                     if tab_id == new_id {
@@ -3519,10 +3538,16 @@ fn main() {
 
             // ── WebContent process terminated (OS killed XPC process) ────────
             Event::UserEvent(AppEvent::WebContentTerminated(tab_id)) => {
-                let url = tabs.lock().unwrap().tabs().iter()
-                    .find(|t| t.id == tab_id)
-                    .map(|t| t.url.clone())
+                // Prefer the deferred URL (mid-snapshot-restore) over TabManager
+                // since the latter may transiently hold "about:blank".
+                let url = deferred_nav.remove(&tab_id)
+                    .or_else(|| {
+                        tabs.lock().unwrap().tabs().iter()
+                            .find(|t| t.id == tab_id)
+                            .map(|t| t.url.clone())
+                    })
                     .unwrap_or_default();
+                restoring_tabs.remove(&tab_id);
                 tracing::warn!(tab_id, %url, "WebContent process terminated — reloading");
                 // Log to crash.log for post-mortem analysis.
                 let (pid, rss_mb) = tab_webviews.get(&tab_id)
@@ -3722,7 +3747,13 @@ fn main() {
             // ── Reload current page ───────────────────────────────────────────
             Event::UserEvent(AppEvent::Reload) => {
                 if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let _ = wv.reload();
+                    // If mid-snapshot-restore, skip the snapshot and load the real URL directly.
+                    if let Some(url) = deferred_nav.remove(&active_wv_id) {
+                        restoring_tabs.remove(&active_wv_id);
+                        let _ = wv.load_url(&url);
+                    } else {
+                        let _ = wv.reload();
+                    }
                 }
             }
 
@@ -3746,7 +3777,11 @@ fn main() {
 
             // ── Frozen tab snapshot captured (async callback) ──────────────────
             Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri)) => {
-                tab_snapshots.insert(tab_id, data_uri);
+                // Discard suspiciously small snapshots (likely blank/hidden WebView).
+                // A real page snapshot is typically >5 KB as base64 PNG.
+                if data_uri.len() > 5_000 {
+                    tab_snapshots.insert(tab_id, data_uri);
+                }
             }
 
             // ── Favicon cache loaded from disk (background thread) ──────────────
