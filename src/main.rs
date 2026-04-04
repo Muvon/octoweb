@@ -2953,7 +2953,13 @@ fn main() {
                             // sets active_wv_id + updates address bar — covers both loaded
                             // and not-yet-loaded tabs.
                             switch_visible_tab!(next);
-                            if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
+                            if app_focused.load(Ordering::Relaxed) {
+                                if overlay_visible {
+                                    overlay_win.set_focus();
+                                } else {
+                                    browser_win.set_focus();
+                                }
+                            }
                         }
                         None => *control_flow = ControlFlow::Exit,
                     }
