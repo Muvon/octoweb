@@ -369,6 +369,7 @@ async fn init_session(
         }
         content.push(msg.text.into());
         let prompt_fut = conn.prompt(acp::PromptRequest::new(session_id.clone(), content));
+        tokio::pin!(prompt_fut);
 
         // Idle timeout: fires only when the agent sends no activity for 5 minutes.
         // Resets on every session_notification (chunks, tool starts, tool updates).
@@ -382,34 +383,53 @@ async fn init_session(
                 }
             }
         };
+        tokio::pin!(idle_timeout);
 
-        tokio::select! {
-            res = prompt_fut => {
-                match res {
-                    Ok(_) => {
-                        let _ = tx.send(AgentEvent::Done);
-                        wake();
+        // After cancel we keep awaiting prompt_fut so the ACP connection stays
+        // clean (response is properly consumed). A 10s deadline prevents hanging
+        // if the agent ignores the cancel notification.
+        let mut cancelled = false;
+        let cancel_deadline = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(cancel_deadline);
+
+        loop {
+            tokio::select! {
+                res = &mut prompt_fut => {
+                    if cancelled {
+                        let _ = tx.send(AgentEvent::Cancelled);
+                    } else {
+                        match res {
+                            Ok(_) => { let _ = tx.send(AgentEvent::Done); }
+                            Err(_) if cancelled => { let _ = tx.send(AgentEvent::Cancelled); }
+                            Err(e) => { let _ = tx.send(AgentEvent::Error(e.to_string())); }
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(AgentEvent::Error(e.to_string()));
-                        wake();
-                    }
+                    wake();
+                    break;
                 }
-            }
-            _ = cancel_rx.recv() => {
-                // Cancel received — send cancel notification to agent
-                let _ = conn
-                    .cancel(acp::CancelNotification::new(session_id.clone()))
-                    .await;
-                let _ = tx.send(AgentEvent::Cancelled);
-                wake();
-            }
-            _ = idle_timeout => {
-                // Agent went silent for 5 minutes — considered stuck
-                let _ = tx.send(AgentEvent::Error(
-                    "agent idle for 5 minutes — no response".into(),
-                ));
-                wake();
+                _ = cancel_rx.recv(), if !cancelled => {
+                    // Cancel received — notify agent, then keep waiting for prompt_fut
+                    let _ = conn
+                        .cancel(acp::CancelNotification::new(session_id.clone()))
+                        .await;
+                    cancelled = true;
+                    cancel_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                    // Don't break — keep looping so prompt_fut completes cleanly
+                }
+                _ = &mut cancel_deadline, if cancelled => {
+                    // Agent didn't finish within 10s after cancel — give up
+                    let _ = tx.send(AgentEvent::Cancelled);
+                    wake();
+                    break;
+                }
+                _ = &mut idle_timeout, if !cancelled => {
+                    // Agent went silent for 5 minutes — considered stuck
+                    let _ = tx.send(AgentEvent::Error(
+                        "agent idle for 5 minutes — no response".into(),
+                    ));
+                    wake();
+                    break;
+                }
             }
         }
     }
