@@ -72,28 +72,104 @@ pub const COMBINED_SCRIPT: &str = r#"
       .catch(function () {});
   });
 
-  // ── URL change tracking (SPA pushState / replaceState / popstate) ─────────
+  // ── URL change tracking (SPA pushState / replaceState / popstate / hash) ──
+  // Covers all SPA routing strategies:
+  //  1. History API (pushState/replaceState) — patched on prototype so frameworks
+  //     that cache History.prototype.pushState at import time still hit our hook.
+  //  2. popstate — back/forward and history.go().
+  //  3. hashchange — hash-based routers (e.g. Vue hash mode, legacy SPAs).
+  //  4. BFCache restore — pageshow with persisted=true.
+  // Deduplicates via _lastUrl so rapid replaceState calls don't spam IPC.
   (function () {
-    function notify(url) { _ipc({ type: 'url_changed', url: url }); }
+    var _lastUrl = location.href;
+    function notify() {
+      var url = location.href;
+      if (url !== _lastUrl) {
+        _lastUrl = url;
+        _ipc({ type: 'url_changed', url: url });
+      }
+    }
+    // Patch on History.prototype — survives frameworks that snapshot the method
+    // reference at module init (React Router, Vue Router, etc.).
+    var proto = History.prototype;
     function wrap(method) {
-      var orig = history[method];
-      history[method] = function () {
+      var orig = proto[method];
+      proto[method] = function () {
         var ret = orig.apply(this, arguments);
-        notify(location.href);
+        notify();
         return ret;
       };
     }
     wrap('pushState');
     wrap('replaceState');
     // popstate fires on back/forward and explicit history.go() calls.
-    window.addEventListener('popstate', function () { notify(location.href); });
+    window.addEventListener('popstate', function () { notify(); });
+    // hashchange — hash-based routers that don't use pushState.
+    window.addEventListener('hashchange', function () { notify(); });
     // BFCache restore: page was frozen in memory and restored on back/forward.
     // `pageshow` with `persisted=true` fires instead of load/DOMContentLoaded.
     // Notify Rust of the URL so the address bar updates, without triggering a
     // full page load cycle (didCommitNavigation/didFinish don't fire for BFCache).
     window.addEventListener('pageshow', function (e) {
-      if (e.persisted) { notify(location.href); }
+      if (e.persisted) { notify(); }
     });
+  }());
+
+  // ── SPA title tracking — MutationObserver + setter intercept ──────────────
+  // WKWebView's document_title_changed callback doesn't fire for SPA title
+  // changes (pushState/replaceState). Two complementary mechanisms cover all
+  // frameworks:
+  //  1. MutationObserver on <title> — catches innerHTML/textContent mutations
+  //     (Next.js <Head>, Remix, static SPAs).
+  //  2. document.title setter intercept — catches direct property assignment
+  //     (React useEffect, Vue watch, Angular Title service).
+  // Deduplicates via _lastTitle so only actual changes fire IPC.
+  (function () {
+    var _lastTitle = document.title || '';
+
+    function onTitleChange(title) {
+      if (title && title !== _lastTitle) {
+        _lastTitle = title;
+        _ipc({ type: 'title_changed', title: title });
+      }
+    }
+
+    // 1. MutationObserver — watches <title> element for child/text mutations.
+    //    Deferred: <title> may not exist at injection time (document-start).
+    function observeTitle() {
+      var el = document.querySelector('title');
+      if (!el) return;
+      new MutationObserver(function () {
+        onTitleChange(document.title);
+      }).observe(el, { childList: true, characterData: true, subtree: true });
+    }
+
+    if (document.querySelector('title')) { observeTitle(); }
+    else {
+      // SPAs that create <title> dynamically — watch <head> for it to appear.
+      var headObs = new MutationObserver(function () {
+        if (document.querySelector('title')) {
+          headObs.disconnect();
+          observeTitle();
+        }
+      });
+      var head = document.head || document.documentElement;
+      headObs.observe(head, { childList: true, subtree: true });
+    }
+
+    // 2. Setter intercept — catches `document.title = "..."` assignments.
+    //    The native setter is preserved so the browser's <title> element still
+    //    updates normally; we just get notified as a side effect.
+    var titleDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'title')
+                 || Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'title');
+    if (titleDesc && titleDesc.set) {
+      var origSet = titleDesc.set;
+      Object.defineProperty(document, 'title', {
+        get: function () { return titleDesc.get ? titleDesc.get.call(this) : _lastTitle; },
+        set: function (v) { origSet.call(this, v); onTitleChange(v); },
+        configurable: true
+      });
+    }
   }());
 
   // ── Media tracking — WeakRef + capture phase, no MutationObserver ─────────

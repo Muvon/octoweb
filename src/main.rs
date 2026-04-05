@@ -377,6 +377,15 @@ fn main() {
                                     ));
                                 }
                             }
+                            // SPA title change — MutationObserver + setter intercept in COMBINED_SCRIPT
+                            Some("title_changed") => {
+                                if let Some(title) = v["title"].as_str() {
+                                    let _ = p3.send_event(AppEvent::TitleChanged(
+                                        tab_id,
+                                        title.to_string(),
+                                    ));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -3410,6 +3419,7 @@ fn main() {
 
             // ── URL update from page load ─────────────────────────────────
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
+                tracing::debug!(tab_id, %url, "BrowserUrlChanged");
                 // During snapshot restore, suppress about:blank URL changes so the
                 // real URL in TabManager is not clobbered by the transient snapshot load.
                 if restoring_tabs.contains(&tab_id) {
