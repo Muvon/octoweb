@@ -1927,6 +1927,7 @@ dependencies = [
  "core-foundation",
  "core-graphics",
  "dirs",
+ "foreign-types",
  "libc",
  "objc2",
  "objc2-app-kit",

@@ -2374,18 +2374,17 @@ fn main() {
                                         return;
                                     }
                                     unsafe {
-                                        let final_image = pdf_data_to_nsimage(pdf_data);
-                                        if final_image.is_null() {
-                                            let _ = tx.send(Err("Failed to render PDF to image".to_string()));
+                                        let Some(cg_image) = pdf_data_to_cgimage(pdf_data) else {
+                                            let _ = tx.send(Err("Failed to render PDF to CGImage".to_string()));
                                             return;
-                                        }
-                                        let png_data = nsimage_to_png_data(final_image);
+                                        };
+                                        copy_cgimage_to_clipboard(&cg_image);
+                                        // Encode PNG only for MCP base64 transport
+                                        let png_data = cgimage_to_png_data(&cg_image);
                                         if png_data.is_null() {
                                             let _ = tx.send(Err("Failed to encode PNG".to_string()));
                                             return;
                                         }
-                                        copy_png_to_clipboard(png_data);
-                                        // Return base64-encoded PNG so MCP can pass it as an image
                                         let length: usize = objc2::msg_send![&*png_data, length];
                                         let bytes: *const u8 = objc2::msg_send![&*png_data, bytes];
                                         let slice = std::slice::from_raw_parts(bytes, length);
@@ -4122,13 +4121,40 @@ fn capture_tab_snapshot(
 unsafe fn nsimage_to_png_data(
     image: *mut objc2::runtime::AnyObject,
 ) -> *mut objc2::runtime::AnyObject {
-    let tiff: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, TIFFRepresentation];
-    if tiff.is_null() {
-        return std::ptr::null_mut();
+    // Get CGImage directly — avoids TIFF serialization round-trip
+    use objc2_core_foundation::CGRect;
+    let size: objc2_core_foundation::CGSize = objc2::msg_send![&*image, size];
+    let proposed = CGRect {
+        origin: objc2_core_foundation::CGPoint { x: 0.0, y: 0.0 },
+        size,
+    };
+    let mut rect = proposed;
+    let cg_image: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, CGImageForProposedRect: &mut rect, context: std::ptr::null::<objc2::runtime::AnyObject>(), hints: std::ptr::null::<objc2::runtime::AnyObject>()];
+    if cg_image.is_null() {
+        // Fallback: TIFF path for images without CGImage backing
+        let tiff: *mut objc2::runtime::AnyObject = objc2::msg_send![&*image, TIFFRepresentation];
+        if tiff.is_null() {
+            return std::ptr::null_mut();
+        }
+        let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            objc2::class!(NSBitmapImageRep),
+            imageRepWithData: &*tiff
+        ];
+        if rep.is_null() {
+            return std::ptr::null_mut();
+        }
+        let empty_dict: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSDictionary), dictionary];
+        return objc2::msg_send![
+            &*rep,
+            representationUsingType: 4u64,
+            properties: &*empty_dict
+        ];
     }
+    let rep: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSBitmapImageRep), alloc];
     let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
-        objc2::class!(NSBitmapImageRep),
-        imageRepWithData: &*tiff
+        rep, initWithCGImage: cg_image
     ];
     if rep.is_null() {
         return std::ptr::null_mut();
@@ -4200,12 +4226,17 @@ fn screenshot_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
     }
 }
 
-/// Convert raw PDF NSData into a stitched NSImage (all pages vertically).
-/// Returns null on failure. Caller must use the returned pointer before it's released.
-unsafe fn pdf_data_to_nsimage(
+/// Render PDF NSData to a CGImage via CGBitmapContext + drawWithBox.
+/// Uses 1x scale and caps height at 16384px for speed.
+/// Returns None on failure. Caller decides encoding (clipboard vs PNG).
+unsafe fn pdf_data_to_cgimage(
     pdf_data: *mut objc2::runtime::AnyObject,
-) -> *mut objc2::runtime::AnyObject {
-    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+) -> Option<core_graphics::image::CGImage> {
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::context::CGContext;
+    use objc2_core_foundation::CGRect;
+
+    let t0 = std::time::Instant::now();
 
     let pdf_doc: *mut objc2::runtime::AnyObject =
         objc2::msg_send![objc2::class!(PDFDocument), alloc];
@@ -4214,102 +4245,155 @@ unsafe fn pdf_data_to_nsimage(
         initWithData: &*pdf_data
     ];
     if pdf_doc.is_null() {
-        return std::ptr::null_mut();
+        return None;
     }
 
     let page_count: usize = objc2::msg_send![&*pdf_doc, pageCount];
     if page_count == 0 {
-        return std::ptr::null_mut();
+        return None;
     }
 
-    let screen: *mut objc2::runtime::AnyObject =
-        objc2::msg_send![objc2::class!(NSScreen), mainScreen];
-    let scale: f64 = if screen.is_null() {
-        2.0
-    } else {
-        objc2::msg_send![&*screen, backingScaleFactor]
-    };
+    // 1x scale — Retina 2x quadruples pixel count for no clipboard benefit
+    let scale: f64 = 1.0;
+    const MAX_HEIGHT_PX: f64 = 16384.0;
 
+    // Measure pages, cap at MAX_HEIGHT_PX
     let mut total_height: f64 = 0.0;
     let mut max_width: f64 = 0.0;
+    let mut render_count = page_count;
     for i in 0..page_count {
         let page: *mut objc2::runtime::AnyObject = objc2::msg_send![&*pdf_doc, pageAtIndex: i];
         let bounds: CGRect = objc2::msg_send![&*page, boundsForBox: 0isize];
-        total_height += bounds.size.height;
+        let page_h = bounds.size.height * scale;
+        if total_height + page_h > MAX_HEIGHT_PX && i > 0 {
+            render_count = i;
+            tracing::debug!(
+                pages = page_count,
+                rendered = render_count,
+                "Full page screenshot truncated at height cap"
+            );
+            break;
+        }
+        total_height += page_h;
         if bounds.size.width > max_width {
             max_width = bounds.size.width;
         }
     }
 
-    let px_w = (max_width * scale).ceil();
-    let px_h = (total_height * scale).ceil();
-    let size = CGSize {
-        width: px_w,
-        height: px_h,
-    };
-
-    let final_image: *mut objc2::runtime::AnyObject =
-        objc2::msg_send![objc2::class!(NSImage), alloc];
-    let final_image: *mut objc2::runtime::AnyObject = objc2::msg_send![
-        final_image, initWithSize: size
-    ];
-
-    let _: () = objc2::msg_send![&*final_image, lockFocus];
-
-    let white: *mut objc2::runtime::AnyObject =
-        objc2::msg_send![objc2::class!(NSColor), whiteColor];
-    let _: () = objc2::msg_send![&*white, setFill];
-    let full_rect = CGRect {
-        origin: CGPoint { x: 0.0, y: 0.0 },
-        size,
-    };
-    let _: () = objc2_app_kit::NSRectFill(full_rect);
-
-    let mut y_offset = px_h;
-    for i in 0..page_count {
-        let page: *mut objc2::runtime::AnyObject = objc2::msg_send![&*pdf_doc, pageAtIndex: i];
-        let bounds: CGRect = objc2::msg_send![&*page, boundsForBox: 0isize];
-        let page_px_w = bounds.size.width * scale;
-        let page_px_h = bounds.size.height * scale;
-        y_offset -= page_px_h;
-
-        let thumb_size = CGSize {
-            width: page_px_w,
-            height: page_px_h,
-        };
-        let thumb: *mut objc2::runtime::AnyObject = objc2::msg_send![
-            &*page,
-            thumbnailOfSize: thumb_size,
-            forBox: 0isize
-        ];
-        if thumb.is_null() {
-            continue;
-        }
-
-        let dest_rect = CGRect {
-            origin: CGPoint {
-                x: 0.0,
-                y: y_offset,
-            },
-            size: CGSize {
-                width: page_px_w,
-                height: page_px_h,
-            },
-        };
-        let _: () = objc2::msg_send![
-            &*thumb,
-            drawInRect: dest_rect,
-            fromRect: CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize { width: 0.0, height: 0.0 },
-            },
-            operation: 2u64,
-            fraction: 1.0f64
-        ];
+    let px_w = (max_width * scale).ceil() as usize;
+    let px_h = total_height.ceil() as usize;
+    if px_w == 0 || px_h == 0 {
+        return None;
     }
 
-    let _: () = objc2::msg_send![&*final_image, unlockFocus];
-    final_image
+    // Create a single CGBitmapContext — one allocation for the entire image
+    let color_space = CGColorSpace::create_device_rgb();
+    let ctx = CGContext::create_bitmap_context(
+        None,
+        px_w,
+        px_h,
+        8,
+        px_w * 4,
+        &color_space,
+        // kCGImageAlphaPremultipliedLast (RGBA)
+        core_graphics::base::kCGImageAlphaPremultipliedLast,
+    );
+
+    // Fill white background
+    ctx.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
+    ctx.fill_rect(core_graphics::geometry::CGRect::new(
+        &core_graphics::geometry::CGPoint::new(0.0, 0.0),
+        &core_graphics::geometry::CGSize::new(px_w as f64, px_h as f64),
+    ));
+
+    // Render each page directly into the bitmap context (bottom-up in CG coords)
+    let mut y_offset: f64 = 0.0;
+    for i in (0..render_count).rev() {
+        let page: *mut objc2::runtime::AnyObject = objc2::msg_send![&*pdf_doc, pageAtIndex: i];
+        let bounds: CGRect = objc2::msg_send![&*page, boundsForBox: 0isize];
+        let page_px_h = bounds.size.height * scale;
+
+        ctx.save();
+        ctx.translate(0.0, y_offset);
+        ctx.scale(scale, scale);
+
+        // drawWithBox:toContext: rasterizes the PDF page (including embedded images)
+        use foreign_types::ForeignType;
+        let ctx_ptr = ctx.as_ptr() as *const std::ffi::c_void;
+        let _: () = objc2::msg_send![
+            &*page,
+            drawWithBox: 0isize,
+            toContext: ctx_ptr
+        ];
+
+        ctx.restore();
+        y_offset += page_px_h;
+    }
+
+    let render_ms = t0.elapsed().as_millis();
+    tracing::debug!(
+        px_w,
+        px_h,
+        pages = render_count,
+        render_ms,
+        "PDF rendered to CGImage"
+    );
+
+    ctx.create_image()
+}
+
+/// Encode a CGImage to PNG NSData. Used by MCP path (needs base64).
+unsafe fn cgimage_to_png_data(
+    cg_image: &core_graphics::image::CGImage,
+) -> *mut objc2::runtime::AnyObject {
+    use foreign_types::ForeignType;
+    let cg_image_ptr = cg_image.as_ptr() as *const objc2::runtime::AnyObject;
+    let rep: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSBitmapImageRep), alloc];
+    let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        rep, initWithCGImage: cg_image_ptr
+    ];
+    if rep.is_null() {
+        return std::ptr::null_mut();
+    }
+    let empty_dict: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSDictionary), dictionary];
+    // NSBitmapImageFileTypePNG = 4
+    objc2::msg_send![
+        &*rep,
+        representationUsingType: 4u64,
+        properties: &*empty_dict
+    ]
+}
+
+/// Copy a CGImage directly to clipboard as NSImage — skips PNG encoding entirely.
+unsafe fn copy_cgimage_to_clipboard(cg_image: &core_graphics::image::CGImage) {
+    use foreign_types::ForeignType;
+    let cg_ptr = cg_image.as_ptr() as *const std::ffi::c_void;
+    let w = cg_image.width();
+    let h = cg_image.height();
+    let size = objc2_core_foundation::CGSize {
+        width: w as f64,
+        height: h as f64,
+    };
+
+    let ns_image: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSImage), alloc];
+    let ns_image: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![ns_image, initWithCGImage: cg_ptr, size: size];
+    if ns_image.is_null() {
+        tracing::error!("Failed to create NSImage from CGImage");
+        return;
+    }
+
+    let pb: *mut objc2::runtime::AnyObject =
+        objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
+    let _: () = objc2::msg_send![&*pb, clearContents];
+    // NSImage conforms to NSPasteboardWriting — writeObjects handles all UTIs
+    let array: *mut objc2::runtime::AnyObject = objc2::msg_send![
+        objc2::class!(NSArray),
+        arrayWithObject: &*ns_image
+    ];
+    let _: bool = objc2::msg_send![&*pb, writeObjects: &*array];
 }
 
 /// Full page screenshot: createPDF → stitch → PNG → clipboard.
@@ -4322,17 +4406,12 @@ fn screenshot_full_page_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
                 tracing::error!("Full page screenshot failed: createPDF returned nil");
             } else {
                 unsafe {
-                    let final_image = pdf_data_to_nsimage(pdf_data);
-                    if final_image.is_null() {
-                        tracing::error!("Full page screenshot: failed to render PDF to image");
+                    // Skip PNG encoding — write CGImage as NSImage directly to clipboard
+                    if let Some(cg_image) = pdf_data_to_cgimage(pdf_data) {
+                        copy_cgimage_to_clipboard(&cg_image);
+                        tracing::debug!("Full page screenshot copied to clipboard");
                     } else {
-                        let png_data = nsimage_to_png_data(final_image);
-                        if png_data.is_null() {
-                            tracing::error!("Full page screenshot: failed to encode PNG");
-                        } else {
-                            copy_png_to_clipboard(png_data);
-                            tracing::debug!("Full page screenshot copied to clipboard");
-                        }
+                        tracing::error!("Full page screenshot: failed to render PDF");
                     }
                 }
             }
