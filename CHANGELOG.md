@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.2] - 2026-04-08
+
+### 📋 Release Summary
+
+This release introduces SPA title change detection for improved webview tracking. Enhanced PDF rendering and clipboard functionality provide a more seamless copy-paste experience. Documentation improvements help users better understand octoweb's features (279fb7b0, 577a72d2).
+
+
+### ✨ New Features & Enhancements
+
+- **webview**: add SPA title change detection `28f23f1f`
+
+### 🔧 Improvements & Optimizations
+
+- **clipboard**: use CGBitmapContext for PDF rendering and clipboard copy `577a72d2`
+
+### 📚 Documentation & Examples
+
+- enhance README with comprehensive feature documentation `279fb7b0`
+
 ## [0.5.1] - 2026-04-04
 
 ### 📋 Release Summary
