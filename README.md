@@ -1,24 +1,48 @@
 # octoweb
 
-The browser you reach for when you want to think.
+[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/muvon/octoweb/releases)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+
+**The browser you reach for when you want to think.**
 
 Built on WebKit and Rust. No Electron. No Chrome. No mouse required.
 
 ---
 
-## Why
+## Why Octoweb?
 
-Most browsers are built around the mouse. octoweb is built around the keyboard — and around the idea that your browser should amplify your thinking, not interrupt it. Every action has a shortcut. The AI assistant lives in the sidebar, not a tab. And your AI tools can drive the browser directly. No extensions. No config. Just open it and go.
+Most browsers are built around the mouse. Octoweb is built around the keyboard — and around the idea that your browser should amplify your thinking, not interrupt it. Every action has a shortcut. The AI assistant lives in a sidebar, not a tab. And your AI tools can drive the browser directly via MCP. No extensions. No config. Just open it and go.
 
-Three things it does differently:
+**Three things it does differently:**
 
-1. **Keyboard-first navigation** — every action has a shortcut, nothing requires a click; the command palette (`⌘K`) fuzzy-searches tabs and history; pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere
-2. **AI assistant built in** — not an extension, not a tab, a sidebar panel that overlays the page, powered by a local [octomind](https://github.com/muvon/octomind) agent connected via [ACP](https://github.com/muvon/agent-client-protocol); also reachable from the command palette with `⌘⇧↵`
-3. **MCP server inside the browser** — your AI tools can actually *drive* the browser (`localhost:3434`)
+1. **Keyboard-first navigation** — Every action has a shortcut. Nothing requires a click. The command palette (`⌘K`) fuzzy-searches tabs and history. Pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere.
+
+2. **AI assistant built in** — Not an extension, not a tab. A sidebar overlay powered by a local [octomind](https://github.com/muvon/octomind) agent via [ACP](https://github.com/muvon/agent-client-protocol). Ask questions about the current page, get code explanations, summarize content — all without leaving the browser.
+
+3. **MCP server inside the browser** — Your AI tools can actually *drive* the browser. Octoweb runs an MCP server on `localhost:3434/mcp` that exposes 20+ tools for navigation, tab management, page interaction, and content extraction. Point Claude Desktop or any MCP client at it and watch it browse.
 
 ---
 
-## AI assistant
+## Features
+
+- **Command palette** (`⌘K`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
+- **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access. Footer bar shows all slots.
+- **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
+- **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
+- **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. Opt-in, configurable interval.
+- **MCP server** — 20+ tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
+- **Find-in-page** (`⌘F`) — Full-text search with highlighting.
+- **Page zoom** — `+`/`-` to zoom, `⌘0` to reset.
+- **Screenshots** — `⌘S` for viewport, `⌘⇧S` for full page. Copied to clipboard.
+- **PDF & DOCX viewer** — Open documents directly in the browser.
+- **Session restore** — Tabs and history persist across restarts.
+- **Favicon caching** — No network requests on startup. Icons stored as base64.
+- **Content blocking** — Built-in tracker and ad blocker via WKContentRuleList.
+- **Smart tab hibernation** — Background tabs under memory pressure are frozen.
+
+---
+
+## AI Assistant
 
 Press `⌘⇧A` to open the sidebar. It connects to a local AI agent running under [octomind](https://github.com/muvon/octomind) using the [Agent Client Protocol (ACP)](https://github.com/muvon/agent-client-protocol). Responses stream in as they arrive.
 
@@ -67,6 +91,26 @@ The agent tag in the sidebar header defaults to `octoweb:assistant`. You can typ
 
 No data leaves your machine unless your agent sends it somewhere. The AI provider call is made by octomind, not by the browser.
 
+### Proactive Learning
+
+Octoweb can optionally run a background agent that periodically analyzes your browsing patterns and memorizes insights. This is disabled by default and can be enabled in Settings (`⌘,`).
+
+**How it works:**
+
+1. Every `learning_interval_min` (default: 30), the background agent wakes up
+2. It collects: open tabs, recent history, and the active page's text content
+3. The agent calls `remember` to check existing memories, then `memorize` for new insights
+4. Insights are stored locally in octomind's memory system
+
+**Configuration:**
+
+```toml
+proactive_learning    = true    # enable background learning
+learning_interval_min = 30     # minutes between runs
+```
+
+The learning agent runs as a separate `octomind acp octoweb:learning` process. It's completely independent from the sidebar assistant — you can use one without the other.
+
 ---
 
 ## MCP server (AI browser control)
@@ -87,16 +131,27 @@ Claude Desktop / octomind / any MCP client
 **Available tools:**
 
 | Tool | What it does |
-|---|---|
-| `browser_navigate` | Navigate to a URL (`new_tab: true` to open in background) |
+|------|--------------|
+| `browser_navigate` | Navigate to a URL (`new_tab: true` opens in background) |
+| `browser_go_back` | Go back in history |
+| `browser_go_forward` | Go forward in history |
+| `browser_reload` | Reload current page |
+| `browser_wait` | Wait for page load to complete |
 | `browser_get_tabs` | List all open tabs with IDs, titles, URLs |
+| `browser_get_current_tab` | Get the active tab's ID |
 | `browser_switch_tab` | Switch to a tab by ID |
 | `browser_close_tab` | Close a tab by ID |
-| `browser_get_page_info` | Get title, URL, meta description of current page |
+| `browser_get_page_info` | Get title, URL, meta description |
+| `browser_get_page_content` | Get page text content (innerText) |
 | `browser_execute_js` | Run arbitrary JavaScript in the page |
 | `browser_click` | Click an element by CSS selector |
 | `browser_type` | Type text into an input by CSS selector |
-| `browser_screenshot` | Take a screenshot (`full_page: true` for entire scrollable page) |
+| `browser_scroll` | Scroll the page (pixels or to element) |
+| `browser_press_key` | Press a key (e.g., Enter, Tab, Escape) |
+| `browser_select_option` | Select an option in a `<select>` element |
+| `browser_screenshot` | Take a screenshot (`full_page: true` for entire page) |
+| `browser_get_history` | Get browsing history entries |
+| `browser_get_playing_tabs` | List tabs currently playing audio/video |
 
 Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
 
@@ -174,11 +229,50 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 The sidebar overlays the page on the right — the page content underneath is not resized.
 
 | Shortcut | Action |
-|---|---|
+|----------|--------|
 | `↵` | Send prompt |
 | `⇧↵` | Insert newline |
 | `↵` *(agent input)* | Apply agent tag |
 | `Esc` *(agent input)* | Show agent chip |
+
+**Prompt history:**
+
+- `Ctrl+P` / `Ctrl+N` — Navigate older/newer prompts (MRU order)
+- `Ctrl+R` — Reverse incremental search through history
+- `Ctrl+E` — Accept ghost text autocomplete
+- `Ctrl+U` — Clear input to cursor start
+
+History persists across sessions (`ai_prompt_history.json`).
+
+### Inline AI edit (`⌘⇧E`)
+
+Select text on any page and press `⌘⇧E` to open the inline edit modal. The AI can rewrite, summarize, translate, or transform the selected text.
+
+| Shortcut | Action |
+|----------|--------|
+| `↵` | Submit transformation |
+| `⇧↵` | Insert newline |
+| `Esc` | Close modal |
+
+Prompt history works the same as the sidebar (`Ctrl+P/N/R/E/U`).
+
+### Find-in-page (`⌘F`)
+
+Full-text search with highlighting. Uses CSS Custom Highlight API for fast, native rendering.
+
+| Shortcut | Action |
+|----------|--------|
+| `↵` | Next match |
+| `⇧↵` | Previous match |
+| `Esc` | Close find bar |
+
+### Page zoom
+
+| Shortcut | Action |
+|----------|--------|
+| `⌘+` | Zoom in |
+| `⌘-` | Zoom out |
+| `⌘0` | Reset zoom |
 
 ---
 
@@ -211,16 +305,27 @@ cp -r dist/Octoweb.app /Applications/
 
 Config lives at `~/Library/Application Support/octoweb/config.toml`. Created on first launch with defaults.
 
+Open Settings with `⌘,` to configure visually, or edit the file directly:
+
 ```toml
-home_page     = "https://www.google.com"
-search_engine = "https://www.google.com/search?q={}"
-max_history   = 1000
-window_width  = 1280
-window_height = 800
+home_page              = "https://www.google.com"
+search_engine          = "https://www.google.com/search?q={}"
+max_history            = 1000
+window_width           = 1280
+window_height          = 800
+ai_edit_auto_hide      = false      # auto-hide inline edit after submit
+max_prompt_history     = 50         # editor prompt history size
+max_ai_prompt_history  = 50         # sidebar prompt history size
+proactive_learning     = true       # enable background learning agent
+learning_interval_min  = 30         # minutes between learning runs
 ```
 
-Session (open tabs + active tab) is restored automatically on next launch.
-Favicons are cached as base64 data-URIs — no network requests on startup.
+**Persistence:**
+
+- **Session** — Open tabs and active tab restored on next launch
+- **History** — Browsing history up to `max_history` entries
+- **Favicons** — Cached as base64 data-URIs, no network on startup
+- **Prompt history** — Separate histories for inline edit and sidebar
 
 ---
 
