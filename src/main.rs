@@ -276,7 +276,7 @@ fn main() {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
             let p3 = proxy.clone();
-            let p4 = proxy.clone();
+
             let p5 = proxy.clone();
             let p6 = proxy.clone();
             let sz = browser_win.inner_size();
@@ -386,6 +386,11 @@ fn main() {
                                     ));
                                 }
                             }
+                            Some("open_new_tab") => {
+                                if let Some(url) = v["url"].as_str() {
+                                    let _ = p3.send_event(AppEvent::OpenInNewTab(url.to_string()));
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -406,16 +411,12 @@ fn main() {
                 .with_document_title_changed_handler(move |title| {
                     let _ = p2.send_event(AppEvent::TitleChanged(tab_id, title));
                 })
-                .with_new_window_req_handler(move |url, features| {
-                    if features.size.is_some() {
-                        // Popup with explicit dimensions (OAuth, login flows) —
-                        // allow wry to create a real window so window.opener is preserved.
-                        wry::NewWindowResponse::Allow
-                    } else {
-                        // Regular target=_blank — open in a new tab.
-                        let _ = p4.send_event(AppEvent::OpenInNewTab(url));
-                        wry::NewWindowResponse::Deny
-                    }
+                .with_new_window_req_handler(move |_url, _features| {
+                    // Always allow wry to create a real popup window.
+                    // Many sites (OAuth, sign-up flows) use window.open() without
+                    // explicit dimensions and rely on window.opener for callbacks.
+                    // Denying + opening in a new tab breaks that relationship.
+                    wry::NewWindowResponse::Allow
                 })
                 .with_download_started_handler(move |url, _path| {
                     // Extract filename from URL for the toast notification

@@ -430,6 +430,26 @@ pub const COMBINED_SCRIPT: &str = r#"
     window.__octoweb_edit = null;
   };
 
+  // ── target=_blank link interceptor ────────────────────────────────────────
+  // Clicks on <a target="_blank"> are caught here and routed through IPC to
+  // open in a new browser tab. This prevents them from reaching the native
+  // createWebViewWithConfiguration handler (which creates a popup window).
+  // Genuine window.open() calls (OAuth, sign-up flows) are NOT affected —
+  // they bypass this listener and go through the native handler where
+  // window.opener is preserved.
+  document.addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el.tagName !== 'A') el = el.parentElement;
+    if (!el) return;
+    var t = (el.getAttribute('target') || '').toLowerCase();
+    if (t !== '_blank') return;
+    var href = el.href;
+    if (!href || href.startsWith('javascript:')) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    _ipc({ type: 'open_new_tab', url: href });
+  }, true);
+
 }());
 "#;
 
