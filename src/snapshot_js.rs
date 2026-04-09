@@ -52,6 +52,18 @@ pub const SNAPSHOT_JS: &str = r#"
     return (text || '').trim().replace(/\s+/g, ' ').substring(0, 80);
   }
 
+  var SENSITIVE_NAMES = /password|passwd|pwd|secret|token|csrf|xsrf|api_key|apikey|auth_token|access_token|refresh_token|session|nonce|ssn|credit.?card|cc.?number|card.?number|cvv|cvc|csc|pin|otp/i;
+  var SENSITIVE_AC = /^(cc-|new-password|current-password)/;
+
+  function isSensitiveInput(el) {
+    if (el.type === 'password' || el.type === 'hidden') return true;
+    if (SENSITIVE_NAMES.test(el.name || '')) return true;
+    if (SENSITIVE_NAMES.test(el.id || '')) return true;
+    var ac = el.getAttribute('autocomplete') || '';
+    if (SENSITIVE_AC.test(ac)) return true;
+    return false;
+  }
+
   function getAttrs(el) {
     var parts = [];
     var tag = el.tagName.toLowerCase();
@@ -63,10 +75,9 @@ pub const SNAPSHOT_JS: &str = r#"
       if (el.type && el.type !== 'text') parts.push('type=' + el.type);
       if (el.placeholder) parts.push('placeholder=' + el.placeholder.substring(0, 40));
       if (el.type === 'checkbox' || el.type === 'radio') parts.push(el.checked ? 'checked' : 'unchecked');
-      if (el.value && el.type !== 'password' && el.type !== 'hidden') parts.push('val=' + el.value.substring(0, 40));
-      if (el.type === 'hidden' && el.name) parts.push('val=' + (el.value || '').substring(0, 40));
+      if (el.value && !isSensitiveInput(el)) parts.push('val=' + el.value.substring(0, 40));
     }
-    if (tag === 'textarea' && el.value) parts.push('val=' + el.value.substring(0, 40));
+    if (tag === 'textarea' && el.value && !SENSITIVE_NAMES.test(el.name || '') && !SENSITIVE_NAMES.test(el.id || '')) parts.push('val=' + el.value.substring(0, 40));
     if (tag === 'select') {
       var opts = Array.from(el.options).slice(0, 10);
       var optStr = opts.map(function(o) {

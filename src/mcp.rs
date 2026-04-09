@@ -26,6 +26,8 @@
 //! - browser_snapshot: Get compact element map with numeric refs for efficient interaction
 //! - browser_handle_dialog: Accept/dismiss JS alert/confirm/prompt dialogs
 
+use crate::sanitize;
+
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
@@ -193,11 +195,35 @@ pub struct TabInfo {
     pub is_playing_audio: bool,
 }
 
+impl TabInfo {
+    /// Build from a browser::Tab with URL sanitization (strips sensitive query params).
+    pub fn from_tab(tab: &crate::browser::Tab, is_active: bool) -> Self {
+        Self {
+            id: tab.id,
+            title: tab.title.clone(),
+            url: sanitize::sanitize_url(&tab.url),
+            is_active,
+            is_playing_audio: tab.is_playing_audio,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PageInfo {
     pub title: String,
     pub url: String,
     pub description: Option<String>,
+}
+
+impl PageInfo {
+    /// Build with URL sanitization.
+    pub fn new(title: String, url: String, description: Option<String>) -> Self {
+        Self {
+            title,
+            url: sanitize::sanitize_url(&url),
+            description,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -206,6 +232,17 @@ pub struct HistoryInfo {
     pub url: String,
     /// Unix timestamp (seconds) of when the page was visited
     pub visited_at: u64,
+}
+
+impl HistoryInfo {
+    /// Build from a browser::HistoryEntry with URL sanitization.
+    pub fn from_entry(entry: &crate::browser::HistoryEntry) -> Self {
+        Self {
+            title: entry.title.clone(),
+            url: sanitize::sanitize_url(&entry.url),
+            visited_at: entry.visited_at,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────

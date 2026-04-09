@@ -20,6 +20,7 @@ mod progress_bar_html;
 mod prompt_history_js;
 mod quickslots;
 mod quickslots_html;
+mod sanitize;
 mod settings_html;
 mod shortcuts_html;
 mod sidebar_html;
@@ -2171,12 +2172,9 @@ fn main() {
                         tracing::debug!("MCP get_tabs");
 
                         let tm = tabs.lock().unwrap();
-                        let tabs_list: Vec<TabInfo> = tm.tabs().iter().map(|t| TabInfo {
-                            id: t.id,
-                            title: t.title.clone(),
-                            url: t.url.clone(),
-                            is_active: tm.active_id() == Some(t.id),
-                            is_playing_audio: t.is_playing_audio,
+                        let active = tm.active_id();
+                        let tabs_list: Vec<TabInfo> = tm.tabs().iter().map(|t| {
+                            TabInfo::from_tab(t, active == Some(t.id))
                         }).collect();
 
                         tracing::debug!(count = tabs_list.len(), "MCP get_tabs response");
@@ -2215,7 +2213,7 @@ fn main() {
                                             if let Some(tx) = response_cb.lock().unwrap().take() {
                                                 let desc = serde_json::from_str::<String>(&val).unwrap_or(val);
                                                 let description = if desc.is_empty() { None } else { Some(desc) };
-                                                let _ = tx.send(Ok(PageInfo { title: cb_title.clone(), url: cb_url.clone(), description }));
+                                                let _ = tx.send(Ok(PageInfo::new(cb_title.clone(), cb_url.clone(), description)));
                                             }
                                         },
                                     ) {
@@ -2223,12 +2221,12 @@ fn main() {
                                         Err(_) => {
                                             // JS failed — return info without description
                                             if let Some(tx) = response.lock().unwrap().take() {
-                                                let _ = tx.send(Ok(PageInfo { title, url, description: None }));
+                                                let _ = tx.send(Ok(PageInfo::new(title, url, None)));
                                             }
                                         }
                                     }
                                 } else {
-                                    let _ = response.send(Ok(PageInfo { title, url, description: None }));
+                                    let _ = response.send(Ok(PageInfo::new(title, url, None)));
                                 }
                             }
                             None => {
@@ -2356,12 +2354,8 @@ fn main() {
                     }
                     McpCommand::GetCurrentTab { response } => {
                         let tm = tabs.lock().unwrap();
-                        let result = tm.active_tab().map(|t| TabInfo {
-                            id: t.id,
-                            title: t.title.clone(),
-                            url: t.url.clone(),
-                            is_active: true,
-                            is_playing_audio: t.is_playing_audio,
+                        let result = tm.active_tab().map(|t| {
+                            TabInfo::from_tab(t, true)
                         }).ok_or("No active tab".to_string());
                         let _ = response.send(result);
                     }
@@ -2401,24 +2395,18 @@ fn main() {
                         let history = tm.history();
                         let limit = limit.unwrap_or(50);
                         // history is oldest-first; return most recent first
-                        let entries: Vec<HistoryInfo> = history.iter().rev().take(limit).map(|e| HistoryInfo {
-                            title: e.title.clone(),
-                            url: e.url.clone(),
-                            visited_at: e.visited_at,
+                        let entries: Vec<HistoryInfo> = history.iter().rev().take(limit).map(|e| {
+                            HistoryInfo::from_entry(e)
                         }).collect();
                         let _ = response.send(Ok(entries));
                     }
                     McpCommand::GetPlayingTabs { response } => {
                         let tm = tabs.lock().unwrap();
+                        let active = tm.active_id();
                         let playing: Vec<TabInfo> = tm.tabs().iter()
                             .filter(|t| t.is_playing_audio)
-                            .map(|t| TabInfo {
-                                id: t.id,
-                                title: t.title.clone(),
-                                url: t.url.clone(),
-                                is_active: tm.active_id() == Some(t.id),
-                                is_playing_audio: true,
-                            }).collect();
+                            .map(|t| TabInfo::from_tab(t, active == Some(t.id)))
+                            .collect();
                         let _ = response.send(Ok(playing));
                     }
                     McpCommand::Reload { tab_id, response } => {
@@ -4608,14 +4596,24 @@ fn build_learning_prompt(
         return None;
     }
 
+    // Check if active tab is on a sensitive page (login, payment, etc.)
+    // — skip content extraction entirely to prevent leaking credentials.
+    let active_url = tab_list
+        .iter()
+        .find(|t| t.id == active_wv_id)
+        .map(|t| t.url.as_str())
+        .unwrap_or("");
+    let on_sensitive_page = sanitize::is_sensitive_page(active_url);
+
     let mut out = String::with_capacity(BUDGET);
 
-    // Open tabs (compact: title + URL per line)
+    // Open tabs (compact: title + sanitized URL per line)
     if !tab_list.is_empty() {
         out.push_str("Open tabs:\n");
         for t in tab_list {
             let marker = if t.id == active_wv_id { " *" } else { "" };
-            let line = format!("- {}{} | {}\n", t.title, marker, t.url);
+            let safe_url = sanitize::sanitize_url(&t.url);
+            let line = format!("- {}{} | {}\n", t.title, marker, safe_url);
             if out.len() + line.len() > BUDGET - CONTENT_BUDGET - 2000 {
                 break;
             }
@@ -4634,7 +4632,8 @@ fn build_learning_prompt(
             if tab_urls.contains(entry.url.as_str()) {
                 continue;
             }
-            let line = format!("- {} | {}\n", entry.title, entry.url);
+            let safe_url = sanitize::sanitize_url(&entry.url);
+            let line = format!("- {} | {}\n", entry.title, safe_url);
             if out.len() + line.len() > BUDGET - CONTENT_BUDGET - 200 {
                 out.push_str("- ...\n");
                 break;
@@ -4644,8 +4643,8 @@ fn build_learning_prompt(
         out.push('\n');
     }
 
-    // Active tab page text (cleaned, trimmed to budget)
-    if !active_tab_text.is_empty() {
+    // Active tab page text — skip entirely on sensitive pages
+    if !active_tab_text.is_empty() && !on_sensitive_page {
         out.push_str("Active page text:\n");
         // Clean: collapse whitespace, strip control chars
         let cleaned: String = active_tab_text
@@ -4671,6 +4670,8 @@ fn build_learning_prompt(
         }
         out.push_str(trimmed.trim());
         out.push('\n');
+    } else if on_sensitive_page {
+        out.push_str("Active page: [sensitive page — content omitted]\n");
     }
 
     Some(out)
