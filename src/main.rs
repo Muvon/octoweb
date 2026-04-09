@@ -1137,8 +1137,13 @@ fn main() {
 
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
     // Complementary to the reactive hibernation (which only fires under pressure).
-    // Hibernates frozen (idle > 10 min) tabs always, and cold (idle > 3 min)
-    // tabs when too many background WebViews are alive or a tab is memory-heavy.
+    // Thresholds scale with system RAM (sqrt scaling: 8 GB = baseline, 64 GB ≈ 2.8×).
+    let proactive_config =
+        hibernation::ProactiveConfig::from_total_memory(hibernation::total_system_memory());
+    tracing::info!(
+        ?proactive_config,
+        "Proactive hibernation config (RAM-scaled)"
+    );
     let mut proactive_hiber_next_at =
         std::time::Instant::now() + std::time::Duration::from_secs(60);
 
@@ -1826,6 +1831,7 @@ fn main() {
                     pending_swap,
                     active_wv_id,
                     &media_playing_tabs,
+                    &proactive_config,
                 )
             };
             for victim_id in victims {
@@ -2082,6 +2088,32 @@ fn main() {
         if let Some(ref mut handle) = mcp_handle {
             while let Some(cmd) = handle.poll() {
                 tracing::debug!(cmd = ?std::mem::discriminant(&cmd), "MCP command received");
+
+                // Touch the target tab so hibernation knows it's in use.
+                // Prevents background tabs used by AI from being offloaded.
+                let touch_id = match &cmd {
+                    McpCommand::Navigate { tab_id, .. } => *tab_id,
+                    McpCommand::GetPageInfo { tab_id, .. }
+                    | McpCommand::ExecuteJs { tab_id, .. }
+                    | McpCommand::GetPageContent { tab_id, .. }
+                    | McpCommand::GetHtml { tab_id, .. }
+                    | McpCommand::Snapshot { tab_id, .. }
+                    | McpCommand::Screenshot { tab_id, .. }
+                    | McpCommand::Reload { tab_id, .. }
+                    | McpCommand::GoBack { tab_id, .. }
+                    | McpCommand::GoForward { tab_id, .. }
+                    | McpCommand::Scroll { tab_id, .. }
+                    | McpCommand::Wait { tab_id, .. } => *tab_id,
+                    McpCommand::Click { tab_id, .. }
+                    | McpCommand::Hover { tab_id, .. }
+                    | McpCommand::Type { tab_id, .. }
+                    | McpCommand::PressKey { tab_id, .. }
+                    | McpCommand::SelectOption { tab_id, .. } => *tab_id,
+                    _ => None,
+                };
+                if let Some(id) = touch_id.or(Some(active_wv_id)) {
+                    tabs.lock().unwrap().touch(id);
+                }
 
                 match cmd {
                     McpCommand::Navigate { url, tab_id, new_tab, background, response } => {

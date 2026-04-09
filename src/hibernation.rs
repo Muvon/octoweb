@@ -172,23 +172,78 @@ fn hibernation_score(
     Some(time_w * 0.70 + mem_w * 0.20 + mru_w * 0.10)
 }
 
-// ── Proactive thresholds ─────────────────────────────────────────────────────
+// ── Total system memory ─────────────────────────────────────────────────────
 
-/// Idle seconds after which a tab is "frozen" and always hibernated.
-const FROZEN_IDLE_SECS: u64 = 600; // 10 minutes
-/// Idle seconds after which a "cold" tab is hibernated when resources are scarce.
-const COLD_IDLE_SECS: u64 = 180; // 3 minutes
-/// Background tab count above which cold tabs are hibernated.
-const COLD_TAB_THRESHOLD: usize = 6;
-/// RSS in bytes above which a cold tab is hibernated regardless of tab count.
-const COLD_RSS_THRESHOLD: u64 = 100 * 1024 * 1024; // 100 MB
+/// Detect total physical memory in bytes (via sysctl hw.memsize). Call once at startup.
+pub fn total_system_memory() -> u64 {
+    let mut memsize: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let name = c"hw.memsize";
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut memsize as *mut _ as _,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || memsize == 0 {
+        8 * 1024 * 1024 * 1024 // fallback: assume 8 GB
+    } else {
+        memsize
+    }
+}
+
+// ── Proactive thresholds (adaptive to system RAM) ───────────────────────────
+
+// Base thresholds — calibrated for 8 GB machines. Scaled up via sqrt(ram_gb/8).
+const BASE_FROZEN_IDLE_SECS: f64 = 600.0; // 10 minutes
+const BASE_COLD_IDLE_SECS: f64 = 180.0; // 3 minutes
+const BASE_COLD_TAB_THRESHOLD: f64 = 6.0;
+const BASE_COLD_RSS_BYTES: f64 = 250.0 * 1024.0 * 1024.0; // 250 MB
+
+/// Pre-computed proactive hibernation thresholds scaled to system RAM.
+/// Created once at startup and reused every 60-second cycle.
+#[derive(Debug, Clone, Copy)]
+pub struct ProactiveConfig {
+    /// Idle seconds after which a tab is "frozen" and always hibernated.
+    pub frozen_idle_secs: u64,
+    /// Idle seconds after which a "cold" tab is hibernated when resources are scarce.
+    pub cold_idle_secs: u64,
+    /// Background tab count above which cold tabs are hibernated.
+    pub cold_tab_threshold: usize,
+    /// RSS in bytes above which a cold tab is hibernated regardless of tab count.
+    pub cold_rss_bytes: u64,
+}
+
+impl ProactiveConfig {
+    /// Build config scaled to the machine's total RAM.
+    ///
+    /// Uses `sqrt(ram_gb / 8)` scaling — sublinear so thresholds grow gently:
+    ///   8 GB → factor 1.0 (baseline)
+    ///  16 GB → factor 1.41
+    ///  32 GB → factor 2.0
+    ///  64 GB → factor 2.83
+    pub fn from_total_memory(total_bytes: u64) -> Self {
+        let ram_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let factor = (ram_gb / 8.0).max(1.0).sqrt();
+
+        Self {
+            frozen_idle_secs: (BASE_FROZEN_IDLE_SECS * factor).min(1800.0) as u64, // cap 30 min
+            cold_idle_secs: (BASE_COLD_IDLE_SECS * factor).min(900.0) as u64,      // cap 15 min
+            cold_tab_threshold: (BASE_COLD_TAB_THRESHOLD * factor).min(24.0) as usize,
+            cold_rss_bytes: (BASE_COLD_RSS_BYTES * factor).min(1024.0 * 1024.0 * 1024.0) as u64, // cap 1 GB
+        }
+    }
+}
 
 /// Proactive hibernation — runs on a 60 s timer regardless of memory pressure.
 ///
-/// Two tiers:
-/// - **Frozen** (idle > 10 min): always hibernate, no conditions.
-/// - **Cold** (idle > 3 min): hibernate if too many background tabs OR this
-///   tab's WebContent process uses more than 100 MB RSS.
+/// Two tiers (thresholds scaled to system RAM via `ProactiveConfig`):
+/// - **Frozen** (idle > threshold): always hibernate, no conditions.
+/// - **Cold** (idle > threshold): hibernate if too many background tabs OR this
+///   tab's WebContent process exceeds the RSS threshold.
 ///
 /// Protected tabs (active, audio-playing, about:blank, pending-swap) are skipped.
 pub fn pick_proactive_victims(
@@ -198,6 +253,7 @@ pub fn pick_proactive_victims(
     pending_swap: Option<(usize, usize)>,
     active_id: usize,
     media_playing: &HashSet<usize>,
+    config: &ProactiveConfig,
 ) -> Vec<usize> {
     let now = Instant::now();
     // How many background WebViews exist (exclude the active one).
@@ -224,14 +280,14 @@ pub fn pick_proactive_victims(
 
             let idle = now.duration_since(t.last_active_at).as_secs();
 
-            // Frozen: idle > 10 min — always hibernate.
-            if idle > FROZEN_IDLE_SECS {
+            // Frozen: idle > threshold — always hibernate.
+            if idle > config.frozen_idle_secs {
                 return true;
             }
 
-            // Cold: idle > 3 min — hibernate if resources are scarce.
-            if idle > COLD_IDLE_SECS {
-                if background_count > COLD_TAB_THRESHOLD {
+            // Cold: idle > threshold — hibernate if resources are scarce.
+            if idle > config.cold_idle_secs {
+                if background_count > config.cold_tab_threshold {
                     return true;
                 }
                 // Sample this tab's RSS; hibernate if heavy.
@@ -244,7 +300,7 @@ pub fn pick_proactive_victims(
                         Some(rss)
                     })
                     .unwrap_or(0);
-                if rss > COLD_RSS_THRESHOLD {
+                if rss > config.cold_rss_bytes {
                     return true;
                 }
             }

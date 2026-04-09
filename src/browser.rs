@@ -175,6 +175,14 @@ impl TabManager {
         false
     }
 
+    /// Bump `last_active_at` to now — keeps the tab alive during hibernation scoring.
+    /// Call when MCP tools operate on a background tab.
+    pub fn touch(&mut self, id: usize) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+            tab.last_active_at = Instant::now();
+        }
+    }
+
     pub fn active_id(&self) -> Option<usize> {
         self.active_id
     }
