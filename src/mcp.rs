@@ -10,7 +10,8 @@
 //! - browser_get_page_content: Get readable text content of a page
 //! - browser_execute_js: Run JavaScript in page (returns result)
 //! - browser_click: Click element by selector
-//! - browser_type: Type text into input
+//! - browser_hover: Hover over element by selector
+//! - browser_type: Type text into input or contenteditable element
 //! - browser_scroll: Scroll page up/down/top/bottom
 //! - browser_press_key: Press a keyboard key
 //! - browser_select_option: Select an option in a dropdown
@@ -21,6 +22,9 @@
 //! - browser_get_playing_tabs: Get tabs playing audio
 //! - browser_reload: Reload a tab
 //! - browser_screenshot: Take a screenshot
+//! - browser_get_html: Get HTML content of page or element
+//! - browser_snapshot: Get compact element map with numeric refs for efficient interaction
+//! - browser_handle_dialog: Accept/dismiss JS alert/confirm/prompt dialogs
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -81,6 +85,12 @@ pub enum McpCommand {
     },
     /// Click element by selector — returns whether element was found
     Click {
+        tab_id: Option<usize>,
+        selector: String,
+        response: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Hover over element by selector — returns whether element was found
+    Hover {
         tab_id: Option<usize>,
         selector: String,
         response: oneshot::Sender<Result<bool, String>>,
@@ -156,6 +166,23 @@ pub enum McpCommand {
         selector: String,
         value: String,
         response: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Get HTML content of page or a specific element
+    GetHtml {
+        tab_id: Option<usize>,
+        selector: Option<String>,
+        response: oneshot::Sender<Result<String, String>>,
+    },
+    /// Take a snapshot of interactive elements on the page
+    Snapshot {
+        tab_id: Option<usize>,
+        response: oneshot::Sender<Result<String, String>>,
+    },
+    /// Handle (accept/dismiss) a pending JS dialog
+    HandleDialog {
+        accept: bool,
+        text: Option<String>,
+        response: oneshot::Sender<Result<String, String>>,
     },
 }
 
@@ -250,6 +277,16 @@ pub struct ClickRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HoverRequest {
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
+    pub tab_id: Option<usize>,
+    #[schemars(description = "CSS selector for element to hover over")]
+    pub selector: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeRequest {
     #[schemars(
         description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
@@ -329,6 +366,34 @@ pub struct WaitRequest {
     pub event: Option<String>,
     #[schemars(description = "Maximum time to wait in milliseconds (default: 10000, max: 30000)")]
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetHtmlRequest {
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
+    pub tab_id: Option<usize>,
+    #[schemars(
+        description = "CSS selector for a specific element. Returns that element's outerHTML. Omit to get the full page HTML with scripts and styles removed."
+    )]
+    pub selector: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotRequest {
+    #[schemars(
+        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
+    )]
+    pub tab_id: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HandleDialogRequest {
+    #[schemars(description = "true to accept (OK/Yes), false to dismiss (Cancel/No)")]
+    pub accept: bool,
+    #[schemars(description = "Text to enter for prompt() dialogs. Ignored for alert/confirm.")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -593,6 +658,39 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Get HTML content of a page or a specific element. Without selector: returns the page's HTML with scripts and styles stripped — useful for understanding page structure, forms, tables, and element attributes. With selector: returns the matching element's outerHTML. Use browser_get_page_content for plain text, this tool for structure. Defaults to the user's visible tab if tab_id is omitted."
+    )]
+    async fn browser_get_html(
+        &self,
+        Parameters(req): Parameters<GetHtmlRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let html = self
+            .send_command(|tx| McpCommand::GetHtml {
+                tab_id: req.tab_id,
+                selector: req.selector,
+                response: tx,
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(html)]))
+    }
+
+    #[tool(
+        description = "Get a compact map of all interactive elements on the page — links, buttons, inputs, selects, etc. Each element is assigned a @ref number (e.g. @1, @2) that you can pass directly as the selector to browser_click, browser_type, browser_hover, and other interaction tools. This is the most efficient way to discover what's on a page and interact with it. Includes elements inside same-origin iframes. Call this before interacting with a page you haven't seen yet. Defaults to the user's visible tab if tab_id is omitted."
+    )]
+    async fn browser_snapshot(
+        &self,
+        Parameters(req): Parameters<SnapshotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = self
+            .send_command(|tx| McpCommand::Snapshot {
+                tab_id: req.tab_id,
+                response: tx,
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(snapshot)]))
+    }
+
+    #[tool(
         description = "Execute JavaScript code in a page and return the result as a string. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to target background tabs. For reading page text prefer browser_get_page_content instead."
     )]
     async fn browser_execute_js(
@@ -632,7 +730,7 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element on the page by CSS selector. Returns whether the element was found and clicked. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to click in background tabs."
+        description = "Click an element on the page by CSS selector or @ref from browser_snapshot. Returns whether the element was found and clicked. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to click in background tabs."
     )]
     async fn browser_click(
         &self,
@@ -658,7 +756,33 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Type text into an input element by CSS selector. Focuses the element, sets its value, and fires input+change events. Returns whether the element was found. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to type in background tabs."
+        description = "Hover over an element on the page by CSS selector (or @ref from browser_snapshot). Triggers mouseenter, mouseover, and mousemove JS events — works for JS-based menus (Bootstrap, React, Material UI) but cannot activate pure CSS :hover pseudo-class (WebKit limitation). Returns whether the element was found. Defaults to the user's visible tab if tab_id is omitted."
+    )]
+    async fn browser_hover(
+        &self,
+        Parameters(req): Parameters<HoverRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let found = self
+            .send_command(|tx| McpCommand::Hover {
+                tab_id: req.tab_id,
+                selector: req.selector.clone(),
+                response: tx,
+            })
+            .await?;
+        if found {
+            Ok(CallToolResult::success(vec![Content::text(
+                "Element hovered successfully",
+            )]))
+        } else {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Element not found: {}",
+                req.selector
+            ))]))
+        }
+    }
+
+    #[tool(
+        description = "Type text into an element by CSS selector or @ref from browser_snapshot. Replaces the current value — does not append. Works with <input>, <textarea>, and contenteditable elements (rich text editors, Gmail compose, etc.). Focuses the element, sets its value, and fires input+change events. Returns whether the element was found. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to type in background tabs."
     )]
     async fn browser_type(
         &self,
@@ -705,7 +829,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Press a keyboard key, optionally with modifiers. Use for form submission (Enter), closing dialogs (Escape), moving focus (Tab), or any keyboard interaction. If selector is provided, focuses that element first. Returns whether the target element was found (always true when no selector is given). Defaults to the user's visible tab if tab_id is omitted."
+        description = "Press a keyboard key, optionally with modifiers. Use for form submission (Enter), closing dialogs (Escape), moving focus (Tab), or any keyboard interaction. If selector is provided (CSS selector or @ref from browser_snapshot), focuses that element first. Returns whether the target element was found (always true when no selector is given). Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_press_key(
         &self,
@@ -734,7 +858,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Select an option in a <select> dropdown by its value. Dispatches a change event after selection. Returns whether the <select> element and the matching option were found. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Select an option in a <select> dropdown by its value. Accepts CSS selector or @ref from browser_snapshot. Dispatches a change event after selection. Returns whether the <select> element and the matching option were found. Defaults to the user's visible tab if tab_id is omitted."
     )]
     async fn browser_select_option(
         &self,
@@ -792,6 +916,25 @@ impl McpServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // ── Dialogs ────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Handle a pending JavaScript dialog (alert, confirm, or prompt). JS dialogs block the page until resolved. Set accept=true to click OK/Yes, false to click Cancel/No. For prompt() dialogs, provide the text to enter. Returns the dialog type and message. Returns an error if no dialog is currently pending."
+    )]
+    async fn browser_handle_dialog(
+        &self,
+        Parameters(req): Parameters<HandleDialogRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .send_command(|tx| McpCommand::HandleDialog {
+                accept: req.accept,
+                text: req.text,
+                response: tx,
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
 }
 
 #[tool_handler]
@@ -802,7 +945,7 @@ impl ServerHandler for McpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions("Octoweb browser control. Tools that accept tab_id default to the user's visible (foreground) tab when omitted. Always pass tab_id explicitly when working with background tabs. Use browser_navigate with new_tab+background to open tabs the user doesn't see.".to_string())
+            .with_instructions("Octoweb browser control. Start with browser_snapshot to discover interactive elements — it returns @ref numbers you can pass as selectors to click/type/hover. Tools that accept tab_id default to the user's visible (foreground) tab when omitted. Always pass tab_id explicitly when working with background tabs. Use browser_navigate with new_tab+background to open tabs the user doesn't see. Use browser_handle_dialog to respond to JS alert/confirm/prompt dialogs that block the page.".to_string())
     }
 }
 

@@ -5,6 +5,7 @@ mod cold_open;
 mod config;
 mod content_rules;
 mod crash_report;
+mod dialog_patch;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
@@ -22,6 +23,7 @@ mod quickslots_html;
 mod settings_html;
 mod shortcuts_html;
 mod sidebar_html;
+mod snapshot_js;
 mod tab_stats;
 mod url;
 mod webview_utils;
@@ -112,6 +114,7 @@ enum AppEvent {
     ZoomReset,                       // ⌘0 — reset page zoom to 100%
     LearningWake,                    // background learning agent pokes event loop
     LearningReady(String),           // active tab content extracted — build prompt and send
+    JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
     Quit,
 }
 fn main() {
@@ -515,6 +518,9 @@ fn main() {
             tokio::sync::oneshot::Sender<Result<usize, String>>,
         ),
     > = HashMap::new();
+    // MCP dialog: at most one pending JS dialog at a time (alert/confirm/prompt).
+    // The dialog blocks the page until resolved — stored here for browser_handle_dialog.
+    let mut mcp_pending_dialog: Option<(std::time::Instant, dialog_patch::DialogInfo)> = None;
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -553,6 +559,7 @@ fn main() {
             }
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             nav_error_patch::inject_from_webview(wv_ptr);
+            dialog_patch::inject_from_webview(wv_ptr);
             let p = proxy.clone();
             nav_error_patch::register(wv_ptr, move |url, code| {
                 let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
@@ -560,6 +567,10 @@ fn main() {
             let pt = proxy.clone();
             nav_error_patch::register_termination(wv_ptr, move || {
                 let _ = pt.send_event(AppEvent::WebContentTerminated(tab_id));
+            });
+            let pd = proxy.clone();
+            dialog_patch::register(wv_ptr, tab_id, move |info| {
+                let _ = pd.send_event(AppEvent::JsDialog(info));
             });
             let _ = wv.set_visible(true);
             tab_webviews.insert(tab_id, wv);
@@ -1461,6 +1472,10 @@ fn main() {
             nav_error_patch::register_termination(wv_ptr, move || {
                 let _ = pt.send_event(AppEvent::WebContentTerminated(id));
             });
+            let pd = proxy.clone();
+            dialog_patch::register(wv_ptr, id, move |info| {
+                let _ = pd.send_event(AppEvent::JsDialog(info));
+            });
             tab_webviews.insert(id, wv);
             if zoom_level != 1.0 {
                 if let Some(wv) = tab_webviews.get(&id) {
@@ -1496,6 +1511,7 @@ fn main() {
                     }
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::inject_from_webview(wv_ptr);
+                    dialog_patch::inject_from_webview(wv_ptr);
                     let p = proxy.clone();
                     nav_error_patch::register(wv_ptr, move |url, code| {
                         let _ =
@@ -1504,6 +1520,10 @@ fn main() {
                     let pt = proxy.clone();
                     nav_error_patch::register_termination(wv_ptr, move || {
                         let _ = pt.send_event(AppEvent::WebContentTerminated(target));
+                    });
+                    let pd = proxy.clone();
+                    dialog_patch::register(wv_ptr, target, move |info| {
+                        let _ = pd.send_event(AppEvent::JsDialog(info));
                     });
                     // If a snapshot exists, show it immediately — deferred navigation to
                     // the real URL happens on PageLoadFinished once the snapshot renders.
@@ -1777,6 +1797,7 @@ fn main() {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
+                        dialog_patch::unregister(wv_ptr);
                     }
                     tab_webviews.remove(&victim_id); // WebView dropped → XPC process freed
                     media_playing_tabs.remove(&victim_id);  // Clean up stale media state
@@ -2216,8 +2237,8 @@ fn main() {
                         if let Some(id) = target_id {
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function(){{const el=document.querySelector({});if(!el)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});const r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return true}})()",
-                                    serde_json::to_string(&selector).unwrap_or_default()
+                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return true}})()",
+                                    sel = serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
@@ -2241,15 +2262,44 @@ fn main() {
                             let _ = response.send(Err("No active tab".to_string()));
                         }
                     }
+                    McpCommand::Hover { tab_id, selector, response } => {
+                        let target_id = tab_id.or(Some(active_wv_id));
+                        if let Some(id) = target_id {
+                            if let Some(wv) = tab_webviews.get(&id) {
+                                let script = format!(
+                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mouseenter',{{...o,bubbles:false}}));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new MouseEvent('mousemove',o));return true}})()",
+                                    sel = serde_json::to_string(&selector).unwrap_or_default()
+                                );
+                                let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                                let response_cb = response.clone();
+                                match wv.evaluate_script_with_callback(&script, move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        let found = val.trim() == "true";
+                                        let _ = tx.send(Ok(found));
+                                    }
+                                }) {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        if let Some(tx) = response.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("Hover failed: {e}")));
+                                        }
+                                    }
+                                }
+                            } else {
+                                let _ = response.send(Err("Tab not found".to_string()));
+                            }
+                        } else {
+                            let _ = response.send(Err("No active tab".to_string()));
+                        }
+                    }
                     McpCommand::Type { tab_id, selector, text, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function(){{const el=document.querySelector({});if(!el)return false;el.focus();const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(s)s.call(el,{});else el.value={};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
-                                    serde_json::to_string(&selector).unwrap_or_default(),
-                                    serde_json::to_string(&text).unwrap_or_default(),
-                                    serde_json::to_string(&text).unwrap_or_default()
+                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.focus();if(el.isContentEditable){{var s=window.getSelection(),r=document.createRange();r.selectNodeContents(el);s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,{txt});return true}}var s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(s)s.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
+                                    sel = serde_json::to_string(&selector).unwrap_or_default(),
+                                    txt = serde_json::to_string(&text).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
@@ -2480,12 +2530,48 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
+                    McpCommand::GetHtml { tab_id, selector, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let script = if let Some(sel) = &selector {
+                                let sel_json = serde_json::to_string(sel).unwrap_or_default();
+                                format!("(function(){{const el=document.querySelector({sel_json});return el?el.outerHTML:null}})()")
+                            } else {
+                                "(function(){const c=document.documentElement.cloneNode(true);c.querySelectorAll('script,style,link[rel=stylesheet],noscript').forEach(e=>e.remove());return c.outerHTML})()".to_string()
+                            };
+                            let sel_for_err = selector.clone().unwrap_or_default();
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(&script, move |val| {
+                                if let Some(tx) = response_cb.lock().unwrap().take() {
+                                    let text = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                    if text == "null" {
+                                        let _ = tx.send(Err(format!(
+                                            "Element not found: {}",
+                                            sel_for_err
+                                        )));
+                                    } else {
+                                        let _ = tx.send(Ok(text));
+                                    }
+                                }
+                            }) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("JS error: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
                     McpCommand::Scroll { tab_id, direction, pixels, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let script = match direction.as_str() {
                                 "top" => "window.scrollTo(0, 0)".to_string(),
-                                "bottom" => "window.scrollTo(0, document.body.scrollHeight)".to_string(),
+                                "bottom" => "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))".to_string(),
                                 "up" => match pixels {
                                     Some(px) => format!("window.scrollBy(0, -{px})"),
                                     None => "window.scrollBy(0, -(window.innerHeight - 100))".to_string(),
@@ -2516,9 +2602,10 @@ fn main() {
                             let has_alt = modifiers.iter().any(|m| m == "alt");
                             let has_meta = modifiers.iter().any(|m| m == "meta");
                             let target_expr = if let Some(ref sel) = selector {
+                                let sel_json = serde_json::to_string(sel).unwrap_or_default();
                                 format!(
-                                    "document.querySelector({})",
-                                    serde_json::to_string(sel).unwrap_or_default()
+                                    "(function(s){{return s[0]==='@'?(window.__octoweb_refs||new Map).get(s):document.querySelector(s)}})({})",
+                                    sel_json
                                 )
                             } else {
                                 "document.activeElement || document.body".to_string()
@@ -2530,6 +2617,7 @@ fn main() {
                                     if (el.focus) el.focus();\
                                     const opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
                                     el.dispatchEvent(new KeyboardEvent('keydown', opts));\
+                                    if ({key_json}.length===1) el.dispatchEvent(new KeyboardEvent('keypress', opts));\
                                     el.dispatchEvent(new KeyboardEvent('keyup', opts));\
                                     return true;\
                                 }})()"
@@ -2594,9 +2682,9 @@ fn main() {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let script = format!(
-                                "(function() {{ const el = document.querySelector({}); if (!el || el.tagName !== 'SELECT') return false; const opt = Array.from(el.options).find(o => o.value === {}); if (!opt) return false; el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()",
-                                serde_json::to_string(&selector).unwrap_or_default(),
-                                serde_json::to_string(&value).unwrap_or_default()
+                                "(function() {{ var _s={sel}; var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s); if (!el || el.tagName !== 'SELECT') return false; var opt = Array.from(el.options).find(function(o){{ return o.value === {val}; }}); if (!opt) return false; el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()",
+                                sel = serde_json::to_string(&selector).unwrap_or_default(),
+                                val = serde_json::to_string(&value).unwrap_or_default()
                             );
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
@@ -2617,6 +2705,63 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
+                    McpCommand::Snapshot { tab_id, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            match wv.evaluate_script_with_callback(
+                                snapshot_js::SNAPSHOT_JS,
+                                move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        let text = serde_json::from_str::<String>(&val).unwrap_or(val);
+                                        let _ = tx.send(Ok(text));
+                                    }
+                                },
+                            ) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    if let Some(tx) = response.lock().unwrap().take() {
+                                        let _ = tx.send(Err(format!("Snapshot failed: {e}")));
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
+                    McpCommand::HandleDialog { accept, text, response } => {
+                        if let Some((_at, info)) = mcp_pending_dialog.take() {
+                            let dialog_type = match &info.dialog_type {
+                                dialog_patch::DialogType::Alert => "alert",
+                                dialog_patch::DialogType::Confirm => "confirm",
+                                dialog_patch::DialogType::Prompt { default_text: ref dt } => {
+                                    if !dt.is_empty() {
+                                        tracing::debug!(default_text = %dt, "Prompt default");
+                                    }
+                                    "prompt"
+                                }
+                            };
+                            let msg = info.message.clone();
+                            dialog_patch::resolve(info.dialog_id, accept, text.as_deref());
+                            let action = if accept { "accepted" } else { "dismissed" };
+                            let _ = response.send(Ok(format!(
+                                "Dialog {action}: [{dialog_type}] {msg}"
+                            )));
+                        } else {
+                            let _ = response.send(Err("No dialog pending".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Auto-dismiss stale JS dialogs (30s timeout) ─────────────────
+        if let Some((at, _)) = &mcp_pending_dialog {
+            if at.elapsed() > std::time::Duration::from_secs(30) {
+                tracing::warn!("Auto-dismissing stale JS dialog (>30s)");
+                if let Some((_, info)) = mcp_pending_dialog.take() {
+                    dialog_patch::dismiss(info.dialog_id);
                 }
             }
         }
@@ -2943,6 +3088,7 @@ fn main() {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
+                        dialog_patch::unregister(wv_ptr);
                     }
                     tab_webviews.remove(&id);
                     media_playing_tabs.remove(&id);  // Clean up stale media state
@@ -3395,6 +3541,17 @@ fn main() {
                 let _ = notification_wv.evaluate_script(&format!(
                     "window.__show && window.__show(`{escaped}`, `{icon}`, `Download`, 4000)"
                 ));
+            }
+
+            // ── JS Dialog captured by dialog_patch ────────────────────────
+            Event::UserEvent(AppEvent::JsDialog(info)) => {
+                tracing::debug!(tab_id = info.tab_id, ?info.dialog_type, %info.message, "JS dialog received");
+                // If there's already a pending dialog, auto-dismiss the old one
+                if let Some((_, old_info)) = mcp_pending_dialog.take() {
+                    tracing::warn!("Auto-dismissing previous dialog (new one arrived)");
+                    dialog_patch::dismiss(old_info.dialog_id);
+                }
+                mcp_pending_dialog = Some((std::time::Instant::now(), info));
             }
 
             // ── Quit ──────────────────────────────────────────────────────
