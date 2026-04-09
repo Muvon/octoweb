@@ -167,12 +167,6 @@ pub enum McpCommand {
         value: String,
         response: oneshot::Sender<Result<bool, String>>,
     },
-    /// Get HTML content of page or a specific element
-    GetHtml {
-        tab_id: Option<usize>,
-        selector: Option<String>,
-        response: oneshot::Sender<Result<String, String>>,
-    },
     /// Take a snapshot of interactive elements on the page
     Snapshot {
         tab_id: Option<usize>,
@@ -366,18 +360,6 @@ pub struct WaitRequest {
     pub event: Option<String>,
     #[schemars(description = "Maximum time to wait in milliseconds (default: 10000, max: 30000)")]
     pub timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetHtmlRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
-    pub tab_id: Option<usize>,
-    #[schemars(
-        description = "CSS selector for a specific element. Returns that element's outerHTML. Omit to get the full page HTML with scripts and styles removed."
-    )]
-    pub selector: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -655,23 +637,6 @@ impl McpServer {
             })
             .await?;
         Ok(CallToolResult::success(vec![Content::text(content)]))
-    }
-
-    #[tool(
-        description = "Get HTML content of a page or a specific element. Without selector: returns the page's HTML with scripts and styles stripped — useful for understanding page structure, forms, tables, and element attributes. With selector: returns the matching element's outerHTML. Use browser_get_page_content for plain text, this tool for structure. Defaults to the user's visible tab if tab_id is omitted."
-    )]
-    async fn browser_get_html(
-        &self,
-        Parameters(req): Parameters<GetHtmlRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let html = self
-            .send_command(|tx| McpCommand::GetHtml {
-                tab_id: req.tab_id,
-                selector: req.selector,
-                response: tx,
-            })
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(html)]))
     }
 
     #[tool(

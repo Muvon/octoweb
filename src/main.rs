@@ -2096,7 +2096,6 @@ fn main() {
                     McpCommand::GetPageInfo { tab_id, .. }
                     | McpCommand::ExecuteJs { tab_id, .. }
                     | McpCommand::GetPageContent { tab_id, .. }
-                    | McpCommand::GetHtml { tab_id, .. }
                     | McpCommand::Snapshot { tab_id, .. }
                     | McpCommand::Screenshot { tab_id, .. }
                     | McpCommand::Reload { tab_id, .. }
@@ -2551,42 +2550,6 @@ fn main() {
                                     }
                                 },
                             ) {
-                                Ok(()) => {}
-                                Err(e) => {
-                                    if let Some(tx) = response.lock().unwrap().take() {
-                                        let _ = tx.send(Err(format!("JS error: {e}")));
-                                    }
-                                }
-                            }
-                        } else {
-                            let _ = response.send(Err("Tab not found".to_string()));
-                        }
-                    }
-                    McpCommand::GetHtml { tab_id, selector, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
-                            let script = if let Some(sel) = &selector {
-                                let sel_json = serde_json::to_string(sel).unwrap_or_default();
-                                format!("(function(){{const el=document.querySelector({sel_json});return el?el.outerHTML:null}})()")
-                            } else {
-                                "(function(){const c=document.documentElement.cloneNode(true);c.querySelectorAll('script,style,link[rel=stylesheet],noscript').forEach(e=>e.remove());return c.outerHTML})()".to_string()
-                            };
-                            let sel_for_err = selector.clone().unwrap_or_default();
-                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
-                            let response_cb = response.clone();
-                            match wv.evaluate_script_with_callback(&script, move |val| {
-                                if let Some(tx) = response_cb.lock().unwrap().take() {
-                                    let text = serde_json::from_str::<String>(&val).unwrap_or(val);
-                                    if text == "null" {
-                                        let _ = tx.send(Err(format!(
-                                            "Element not found: {}",
-                                            sel_for_err
-                                        )));
-                                    } else {
-                                        let _ = tx.send(Ok(text));
-                                    }
-                                }
-                            }) {
                                 Ok(()) => {}
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
