@@ -52,7 +52,7 @@ pub const SNAPSHOT_JS: &str = r#"
     return (text || '').trim().replace(/\s+/g, ' ').substring(0, 80);
   }
 
-  var SENSITIVE_NAMES = /password|passwd|pwd|secret|token|csrf|xsrf|api_key|apikey|auth_token|access_token|refresh_token|session|nonce|ssn|credit.?card|cc.?number|card.?number|cvv|cvc|csc|pin|otp/i;
+  var SENSITIVE_NAMES = /password|passwd|pwd|secret|token|csrf|xsrf|api_key|apikey|auth_token|access_token|refresh_token|session|nonce|ssn|credit.?card|cc.?number|card.?number|card.?no|card.?#|cc.?num|acct.?num|cvv|cvc|csc|cvn|security.?code|verification|card.?identification|pin|otp|expir|exp.?date|exp.?month|exp.?year|ccmonth|cardmonth|card.?holder|name.?on.?card|cc.?name|cc.?full.?name/i;
   var SENSITIVE_AC = /^(cc-|new-password|current-password)/;
 
   function isSensitiveInput(el) {
@@ -77,7 +77,7 @@ pub const SNAPSHOT_JS: &str = r#"
       if (el.type === 'checkbox' || el.type === 'radio') parts.push(el.checked ? 'checked' : 'unchecked');
       if (el.value && !isSensitiveInput(el)) parts.push('val=' + el.value.substring(0, 40));
     }
-    if (tag === 'textarea' && el.value && !SENSITIVE_NAMES.test(el.name || '') && !SENSITIVE_NAMES.test(el.id || '')) parts.push('val=' + el.value.substring(0, 40));
+    if (tag === 'textarea' && el.value && !isSensitiveInput(el)) parts.push('val=' + el.value.substring(0, 40));
     if (tag === 'select') {
       var opts = Array.from(el.options).slice(0, 10);
       var optStr = opts.map(function(o) {

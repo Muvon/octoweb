@@ -28,6 +28,12 @@ const SENSITIVE_PARAMS: &[&str] = &[
     "sid",
     "code",  // OAuth auth code — single-use but still sensitive
     "state", // OAuth state — session identifier
+    "card_number",
+    "cc_number",
+    "cvv",
+    "cvc",
+    "pan",
+    "card_exp",
 ];
 
 /// URL path segments that indicate a sensitive page.
@@ -55,6 +61,10 @@ const SENSITIVE_PATH_SEGMENTS: &[&str] = &[
     "/billing",
     "/payment",
     "/checkout",
+    "/add-card",
+    "/card-details",
+    "/payment-method",
+    "/credit-card",
 ];
 
 /// Sanitize a URL by replacing sensitive query parameter values with `[REDACTED]`.
@@ -132,6 +142,142 @@ pub fn is_sensitive_page(url: &str) -> bool {
         .any(|seg| path_lower.contains(seg))
 }
 
+/// Luhn mod-10 checksum validation (ISO/IEC 7812-1).
+/// Used to distinguish real card numbers from arbitrary digit sequences.
+fn luhn_valid(digits: &[u8]) -> bool {
+    if digits.len() < 13 {
+        return false;
+    }
+    let mut sum = 0u32;
+    for (i, &d) in digits.iter().rev().enumerate() {
+        let mut n = (d - b'0') as u32;
+        if i % 2 == 1 {
+            n *= 2;
+            if n > 9 {
+                n -= 9;
+            }
+        }
+        sum += n;
+    }
+    sum % 10 == 0
+}
+
+/// Check whether digit sequence has a valid IIN (Issuer Identification Number) prefix.
+/// Covers Visa (4), Mastercard (51-55, 2221-2720), Amex (34/37), Discover (6011/65/644-649),
+/// JCB (3528-3589), Diners (300-305/36/38), UnionPay (62).
+fn valid_iin_prefix(digits: &[u8]) -> bool {
+    if digits.is_empty() {
+        return false;
+    }
+    let d0 = digits[0] - b'0';
+    match d0 {
+        4 => true, // Visa
+        3 => {
+            // Amex (34, 37), Diners (30x, 36, 38), JCB (35)
+            digits.len() >= 2 && matches!(digits[1] - b'0', 0..=8)
+        }
+        5 => {
+            // Mastercard (51-55), some Maestro (50, 56-58)
+            digits.len() >= 2 && matches!(digits[1] - b'0', 0..=8)
+        }
+        6 => true, // Discover, Maestro, UnionPay
+        2 => {
+            // Mastercard 2-series (2221-2720)
+            if digits.len() >= 4 {
+                let prefix = (digits[0] - b'0') as u32 * 1000
+                    + (digits[1] - b'0') as u32 * 100
+                    + (digits[2] - b'0') as u32 * 10
+                    + (digits[3] - b'0') as u32;
+                (2221..=2720).contains(&prefix)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Sanitize free text by redacting sequences that look like credit card PANs.
+///
+/// Detection uses the same approach as Zendesk's credit_card_sanitizer:
+/// 1. Find digit sequences (allowing space/dash separators) of 13–19 digits
+/// 2. Validate IIN prefix (known card brand ranges)
+/// 3. Validate Luhn checksum
+///
+/// Only sequences passing both checks are redacted — this keeps false positives
+/// near zero (phone numbers, timestamps, IDs won't match).
+pub fn sanitize_text(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+
+    while i < len {
+        if !bytes[i].is_ascii_digit() {
+            // Non-digit: copy full UTF-8 character
+            let ch = text[i..].chars().next().unwrap();
+            result.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        // Found a digit — collect the first contiguous digit group
+        let span_start = i;
+        let mut j = i;
+        while j < len && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        let first_group_len = j - span_start;
+
+        if first_group_len > 19 {
+            // Too many contiguous digits — not a card, emit as-is
+            result.push_str(&text[span_start..j]);
+            i = j;
+        } else if first_group_len >= 13 {
+            // Standalone group in card-length range — check directly
+            let digits: Vec<u8> = bytes[span_start..j].to_vec();
+            if valid_iin_prefix(&digits) && luhn_valid(&digits) {
+                result.push_str("[CARD REDACTED]");
+            } else {
+                result.push_str(&text[span_start..j]);
+            }
+            i = j;
+        } else {
+            // < 13 contiguous digits — try assembling with separator-connected groups
+            let mut digits: Vec<u8> = bytes[span_start..j].to_vec();
+            let mut span_end = j;
+
+            while digits.len() < 19 {
+                if span_end < len
+                    && (bytes[span_end] == b' ' || bytes[span_end] == b'-')
+                    && span_end + 1 < len
+                    && bytes[span_end + 1].is_ascii_digit()
+                {
+                    span_end += 1; // skip separator
+                    while span_end < len && bytes[span_end].is_ascii_digit() && digits.len() < 19 {
+                        digits.push(bytes[span_end]);
+                        span_end += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if digits.len() >= 13
+                && digits.len() <= 19
+                && valid_iin_prefix(&digits)
+                && luhn_valid(&digits)
+            {
+                result.push_str("[CARD REDACTED]");
+            } else {
+                result.push_str(&text[span_start..span_end]);
+            }
+            i = span_end;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,7 +319,106 @@ mod tests {
         assert!(is_sensitive_page("https://example.com/login"));
         assert!(is_sensitive_page("https://bank.com/account/security"));
         assert!(is_sensitive_page("https://shop.com/checkout"));
+        assert!(is_sensitive_page("https://shop.com/add-card"));
+        assert!(is_sensitive_page("https://shop.com/payment-method"));
         assert!(!is_sensitive_page("https://example.com/dashboard"));
         assert!(!is_sensitive_page("https://example.com/products"));
+    }
+
+    // ── Luhn checksum ──────────────────────────────────────────────
+
+    #[test]
+    fn test_luhn_valid_known_cards() {
+        // Visa test number
+        assert!(luhn_valid(b"4111111111111111"));
+        // Mastercard test number
+        assert!(luhn_valid(b"5500000000000004"));
+        // Amex test number
+        assert!(luhn_valid(b"378282246310005"));
+        // Discover test number
+        assert!(luhn_valid(b"6011111111111117"));
+    }
+
+    #[test]
+    fn test_luhn_invalid() {
+        assert!(!luhn_valid(b"4111111111111112")); // wrong check digit
+        assert!(!luhn_valid(b"1234567890123")); // random 13 digits
+    }
+
+    // ── PAN text sanitization ──────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_text_pan_no_separators() {
+        let text = "Card: 4111111111111111 thanks";
+        assert_eq!(sanitize_text(text), "Card: [CARD REDACTED] thanks");
+    }
+
+    #[test]
+    fn test_sanitize_text_pan_with_spaces() {
+        let text = "Card 4111 1111 1111 1111 ok";
+        assert_eq!(sanitize_text(text), "Card [CARD REDACTED] ok");
+    }
+
+    #[test]
+    fn test_sanitize_text_pan_with_dashes() {
+        let text = "Card 4111-1111-1111-1111 ok";
+        assert_eq!(sanitize_text(text), "Card [CARD REDACTED] ok");
+    }
+
+    #[test]
+    fn test_sanitize_text_amex() {
+        let text = "Amex 3782 822463 10005 end";
+        assert_eq!(sanitize_text(text), "Amex [CARD REDACTED] end");
+    }
+
+    #[test]
+    fn test_sanitize_text_no_false_positive_phone() {
+        // Phone numbers: too short (10-11 digits) and wrong IIN
+        let text = "Call +1-555-123-4567 now";
+        assert_eq!(sanitize_text(text), "Call +1-555-123-4567 now");
+    }
+
+    #[test]
+    fn test_sanitize_text_no_false_positive_timestamp() {
+        let text = "ID: 20260410143022 ref";
+        // 14 digits starting with 2 — won't match IIN 2221-2720 range
+        assert_eq!(sanitize_text(text), "ID: 20260410143022 ref");
+    }
+
+    #[test]
+    fn test_sanitize_text_no_false_positive_short() {
+        let text = "Order 123456 confirmed";
+        assert_eq!(sanitize_text(text), "Order 123456 confirmed");
+    }
+
+    #[test]
+    fn test_sanitize_text_fails_luhn_not_redacted() {
+        // 16 digits starting with 4 but fails Luhn
+        let text = "Number 4111111111111112 here";
+        assert_eq!(sanitize_text(text), "Number 4111111111111112 here");
+    }
+
+    #[test]
+    fn test_sanitize_text_preserves_normal_text() {
+        let text = "Hello world, no cards here.";
+        assert_eq!(sanitize_text(text), text);
+    }
+
+    #[test]
+    fn test_sanitize_text_multiple_pans() {
+        let text = "Cards: 4111111111111111 and 5500000000000004";
+        assert_eq!(
+            sanitize_text(text),
+            "Cards: [CARD REDACTED] and [CARD REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_text_pan_in_prose() {
+        let text = "Your payment with card 4111111111111111 was processed successfully.";
+        assert_eq!(
+            sanitize_text(text),
+            "Your payment with card [CARD REDACTED] was processed successfully."
+        );
     }
 }

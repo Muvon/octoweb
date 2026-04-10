@@ -216,12 +216,12 @@ pub struct PageInfo {
 }
 
 impl PageInfo {
-    /// Build with URL sanitization.
+    /// Build with URL sanitization and PAN scrubbing on description.
     pub fn new(title: String, url: String, description: Option<String>) -> Self {
         Self {
             title,
             url: sanitize::sanitize_url(&url),
-            description,
+            description: description.map(|d| sanitize::sanitize_text(&d)),
         }
     }
 }

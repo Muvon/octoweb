@@ -2534,7 +2534,7 @@ fn main() {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         // val comes as a JSON string — strip outer quotes
                                         let text = serde_json::from_str::<String>(&val).unwrap_or(val);
-                                        let _ = tx.send(Ok(text));
+                                        let _ = tx.send(Ok(sanitize::sanitize_text(&text)));
                                     }
                                 },
                             ) {
@@ -4668,7 +4668,8 @@ fn build_learning_prompt(
                 break;
             }
         }
-        out.push_str(trimmed.trim());
+        let sanitized = sanitize::sanitize_text(trimmed.trim());
+        out.push_str(&sanitized);
         out.push('\n');
     } else if on_sensitive_page {
         out.push_str("Active page: [sensitive page — content omitted]\n");
