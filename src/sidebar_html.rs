@@ -1430,7 +1430,7 @@ pub fn html() -> String {
         '<path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
       '</svg>';
     marked.use({ renderer: {
-      code({ text, lang }) {
+      code(text, lang) {
         const l = (lang || '').split(/\s+/)[0];
         const label = l ? '<span class="code-lang">' + l + '</span>' : '';
         return '<div class="code-block">' +
