@@ -159,7 +159,7 @@ fn luhn_valid(digits: &[u8]) -> bool {
         }
         sum += n;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Check whether digit sequence has a valid IIN (Issuer Identification Number) prefix.
