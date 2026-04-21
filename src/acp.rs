@@ -141,11 +141,9 @@ impl acp::Client for BrowserClient {
         match args.update {
             acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
                 match content {
-                    acp::ContentBlock::Text(t) => {
-                        if !t.text.is_empty() {
-                            let _ = self.tx.send(AgentEvent::Chunk(t.text));
-                            (self.wake)();
-                        }
+                    acp::ContentBlock::Text(t) if !t.text.is_empty() => {
+                        let _ = self.tx.send(AgentEvent::Chunk(t.text));
+                        (self.wake)();
                     }
                     acp::ContentBlock::Image(img) => {
                         let _ = self.tx.send(AgentEvent::Image {
@@ -154,11 +152,9 @@ impl acp::Client for BrowserClient {
                         });
                         (self.wake)();
                     }
-                    acp::ContentBlock::ResourceLink(r) => {
-                        if !r.uri.is_empty() {
-                            let _ = self.tx.send(AgentEvent::Chunk(r.uri));
-                            (self.wake)();
-                        }
+                    acp::ContentBlock::ResourceLink(r) if !r.uri.is_empty() => {
+                        let _ = self.tx.send(AgentEvent::Chunk(r.uri));
+                        (self.wake)();
                     }
                     _ => {}
                 }

@@ -3370,21 +3370,21 @@ fn main() {
             Event::UserEvent(AppEvent::LearningWake) => {}
 
             // ── Learning ready — active tab text extracted, build prompt and send ──
-            Event::UserEvent(AppEvent::LearningReady(page_text)) => {
-                if learning_handle.is_none() && cfg.proactive_learning {
-                    let mut tm = tabs.lock().unwrap();
-                    tm.ensure_contiguous();
-                    if let Some(prompt) = build_learning_prompt(&tm, active_wv_id, &page_text) {
-                        drop(tm);
-                        tracing::info!(prompt_len = prompt.len(), "starting proactive learning run");
-                        let lp = proxy.clone();
-                        learning_handle = acp::AcpHandle::connect(
-                            "octomind acp octoweb:learning",
-                            move || { let _ = lp.send_event(AppEvent::LearningWake); },
-                        ).ok();
-                        if let Some(ref h) = learning_handle {
-                            h.send_prompt(prompt, vec![]);
-                        }
+            Event::UserEvent(AppEvent::LearningReady(page_text))
+                if learning_handle.is_none() && cfg.proactive_learning =>
+            {
+                let mut tm = tabs.lock().unwrap();
+                tm.ensure_contiguous();
+                if let Some(prompt) = build_learning_prompt(&tm, active_wv_id, &page_text) {
+                    drop(tm);
+                    tracing::info!(prompt_len = prompt.len(), "starting proactive learning run");
+                    let lp = proxy.clone();
+                    learning_handle = acp::AcpHandle::connect(
+                        "octomind acp octoweb:learning",
+                        move || { let _ = lp.send_event(AppEvent::LearningWake); },
+                    ).ok();
+                    if let Some(ref h) = learning_handle {
+                        h.send_prompt(prompt, vec![]);
                     }
                 }
             }
@@ -3407,14 +3407,14 @@ fn main() {
             }
 
             // ── Dismiss notification toast ─────────────────────────────────────
-            Event::UserEvent(AppEvent::DismissNotification) => {
-                if notification_visible {
-                    let _ = notification_wv.evaluate_script(
-                        "window.__hide && window.__hide()"
-                    );
-                    let _ = notification_wv.set_visible(false);
-                    notification_visible = false;
-                }
+            Event::UserEvent(AppEvent::DismissNotification)
+                if notification_visible =>
+            {
+                let _ = notification_wv.evaluate_script(
+                    "window.__hide && window.__hide()"
+                );
+                let _ = notification_wv.set_visible(false);
+                notification_visible = false;
             }
 
             // ── Find bar: toggle ⌘F ──────────────────────────────────────────
@@ -3455,17 +3455,15 @@ fn main() {
             }
 
             // ── Find bar: hide (Esc / close button) ─────────────────────────
-            Event::UserEvent(AppEvent::HideFindBar) => {
-                if find_bar_visible {
-                    let _ = find_bar_wv.set_visible(false);
-                    let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
-                    find_bar_visible = false;
-                    find_bar_hotkey_visible.store(false, Ordering::Relaxed);
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                        let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
-                    }
-                    browser_win.set_focus();
+            Event::UserEvent(AppEvent::HideFindBar) if find_bar_visible => {
+                let _ = find_bar_wv.set_visible(false);
+                let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                find_bar_visible = false;
+                find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
                 }
+                browser_win.set_focus();
             }
 
             // ── Find bar: search query from input ───────────────────────────
@@ -3493,12 +3491,12 @@ fn main() {
             }
 
             // ── Find bar: match count from tab WebView ──────────────────────
-            Event::UserEvent(AppEvent::FindCount(current, total)) => {
-                if find_bar_visible {
-                    let _ = find_bar_wv.evaluate_script(&format!(
-                        "window.__setCount && window.__setCount({current}, {total})"
-                    ));
-                }
+            Event::UserEvent(AppEvent::FindCount(current, total))
+                if find_bar_visible =>
+            {
+                let _ = find_bar_wv.evaluate_script(&format!(
+                    "window.__setCount && window.__setCount({current}, {total})"
+                ));
             }
 
             // ── Download started — show toast, keep the tab open ────────────
@@ -3950,45 +3948,41 @@ fn main() {
                     browser_win.set_focus();
                 }
             }
-            Event::UserEvent(AppEvent::InlineEditHide) => {
-                if inline_edit_visible {
-                    let _ = inline_edit_wv.set_visible(false);
-                    inline_edit_visible = false;
-                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
-                    // Set loading cursor on the target tab while processing continues
-                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
-                        let _ = wv.evaluate_script(
-                            "document.documentElement.style.cursor='wait'"
-                        );
-                    }
-                    browser_win.set_focus();
+            Event::UserEvent(AppEvent::InlineEditHide) if inline_edit_visible => {
+                let _ = inline_edit_wv.set_visible(false);
+                inline_edit_visible = false;
+                inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
+                // Set loading cursor on the target tab while processing continues
+                if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                    let _ = wv.evaluate_script(
+                        "document.documentElement.style.cursor='wait'"
+                    );
                 }
+                browser_win.set_focus();
             }
-            Event::UserEvent(AppEvent::InlineEditResize(h)) => {
-                if inline_edit_visible {
-                    let scale = browser_win.scale_factor();
-                    let new_h = (h * scale) as u32;
-                    let bounds = inline_edit_wv.bounds().unwrap_or(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
-                    });
-                    let _ = inline_edit_wv.set_bounds(wry::Rect {
-                        position: bounds.position,
-                        size: tao::dpi::PhysicalSize::new(inline_edit_w, new_h).into(),
-                    });
-                }
+            Event::UserEvent(AppEvent::InlineEditResize(h))
+                if inline_edit_visible =>
+            {
+                let scale = browser_win.scale_factor();
+                let new_h = (h * scale) as u32;
+                let bounds = inline_edit_wv.bounds().unwrap_or(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                    size: tao::dpi::PhysicalSize::new(inline_edit_w, inline_edit_h).into(),
+                });
+                let _ = inline_edit_wv.set_bounds(wry::Rect {
+                    position: bounds.position,
+                    size: tao::dpi::PhysicalSize::new(inline_edit_w, new_h).into(),
+                });
             }
-            Event::UserEvent(AppEvent::InlineEditClose) => {
-                if inline_edit_visible {
-                    let _ = inline_edit_wv.set_visible(false);
-                    let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
-                    inline_edit_visible = false;
-                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
-                    if let Some(ref h) = inline_edit_acp { h.cancel(); }
-                    inline_edit_acp = None;
-                    inline_edit_response.clear();
-                    browser_win.set_focus();
-                }
+            Event::UserEvent(AppEvent::InlineEditClose) if inline_edit_visible => {
+                let _ = inline_edit_wv.set_visible(false);
+                let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                inline_edit_visible = false;
+                inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
+                if let Some(ref h) = inline_edit_acp { h.cancel(); }
+                inline_edit_acp = None;
+                inline_edit_response.clear();
+                browser_win.set_focus();
             }
 
             // ── Reload current page ───────────────────────────────────────────
@@ -4023,12 +4017,12 @@ fn main() {
             }
 
             // ── Frozen tab snapshot captured (async callback) ──────────────────
-            Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri)) => {
+            Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri))
                 // Discard suspiciously small snapshots (likely blank/hidden WebView).
                 // A real page snapshot is typically >5 KB as base64 PNG.
-                if data_uri.len() > 5_000 {
-                    tab_snapshots.insert(tab_id, data_uri);
-                }
+                if data_uri.len() > 5_000 =>
+            {
+                tab_snapshots.insert(tab_id, data_uri);
             }
 
             // ── Favicon cache loaded from disk (background thread) ──────────────

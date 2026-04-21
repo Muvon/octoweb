@@ -181,17 +181,13 @@ fn valid_iin_prefix(digits: &[u8]) -> bool {
             digits.len() >= 2 && matches!(digits[1] - b'0', 0..=8)
         }
         6 => true, // Discover, Maestro, UnionPay
-        2 => {
+        2 if digits.len() >= 4 => {
             // Mastercard 2-series (2221-2720)
-            if digits.len() >= 4 {
-                let prefix = (digits[0] - b'0') as u32 * 1000
-                    + (digits[1] - b'0') as u32 * 100
-                    + (digits[2] - b'0') as u32 * 10
-                    + (digits[3] - b'0') as u32;
-                (2221..=2720).contains(&prefix)
-            } else {
-                false
-            }
+            let prefix = (digits[0] - b'0') as u32 * 1000
+                + (digits[1] - b'0') as u32 * 100
+                + (digits[2] - b'0') as u32 * 10
+                + (digits[3] - b'0') as u32;
+            (2221..=2720).contains(&prefix)
         }
         _ => false,
     }
