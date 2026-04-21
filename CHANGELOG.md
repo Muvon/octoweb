@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.6.0] - 2026-04-21
+
+### 📋 Release Summary
+
+This update introduces advanced browser automation for dialogs and element interaction alongside RAM-aware hibernation for optimized resource management (f653f374, 2803aea0, 71c90203). Security and privacy are strengthened with new data sanitization measures to prevent sensitive information leakage in prompts and outputs (eebd5cf4, 5c067f32). Reliability is further improved through refined window and popup handling and streamlined core logic (debfe68c, 05b45c46, 3ae246e2, 65c7a996).
+
+
+### 🚨 Breaking Changes
+
+⚠️ **Important**: This release contains breaking changes that may require code updates.
+
+- **mcp**: remove browser_get_html tool `f653f374`
+
+### ✨ New Features & Enhancements
+
+- **hibernation**: add RAM-aware proactive thresholds `71c90203`
+- **mcp**: add browser automation tools for JS dialogs and element interaction `2803aea0`
+
+### 🔧 Improvements & Optimizations
+
+- **core**: simplify logic and event handling `3ae246e2`
+- **sidebar**: simplify code renderer parameters `65c7a996`
+
+### 🐛 Bug Fixes & Stability
+
+- **window**: route window.open to tabs or popups `debfe68c`
+- **sanitize**: redact PANs in text outputs `eebd5cf4`
+- **mcp**: prevent sensitive data leakage in prompts and snapshots `5c067f32`
+- **webview**: preserve window.opener for popup windows `05b45c46`
+
 ## [0.5.2] - 2026-04-08
 
 ### 📋 Release Summary
