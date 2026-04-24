@@ -781,7 +781,57 @@ pub fn html() -> String {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    position: relative;
   }
+
+  /* ── Slash command dropdown ─────────────────────────────────────────── */
+  #cmd-dropdown {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 4px; right: 4px;
+    margin-bottom: 2px;
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--glass-solid);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    box-shadow: var(--glass-shadow);
+    z-index: 10;
+    padding: 4px 0;
+  }
+  #cmd-dropdown.visible { display: block; }
+  #cmd-dropdown::-webkit-scrollbar { width: 3px; }
+  #cmd-dropdown::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+
+  .cmd-item {
+    padding: 6px 10px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .cmd-item.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .cmd-item:hover:not(.active) {
+    background: var(--input-border);
+  }
+  .cmd-name {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .cmd-item.active .cmd-name { color: #fff; }
+  .cmd-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cmd-item.active .cmd-desc { color: rgba(255,255,255,0.75); }
 
   #input-row {
     display: flex;
@@ -1335,6 +1385,7 @@ pub fn html() -> String {
 
   <!-- Input -->
   <div id="input-area">
+    <div id="cmd-dropdown"></div>
     <div id="input-row">
       <button id="new-session-btn" title="New session" aria-label="New session">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
@@ -1504,6 +1555,8 @@ pub fn html() -> String {
     thinking.innerHTML = '';
     currentAgentBubble = null;
     currentAgentRaw = '';
+    availableCommands = [];
+    hideCmdDropdown();
   };
 
   // ── Status ──────────────────────────────────────────────────────────────
@@ -1514,11 +1567,122 @@ pub fn html() -> String {
   window.__setConnecting = function() {
     dot.className = 'dot connecting';
     statusTxt.textContent = 'connecting';
+    availableCommands = [];
+    hideCmdDropdown();
   };
   window.__setError = function() {
     dot.className = 'dot error';
     statusTxt.textContent = 'error';
   };
+
+  // ── Slash commands ──────────────────────────────────────────────────────
+  var availableCommands = [];
+  var cmdDropdown = document.getElementById('cmd-dropdown');
+  var cmdActiveIdx = 0;
+  var cmdFiltered = [];
+  var cmdVisible = false;
+
+  window.__setAvailableCommands = function(json) {
+    try { availableCommands = JSON.parse(json); } catch(e) { availableCommands = []; }
+  };
+
+  function showCmdDropdown(filter) {
+    var lower = filter.toLowerCase();
+    cmdFiltered = availableCommands.filter(function(c) {
+      return c.name.toLowerCase().indexOf(lower) === 0;
+    });
+    if (cmdFiltered.length === 0) { hideCmdDropdown(); return; }
+    cmdActiveIdx = 0;
+    renderCmdDropdown();
+    cmdDropdown.classList.add('visible');
+    cmdVisible = true;
+  }
+
+  function hideCmdDropdown() {
+    cmdDropdown.classList.remove('visible');
+    cmdVisible = false;
+    cmdFiltered = [];
+    cmdActiveIdx = 0;
+  }
+
+  function renderCmdDropdown() {
+    cmdDropdown.innerHTML = '';
+    for (var i = 0; i < cmdFiltered.length; i++) {
+      var c = cmdFiltered[i];
+      var div = document.createElement('div');
+      div.className = 'cmd-item' + (i === cmdActiveIdx ? ' active' : '');
+      var nameEl = document.createElement('div');
+      nameEl.className = 'cmd-name';
+      nameEl.textContent = '/' + c.name;
+      var descEl = document.createElement('div');
+      descEl.className = 'cmd-desc';
+      descEl.textContent = c.description;
+      div.appendChild(nameEl);
+      div.appendChild(descEl);
+      (function(idx) {
+        div.addEventListener('mousedown', function(e) {
+          e.preventDefault();
+          selectCmd(idx);
+        });
+        div.addEventListener('mouseenter', function() {
+          cmdActiveIdx = idx;
+          updateCmdActive();
+        });
+      })(i);
+      cmdDropdown.appendChild(div);
+    }
+  }
+
+  function updateCmdActive() {
+    var items = cmdDropdown.querySelectorAll('.cmd-item');
+    for (var i = 0; i < items.length; i++) {
+      items[i].classList.toggle('active', i === cmdActiveIdx);
+    }
+    if (items[cmdActiveIdx]) items[cmdActiveIdx].scrollIntoView({ block: 'nearest' });
+  }
+
+  function selectCmd(idx) {
+    var cmd = cmdFiltered[idx];
+    if (!cmd) return;
+    input.value = '/' + cmd.name + ' ';
+    if (cmd.hint) { input.placeholder = cmd.hint; }
+    hideCmdDropdown();
+    input.focus();
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    updateSendBtn();
+  }
+
+  // Capture-phase keydown: intercept arrow/enter/tab/escape when dropdown is visible
+  input.addEventListener('keydown', function(e) {
+    if (!cmdVisible) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault(); e.stopPropagation();
+      if (cmdActiveIdx < cmdFiltered.length - 1) cmdActiveIdx++;
+      updateCmdActive();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault(); e.stopPropagation();
+      if (cmdActiveIdx > 0) cmdActiveIdx--;
+      updateCmdActive();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault(); e.stopPropagation();
+      selectCmd(cmdActiveIdx);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault(); e.stopPropagation();
+      hideCmdDropdown();
+      return;
+    }
+  }, true);
+
+  input.addEventListener('blur', function() {
+    setTimeout(hideCmdDropdown, 150);
+  });
 
   // ── Agent chip ──────────────────────────────────────────────────────────
   const agentChip      = document.getElementById('agent-chip');
@@ -2147,6 +2311,7 @@ pub fn html() -> String {
     const docs = pendingDocs.slice();
     if (!text && !images.length && !docs.length) return;
     input.value = '';
+    input.placeholder = 'Ask Octopus\u2026';
     input.style.height = 'auto';
     pendingImages = [];
     pendingDocs = [];
@@ -2204,6 +2369,19 @@ pub fn html() -> String {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
+
+    var val = input.value;
+    if (!val) { input.placeholder = 'Ask Octopus\u2026'; }
+    if (val.charAt(0) === '/' && availableCommands.length > 0) {
+      var spaceIdx = val.indexOf(' ');
+      if (spaceIdx === -1) {
+        showCmdDropdown(val.substring(1));
+      } else {
+        hideCmdDropdown();
+      }
+    } else {
+      hideCmdDropdown();
+    }
   });
 
   // Hook into __setThinking to drain queue when agent becomes free

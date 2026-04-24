@@ -1933,6 +1933,16 @@ fn main() {
                             "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`,{raw_output_json})"
                         ));
                     }
+                    acp::AgentEvent::AvailableCommands(commands) => {
+                        let json: Vec<serde_json::Value> = commands.iter().map(|c| {
+                            serde_json::json!({"name": c.name, "description": c.description, "hint": c.hint})
+                        }).collect();
+                        let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "[]".into());
+                        let escaped = webview_utils::escape_js_template(&json_str);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setAvailableCommands && window.__setAvailableCommands(`{escaped}`)"
+                        ));
+                    }
                     acp::AgentEvent::Done => {
                         let _ = sidebar_wv.evaluate_script(
                             "window.__setThinking && window.__setThinking(false)"

@@ -43,12 +43,23 @@ pub enum AgentEvent {
     Cancelled,
     /// Agent or connection error.
     Error(String),
+    /// Agent sent updated list of available slash commands.
+    AvailableCommands(Vec<CommandInfo>),
 }
 
 /// A prompt with optional image attachments.
 pub struct PromptMessage {
     pub text: String,
     pub images: Vec<(String, String)>, // (base64_data, mime_type)
+}
+
+/// Simplified representation of an ACP available command for the UI.
+#[derive(Debug, Clone)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    /// Optional input hint (e.g. "describe what to search for").
+    pub hint: Option<String>,
 }
 
 /// Minimal Client impl — handles streaming text chunks and auto-approves permissions.
@@ -185,6 +196,25 @@ impl acp::Client for BrowserClient {
                     status,
                     raw_output: upd.fields.raw_output.clone(),
                 });
+                (self.wake)();
+            }
+            acp::SessionUpdate::AvailableCommandsUpdate(update) => {
+                let commands: Vec<CommandInfo> = update
+                    .available_commands
+                    .into_iter()
+                    .map(|cmd| {
+                        let hint = cmd.input.and_then(|inp| match inp {
+                            acp::AvailableCommandInput::Unstructured(u) => Some(u.hint),
+                            _ => None,
+                        });
+                        CommandInfo {
+                            name: cmd.name,
+                            description: cmd.description,
+                            hint,
+                        }
+                    })
+                    .collect();
+                let _ = self.tx.send(AgentEvent::AvailableCommands(commands));
                 (self.wake)();
             }
             _ => {}
