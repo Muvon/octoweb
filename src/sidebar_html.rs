@@ -833,6 +833,72 @@ pub fn html() -> String {
   }
   .cmd-item.active .cmd-desc { color: rgba(255,255,255,0.75); }
 
+  /* ── Command output card ──────────────────────────────────────────── */
+  .cmd-output {
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .cmd-output-header {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin-bottom: 6px;
+  }
+  .cmd-output-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .cmd-output-table tr {
+    border-bottom: 1px solid var(--divider);
+  }
+  .cmd-output-table tr:last-child {
+    border-bottom: none;
+  }
+  .cmd-output-key {
+    padding: 3px 8px 3px 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    white-space: nowrap;
+    vertical-align: top;
+    width: 1%;
+  }
+  .cmd-output-val {
+    padding: 3px 0;
+    color: var(--text-primary);
+    font-size: 12px;
+    word-break: break-word;
+  }
+  .cmd-output-val.null { color: var(--text-tertiary); font-style: italic; }
+  .cmd-output-val.bool-true { color: #34c759; }
+  .cmd-output-val.bool-false { color: var(--text-tertiary); }
+  .cmd-output-val.number { font-variant-numeric: tabular-nums; }
+  .cmd-output-nested {
+    margin: 2px 0;
+    padding: 4px 0 4px 8px;
+    border-left: 2px solid var(--divider);
+    font-size: 11px;
+  }
+  .cmd-output-list {
+    margin: 0;
+    padding-left: 16px;
+  }
+  .cmd-output-list li {
+    margin: 1px 0;
+    font-size: 12px;
+  }
+  .cmd-output-single-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .cmd-output-list-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
   #input-row {
     display: flex;
     align-items: center;
@@ -1828,10 +1894,86 @@ pub fn html() -> String {
     return btn;
   }
 
+  // ── Command output renderer ──────────────────────────────────────────
+  function tryParseCommandJson(raw) {
+    var trimmed = raw.trim();
+    if (trimmed.charAt(0) !== '{') return null;
+    try {
+      var obj = JSON.parse(trimmed);
+      if (obj && typeof obj === 'object' && obj.command_type) return obj;
+    } catch(e) {}
+    return null;
+  }
+
+  function formatLabel(key) {
+    return key.replace(/_/g, ' ');
+  }
+
+  function renderCommandValue(val) {
+    if (val === null || val === undefined) return '<span class="null">none</span>';
+    if (typeof val === 'boolean') return '<span class="bool-' + val + '">' + val + '</span>';
+    if (typeof val === 'number') return '<span class="number">' + val + '</span>';
+    if (typeof val === 'string') return escapeHtml(val);
+    if (Array.isArray(val)) {
+      if (val.length === 0) return '<span class="null">none</span>';
+      if (val.every(function(v) { return typeof v === 'string' || typeof v === 'number'; })) {
+        var ul = '<ul class="cmd-output-list">';
+        for (var i = 0; i < val.length; i++) ul += '<li>' + escapeHtml(String(val[i])) + '</li>';
+        return ul + '</ul>';
+      }
+      return '<div class="cmd-output-nested">' + escapeHtml(JSON.stringify(val, null, 2)) + '</div>';
+    }
+    if (typeof val === 'object') {
+      return '<div class="cmd-output-nested">' + renderCommandTable(val) + '</div>';
+    }
+    return escapeHtml(String(val));
+  }
+
+  function renderCommandTable(obj) {
+    var html = '<table class="cmd-output-table">';
+    for (var key in obj) {
+      if (!obj.hasOwnProperty(key)) continue;
+      html += '<tr><td class="cmd-output-key">' + escapeHtml(formatLabel(key)) + '</td>';
+      html += '<td class="cmd-output-val">' + renderCommandValue(obj[key]) + '</td></tr>';
+    }
+    return html + '</table>';
+  }
+
+  function renderCommandOutput(obj) {
+    var cmdType = obj.command_type;
+    var rest = {};
+    for (var key in obj) {
+      if (key === 'command_type') continue;
+      rest[key] = obj[key];
+    }
+    var keys = Object.keys(rest);
+    var body;
+    if (keys.length === 1 && Array.isArray(rest[keys[0]])) {
+      var k = keys[0];
+      var arr = rest[k];
+      body = '<div class="cmd-output-single-list">' +
+        '<div class="cmd-output-list-label">' + escapeHtml(formatLabel(k)) + ':</div>' +
+        renderCommandValue(arr) +
+        '</div>';
+    } else {
+      body = renderCommandTable(rest);
+    }
+    return '<div class="cmd-output">' +
+      '<div class="cmd-output-header">/' + escapeHtml(cmdType) + '</div>' +
+      body +
+      '</div>';
+  }
+
   // Called once Done arrives — stores raw, appends copy btn, collapses if tall
   function finishAgentBubble(bubble, rawText, toolCount, details) {
     const wrap = bubble.closest('.msg');
     wrap.dataset.raw = rawText;
+
+    // Render structured command output if response is JSON with command_type
+    var cmdObj = tryParseCommandJson(rawText);
+    if (cmdObj) {
+      bubble.innerHTML = renderCommandOutput(cmdObj);
+    }
 
     // Show tool count in header if any tools were used
     if (toolCount > 0) {
@@ -1914,7 +2056,8 @@ pub fn html() -> String {
       clearActivity();
     }
     currentAgentRaw += text;
-    currentAgentBubble.innerHTML = renderMd(currentAgentRaw);
+    var cmdObj = tryParseCommandJson(currentAgentRaw);
+    currentAgentBubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(currentAgentRaw);
     scrollToBottom();
   };
 
