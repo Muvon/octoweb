@@ -82,6 +82,10 @@ pub fn sanitize_url(url: &str) -> String {
 
     // Split at fragment (#) if present
     let (url_no_frag, fragment) = match url.find('#') {
+        Some(f_pos) if f_pos < q_pos => {
+            // '#' before '?' means '?' is inside the fragment — no real query string
+            return url.to_string();
+        }
         Some(f_pos) => (&url[..f_pos], Some(&url[f_pos..])),
         None => (url, None),
     };
