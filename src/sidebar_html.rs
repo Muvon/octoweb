@@ -1880,13 +1880,15 @@ pub fn html() -> String {
   }
 
   // ── Session create panel (header + button) ──────────────────────────────
-  sessionAddBtn.addEventListener('click', () => {
+  function openCreatePanel() {
     if (sessions.size >= MAX_SESSIONS) return;
     scPanel.classList.add('visible');
     scTitle.value = '';
     scTag.value = 'octoweb:assistant';
     scTitle.focus();
-  });
+  }
+  window.__openCreatePanel = openCreatePanel;
+  sessionAddBtn.addEventListener('click', openCreatePanel);
   function hideCreatePanel() { scPanel.classList.remove('visible'); }
   scCancel.addEventListener('click', hideCreatePanel);
   function submitCreate() {
