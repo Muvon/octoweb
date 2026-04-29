@@ -59,20 +59,24 @@ enum AppEvent {
     NavigateTo(String),
     SwitchTab(usize),
     CloseTab(usize),
-    PrevTab,                                  // Ctrl+P — switch to previous tab in MRU order
-    NextTab,                                  // Ctrl+N — switch to next tab in MRU order
-    ToggleSidebar,                            // Cmd+Shift+A — toggle AI assistant sidebar
-    AcpPrompt(String, Vec<(String, String)>), // user typed a prompt + optional images (base64, mime)
-    AcpCancel,                                // user clicked stop button — cancel current prompt
-    AcpRestart(String), // change agent tag (e.g. "octoweb:assistant") and reconnect
-    AcpNewSession,      // restart session with same agent tag (clear chat)
-    AskAI(String),      // overlay ⌘⇧Enter — open sidebar + send prompt
-    ToggleDevTools,     // Cmd+Shift+I — open devtools for active tab
-    OpenInNewTab(String), // Cmd+click / target=_blank — open URL in new tab and switch to it
-    PageLoadStarted(usize), // (tab_id) — show progress bar
-    PageLoadFinished(usize), // (tab_id) — hide progress bar
+    PrevTab,       // Ctrl+P — switch to previous tab in MRU order
+    NextTab,       // Ctrl+N — switch to next tab in MRU order
+    ToggleSidebar, // Cmd+Shift+A — toggle AI assistant sidebar
+    AcpPrompt(u64, String, Vec<(String, String)>), // (session_id, text, images) — user prompt + optional images
+    AcpCancel(u64),                                // (session_id) — user clicked stop button
+    AcpSetAgent(u64, String), // (session_id, tag) — change agent tag and restart that session
+    AcpClearSession(u64),     // (session_id) — restart session with same tag (clear chat)
+    AcpSessionCreate(String, String), // (title, tag) — create new session (capped at MAX_SESSIONS)
+    AcpSessionClose(u64),     // (session_id) — close session (refused if last one)
+    AcpSessionSwitch(u64),    // (session_id) — switch active session
+    AcpSessionRename(u64, String), // (session_id, title) — rename session
+    AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
+    ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
+    OpenInNewTab(String),     // Cmd+click / target=_blank — open URL in new tab and switch to it
+    PageLoadStarted(usize),   // (tab_id) — show progress bar
+    PageLoadFinished(usize),  // (tab_id) — hide progress bar
     NavigationError(usize, String, String), // (tab_id, url, error) — show error page
-    Reload,             // Cmd+R — reload current page
+    Reload,                   // Cmd+R — reload current page
     MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
     PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
     RemoveHistory(String),     // URL to remove from history
@@ -80,7 +84,7 @@ enum AppEvent {
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
-    AcpReconnect(u64), // scheduled reconnection attempt after error (carries generation to ignore stale timers)
+    AcpReconnect(u64, u64), // (session_id, gen) — scheduled reconnection attempt for given session
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,            // user clicked X on notification toast
@@ -118,6 +122,33 @@ enum AppEvent {
     JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
     Quit,
 }
+
+/// Per-ACP-session live state.
+///
+/// Multiple sessions can run in parallel (capped at `MAX_SESSIONS`). Each owns a
+/// dedicated subprocess via `AcpHandle`. The sidebar UI shows a tab strip; events
+/// from each handle are tagged with `id` before being forwarded to the sidebar JS,
+/// which keeps a separate DOM message log per session.
+struct AcpSession {
+    /// Stable monotonic local id (not the ACP protocol session id).
+    id: u64,
+    /// User-visible label shown in the header strip.
+    title: String,
+    /// Agent command tag (the `<tag>` in `octomind acp <tag>`).
+    tag: String,
+    /// Live handle. `None` while reconnecting after an error.
+    handle: Option<acp::AcpHandle>,
+    /// Reconnect retry counter (per-session exponential backoff).
+    retry_count: u32,
+    /// Generation counter — bumped on every intentional reconnect to invalidate
+    /// stale `AcpReconnect` timers from prior error cycles for THIS session.
+    reconnect_gen: u64,
+}
+
+/// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
+/// memory footprint. 4 is plenty for current use cases; raise if needed.
+const MAX_SESSIONS: usize = 4;
+
 fn main() {
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
     tracing_subscriber::fmt()
@@ -838,6 +869,7 @@ fn main() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
                         Some("acp_prompt") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
                             let text = v["text"].as_str().unwrap_or("").to_string();
                             let mut images = Vec::new();
                             if let Some(arr) = v["images"].as_array() {
@@ -850,22 +882,45 @@ fn main() {
                                 }
                             }
                             if !text.is_empty() || !images.is_empty() {
-                                let _ = p.send_event(AppEvent::AcpPrompt(text, images));
+                                let _ = p.send_event(AppEvent::AcpPrompt(sid, text, images));
                             }
                         }
                         Some("acp_cancel") => {
-                            let _ = p.send_event(AppEvent::AcpCancel);
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpCancel(sid));
                         }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
                         }
                         Some("acp_set_agent") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
                             if let Some(tag) = v["tag"].as_str() {
-                                let _ = p.send_event(AppEvent::AcpRestart(tag.to_string()));
+                                let _ = p.send_event(AppEvent::AcpSetAgent(sid, tag.to_string()));
                             }
                         }
-                        Some("acp_new_session") => {
-                            let _ = p.send_event(AppEvent::AcpNewSession);
+                        Some("acp_clear_session") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpClearSession(sid));
+                        }
+                        Some("acp_session_create") => {
+                            let title = v["title"].as_str().unwrap_or("").to_string();
+                            let tag = v["tag"].as_str().unwrap_or("").to_string();
+                            if !tag.is_empty() {
+                                let _ = p.send_event(AppEvent::AcpSessionCreate(title, tag));
+                            }
+                        }
+                        Some("acp_session_close") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpSessionClose(sid));
+                        }
+                        Some("acp_session_switch") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpSessionSwitch(sid));
+                        }
+                        Some("acp_session_rename") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let title = v["title"].as_str().unwrap_or("").to_string();
+                            let _ = p.send_event(AppEvent::AcpSessionRename(sid, title));
                         }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
@@ -1244,22 +1299,38 @@ fn main() {
         ));
     }
 
-    // ── ACP handle — spawns octomind acp subprocess in background ─────────
-    let mut acp_tag = "octoweb:assistant".to_string();
+    // ── ACP sessions — multiple parallel agent connections ─────────────────
+    // Each session owns its own `octomind acp <tag>` subprocess. The sidebar shows
+    // them as tabs in its header strip; switching toggles which DOM message log is
+    // visible (the others remain mounted as detached fragments).
+    //
+    // At least one session always exists (the default `octoweb:assistant` —
+    // matches pre-multi-session behavior on startup).
     let acp_proxy = proxy.clone();
-    let mut acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-        let p = acp_proxy.clone();
+    let make_wake = |proxy: tao::event_loop::EventLoopProxy<AppEvent>| {
         move || {
-            let _ = p.send_event(AppEvent::AcpWake);
+            let _ = proxy.send_event(AppEvent::AcpWake);
         }
-    })
-    .ok();
+    };
+    let mut next_session_id: u64 = 1;
+    let default_session = AcpSession {
+        id: next_session_id,
+        title: "Assistant".to_string(),
+        tag: "octoweb:assistant".to_string(),
+        handle: acp::AcpHandle::connect(
+            "octomind acp octoweb:assistant",
+            make_wake(acp_proxy.clone()),
+        )
+        .ok(),
+        retry_count: 0,
+        reconnect_gen: 0,
+    };
+    let mut active_session_id: u64 = next_session_id;
+    next_session_id += 1;
+    let mut sessions: Vec<AcpSession> = vec![default_session];
 
-    // ACP reconnection state — exponential backoff on connection failures
-    let mut acp_retry_count: u32 = 0;
-    // Generation counter: incremented on every intentional reconnect so stale
-    // sleep-thread timers (from prior error backoffs) are ignored when they fire.
-    let mut acp_reconnect_gen: u64 = 0;
+    // ACP reconnection backoff bounds (shared across all sessions — backoff state
+    // itself lives per-session in `AcpSession::retry_count` / `reconnect_gen`).
     const ACP_MAX_RETRIES: u32 = 5;
     const ACP_BASE_DELAY_SECS: u64 = 1;
     const ACP_MAX_DELAY_SECS: u64 = 30;
@@ -1879,29 +1950,41 @@ fn main() {
             icon_set = true;
         }
 
-        // Drain ACP events and forward to the UI on every tick.
-        // Collect into owned Vec first so we can drop the handle on error.
-        let acp_events = acp_handle.as_mut().map(|h| h.poll()).unwrap_or_default();
-        for ev in acp_events {
-            match ev {
+        // Drain ACP events from every session and forward to the sidebar UI.
+        // Events are tagged with `session_id` so JS can route them to the correct
+        // per-session DOM message log (only the active session is visible in #messages).
+        //
+        // We collect (session_id, events) into an owned Vec first so the immutable
+        // borrow of `sessions` is released before we mutate it (e.g. on Error we
+        // drop a session's handle).
+        let drained: Vec<(u64, Vec<acp::AgentEvent>)> = sessions
+            .iter_mut()
+            .map(|s| (s.id, s.handle.as_mut().map(|h| h.poll()).unwrap_or_default()))
+            .collect();
+        for (sid, events) in drained {
+            for ev in events {
+                match ev {
                     acp::AgentEvent::Connected => {
-                        acp_retry_count = 0; // reset retry count on successful connection
-                        let _ = sidebar_wv.evaluate_script(
-                            "window.__setConnected && window.__setConnected()"
-                        );
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.retry_count = 0;
+                        }
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setSessionStatus && window.__setSessionStatus({sid},'ready')"
+                        ));
                     }
                     acp::AgentEvent::Image { data, mime_type } => {
-                        // Pass base64 image to sidebar — use template literal to avoid quote issues
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__appendImage && window.__appendImage(`{mime_type}`,`{data}`)"
+                            "window.__appendImage && window.__appendImage({sid},`{mime_type}`,`{data}`)"
                         ));
                     }
                     acp::AgentEvent::Chunk(chunk) => {
                         let escaped = webview_utils::escape_js_template(&chunk);
                         let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__appendChunk && window.__appendChunk(`{escaped}`)"
-                    ));
-                        // Show badge + notification toast when sidebar is hidden
+                            "window.__appendChunk && window.__appendChunk({sid},`{escaped}`)"
+                        ));
+                        // Show badge + notification toast when sidebar is hidden.
+                        // The toast surfaces ANY session's chunk — only one toast
+                        // visible at a time is fine (it auto-dismisses).
                         if !sidebar_visible {
                             let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
@@ -1925,7 +2008,7 @@ fn main() {
                             .unwrap_or_else(|| "null".to_string());
                         let locations_json = serde_json::to_string(&locations).unwrap_or_else(|_| "[]".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__toolStart && window.__toolStart(`{eid}`,`{etitle}`,`{ekind}`,{raw_input_json},{locations_json})"
+                            "window.__toolStart && window.__toolStart({sid},`{eid}`,`{etitle}`,`{ekind}`,{raw_input_json},{locations_json})"
                         ));
                     }
                     acp::AgentEvent::ToolUpdate { id, title, status, raw_output } => {
@@ -1937,7 +2020,7 @@ fn main() {
                             .and_then(|v| serde_json::to_string(v).ok())
                             .unwrap_or_else(|| "null".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__toolUpdate && window.__toolUpdate(`{eid}`,`{etitle}`,`{estatus}`,{raw_output_json})"
+                            "window.__toolUpdate && window.__toolUpdate({sid},`{eid}`,`{etitle}`,`{estatus}`,{raw_output_json})"
                         ));
                     }
                     acp::AgentEvent::AvailableCommands(commands) => {
@@ -1947,13 +2030,13 @@ fn main() {
                         let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "[]".into());
                         let escaped = webview_utils::escape_js_template(&json_str);
                         let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__setAvailableCommands && window.__setAvailableCommands(`{escaped}`)"
+                            "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
                         ));
                     }
                     acp::AgentEvent::Done => {
-                        let _ = sidebar_wv.evaluate_script(
-                            "window.__setThinking && window.__setThinking(false)"
-                        );
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setThinking && window.__setThinking({sid},false)"
+                        ));
                         if !sidebar_visible {
                             let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
@@ -1961,42 +2044,42 @@ fn main() {
                         }
                     }
                     acp::AgentEvent::Cancelled => {
-                        let _ = sidebar_wv.evaluate_script(
-                            "window.__setThinking && window.__setThinking(false)"
-                        );
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setThinking && window.__setThinking({sid},false)"
+                        ));
                     }
                     acp::AgentEvent::Error(err) => {
-                        tracing::warn!(error = %err, "ACP connection error");
-                        // Drop dead handle immediately so prompts aren't silently lost
-                        acp_handle = None;
-                        // Schedule reconnection with exponential backoff
-                        if acp_retry_count < ACP_MAX_RETRIES {
-                            acp_retry_count += 1;
+                        tracing::warn!(session_id = sid, error = %err, "ACP connection error");
+                        // Find the session and schedule per-session reconnection.
+                        let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
+                        // Drop dead handle immediately so prompts aren't silently lost.
+                        s.handle = None;
+                        if s.retry_count < ACP_MAX_RETRIES {
+                            s.retry_count += 1;
                             let delay = std::cmp::min(
-                                ACP_BASE_DELAY_SECS * 2u64.pow(acp_retry_count - 1),
+                                ACP_BASE_DELAY_SECS * 2u64.pow(s.retry_count - 1),
                                 ACP_MAX_DELAY_SECS,
                             );
-                            tracing::info!(retry = acp_retry_count, delay_s = delay, "scheduling ACP reconnection");
-                            // Show connecting status in UI
-                            let _ = sidebar_wv.evaluate_script(
-                                "window.__setConnecting && window.__setConnecting()"
-                            );
-                            // Bump generation so any previously scheduled timer is ignored.
-                            acp_reconnect_gen += 1;
-                            let gen = acp_reconnect_gen;
-                            // Schedule reconnection after delay
+                            tracing::info!(session_id = sid, retry = s.retry_count, delay_s = delay, "scheduling ACP reconnection");
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                            ));
+                            // Bump generation so any previously scheduled timer for this session is ignored.
+                            s.reconnect_gen += 1;
+                            let gen = s.reconnect_gen;
                             let proxy_clone = acp_proxy.clone();
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_secs(delay));
-                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect(gen));
+                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect(sid, gen));
                             });
                         } else {
-                            // Max retries exceeded — show error state
-                            tracing::error!("ACP max reconnection retries exceeded");
-                            let _ = sidebar_wv.evaluate_script("window.__setError && window.__setError()");
+                            tracing::error!(session_id = sid, "ACP max reconnection retries exceeded");
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__setSessionStatus && window.__setSessionStatus({sid},'error')"
+                            ));
                             let escaped = webview_utils::escape_js_template(&err);
                             let _ = sidebar_wv.evaluate_script(&format!(
-                                "window.__appendError && window.__appendError(`{escaped}`)"
+                                "window.__appendError && window.__appendError({sid},`{escaped}`)"
                             ));
                             if !sidebar_visible {
                                 let _ = address_bar_wv.evaluate_script(
@@ -2014,6 +2097,7 @@ fn main() {
                     }
                 }
             }
+        }
 
         // Drain inline-edit ACP events.
         let inline_events = inline_edit_acp.as_mut().map(|h| h.poll()).unwrap_or_default();
@@ -3225,14 +3309,22 @@ fn main() {
                          var n=0;(function f(){if(n++>20)return;el.focus();\
                          if(document.activeElement===el)return;setTimeout(f,30)})()})()"
                     );
-                    // Connect ACP if not yet connected
-                    if acp_handle.is_none() {
-                        acp_retry_count = 0; // reset retry count on manual open
-                        acp_reconnect_gen += 1; // invalidate any pending backoff timers
-                        acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-                            let p = acp_proxy.clone();
-                            move || { let _ = p.send_event(AppEvent::AcpWake); }
-                        }).ok();
+                    // Reconnect any session whose handle has died (e.g. after
+                    // max retries exceeded — manual sidebar open re-arms it).
+                    for s in sessions.iter_mut() {
+                        if s.handle.is_none() {
+                            s.retry_count = 0;
+                            s.reconnect_gen += 1; // invalidate any pending backoff timers
+                            s.handle = acp::AcpHandle::connect(
+                                &format!("octomind acp {}", s.tag),
+                                make_wake(acp_proxy.clone()),
+                            )
+                            .ok();
+                            let sid = s.id;
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                            ));
+                        }
                     }
                 }
             }
@@ -3249,8 +3341,8 @@ fn main() {
             }
 
             // ── ACP events ─────────────────────────────────────────────────────
-            Event::UserEvent(AppEvent::AcpPrompt(text, images)) => {
-                // Save prompt to AI history (MRU, dedup)
+            Event::UserEvent(AppEvent::AcpPrompt(sid, text, images)) => {
+                // Save prompt to AI history (MRU, dedup) — shared across sessions.
                 if !text.is_empty() {
                     if let Some(pos) = ai_prompt_history.iter().position(|p| p == &text) {
                         ai_prompt_history.remove(pos);
@@ -3262,57 +3354,138 @@ fn main() {
                         std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                     }
                 }
-                if let Some(ref handle) = acp_handle {
-                    if !handle.send_prompt(text, images) {
-                        // Channel dead — ACP thread exited without error event
-                        acp_handle = None;
-                        let _ = sidebar_wv.evaluate_script(
-                            "window.__setError && window.__setError()"
-                        );
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    if let Some(ref handle) = s.handle {
+                        if !handle.send_prompt(text, images) {
+                            // Channel dead — drop handle so reconnection can re-arm.
+                            s.handle = None;
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__setSessionStatus && window.__setSessionStatus({sid},'error')"
+                            ));
+                        }
                     }
                 }
             }
 
             // ── ACP cancel (stop button) ───────────────────────────────────────────
-            Event::UserEvent(AppEvent::AcpCancel) => {
-                if let Some(ref handle) = acp_handle {
-                    handle.cancel();
+            Event::UserEvent(AppEvent::AcpCancel(sid)) => {
+                if let Some(s) = sessions.iter().find(|s| s.id == sid) {
+                    if let Some(ref handle) = s.handle {
+                        handle.cancel();
+                    }
                 }
             }
 
-            // ── ACP restart with new agent command ─────────────────────────────────
-            Event::UserEvent(AppEvent::AcpRestart(tag)) => {
-                acp_tag = tag.clone();
-                acp_retry_count = 0; // reset retry count on manual restart
-                acp_reconnect_gen += 1; // invalidate any pending backoff timers
-                acp_handle = None; // drop old handle (kills subprocess)
-                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-                    let p = acp_proxy.clone();
-                    move || { let _ = p.send_event(AppEvent::AcpWake); }
-                }).ok();
-                // Reset sidebar status to "connecting"
-                let _ = sidebar_wv.evaluate_script(
-                    "window.__setConnecting && window.__setConnecting()"
-                );
-                // Update the chip label in the sidebar
-                let escaped = webview_utils::escape_js_template(&tag);
-                let _ = sidebar_wv.evaluate_script(&format!(
-                "window.__setAgentTag && window.__setAgentTag(`{escaped}`)"
-            ));
+            // ── ACP set agent for an existing session (kills + respawns its handle) ──
+            Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    s.tag = tag.clone();
+                    s.retry_count = 0;
+                    s.reconnect_gen += 1;
+                    s.handle = None; // drop old (kills subprocess)
+                    s.handle = acp::AcpHandle::connect(
+                        &format!("octomind acp {}", tag),
+                        make_wake(acp_proxy.clone()),
+                    )
+                    .ok();
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                    ));
+                    let escaped = webview_utils::escape_js_template(&tag);
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__updateSessionTag && window.__updateSessionTag({sid},`{escaped}`)"
+                    ));
+                }
             }
 
-            // ── ACP new session (same agent, fresh chat) ────────────────────────
-            Event::UserEvent(AppEvent::AcpNewSession) => {
-                acp_retry_count = 0; // reset retry count on new session
-                acp_reconnect_gen += 1; // invalidate any pending backoff timers
-                acp_handle = None; // drop old handle (kills subprocess)
-                acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-                    let p = acp_proxy.clone();
-                    move || { let _ = p.send_event(AppEvent::AcpWake); }
-                }).ok();
-                let _ = sidebar_wv.evaluate_script(
-                    "window.__setConnecting && window.__setConnecting()"
-                );
+            // ── ACP clear session (same agent, fresh chat) ────────────────────────
+            Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    s.retry_count = 0;
+                    s.reconnect_gen += 1;
+                    s.handle = None; // drop old (kills subprocess)
+                    s.handle = acp::AcpHandle::connect(
+                        &format!("octomind acp {}", s.tag),
+                        make_wake(acp_proxy.clone()),
+                    )
+                    .ok();
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                    ));
+                }
+            }
+
+            // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
+            Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
+                if sessions.len() >= MAX_SESSIONS {
+                    tracing::warn!(max = MAX_SESSIONS, "session create rejected — cap reached");
+                } else {
+                    let sid = next_session_id;
+                    next_session_id += 1;
+                    let handle = acp::AcpHandle::connect(
+                        &format!("octomind acp {}", tag),
+                        make_wake(acp_proxy.clone()),
+                    )
+                    .ok();
+                    sessions.push(AcpSession {
+                        id: sid,
+                        title: title.clone(),
+                        tag: tag.clone(),
+                        handle,
+                        retry_count: 0,
+                        reconnect_gen: 0,
+                    });
+                    active_session_id = sid; // auto-switch to new session
+                    let etitle = webview_utils::escape_js_template(&title);
+                    let etag = webview_utils::escape_js_template(&tag);
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'connecting')"
+                    ));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__switchSession && window.__switchSession({sid})"
+                    ));
+                }
+            }
+
+            // ── ACP close session (refused if it's the only one) ───────────────────
+            Event::UserEvent(AppEvent::AcpSessionClose(sid)) => {
+                if sessions.len() <= 1 {
+                    tracing::debug!(session_id = sid, "session close ignored — last session");
+                } else if let Some(pos) = sessions.iter().position(|s| s.id == sid) {
+                    let _removed = sessions.remove(pos); // drop kills subprocess
+                    // If we closed the active session, fall back to the first one.
+                    if active_session_id == sid {
+                        active_session_id = sessions[0].id;
+                        let new_active = active_session_id;
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__switchSession && window.__switchSession({new_active})"
+                        ));
+                    }
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__removeSession && window.__removeSession({sid})"
+                    ));
+                }
+            }
+
+            // ── ACP switch active session ──────────────────────────────────────────
+            Event::UserEvent(AppEvent::AcpSessionSwitch(sid))
+                if sessions.iter().any(|s| s.id == sid) =>
+            {
+                active_session_id = sid;
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__switchSession && window.__switchSession({sid})"
+                ));
+            }
+
+            // ── ACP rename session (title only) ────────────────────────────────────
+            Event::UserEvent(AppEvent::AcpSessionRename(sid, title)) => {
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    s.title = title.clone();
+                    let etitle = webview_utils::escape_js_template(&title);
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__renameSession && window.__renameSession({sid},`{etitle}`)"
+                    ));
+                }
             }
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────
@@ -3407,19 +3580,24 @@ fn main() {
             }
 
             // ── ACP reconnection attempt (scheduled after error) ──
-            Event::UserEvent(AppEvent::AcpReconnect(gen)) => {
-                // Ignore stale timers from a previous error cycle — the user may
-                // have manually reconnected (AcpRestart / AcpNewSession) in the
-                // meantime, which already bumped acp_reconnect_gen.
-                if gen != acp_reconnect_gen {
-                    tracing::debug!(gen, current = acp_reconnect_gen, "ignoring stale ACP reconnect timer");
+            Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    // Ignore stale timers from a previous error cycle — the user may
+                    // have manually reconnected (AcpSetAgent / AcpClearSession) in the
+                    // meantime, which already bumped this session's reconnect_gen.
+                    if gen != s.reconnect_gen {
+                        tracing::debug!(session_id = sid, gen, current = s.reconnect_gen, "ignoring stale ACP reconnect timer");
+                    } else {
+                        tracing::info!(session_id = sid, retry = s.retry_count, "attempting ACP reconnection");
+                        s.handle = None; // drop old handle if any
+                        s.handle = acp::AcpHandle::connect(
+                            &format!("octomind acp {}", s.tag),
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok();
+                    }
                 } else {
-                    tracing::info!(retry = acp_retry_count, "attempting ACP reconnection");
-                    acp_handle = None; // drop old handle if any
-                    acp_handle = acp::AcpHandle::connect(&format!("octomind acp {}", acp_tag), {
-                        let p = acp_proxy.clone();
-                        move || { let _ = p.send_event(AppEvent::AcpWake); }
-                    }).ok();
+                    tracing::debug!(session_id = sid, "reconnect for unknown session — ignoring");
                 }
             }
 

@@ -1622,10 +1622,15 @@ pub fn html() -> String {
   // Configure marked: safe defaults, no mangling
   if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
+    // Custom renderer: wrap fenced code blocks with header (language label + copy btn)
     const _copyIcon =
       '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
         '<rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>' +
         '<path d="M3 8H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+      '</svg>';
+    const _checkIcon =
+      '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
+        '<path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
       '</svg>';
     marked.use({ renderer: {
       code(text, lang) {
@@ -1645,252 +1650,17 @@ pub fn html() -> String {
     }});
   }
 
-  // ── DOM refs ────────────────────────────────────────────────────────────
-  const messagesHost   = document.getElementById('messages');
-  const sessionStrip   = document.getElementById('session-strip');
-  const sessionAddBtn  = document.getElementById('session-add-btn');
-  const scPanel        = document.getElementById('session-create-panel');
-  const scTitle        = document.getElementById('sc-title');
-  const scTag          = document.getElementById('sc-tag');
-  const scCreate       = document.getElementById('sc-create');
-  const scCancel       = document.getElementById('sc-cancel');
-  const input          = document.getElementById('prompt-input');
-  const sendBtn        = document.getElementById('send-btn');
-  const newSessBtn     = document.getElementById('new-session-btn');
-  const cmdDropdown    = document.getElementById('cmd-dropdown');
-  const queueList      = document.getElementById('queue-list');
-  const inputRow       = document.getElementById('input-row');
-  const imagePreview   = document.getElementById('image-preview');
-  const fileInputImage = document.getElementById('file-input-image');
-  const fileInputDoc   = document.getElementById('file-input-doc');
-  const attachBtn      = document.getElementById('attach-btn');
-  const attachMenu     = document.getElementById('attach-menu');
+  const messages  = document.getElementById('messages');
+  const thinking  = document.getElementById('thinking');
+  const input     = document.getElementById('prompt-input');
+  const sendBtn   = document.getElementById('send-btn');
+  const newSessBtn = document.getElementById('new-session-btn');
+  const dot       = document.getElementById('status-dot');
+  const statusTxt = document.getElementById('status-text');
 
-  const MAX_SESSIONS = 4;
-  const MAX_QUEUE    = 2;
-
-  const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
-
-  // ── Per-session state ──────────────────────────────────────────────────
-  // Map<sid, Session>. Each Session owns its DOM container, thinking element,
-  // and all chat/tool/queue state. Only the active session's container is
-  // mounted in #messagesHost; others are detached (kept alive in JS memory).
-  const sessions = new Map();
-  let activeSid = null;
-  // `active` is a live proxy that always points to the current session's
-  // state. Updated on every switchTo(). All chat helpers read/write through it.
-  let active = null;
-
-  function makeSession(sid, title, tag, status) {
-    const container = document.createElement('div');
-    container.className = 'session-messages';
-    container.dataset.sid = sid;
-    const thinking = document.createElement('div');
-    thinking.id = 'thinking-' + sid;
-    thinking.className = '';
-    container.appendChild(thinking);
-
-    const tab = document.createElement('div');
-    tab.className = 'session-tab';
-    tab.dataset.sid = sid;
-    tab.setAttribute('role', 'tab');
-    const dot = document.createElement('span');
-    dot.className = 'session-dot ' + (status || 'connecting');
-    const titleEl = document.createElement('span');
-    titleEl.className = 'session-title';
-    titleEl.textContent = title;
-    titleEl.title = tag;
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'session-close';
-    closeBtn.title = 'Close session';
-    closeBtn.setAttribute('aria-label', 'Close session');
-    closeBtn.innerHTML = '<svg width="7" height="7" viewBox="0 0 8 8" fill="none"><path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
-    tab.appendChild(dot);
-    tab.appendChild(titleEl);
-    tab.appendChild(closeBtn);
-    sessionStrip.appendChild(tab);
-
-    tab.addEventListener('click', (e) => {
-      if (e.target === closeBtn || closeBtn.contains(e.target)) return;
-      if (tab.querySelector('.session-rename')) return; // editing
-      if (sid !== activeSid) {
-        window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: sid }));
-      }
-    });
-    tab.addEventListener('dblclick', (e) => {
-      e.preventDefault();
-      startRename(sid);
-    });
-    closeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (sessions.size <= 1) return;
-      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_close', session_id: sid }));
-    });
-
-    return {
-      sid,
-      title,
-      tag,
-      status: status || 'connecting',
-      container,
-      thinking,
-      tab,
-      tabDot: dot,
-      tabTitle: titleEl,
-      // chat state
-      currentAgentBubble: null,
-      currentAgentRaw: '',
-      isThinking: false,
-      // tool tracking
-      toolCount: 0,
-      toolDetails: [],
-      toolRows: {},
-      activityStart: 0,
-      activityTimer: null,
-      // commands
-      availableCommands: [],
-      // queue (per-session: each session has its own pending list)
-      msgQueue: [],
-      // message → toolDetails map for modal lookup
-      messageToolDetails: new WeakMap(),
-    };
-  }
-
-  function refreshAddBtn() {
-    sessionAddBtn.disabled = sessions.size >= MAX_SESSIONS;
-  }
-
-  function refreshTabActiveStates() {
-    for (const s of sessions.values()) {
-      s.tab.classList.toggle('active', s.sid === activeSid);
-    }
-  }
-
-  function applyStatus(s, st) {
-    s.status = st;
-    s.tabDot.className = 'session-dot ' + (st === 'ready' ? '' : st);
-    s.tabDot.className = s.tabDot.className.trim();
-  }
-
-  function switchTo(sid) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    if (activeSid === sid && active === s) {
-      refreshTabActiveStates();
-      return;
-    }
-    // Detach old container (its DOM stays in memory, attached to its session object)
-    if (active && active.container.parentNode === messagesHost) {
-      messagesHost.removeChild(active.container);
-    }
-    activeSid = sid;
-    active = s;
-    messagesHost.appendChild(s.container);
-    refreshTabActiveStates();
-    // Rebind input UI to reflect this session's state
-    sendBtn.classList.toggle('stop-mode', s.isThinking);
-    sendBtn.title = s.isThinking ? 'Stop' : 'Send (Return)';
-    renderQueue();
-    updateInputLock();
-    scrollToBottom();
-  }
-
-  // Rust-driven session lifecycle ────────────────────────────────────────
-  window.__addSession = function(sid, title, tag, status) {
-    if (sessions.has(sid)) return;
-    const s = makeSession(sid, title, tag, status);
-    sessions.set(sid, s);
-    refreshAddBtn();
-  };
-  window.__removeSession = function(sid) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    if (s.activityTimer) clearInterval(s.activityTimer);
-    if (s.container.parentNode === messagesHost) messagesHost.removeChild(s.container);
-    if (s.tab.parentNode === sessionStrip) sessionStrip.removeChild(s.tab);
-    sessions.delete(sid);
-    refreshAddBtn();
-  };
-  window.__renameSession = function(sid, title) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    s.title = title;
-    s.tabTitle.textContent = title;
-  };
-  window.__updateSessionTag = function(sid, tag) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    s.tag = tag;
-    s.tabTitle.title = tag;
-  };
-  window.__switchSession = switchTo;
-  window.__setSessionStatus = function(sid, st) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    applyStatus(s, st);
-  };
-
-  // ── Inline rename ───────────────────────────────────────────────────────
-  function startRename(sid) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    const titleEl = s.tabTitle;
-    if (s.tab.querySelector('.session-rename')) return;
-    const inp = document.createElement('input');
-    inp.className = 'session-rename';
-    inp.type = 'text';
-    inp.value = s.title;
-    inp.maxLength = 32;
-    s.tab.replaceChild(inp, titleEl);
-    inp.focus();
-    inp.select();
-    const commit = (save) => {
-      const v = inp.value.trim();
-      s.tab.replaceChild(s.tabTitle, inp);
-      if (save && v && v !== s.title) {
-        window.ipc.postMessage(JSON.stringify({ type: 'acp_session_rename', session_id: sid, title: v }));
-      }
-    };
-    inp.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); commit(true); }
-      else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
-    });
-    inp.addEventListener('blur', () => commit(true));
-  }
-
-  // ── Session create panel (header + button) ──────────────────────────────
-  sessionAddBtn.addEventListener('click', () => {
-    if (sessions.size >= MAX_SESSIONS) return;
-    scPanel.classList.add('visible');
-    scTitle.value = '';
-    scTag.value = 'octoweb:assistant';
-    scTitle.focus();
-  });
-  function hideCreatePanel() { scPanel.classList.remove('visible'); }
-  scCancel.addEventListener('click', hideCreatePanel);
-  function submitCreate() {
-    const title = scTitle.value.trim() || 'Session';
-    const tag   = scTag.value.trim();
-    if (!tag) { scTag.focus(); return; }
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_session_create', title, tag }));
-    hideCreatePanel();
-  }
-  scCreate.addEventListener('click', submitCreate);
-  [scTitle, scTag].forEach(el => {
-    el.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); submitCreate(); }
-      else if (e.key === 'Escape') { e.preventDefault(); hideCreatePanel(); }
-    });
-  });
-
-  // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
-  // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
-  // before the sidebar HTML loads. We register it here so events arriving with
-  // sid=1 find a target.
-  (function initDefault() {
-    window.__addSession(1, 'Assistant', 'octoweb:assistant', 'connecting');
-    switchTo(1);
-  })();
+  let currentAgentBubble = null;
+  let currentAgentRaw    = '';   // accumulate raw MD chunks
+  let isThinking = false;
 
   // ── Prompt history (shared module) ──────────────────────────────────────
   /* PROMPT_HISTORY_JS */
@@ -1902,58 +1672,75 @@ pub fn html() -> String {
   });
   window.__setHistory = _ph.setHistory;
 
-  // ── Clear current session (toolbar pencil button) ───────────────────────
+  // ── New session ─────────────────────────────────────────────────────────
   newSessBtn.addEventListener('click', () => {
-    if (!active) return;
-    // Wipe local DOM optimistically; Rust will restart the agent.
-    while (active.container.firstChild) {
-      active.container.removeChild(active.container.firstChild);
+    // Clear all messages but keep the thinking div reference intact
+    while (messages.firstChild) {
+      if (messages.firstChild === thinking) break;
+      messages.removeChild(messages.firstChild);
     }
-    active.container.appendChild(active.thinking);
-    active.thinking.className = '';
-    active.thinking.innerHTML = '';
-    active.currentAgentBubble = null;
-    active.currentAgentRaw = '';
-    active.isThinking = false;
-    active.toolCount = 0;
-    active.toolDetails = [];
-    active.toolRows = {};
-    if (active.activityTimer) { clearInterval(active.activityTimer); active.activityTimer = null; }
+    // Remove any nodes after thinking too
+    while (thinking.nextSibling) {
+      messages.removeChild(thinking.nextSibling);
+    }
+    thinking.className = '';
+    thinking.innerHTML = '';
+    currentAgentBubble = null;
+    currentAgentRaw = '';
+    isThinking = false;
     sendBtn.className = '';
     input.value = '';
     input.style.height = 'auto';
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_clear_session', session_id: active.sid }));
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_new_session' }));
   });
 
-  // Callable from Rust to clear messages for a specific session
-  window.__clearMessages = function(sid) {
-    const s = sid ? sessions.get(sid) : active;
-    if (!s) return;
-    while (s.container.firstChild) s.container.removeChild(s.container.firstChild);
-    s.container.appendChild(s.thinking);
-    s.thinking.className = '';
-    s.thinking.innerHTML = '';
-    s.currentAgentBubble = null;
-    s.currentAgentRaw = '';
-    s.availableCommands = [];
-    if (s === active) hideCmdDropdown();
+  // Callable from Rust to clear messages (e.g. on agent restart)
+  window.__clearMessages = function() {
+    while (messages.firstChild) {
+      if (messages.firstChild === thinking) break;
+      messages.removeChild(messages.firstChild);
+    }
+    while (thinking.nextSibling) {
+      messages.removeChild(thinking.nextSibling);
+    }
+    thinking.className = '';
+    thinking.innerHTML = '';
+    currentAgentBubble = null;
+    currentAgentRaw = '';
+    availableCommands = [];
+    hideCmdDropdown();
   };
 
-  // ── Slash commands (per-session) ────────────────────────────────────────
+  // ── Status ──────────────────────────────────────────────────────────────
+  window.__setConnected = function() {
+    dot.className = 'dot';
+    statusTxt.textContent = 'ready';
+  };
+  window.__setConnecting = function() {
+    dot.className = 'dot connecting';
+    statusTxt.textContent = 'connecting';
+    availableCommands = [];
+    hideCmdDropdown();
+  };
+  window.__setError = function() {
+    dot.className = 'dot error';
+    statusTxt.textContent = 'error';
+  };
+
+  // ── Slash commands ──────────────────────────────────────────────────────
+  var availableCommands = [];
+  var cmdDropdown = document.getElementById('cmd-dropdown');
   var cmdActiveIdx = 0;
   var cmdFiltered = [];
   var cmdVisible = false;
 
-  window.__setAvailableCommands = function(sid, json) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    try { s.availableCommands = JSON.parse(json); } catch(e) { s.availableCommands = []; }
+  window.__setAvailableCommands = function(json) {
+    try { availableCommands = JSON.parse(json); } catch(e) { availableCommands = []; }
   };
 
   function showCmdDropdown(filter) {
-    if (!active) return;
     var lower = filter.toLowerCase();
-    cmdFiltered = active.availableCommands.filter(function(c) {
+    cmdFiltered = availableCommands.filter(function(c) {
       return c.name.toLowerCase().indexOf(lower) === 0;
     });
     if (cmdFiltered.length === 0) { hideCmdDropdown(); return; }
@@ -2049,7 +1836,58 @@ pub fn html() -> String {
     setTimeout(hideCmdDropdown, 150);
   });
 
-  // ── Markdown render helper ─────────────────────────────────────────────
+  // ── Agent chip ──────────────────────────────────────────────────────────
+  const agentChip      = document.getElementById('agent-chip');
+  const agentEditRow   = document.getElementById('agent-edit-row');
+  const agentInput     = document.getElementById('agent-input');
+  const agentChipLabel = document.getElementById('agent-chip-label');
+  const agentConfirm   = document.getElementById('agent-confirm-btn');
+
+  const header = document.getElementById('header');
+
+  function showChip() {
+    header.classList.remove('editing');
+    agentEditRow.classList.remove('visible');
+  }
+  function showEdit() {
+    header.classList.add('editing');
+    agentEditRow.classList.add('visible');
+    agentInput.focus();
+    agentInput.select();
+  }
+
+  agentChip.addEventListener('click', showEdit);
+
+  function applyAgent() {
+    const tag = agentInput.value.trim();
+    if (!tag) { showChip(); return; }
+    agentChipLabel.textContent = tag;
+    showChip();
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_set_agent', tag }));
+    window.__setConnecting();
+  }
+
+  agentConfirm.addEventListener('click', applyAgent);
+  agentInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); applyAgent(); }
+    if (e.key === 'Escape') { showChip(); }
+  });
+
+  // Called from Rust (overlay "Ask AI") to programmatically submit a prompt
+  window.__injectPrompt = function(text) {
+    input.value = text;
+    input.style.height = 'auto';
+    sendBtn.classList.toggle('active', true);
+    send();
+  };
+
+  // Called from Rust after AcpRestart to sync the chip label
+  window.__setAgentTag = function(tag) {
+    agentInput.value = tag;
+    agentChipLabel.textContent = tag;
+  };
+
+  // ── Markdown render helper ───────────────────────────────────────────────
   function renderMd(raw) {
     if (typeof marked === 'undefined') return escapeHtml(raw);
     return marked.parse(raw);
@@ -2082,8 +1920,7 @@ pub fn html() -> String {
     return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
   }
 
-  function appendMessage(s, role, text) {
-    if (!s) return;
+  function appendMessage(role, text) {
     const wrap   = document.createElement('div');
     wrap.className = 'msg ' + role;
     const label  = document.createElement('div');
@@ -2101,8 +1938,8 @@ pub fn html() -> String {
     bubble.textContent = text;
     wrap.appendChild(label);
     wrap.appendChild(bubble);
-    s.container.insertBefore(wrap, s.thinking);
-    if (s.sid === activeSid) scrollToBottom();
+    messages.insertBefore(wrap, thinking);
+    scrollToBottom();
     return bubble;
   }
 
@@ -2111,6 +1948,7 @@ pub fn html() -> String {
     const btn = document.createElement('button');
     btn.className = 'msg-copy';
     btn.title = 'Copy';
+    // SF-style: small copy icon + label
     btn.innerHTML =
       '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="flex-shrink:0">' +
         '<rect x="4" y="4" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>' +
@@ -2119,6 +1957,9 @@ pub fn html() -> String {
       '<span>Copy</span>';
     btn.addEventListener('click', () => {
       const raw = wrap.dataset.raw || wrap.querySelector('.msg-bubble')?.textContent || '';
+      // navigator.clipboard requires secure context — unavailable in
+      // child WKWebView loaded via with_html().  Fall back to IPC so
+      // Rust writes to NSPasteboard directly.
       window.ipc.postMessage(JSON.stringify({ type: 'copy_text', text: raw }));
       btn.classList.add('copied');
       btn.innerHTML =
@@ -2210,16 +2051,17 @@ pub fn html() -> String {
   }
 
   // Called once Done arrives — stores raw, appends copy btn, collapses if tall
-  function finishAgentBubble(s, bubble, rawText, toolCount, details) {
+  function finishAgentBubble(bubble, rawText, toolCount, details) {
     const wrap = bubble.closest('.msg');
-    if (!wrap) return;
     wrap.dataset.raw = rawText;
 
+    // Render structured command output if response is JSON with command_type
     var cmdObj = tryParseCommandJson(rawText);
     if (cmdObj) {
       bubble.innerHTML = renderCommandOutput(cmdObj);
     }
 
+    // Show tool count in header if any tools were used
     if (toolCount > 0) {
       const sepEl = wrap.querySelector('.msg-sep');
       if (sepEl) sepEl.style.display = 'inline';
@@ -2228,15 +2070,17 @@ pub fn html() -> String {
         toolsEl.textContent = toolCount + ' tools';
         toolsEl.style.display = 'inline';
         toolsEl.style.cursor = 'pointer';
-        s.messageToolDetails.set(wrap, details);
+        // Store details and make clickable
+        messageToolDetails.set(wrap, details);
         toolsEl.addEventListener('click', (e) => {
           e.stopPropagation();
-          const d = s.messageToolDetails.get(wrap);
-          if (d) showToolModal(d);
+          const details = messageToolDetails.get(wrap);
+          if (details) showToolModal(details);
         });
       }
     }
 
+    // Copy button sits inside the bubble, bottom-right corner
     bubble.appendChild(makeCopyBtn(wrap));
 
     requestAnimationFrame(() => {
@@ -2254,8 +2098,7 @@ pub fn html() -> String {
     });
   }
 
-  function startAgentBubble(s) {
-    if (!s) return;
+  function startAgentBubble() {
     const wrap   = document.createElement('div');
     wrap.className = 'msg agent';
     const label  = document.createElement('div');
@@ -2266,6 +2109,7 @@ pub fn html() -> String {
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
+    // Placeholder for tool count (populated on finish)
     const sep = document.createElement('span');
     sep.className = 'msg-sep';
     sep.textContent = '·';
@@ -2281,111 +2125,122 @@ pub fn html() -> String {
     bubble.className = 'msg-bubble';
     wrap.appendChild(label);
     wrap.appendChild(bubble);
-    s.container.insertBefore(wrap, s.thinking);
-    if (s.sid === activeSid) scrollToBottom();
+    messages.insertBefore(wrap, thinking);
     return bubble;
   }
 
-  window.__appendChunk = function(sid, text) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    if (!s.currentAgentBubble) {
-      s.currentAgentBubble = startAgentBubble(s);
-      s.currentAgentRaw = '';
-      s.isThinking = false;
-      s.thinking.className = '';
-      clearActivity(s);
+  // Chunks arrive as raw markdown — accumulate and re-render on each chunk.
+  // Re-rendering is cheap for typical response sizes and gives correct output
+  // (partial markdown like unclosed ``` would render wrong if we appended HTML).
+  window.__appendChunk = function(text) {
+    if (!currentAgentBubble) {
+      currentAgentBubble = startAgentBubble();
+      currentAgentRaw    = '';
+      // Hide activity feed without triggering finishAgentBubble
+      isThinking = false;
+      thinking.className = '';
+      clearActivity();
     }
-    s.currentAgentRaw += text;
-    var cmdObj = tryParseCommandJson(s.currentAgentRaw);
-    s.currentAgentBubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(s.currentAgentRaw);
-    if (s.sid === activeSid) scrollToBottom();
+    currentAgentRaw += text;
+    var cmdObj = tryParseCommandJson(currentAgentRaw);
+    currentAgentBubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(currentAgentRaw);
+    scrollToBottom();
   };
 
-  window.__appendImage = function(sid, mimeType, b64data) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    if (!s.currentAgentBubble) {
-      s.currentAgentBubble = startAgentBubble(s);
-      s.currentAgentRaw = '';
-      s.isThinking = false;
-      s.thinking.className = '';
-      clearActivity(s);
+  window.__appendImage = function(mimeType, b64data) {
+    if (!currentAgentBubble) {
+      currentAgentBubble = startAgentBubble();
+      currentAgentRaw    = '';
+      isThinking = false;
+      thinking.className = '';
+      clearActivity();
     }
     const img = document.createElement('img');
     img.className = 'chat-img';
     img.src = 'data:' + mimeType + ';base64,' + b64data;
-    s.currentAgentBubble.appendChild(img);
-    if (s.sid === activeSid) scrollToBottom();
+    currentAgentBubble.appendChild(img);
+    scrollToBottom();
   };
 
-  // ── Activity feed state (per-session) ──────────────────────────────────
+  // ── Activity feed state ──────────────────────────────────────────────────────────────
+  let activityStart = 0;       // Date.now() when thinking began
+  let activityTimer = null;    // setInterval id for elapsed display
+  const toolRows = {};         // id → { el, startTime, timerEl }
+  let toolCount = 0;           // total tools used in current response
+  let toolDetails = [];        // [{kind, title, status, duration}] for current response
+
+  const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
+
   function fmtElapsed(ms) {
     const s = Math.floor(ms / 1000);
     if (s < 60) return s + 's';
     return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
   }
 
-  function clearActivity(s) {
-    if (s.activityTimer) { clearInterval(s.activityTimer); s.activityTimer = null; }
-    s.thinking.innerHTML = '';
-    for (const k in s.toolRows) delete s.toolRows[k];
+  function clearActivity() {
+    if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+    thinking.innerHTML = '';
+    for (const k in toolRows) delete toolRows[k];
   }
 
-  function tickActivity(s) {
-    const hdr = s.thinking.querySelector('.activity-elapsed');
-    if (hdr) hdr.textContent = fmtElapsed(Date.now() - s.activityStart);
-    for (const id in s.toolRows) {
-      const t = s.toolRows[id];
+  function tickActivity() {
+    const hdr = thinking.querySelector('.activity-elapsed');
+    if (hdr) hdr.textContent = fmtElapsed(Date.now() - activityStart);
+    // Update per-tool timers for in-progress tools
+    for (const id in toolRows) {
+      const t = toolRows[id];
       if (t.timerEl && !t.finished) {
         t.timerEl.textContent = fmtElapsed(Date.now() - t.startTime);
       }
     }
   }
 
-  window.__toolStart = function(sid, id, title, kind, rawInput, locations) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    s.toolCount++;
-    s.toolDetails.push({ id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null });
+  window.__toolStart = function(id, title, kind, rawInput, locations) {
+    toolCount++;
+    toolDetails.push({ id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null });
+    // Create row
     const row = document.createElement('div');
     row.className = 'tool-row';
+
     const icon = document.createElement('span');
     icon.className = 'tool-kind ' + kind;
     icon.textContent = kindLabel[kind] || '·';
+
     const ttl = document.createElement('span');
     ttl.className = 'tool-title';
     ttl.textContent = title;
+
     const tm = document.createElement('span');
     tm.className = 'tool-time';
     tm.textContent = '0s';
+
     row.appendChild(icon);
     row.appendChild(ttl);
     row.appendChild(tm);
-    s.thinking.appendChild(row);
-    s.toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
-    if (sid === activeSid) scrollToBottom();
+    thinking.appendChild(row);
+
+    toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false, idx: toolDetails.length - 1 };
+    scrollToBottom();
   };
 
-  window.__toolUpdate = function(sid, id, title, status, rawOutput) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    const t = s.toolRows[id];
+  window.__toolUpdate = function(id, title, status, rawOutput) {
+    const t = toolRows[id];
     if (!t) return;
     if (title) {
       t.el.querySelector('.tool-title').textContent = title;
-      s.toolDetails[t.idx].title = title;
+      toolDetails[t.idx].title = title;
     }
     if (rawOutput !== undefined && rawOutput !== null) {
-      s.toolDetails[t.idx].rawOutput = rawOutput;
+      toolDetails[t.idx].rawOutput = rawOutput;
     }
     if (status === 'completed') {
       t.finished = true;
       t.el.classList.add('done');
       const duration = Date.now() - t.startTime;
       t.timerEl.textContent = fmtElapsed(duration);
-      s.toolDetails[t.idx].status = 'completed';
-      s.toolDetails[t.idx].duration = duration;
+      toolDetails[t.idx].status = 'completed';
+      toolDetails[t.idx].duration = duration;
+      // Replace timer with checkmark
       const check = document.createElement('span');
       check.className = 'tool-check';
       check.textContent = '✓';
@@ -2393,8 +2248,8 @@ pub fn html() -> String {
     } else if (status === 'failed') {
       t.finished = true;
       t.el.classList.add('failed');
-      s.toolDetails[t.idx].status = 'failed';
-      s.toolDetails[t.idx].duration = Date.now() - t.startTime;
+      toolDetails[t.idx].status = 'failed';
+      toolDetails[t.idx].duration = Date.now() - t.startTime;
       const fail = document.createElement('span');
       fail.className = 'tool-fail';
       fail.textContent = '✗';
@@ -2402,73 +2257,77 @@ pub fn html() -> String {
     }
   };
 
-  window.__setThinking = function(sid, on) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    s.isThinking = on;
-    s.thinking.className = on ? 'visible' : '';
-    if (sid === activeSid) {
-      sendBtn.classList.toggle('stop-mode', on);
-      sendBtn.title = on ? 'Stop' : 'Send (Return)';
-    }
+  window.__setThinking = function(on) {
+    isThinking = on;
+    thinking.className = on ? 'visible' : '';
+    // Toggle send button between send and stop modes
+    sendBtn.classList.toggle('stop-mode', on);
+    sendBtn.title = on ? 'Stop' : 'Send (Return)';
     if (on) {
-      s.currentAgentBubble = null;
-      s.currentAgentRaw = '';
-      s.toolCount = 0;
-      s.toolDetails = [];
-      clearActivity(s);
-      s.activityStart = Date.now();
+      currentAgentBubble = null;
+      currentAgentRaw = '';
+      toolCount = 0;
+      toolDetails = [];
+      clearActivity();
+      activityStart = Date.now();
+      // Header with 3-dot bounce + elapsed
       const hdr = document.createElement('div');
       hdr.className = 'activity-header';
       hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span><span class="activity-elapsed">0s</span>';
-      s.thinking.appendChild(hdr);
-      s.activityTimer = setInterval(() => tickActivity(s), 1000);
-      if (sid === activeSid) scrollToBottom();
+      thinking.appendChild(hdr);
+      activityTimer = setInterval(tickActivity, 1000);
+      scrollToBottom();
     } else {
-      const savedToolCount = s.toolCount;
-      const savedToolDetails = [...s.toolDetails];
-      clearActivity(s);
-      if (s.currentAgentBubble) {
-        finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails);
-        s.currentAgentBubble = null;
-        s.currentAgentRaw = '';
+      // Save tool count before clearing
+      const savedToolCount = toolCount;
+      const savedToolDetails = [...toolDetails];
+      clearActivity();
+      if (currentAgentBubble) {
+        // Done — finalize: store raw for copy, add copy btn, collapse if tall
+        finishAgentBubble(currentAgentBubble, currentAgentRaw, savedToolCount, savedToolDetails);
+        currentAgentBubble = null;
+        currentAgentRaw = '';
       }
     }
   };
 
-  window.__appendError = function(sid, text) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    window.__setThinking(sid, false);
-    appendMessage(s, 'error', text);
+  window.__appendError = function(text) {
+    window.__setThinking(false);
+    appendMessage('error', text);
   };
 
-  function scrollToBottom() {
-    messagesHost.scrollTop = messagesHost.scrollHeight;
-  }
+  function scrollToBottom() { messages.scrollTop = messages.scrollHeight; }
 
-  // ── Queue (per-session, max 2 pending) ─────────────────────────────────
+  // ── Queue (max 2 pending messages) ──────────────────────────────────────
+  const MAX_QUEUE = 2;
+  const msgQueue  = [];   // pending texts waiting to be sent
+  const queueList = document.getElementById('queue-list');
+  const inputRow  = document.getElementById('input-row');
+
   function renderQueue() {
-    if (!active) { queueList.innerHTML = ''; return; }
     queueList.innerHTML = '';
-    active.msgQueue.forEach((entry, i) => {
+    msgQueue.forEach((entry, i) => {
       const item = document.createElement('div');
       item.className = 'queue-item';
+
       const lbl = document.createElement('span');
       lbl.className = 'queue-item-label';
-      lbl.textContent = '#' + (i + 1);
+      lbl.textContent = `#${i + 1}`;
+
       const txt = document.createElement('span');
       txt.className = 'queue-item-text';
-      txt.textContent = entry.text + (entry.images.length ? ' [' + entry.images.length + ' img]' : '');
+      txt.textContent = entry.text + (entry.images.length ? ` [${entry.images.length} img]` : '');
+
       const rm = document.createElement('button');
       rm.className = 'queue-remove';
       rm.title = 'Remove';
       rm.innerHTML = '<svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
       rm.addEventListener('click', () => {
-        active.msgQueue.splice(i, 1);
+        msgQueue.splice(i, 1);
         renderQueue();
         updateInputLock();
       });
+
       item.appendChild(lbl);
       item.appendChild(txt);
       item.appendChild(rm);
@@ -2477,23 +2336,25 @@ pub fn html() -> String {
   }
 
   function updateInputLock() {
-    const lock = active && active.msgQueue.length >= MAX_QUEUE;
+    const lock = msgQueue.length >= MAX_QUEUE;
     inputRow.classList.toggle('locked', lock);
     input.disabled = lock;
   }
 
+  // Called when agent finishes — drain queue one item at a time
   function drainQueue() {
-    if (!active || active.msgQueue.length === 0) return;
-    const next = active.msgQueue.shift();
+    if (msgQueue.length === 0) return;
+    const next = msgQueue.shift();
     renderQueue();
     updateInputLock();
     dispatchPrompt(next.text, next.images, next.docs);
   }
 
   function dispatchPrompt(text, images, docs) {
-    if (!active) return;
+    // Show user's typed text (without the <doc> prefix) in the bubble
     const displayText = text.replace(/<doc filename="[^"]*">[\s\S]*?<\/doc>\s*/g, '').trim();
-    const bubble = appendMessage(active, 'user', displayText || '(document attached)');
+    const bubble = appendMessage('user', displayText || '(document attached)');
+    // Show doc chips in user bubble
     if (docs && docs.length) {
       for (const doc of docs) {
         const chip = document.createElement('div');
@@ -2506,6 +2367,7 @@ pub fn html() -> String {
         bubble.appendChild(chip);
       }
     }
+    // Show attached images in user bubble
     if (images && images.length) {
       for (const img of images) {
         const el = document.createElement('img');
@@ -2514,14 +2376,17 @@ pub fn html() -> String {
         bubble.appendChild(el);
       }
     }
-    window.__setThinking(active.sid, true);
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', session_id: active.sid, text, images: images || [] }));
+    window.__setThinking(true);
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', text, images: images || [] }));
   }
 
   // ── Image attachments ──────────────────────────────────────────────────
   let pendingImages = []; // [{data: base64, mimeType: string}]
-  let pendingDocs = [];   // [{file: File, name: string}]
-  let docLibsLoaded = false;
+  const imagePreview = document.getElementById('image-preview');
+  const fileInputImage = document.getElementById('file-input-image');
+  const fileInputDoc = document.getElementById('file-input-doc');
+  const attachBtn = document.getElementById('attach-btn');
+  const attachMenu = document.getElementById('attach-menu');
 
   function addImageFromFile(file) {
     if (!file || !file.type.startsWith('image/')) return;
@@ -2537,7 +2402,7 @@ pub fn html() -> String {
 
   function renderImagePreview() {
     imagePreview.innerHTML = '';
-    if (!pendingImages.length && !pendingDocs.length) {
+    if (!pendingImages.length) {
       imagePreview.classList.remove('visible');
       return;
     }
@@ -2555,21 +2420,6 @@ pub fn html() -> String {
       thumb.appendChild(rm);
       imagePreview.appendChild(thumb);
     });
-    // Append doc chips
-    for (let i = 0; i < pendingDocs.length; i++) {
-      const chip = document.createElement('div');
-      chip.className = 'doc-chip';
-      chip.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.3"/></svg>';
-      const span = document.createElement('span');
-      span.textContent = pendingDocs[i].name;
-      chip.appendChild(span);
-      const rm = document.createElement('button');
-      rm.className = 'rm';
-      rm.textContent = '×';
-      rm.onclick = () => { pendingDocs.splice(i, 1); renderImagePreview(); updateSendBtn(); };
-      chip.appendChild(rm);
-      imagePreview.appendChild(chip);
-    }
   }
 
   function updateSendBtn() {
@@ -2596,10 +2446,13 @@ pub fn html() -> String {
     for (const f of fileInputImage.files) addImageFromFile(f);
     fileInputImage.value = '';
   });
-
   // ── Document attachments ──────────────────────────────────────────────
+  let pendingDocs = []; // [{file: File, name: string}]
+  let docLibsLoaded = false;
+
   async function ensureDocLibs() {
     if (docLibsLoaded) return;
+    // Load scripts sequentially — each sets a global (pdfjsLib, mammoth)
     async function loadScript(url) {
       return new Promise((resolve, reject) => {
         const s = document.createElement('script');
@@ -2609,10 +2462,13 @@ pub fn html() -> String {
         document.head.appendChild(s);
       });
     }
+    // pdf.js v3 UMD — sets globalThis.pdfjsLib
     await loadScript('octoweb-lib://localhost/pdf.min.js');
+    // Worker: blob URL so pdf.js can load it without network access
     const workerSrc = await fetch('octoweb-lib://localhost/pdf.worker.min.js').then(r => r.text());
     const workerBlob = new Blob([workerSrc], { type: 'application/javascript' });
     pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
+    // mammoth (DOCX) — sets window.mammoth
     await loadScript('octoweb-lib://localhost/mammoth.browser.min.js');
     docLibsLoaded = true;
   }
@@ -2636,12 +2492,32 @@ pub fn html() -> String {
     }
   }
 
+  function renderPreview() {
+    renderImagePreview();
+    // Append doc chips
+    for (let i = 0; i < pendingDocs.length; i++) {
+      const chip = document.createElement('div');
+      chip.className = 'doc-chip';
+      chip.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.3"/></svg>';
+      const span = document.createElement('span');
+      span.textContent = pendingDocs[i].name;
+      chip.appendChild(span);
+      const rm = document.createElement('button');
+      rm.className = 'rm';
+      rm.textContent = '×';
+      rm.onclick = () => { pendingDocs.splice(i, 1); renderPreview(); updateSendBtn(); };
+      chip.appendChild(rm);
+      imagePreview.appendChild(chip);
+    }
+    imagePreview.classList.toggle('visible', pendingImages.length > 0 || pendingDocs.length > 0);
+  }
+
   fileInputDoc.addEventListener('change', () => {
     for (const f of fileInputDoc.files) {
       pendingDocs.push({ file: f, name: f.name });
     }
     fileInputDoc.value = '';
-    renderImagePreview();
+    renderPreview();
     updateSendBtn();
   });
 
@@ -2659,7 +2535,6 @@ pub fn html() -> String {
 
   // ── Send ────────────────────────────────────────────────────────────────
   async function send() {
-    if (!active) return;
     const text = input.value.trim();
     const images = pendingImages.slice();
     const docs = pendingDocs.slice();
@@ -2669,43 +2544,46 @@ pub fn html() -> String {
     input.style.height = 'auto';
     pendingImages = [];
     pendingDocs = [];
-    renderImagePreview();
+    renderPreview();
     sendBtn.classList.remove('active');
 
+    // Extract doc text (lazy-loads libs on first use)
     let docPrefix = '';
     if (docs.length) {
       for (const doc of docs) {
         try {
           const extracted = await extractDocText(doc.file);
           if (extracted) {
-            docPrefix += '<doc filename="' + doc.name + '"\u003e\n' + extracted + '\n</doc>\n\n';
+            docPrefix += '<doc filename="' + doc.name + '">\n' + extracted + '\n</doc>\n\n';
           } else {
-            docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Document was empty or could not be parsed]\n</doc>\n\n';
+            docPrefix += '<doc filename="' + doc.name + '">\n[Document was empty or could not be parsed]\n</doc>\n\n';
           }
         } catch (e) {
           const msg = e && (e.message || e.toString()) || 'unknown error';
           console.error('Doc extraction failed:', e);
-          docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Failed to extract: ' + msg + ']\n</doc>\n\n';
+          docPrefix += '<doc filename="' + doc.name + '">\n[Failed to extract: ' + msg + ']\n</doc>\n\n';
         }
       }
     }
     const fullText = docPrefix + text;
 
-    if (!active.isThinking) {
+    if (!isThinking) {
       dispatchPrompt(fullText, images, docs);
-    } else if (active.msgQueue.length < MAX_QUEUE) {
-      active.msgQueue.push({ text: fullText, images, docs });
+    } else if (msgQueue.length < MAX_QUEUE) {
+      msgQueue.push({ text: fullText, images, docs });
       renderQueue();
       updateInputLock();
     }
   }
 
+  // Stop button — cancel current prompt
   function stop() {
-    if (!active) return;
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_cancel', session_id: active.sid }));
-    window.__setThinking(active.sid, false);
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_cancel' }));
+    // Clear activity feed immediately
+    window.__setThinking(false);
   }
 
+  // Click handler: send or stop depending on mode
   sendBtn.addEventListener('click', () => {
     if (sendBtn.classList.contains('stop-mode')) {
       stop();
@@ -2720,9 +2598,10 @@ pub fn html() -> String {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
+
     var val = input.value;
     if (!val) { input.placeholder = 'Ask Octopus\u2026'; }
-    if (val.charAt(0) === '/' && active && active.availableCommands.length > 0) {
+    if (val.charAt(0) === '/' && availableCommands.length > 0) {
       var spaceIdx = val.indexOf(' ');
       if (spaceIdx === -1) {
         showCmdDropdown(val.substring(1));
@@ -2736,14 +2615,15 @@ pub fn html() -> String {
 
   // Hook into __setThinking to drain queue when agent becomes free
   const _origSetThinking = window.__setThinking;
-  window.__setThinking = function(sid, on) {
-    _origSetThinking(sid, on);
-    if (!on && sid === activeSid) {
+  window.__setThinking = function(on) {
+    _origSetThinking(on);
+    if (!on) {
+      // Small delay so the bubble finishes rendering before next prompt
       setTimeout(drainQueue, 80);
     }
   };
 
-  // ── Close sidebar ──────────────────────────────────────────────────────
+  // ── Close ────────────────────────────────────────────────────────────────
   document.getElementById('close-btn').addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'sidebar_close' }));
   });
@@ -2787,6 +2667,7 @@ pub fn html() -> String {
 
   function buildToolDetails(t) {
     let html = '';
+    // Locations
     if (t.locations && t.locations.length > 0) {
       html += '<div class="detail-section"><div class="detail-section-title">Locations</div>';
       for (const l of t.locations) {
@@ -2794,16 +2675,19 @@ pub fn html() -> String {
       }
       html += '</div>';
     }
+    // Input
     const inputJson = formatJson(t.rawInput);
     if (inputJson) {
       html += '<div class="detail-section"><div class="detail-section-title">Input</div><pre class="detail-code">' + escapeHtml(inputJson) + '</pre></div>';
     }
+    // Output
     const outputJson = formatJson(t.rawOutput);
     if (outputJson) {
       html += '<div class="detail-section"><div class="detail-section-title">Output</div><pre class="detail-code">' + escapeHtml(outputJson) + '</pre></div>';
     }
     return html;
   }
+
 
   function hideToolModal() {
     toolModal.classList.remove('show');
@@ -2817,14 +2701,9 @@ pub fn html() -> String {
     if (e.key === 'Escape' && toolModal.classList.contains('show')) hideToolModal();
   });
 
-  // ── Inject prompt (from Rust "Ask AI") ───────────────────────────────
-  window.__injectPrompt = function(text) {
-    input.value = text;
-    input.style.height = 'auto';
-    sendBtn.classList.toggle('active', true);
-    send();
-  };
-
+  // Store tool details per message for modal access
+  const messageToolDetails = new Map();
+  window._messageToolDetails = messageToolDetails;
 </script>
 </body>
 </html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
