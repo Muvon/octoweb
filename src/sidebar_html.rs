@@ -2789,22 +2789,6 @@ pub fn html() -> String {
     }
   });
   input.addEventListener('keydown', e => {
-    // Tab / Shift+Tab: cycle sessions, keep focus in input
-    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      const keys = Array.from(sessions.keys());
-      if (keys.length <= 1) return;
-      const idx = keys.indexOf(activeSid);
-      let nextIdx;
-      if (e.shiftKey) {
-        nextIdx = idx <= 0 ? keys.length - 1 : idx - 1;
-      } else {
-        nextIdx = idx >= keys.length - 1 ? 0 : idx + 1;
-      }
-      const nextSid = keys[nextIdx];
-      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
-      return;
-    }
     if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
   });
   input.addEventListener('input', () => {
@@ -2908,6 +2892,32 @@ pub fn html() -> String {
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && toolModal.classList.contains('show')) hideToolModal();
   });
+
+  // Tab / Shift+Tab cycle ACP sessions globally, regardless of which element
+  // has focus. Capture phase + skip when modifier keys are present so the
+  // shortcut doesn't collide with browser focus traversal in modals or
+  // ⌘⇧⇥ system shortcuts. Always returns focus to the prompt input so users
+  // can keep typing without an extra click.
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
+    // Don't hijack Tab when the create-session panel is open (its inputs
+    // need normal Tab navigation between title/tag fields).
+    if (scPanel.classList.contains('visible')) return;
+    const keys = Array.from(sessions.keys());
+    if (keys.length <= 1) {
+      e.preventDefault();
+      input.focus();
+      return;
+    }
+    e.preventDefault();
+    const idx = keys.indexOf(activeSid);
+    const nextIdx = e.shiftKey
+      ? (idx <= 0 ? keys.length - 1 : idx - 1)
+      : (idx >= keys.length - 1 ? 0 : idx + 1);
+    const nextSid = keys[nextIdx];
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
+    input.focus();
+  }, true);
 
   // ── Inject prompt (from Rust "Ask AI") ───────────────────────────────
   window.__injectPrompt = function(text) {
