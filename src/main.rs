@@ -67,7 +67,9 @@ enum AppEvent {
     AcpSetAgent(u64, String), // (session_id, tag) — change agent tag and restart that session
     AcpClearSession(u64),     // (session_id) — restart session with same tag (clear chat)
     AcpSessionCreate(String, String), // (title, tag) — create new session (capped at MAX_SESSIONS)
+    AcpSessionCreatePanel,    // ⌘T in sidebar — open the new-session input panel
     AcpSessionClose(u64),     // (session_id) — close session (refused if last one)
+    AcpSessionCloseActive,    // ⌘W in sidebar — close currently active session
     AcpSessionSwitch(u64),    // (session_id) — switch active session
     AcpSessionRename(u64, String), // (session_id, title) — rename session
     AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
@@ -1443,8 +1445,19 @@ fn main() {
                 } else if cmd && keycode == SLASH_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleShortcuts);
                     CallbackResult::Drop
+                } else if cmd && !shift && !ctrl && keycode == T_KEYCODE && sidebar_state.load(Ordering::Relaxed) && !overlay_state.load(Ordering::Relaxed) {
+                    // ⌘T while the sidebar is focused opens the new-session panel
+                    // (mirrors the browser's "new tab" gesture inside the assistant).
+                    let _ = p.send_event(AppEvent::AcpSessionCreatePanel);
+                    CallbackResult::Drop
                 } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::CloseTab(0));
+                    // When the sidebar is focused, ⌘W closes the active ACP session
+                    // instead of the browser tab — mirrors browser behavior in the panel.
+                    if sidebar_state.load(Ordering::Relaxed) {
+                        let _ = p.send_event(AppEvent::AcpSessionCloseActive);
+                    } else {
+                        let _ = p.send_event(AppEvent::CloseTab(0));
+                    }
                     CallbackResult::Drop
                 } else if cmd && !ctrl && !shift && keycode == Q_KEYCODE {
                     let _ = p.send_event(AppEvent::Quit);
@@ -3389,6 +3402,13 @@ fn main() {
                 }
             }
 
+            // ── ⌘T in sidebar — open the new-session panel and focus title ─────────
+            Event::UserEvent(AppEvent::AcpSessionCreatePanel) => {
+                let _ = sidebar_wv.evaluate_script(
+                    "window.__openCreatePanel && window.__openCreatePanel()",
+                );
+            }
+
             // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
             Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
                 if sessions.len() >= MAX_SESSIONS {
@@ -3419,6 +3439,12 @@ fn main() {
                         "window.__switchSession && window.__switchSession({sid})"
                     ));
                 }
+            }
+
+            // ── ⌘W in sidebar — close currently active session ─────────────────────
+            Event::UserEvent(AppEvent::AcpSessionCloseActive) => {
+                let sid = active_session_id;
+                let _ = proxy.send_event(AppEvent::AcpSessionClose(sid));
             }
 
             // ── ACP close session (refused if it's the only one) ───────────────────
