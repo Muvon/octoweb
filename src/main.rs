@@ -915,16 +915,23 @@ fn main() {
             move |msg| {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
-                        Some("drag_move") => {
-                            let dx = v["dx"].as_f64().unwrap_or(0.0);
-                            let dy = v["dy"].as_f64().unwrap_or(0.0);
-                            if let Ok(pos) = bw.outer_position() {
-                                let scale = bw.scale_factor();
-                                let lp: tao::dpi::LogicalPosition<f64> = pos.to_logical(scale);
-                                bw.set_outer_position(tao::dpi::LogicalPosition::new(
-                                    lp.x + dx,
-                                    lp.y + dy,
-                                ));
+                        Some("begin_window_drag") => {
+                            // Delegate to native macOS performWindowDragWithEvent:.
+                            // It uses the OS drag threshold (~3px), so a click without
+                            // intent to drag won't move the window — fixes accidental
+                            // window movement when users click into the bar trying to
+                            // reach content below.
+                            unsafe {
+                                use objc2::runtime::AnyObject;
+                                use objc2::{class, msg_send};
+                                let app: *mut AnyObject =
+                                    msg_send![class!(NSApplication), sharedApplication];
+                                let event: *mut AnyObject = msg_send![app, currentEvent];
+                                if !event.is_null() {
+                                    let ns_win: *mut AnyObject = bw.ns_window() as *mut AnyObject;
+                                    let _: () =
+                                        msg_send![ns_win, performWindowDragWithEvent: event];
+                                }
                             }
                         }
                         Some("toggle_sidebar") => {

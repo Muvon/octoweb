@@ -546,22 +546,14 @@ pub fn html() -> &'static str {
   // Initial state — badge hidden
   document.getElementById('badge').classList.remove('show');
 
-  // Window drag from title bar background
+  // Window drag from title bar background — delegates to native macOS
+  // performWindowDragWithEvent: which has a built-in drag threshold so
+  // accidental clicks (e.g. when reaching past the bar to scroll content)
+  // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
     if (e.target.closest('#ai-btn, .bar-btn, #page-title, #url')) return;
-    e.preventDefault();
-    var sx = e.screenX, sy = e.screenY;
-    function onMove(ev) {
-      var dx = ev.screenX - sx, dy = ev.screenY - sy;
-      sx = ev.screenX; sy = ev.screenY;
-      if (dx || dy) window.ipc.postMessage(JSON.stringify({ type: 'drag_move', dx: dx, dy: dy }));
-    }
-    function onUp() {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });
 })();
 </script>
