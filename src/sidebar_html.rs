@@ -1681,6 +1681,11 @@ pub fn html() -> String {
   // `active` is a live proxy that always points to the current session's
   // state. Updated on every switchTo(). All chat helpers read/write through it.
   let active = null;
+  // Global persisted prompt-history seed, populated by Rust via __setHistory
+  // when the sidebar opens. New sessions clone this so prior prompts are
+  // immediately reachable via Ctrl+P / Ctrl+N. Declared here (before
+  // makeSession) to avoid TDZ when bootstrap creates the default session.
+  let globalHistorySeed = [];
 
   function makeSession(sid, title, tag, status) {
     const container = document.createElement('div');
@@ -1752,8 +1757,8 @@ pub fn html() -> String {
       availableCommands: [],
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
-      // prompt history (per-session, isolated)
-      promptHistory: [],
+      // prompt history (per-session, isolated — seeded from global on creation)
+      promptHistory: globalHistorySeed.slice(),
       // input draft (per-session, isolated)
       inputDraft: '',
       inputSelectionStart: 0,
@@ -1915,7 +1920,22 @@ pub fn html() -> String {
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
   });
-  window.__setHistory = _ph.setHistory;
+  // Global seed used to (re)hydrate per-session history. Rust calls this on
+  // sidebar open with the persisted MRU list. Each session keeps its own
+  // working copy so navigation doesn't leak across sessions.
+  window.__setHistory = function(arr) {
+    globalHistorySeed = Array.isArray(arr) ? arr.slice() : [];
+    // Backfill any session whose history is empty (newly created or untouched).
+    for (const s of sessions.values()) {
+      if (!s.promptHistory || s.promptHistory.length === 0) {
+        s.promptHistory = globalHistorySeed.slice();
+      }
+    }
+    // Refresh the active widget so Ctrl+P/N can immediately walk the seed.
+    if (active) {
+      _ph.setHistory(active.promptHistory.slice());
+    }
+  };
 
   // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
   // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
