@@ -1370,7 +1370,7 @@ fn main() {
                 } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::CloseTab(0));
                     CallbackResult::Drop
-                } else if cmd && !shift && keycode == Q_KEYCODE {
+                } else if cmd && !ctrl && !shift && keycode == Q_KEYCODE {
                     let _ = p.send_event(AppEvent::Quit);
                     CallbackResult::Drop
                 } else if ctrl && keycode == P_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
