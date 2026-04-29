@@ -1668,6 +1668,7 @@ pub fn html() -> String {
 
   const MAX_SESSIONS = 4;
   const MAX_QUEUE    = 2;
+  const MAX_PROMPT_HISTORY = 50;
 
   const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
 
@@ -1751,6 +1752,12 @@ pub fn html() -> String {
       availableCommands: [],
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
+      // prompt history (per-session, isolated)
+      promptHistory: [],
+      // input draft (per-session, isolated)
+      inputDraft: '',
+      inputSelectionStart: 0,
+      inputSelectionEnd: 0,
       // message → toolDetails map for modal lookup
       messageToolDetails: new WeakMap(),
     };
@@ -1779,6 +1786,13 @@ pub fn html() -> String {
       refreshTabActiveStates();
       return;
     }
+    // Save current session's input state before switching
+    if (active) {
+      active.inputDraft = input.value;
+      active.inputSelectionStart = input.selectionStart;
+      active.inputSelectionEnd = input.selectionEnd;
+      active.promptHistory = _ph.getHistory();
+    }
     // Detach old container (its DOM stays in memory, attached to its session object)
     if (active && active.container.parentNode === messagesHost) {
       messagesHost.removeChild(active.container);
@@ -1787,6 +1801,13 @@ pub fn html() -> String {
     active = s;
     messagesHost.appendChild(s.container);
     refreshTabActiveStates();
+    // Restore new session's input state
+    input.value = s.inputDraft || '';
+    input.selectionStart = s.inputSelectionStart || 0;
+    input.selectionEnd = s.inputSelectionEnd || 0;
+    _ph.setHistory(s.promptHistory || []);
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     // Rebind input UI to reflect this session's state
     sendBtn.classList.toggle('stop-mode', s.isThinking);
     sendBtn.title = s.isThinking ? 'Stop' : 'Send (Return)';
@@ -1883,16 +1904,8 @@ pub fn html() -> String {
     });
   });
 
-  // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
-  // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
-  // before the sidebar HTML loads. We register it here so events arriving with
-  // sid=1 find a target.
-  (function initDefault() {
-    window.__addSession(1, 'Assistant', 'octoweb:assistant', 'connecting');
-    switchTo(1);
-  })();
-
   // ── Prompt history (shared module) ──────────────────────────────────────
+  // MUST be initialized before bootstrap — switchTo() references _ph.
   /* PROMPT_HISTORY_JS */
   const ghostEl = document.getElementById('prompt-ghost');
   const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus\u2026', function() {
@@ -1901,6 +1914,15 @@ pub fn html() -> String {
     updateSendBtn();
   });
   window.__setHistory = _ph.setHistory;
+
+  // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
+  // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
+  // before the sidebar HTML loads. We register it here so events arriving with
+  // sid=1 find a target.
+  (function initDefault() {
+    window.__addSession(1, 'Assistant', 'octoweb:assistant', 'connecting');
+    switchTo(1);
+  })();
 
   // ── Clear current session (toolbar pencil button) ───────────────────────
   newSessBtn.addEventListener('click', () => {
@@ -1919,9 +1941,14 @@ pub fn html() -> String {
     active.toolDetails = [];
     active.toolRows = {};
     if (active.activityTimer) { clearInterval(active.activityTimer); active.activityTimer = null; }
+    active.promptHistory = [];
+    active.inputDraft = '';
+    active.inputSelectionStart = 0;
+    active.inputSelectionEnd = 0;
     sendBtn.className = '';
     input.value = '';
     input.style.height = 'auto';
+    _ph.setHistory([]);
     window.ipc.postMessage(JSON.stringify({ type: 'acp_clear_session', session_id: active.sid }));
   });
 
@@ -1936,7 +1963,16 @@ pub fn html() -> String {
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
     s.availableCommands = [];
-    if (s === active) hideCmdDropdown();
+    s.promptHistory = [];
+    s.inputDraft = '';
+    s.inputSelectionStart = 0;
+    s.inputSelectionEnd = 0;
+    if (s === active) {
+      hideCmdDropdown();
+      input.value = '';
+      input.style.height = 'auto';
+      _ph.setHistory([]);
+    }
   };
 
   // ── Slash commands (per-session) ────────────────────────────────────────
@@ -2707,6 +2743,14 @@ pub fn html() -> String {
       renderQueue();
       updateInputLock();
     }
+
+    // Save raw prompt text to session history (MRU, dedup)
+    if (text) {
+      const pos = active.promptHistory.indexOf(text);
+      if (pos !== -1) active.promptHistory.splice(pos, 1);
+      active.promptHistory.unshift(text);
+      if (active.promptHistory.length > MAX_PROMPT_HISTORY) active.promptHistory.pop();
+    }
   }
 
   function stop() {
@@ -2723,6 +2767,22 @@ pub fn html() -> String {
     }
   });
   input.addEventListener('keydown', e => {
+    // Tab / Shift+Tab: cycle sessions, keep focus in input
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      const keys = Array.from(sessions.keys());
+      if (keys.length <= 1) return;
+      const idx = keys.indexOf(activeSid);
+      let nextIdx;
+      if (e.shiftKey) {
+        nextIdx = idx <= 0 ? keys.length - 1 : idx - 1;
+      } else {
+        nextIdx = idx >= keys.length - 1 ? 0 : idx + 1;
+      }
+      const nextSid = keys[nextIdx];
+      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
   });
   input.addEventListener('input', () => {
