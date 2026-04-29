@@ -1188,8 +1188,6 @@ fn main() {
     let mut inline_edit_response = String::new();
     let mut prompt_history: Vec<String> = config::load_prompt_history();
     prompt_history.truncate(cfg.max_prompt_history);
-    let mut ai_prompt_history: Vec<String> = config::load_ai_prompt_history();
-    ai_prompt_history.truncate(cfg.max_ai_prompt_history);
 
     // ── Per-tab WebContent process stats (CPU%, RSS) ───────────────────────
     // Sampled every 2 s from the active tab's WebContent XPC process.
@@ -2920,12 +2918,6 @@ fn main() {
                             prompt_history.truncate(n);
                         }
                     }
-                    "max_ai_prompt_history" => {
-                        if let Ok(n) = val.parse::<usize>() {
-                            cfg.max_ai_prompt_history = n;
-                            ai_prompt_history.truncate(n);
-                        }
-                    }
                     "proactive_learning" => {
                         cfg.proactive_learning = val == "true";
                         if cfg.proactive_learning {
@@ -3276,12 +3268,6 @@ fn main() {
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
                     sidebar_hotkey_visible.store(true, Ordering::Relaxed);
-                    // Inject prompt history into sidebar
-                    let hist_json = serde_json::to_string(&ai_prompt_history)
-                        .unwrap_or_else(|_| "[]".into());
-                    let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__setHistory && window.__setHistory({hist_json})"
-                    ));
                     // Clear unread badge on address bar 🐙 button
                     let _ = address_bar_wv.evaluate_script(
                         "window.__setBadge && window.__setBadge(false)"
@@ -3342,18 +3328,6 @@ fn main() {
 
             // ── ACP events ─────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::AcpPrompt(sid, text, images)) => {
-                // Save prompt to AI history (MRU, dedup) — shared across sessions.
-                if !text.is_empty() {
-                    if let Some(pos) = ai_prompt_history.iter().position(|p| p == &text) {
-                        ai_prompt_history.remove(pos);
-                    }
-                    ai_prompt_history.insert(0, text.clone());
-                    ai_prompt_history.truncate(cfg.max_ai_prompt_history);
-                    {
-                        let snapshot = ai_prompt_history.clone();
-                        std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
-                    }
-                }
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     if let Some(ref handle) = s.handle {
                         if !handle.send_prompt(text, images) {
@@ -3740,7 +3714,7 @@ fn main() {
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
-                save_and_exit(&tabs, &favicon_cache, &prompt_history, &ai_prompt_history, control_flow);
+                save_and_exit(&tabs, &favicon_cache, &prompt_history, control_flow);
             }
 
             // ── Title update ──────────────────────────────────────────────
@@ -4276,7 +4250,7 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
-                        save_and_exit(&tabs, &favicon_cache, &prompt_history, &ai_prompt_history, control_flow);
+                        save_and_exit(&tabs, &favicon_cache, &prompt_history, control_flow);
                     } else if window_id == chrome_win_id {
                         // Chrome window should not be closed independently — ignore.
                     } else {
@@ -4879,7 +4853,6 @@ fn save_and_exit(
     tabs: &Arc<Mutex<browser::TabManager>>,
     favicon_cache: &std::collections::HashMap<String, String>,
     prompt_history: &[String],
-    ai_prompt_history: &[String],
     control_flow: &mut ControlFlow,
 ) {
     let mut tm = tabs.lock().unwrap();
@@ -4901,7 +4874,6 @@ fn save_and_exit(
     config::save_favicons(favicon_cache);
     config::save_history(tm.history());
     config::save_prompt_history(prompt_history);
-    config::save_ai_prompt_history(ai_prompt_history);
     drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;

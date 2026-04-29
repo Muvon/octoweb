@@ -259,6 +259,9 @@ function createPromptHistory(inputEl, ghostEl, defaultPlaceholder, onResize) {
       inputEl.placeholder = defaultPlaceholder;
       clearGhost();
     },
+    getHistory: function() {
+      return history.slice();
+    },
     resetState: function() {
       histIdx = -1;
       savedDraft = '';
