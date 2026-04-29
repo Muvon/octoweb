@@ -2482,18 +2482,22 @@ pub fn html() -> String {
     input.disabled = lock;
   }
 
-  function drainQueue() {
-    if (!active || active.msgQueue.length === 0) return;
-    const next = active.msgQueue.shift();
+  function drainQueueForSession(s) {
+    if (!s || s.msgQueue.length === 0) return;
+    const next = s.msgQueue.shift();
     renderQueue();
     updateInputLock();
-    dispatchPrompt(next.text, next.images, next.docs);
+    dispatchPromptForSession(s, next.text, next.images, next.docs);
   }
 
-  function dispatchPrompt(text, images, docs) {
-    if (!active) return;
+  function drainQueue() {
+    drainQueueForSession(active);
+  }
+
+  function dispatchPromptForSession(s, text, images, docs) {
+    if (!s) return;
     const displayText = text.replace(/<doc filename="[^"]*">[\s\S]*?<\/doc>\s*/g, '').trim();
-    const bubble = appendMessage(active, 'user', displayText || '(document attached)');
+    const bubble = appendMessage(s, 'user', displayText || '(document attached)');
     if (docs && docs.length) {
       for (const doc of docs) {
         const chip = document.createElement('div');
@@ -2514,8 +2518,13 @@ pub fn html() -> String {
         bubble.appendChild(el);
       }
     }
-    window.__setThinking(active.sid, true);
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', session_id: active.sid, text, images: images || [] }));
+    window.__setThinking(s.sid, true);
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', session_id: s.sid, text, images: images || [] }));
+  }
+
+  function dispatchPrompt(text, images, docs) {
+    if (!active) return;
+    dispatchPromptForSession(active, text, images, docs);
   }
 
   // ── Image attachments ──────────────────────────────────────────────────
@@ -2738,8 +2747,9 @@ pub fn html() -> String {
   const _origSetThinking = window.__setThinking;
   window.__setThinking = function(sid, on) {
     _origSetThinking(sid, on);
-    if (!on && sid === activeSid) {
-      setTimeout(drainQueue, 80);
+    if (!on) {
+      const s = sessions.get(sid);
+      if (s) setTimeout(() => drainQueueForSession(s), 80);
     }
   };
 
