@@ -1869,6 +1869,11 @@ pub fn html() -> String {
       // chat state
       currentAgentBubble: null,
       currentAgentRaw: '',
+      // `busy` = agent is processing a prompt right now (set on dispatch,
+      // cleared on Done/Cancelled/Error). Drives queue logic and the stop
+      // button. NOT the same as `isThinking` (the activity spinner UI),
+      // which chunks may hide while the agent is still busy streaming.
+      busy: false,
       isThinking: false,
       // tool tracking
       toolCount: 0,
@@ -1932,8 +1937,8 @@ pub fn html() -> String {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     // Rebind input UI to reflect this session's state
-    sendBtn.classList.toggle('stop-mode', s.isThinking);
-    sendBtn.title = s.isThinking ? 'Stop' : 'Send (Return)';
+    sendBtn.classList.toggle('stop-mode', s.busy);
+    sendBtn.title = s.busy ? 'Stop' : 'Send (Return)';
     renderQueue();
     updateInputLock();
     updateWelcome();
@@ -2077,6 +2082,12 @@ pub fn html() -> String {
     active.currentAgentBubble = null;
     active.currentAgentRaw = '';
     active.isThinking = false;
+    // Clearing the session restarts the agent on Rust side — drop busy and any
+    // queued prompts so we don't dispatch stale messages into the new run.
+    active.busy = false;
+    active.msgQueue = [];
+    renderQueue();
+    updateInputLock();
     active.toolCount = 0;
     active.toolDetails = [];
     active.toolRows = {};
@@ -2466,6 +2477,8 @@ pub fn html() -> String {
     if (!s.currentAgentBubble) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
+      // Hide the activity spinner UI now that real output is streaming.
+      // Do NOT touch `s.busy` — the agent is still running until Done.
       s.isThinking = false;
       s.thinking.className = '';
       clearActivity(s);
@@ -2482,6 +2495,7 @@ pub fn html() -> String {
     if (!s.currentAgentBubble) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
+      // Same rationale as __appendChunk — spinner hide only, busy stays true.
       s.isThinking = false;
       s.thinking.className = '';
       clearActivity(s);
@@ -2599,6 +2613,10 @@ pub fn html() -> String {
       s.activityTimer = setInterval(() => tickActivity(s), 1000);
       if (sid === activeSid) scrollToBottom();
     } else {
+      // Terminal event for this prompt (Done/Cancelled/Error path via main.rs).
+      // Clear the busy flag so queued messages can drain and new prompts go
+      // straight to dispatch instead of being queued.
+      s.busy = false;
       const savedToolCount = s.toolCount;
       const savedToolDetails = [...s.toolDetails];
       clearActivity(s);
@@ -2692,6 +2710,9 @@ pub fn html() -> String {
         bubble.appendChild(el);
       }
     }
+    // Mark the session busy BEFORE flipping the spinner. send() reads `busy`
+    // to decide queue-vs-dispatch, and the stop button mirrors `busy`.
+    s.busy = true;
     window.__setThinking(s.sid, true);
     window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', session_id: s.sid, text, images: images || [] }));
   }
@@ -2874,7 +2895,7 @@ pub fn html() -> String {
     }
     const fullText = docPrefix + text;
 
-    if (!active.isThinking) {
+    if (!active.busy) {
       dispatchPrompt(fullText, images, docs);
     } else if (active.msgQueue.length < MAX_QUEUE) {
       active.msgQueue.push({ text: fullText, images, docs });
@@ -2896,7 +2917,12 @@ pub fn html() -> String {
   function stop() {
     if (!active) return;
     window.ipc.postMessage(JSON.stringify({ type: 'acp_cancel', session_id: active.sid }));
-    window.__setThinking(active.sid, false);
+    // Don't optimistically clear busy/spinner here — the agent will emit
+    // Cancelled which routes through __setThinking(sid, false) and clears
+    // busy at the right moment. Clearing early causes a race where the
+    // queue drains and a new prompt dispatches BEFORE the cancel lands,
+    // then the late Cancelled event clears busy again while the new prompt
+    // is still running → parallel dispatch on next send().
   }
 
   sendBtn.addEventListener('click', () => {
