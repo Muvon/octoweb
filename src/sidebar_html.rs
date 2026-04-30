@@ -1938,6 +1938,14 @@ pub fn html() -> String {
     updateInputLock();
     updateWelcome();
     scrollToBottom();
+    // Focus always lands in the prompt input after any session switch (manual
+    // tab click, Tab/Shift+Tab cycling, or Rust-driven switch after creating
+    // a new session via ⌘T). Restore caret to the saved selection range.
+    input.focus();
+    try {
+      input.selectionStart = s.inputSelectionStart || input.value.length;
+      input.selectionEnd   = s.inputSelectionEnd   || input.value.length;
+    } catch (_) {}
   }
 
   // Rust-driven session lifecycle
