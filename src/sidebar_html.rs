@@ -1804,11 +1804,11 @@ pub fn html() -> String {
   // `active` is a live proxy that always points to the current session's
   // state. Updated on every switchTo(). All chat helpers read/write through it.
   let active = null;
-  // Global persisted prompt-history seed, populated by Rust via __setHistory
-  // when the sidebar opens. New sessions clone this so prior prompts are
-  // immediately reachable via Ctrl+P / Ctrl+N. Declared here (before
-  // makeSession) to avoid TDZ when bootstrap creates the default session.
-  let globalHistorySeed = [];
+  // Global prompt-history list, populated by Rust via __setHistory when the
+  // sidebar opens. This is the single source of truth shared across ALL
+  // sessions — Ctrl+P / Ctrl+N walks one MRU list regardless of which
+  // session is active. Per-session state only owns the input draft + selection.
+  let globalPromptHistory = [];
 
   function makeSession(sid, title, tag, status) {
     const container = document.createElement('div');
@@ -1880,14 +1880,10 @@ pub fn html() -> String {
       availableCommands: [],
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
-      // prompt history (per-session, isolated — seeded from global on creation)
-      promptHistory: globalHistorySeed.slice(),
       // input draft (per-session, isolated)
       inputDraft: '',
       inputSelectionStart: 0,
       inputSelectionEnd: 0,
-      // message → toolDetails map for modal lookup
-      messageToolDetails: new WeakMap(),
     };
   }
 
@@ -1919,7 +1915,6 @@ pub fn html() -> String {
       active.inputDraft = input.value;
       active.inputSelectionStart = input.selectionStart;
       active.inputSelectionEnd = input.selectionEnd;
-      active.promptHistory = _ph.getHistory();
     }
     // Detach old container (its DOM stays in memory, attached to its session object)
     if (active && active.container.parentNode === messagesHost) {
@@ -1929,11 +1924,11 @@ pub fn html() -> String {
     active = s;
     messagesHost.appendChild(s.container);
     refreshTabActiveStates();
-    // Restore new session's input state
+    // Restore new session's input state (history is global — no swap needed)
     input.value = s.inputDraft || '';
     input.selectionStart = s.inputSelectionStart || 0;
     input.selectionEnd = s.inputSelectionEnd || 0;
-    _ph.setHistory(s.promptHistory || []);
+    _ph.resetState();
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     // Rebind input UI to reflect this session's state
@@ -2044,21 +2039,12 @@ pub fn html() -> String {
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
   });
-  // Global seed used to (re)hydrate per-session history. Rust calls this on
-  // sidebar open with the persisted MRU list. Each session keeps its own
-  // working copy so navigation doesn't leak across sessions.
+  // Global prompt history is shared by all sessions. Rust calls this on
+  // sidebar open with the persisted MRU list, and any time it wants to push
+  // a refresh. Ctrl+P / Ctrl+N navigate this single list from any session.
   window.__setHistory = function(arr) {
-    globalHistorySeed = Array.isArray(arr) ? arr.slice() : [];
-    // Backfill any session whose history is empty (newly created or untouched).
-    for (const s of sessions.values()) {
-      if (!s.promptHistory || s.promptHistory.length === 0) {
-        s.promptHistory = globalHistorySeed.slice();
-      }
-    }
-    // Refresh the active widget so Ctrl+P/N can immediately walk the seed.
-    if (active) {
-      _ph.setHistory(active.promptHistory.slice());
-    }
+    globalPromptHistory = Array.isArray(arr) ? arr.slice() : [];
+    _ph.setHistory(globalPromptHistory);
   };
 
   // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
@@ -2087,14 +2073,13 @@ pub fn html() -> String {
     active.toolDetails = [];
     active.toolRows = {};
     if (active.activityTimer) { clearInterval(active.activityTimer); active.activityTimer = null; }
-    active.promptHistory = [];
     active.inputDraft = '';
     active.inputSelectionStart = 0;
     active.inputSelectionEnd = 0;
     sendBtn.className = '';
     input.value = '';
     input.style.height = 'auto';
-    _ph.setHistory([]);
+    _ph.resetState();
     window.ipc.postMessage(JSON.stringify({ type: 'acp_clear_session', session_id: active.sid }));
   });
 
@@ -2109,7 +2094,6 @@ pub fn html() -> String {
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
     s.availableCommands = [];
-    s.promptHistory = [];
     s.inputDraft = '';
     s.inputSelectionStart = 0;
     s.inputSelectionEnd = 0;
@@ -2117,7 +2101,7 @@ pub fn html() -> String {
       hideCmdDropdown();
       input.value = '';
       input.style.height = 'auto';
-      _ph.setHistory([]);
+      _ph.resetState();
     }
   };
 
@@ -2890,12 +2874,14 @@ pub fn html() -> String {
       updateInputLock();
     }
 
-    // Save raw prompt text to session history (MRU, dedup)
+    // Save raw prompt text to GLOBAL history (MRU, dedup) so Ctrl+P/N walks
+    // it from any session and persistence (driven by Rust) sees every prompt.
     if (text) {
-      const pos = active.promptHistory.indexOf(text);
-      if (pos !== -1) active.promptHistory.splice(pos, 1);
-      active.promptHistory.unshift(text);
-      if (active.promptHistory.length > MAX_PROMPT_HISTORY) active.promptHistory.pop();
+      const pos = globalPromptHistory.indexOf(text);
+      if (pos !== -1) globalPromptHistory.splice(pos, 1);
+      globalPromptHistory.unshift(text);
+      if (globalPromptHistory.length > MAX_PROMPT_HISTORY) globalPromptHistory.pop();
+      _ph.setHistory(globalPromptHistory);
     }
   }
 
