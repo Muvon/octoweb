@@ -512,6 +512,87 @@ pub fn html() -> String {
     border-radius: 2px;
   }
 
+  /* ── Welcome screen (empty session) ─────────────────────────────────────── */
+  #welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    padding: 28px 20px 20px;
+    text-align: center;
+    gap: 6px;
+    opacity: 1;
+    transition: opacity 0.25s ease;
+  }
+  #welcome.hidden { opacity: 0; pointer-events: none; position: absolute; }
+  #welcome-icon { margin-bottom: 6px; opacity: 0.6; }
+  #welcome-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+  }
+  #welcome-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-width: 250px;
+    margin-bottom: 14px;
+  }
+  #welcome-suggestions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    max-width: 260px;
+    margin-bottom: 18px;
+  }
+  .suggestion-btn {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--input-border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .suggestion-btn:hover {
+    border-color: var(--accent);
+    background: rgba(0, 122, 255, 0.06);
+    color: var(--text-primary);
+  }
+   #welcome-shortcuts {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .shortcut-row kbd {
+    display: inline-block;
+    min-width: 42px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--md-code-bg);
+    border: 1px solid var(--md-code-border);
+    font-family: inherit;
+    font-size: 10px;
+    text-align: center;
+    color: var(--text-secondary);
+  }
+  .shortcut-row span { color: var(--text-tertiary); }
+
   .msg { display: flex; flex-direction: column; gap: 3px; }
 
   .msg-label {
@@ -1535,6 +1616,30 @@ pub fn html() -> String {
   <!-- Messages — host element; per-session containers mounted/swapped by JS -->
   <div id="messages"></div>
 
+  <!-- Welcome screen — shown when a session has no messages yet -->
+  <div id="welcome">
+    <div id="welcome-icon">
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="16" r="15" stroke="var(--accent)" stroke-width="1.5" fill="none" opacity="0.3"/>
+        <path d="M16 10v6M16 20v1" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div id="welcome-title">How can I help?</div>
+    <div id="welcome-desc">Ask questions, paste code, describe a bug, or attach a file. Can browse and act on your behalf in the background.</div>
+    <div id="welcome-suggestions">
+      <button class="suggestion-btn" data-prompt="Summarize the current page">Summarize the current page</button>
+      <button class="suggestion-btn" data-prompt="Explain this error and suggest a fix">Explain this error and suggest a fix</button>
+      <button class="suggestion-btn" data-prompt="What are the key takeaways from this article?">Key takeaways from this article</button>
+      <button class="suggestion-btn" data-prompt="Open the docs for this library and find the setup instructions">Find setup instructions in the docs</button>
+    </div>
+    <div id="welcome-shortcuts">
+      <div class="shortcut-row"><kbd>⌘⇧A</kbd> <span>Toggle this panel</span></div>
+      <div class="shortcut-row"><kbd>⌘T</kbd> <span>New session</span></div>
+      <div class="shortcut-row"><kbd>⌘W</kbd> <span>Close session</span></div>
+      <div class="shortcut-row"><kbd>Tab</kbd> <span>Switch session</span></div>
+    </div>
+  </div>
+
   <!-- Input -->
   <div id="input-area">
     <div id="cmd-dropdown"></div>
@@ -1647,6 +1752,7 @@ pub fn html() -> String {
 
   // ── DOM refs ────────────────────────────────────────────────────────────
   const messagesHost   = document.getElementById('messages');
+  const welcomeEl      = document.getElementById('welcome');
   const sessionStrip   = document.getElementById('session-strip');
   const sessionAddBtn  = document.getElementById('session-add-btn');
   const scPanel        = document.getElementById('session-create-panel');
@@ -1671,6 +1777,23 @@ pub fn html() -> String {
   const MAX_PROMPT_HISTORY = 50;
 
   const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
+
+  // ── Welcome screen toggle ─────────────────────────────────────────────
+  function updateWelcome() {
+    if (!active) return;
+    const hasMessages = active.container.querySelector('.msg');
+    welcomeEl.classList.toggle('hidden', !!hasMessages);
+  }
+
+  // Suggestion buttons pre-fill the input
+  welcomeEl.querySelectorAll('.suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      input.value = btn.dataset.prompt;
+      input.focus();
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    });
+  });
 
   // ── Per-session state ──────────────────────────────────────────────────
   // Map<sid, Session>. Each Session owns its DOM container, thinking element,
@@ -1818,10 +1941,11 @@ pub fn html() -> String {
     sendBtn.title = s.isThinking ? 'Stop' : 'Send (Return)';
     renderQueue();
     updateInputLock();
+    updateWelcome();
     scrollToBottom();
   }
 
-  // Rust-driven session lifecycle ────────────────────────────────────────
+  // Rust-driven session lifecycle
   window.__addSession = function(sid, title, tag, status) {
     if (sessions.has(sid)) return;
     const s = makeSession(sid, title, tag, status);
@@ -2160,7 +2284,7 @@ pub fn html() -> String {
     wrap.appendChild(label);
     wrap.appendChild(bubble);
     s.container.insertBefore(wrap, s.thinking);
-    if (s.sid === activeSid) scrollToBottom();
+    if (s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
     return bubble;
   }
 
