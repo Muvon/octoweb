@@ -77,6 +77,8 @@ impl acp::Client for BrowserClient {
         &self,
         args: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
+        // Reset idle timeout — permission request is also a sign of life.
+        self.activity.notify_one();
         // Auto-approve by selecting the first allow option from the request.
         // Agent is a trusted local process — no need to prompt the user.
         let option_id = args
@@ -397,9 +399,12 @@ async fn init_session(
         let prompt_fut = conn.prompt(acp::PromptRequest::new(session_id.clone(), content));
         tokio::pin!(prompt_fut);
 
-        // Idle timeout: fires only when the agent sends no activity for 5 minutes.
-        // Resets on every session_notification (chunks, tool starts, tool updates).
-        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+        // Idle timeout: fires only when the agent sends no activity for 20 minutes.
+        // Resets on every session_notification (chunks, tool starts, tool updates)
+        // and on permission requests. The previous 5-minute window produced false
+        // positives on long-running tool calls (large MCP fetches, slow agent steps)
+        // that legitimately produce no intermediate output.
+        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
         let idle_timeout = async {
             loop {
                 tokio::select! {

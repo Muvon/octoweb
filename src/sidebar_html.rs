@@ -2620,6 +2620,12 @@ pub fn html() -> String {
       const savedToolCount = s.toolCount;
       const savedToolDetails = [...s.toolDetails];
       clearActivity(s);
+      // Synthesize an empty bubble for tool-only turns — otherwise the work
+      // disappears with the activity feed and there's no record of it.
+      if (!s.currentAgentBubble && savedToolCount > 0) {
+        s.currentAgentBubble = startAgentBubble(s);
+        s.currentAgentRaw = '';
+      }
       if (s.currentAgentBubble) {
         finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails);
         s.currentAgentBubble = null;
