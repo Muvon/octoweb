@@ -145,6 +145,10 @@ struct AcpSession {
     /// Generation counter — bumped on every intentional reconnect to invalidate
     /// stale `AcpReconnect` timers from prior error cycles for THIS session.
     reconnect_gen: u64,
+    /// Timestamp of the last user-initiated cancel that hasn't yet completed.
+    /// A second `AcpCancel` within ~12s escalates to a force-kill + respawn.
+    /// Cleared on any terminal event (Done/Cancelled/Error).
+    last_cancel_at: Option<std::time::Instant>,
 }
 
 /// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
@@ -1326,6 +1330,7 @@ fn main() {
         .ok(),
         retry_count: 0,
         reconnect_gen: 0,
+        last_cancel_at: None,
     };
     let mut active_session_id: u64 = next_session_id;
     next_session_id += 1;
@@ -2047,6 +2052,9 @@ fn main() {
                         ));
                     }
                     acp::AgentEvent::Done => {
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.last_cancel_at = None;
+                        }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
@@ -2057,6 +2065,9 @@ fn main() {
                         }
                     }
                     acp::AgentEvent::Cancelled => {
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.last_cancel_at = None;
+                        }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
@@ -2067,6 +2078,7 @@ fn main() {
                         let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
                         // Drop dead handle immediately so prompts aren't silently lost.
                         s.handle = None;
+                        s.last_cancel_at = None;
                         if s.retry_count < ACP_MAX_RETRIES {
                             // First disconnect of this cycle: surface to chat so the user
                             // knows their in-flight prompt is gone (it isn't replayed) and
@@ -3393,10 +3405,41 @@ fn main() {
             }
 
             // ── ACP cancel (stop button) ───────────────────────────────────────────
+            // First click: polite ACP cancel notification.
+            // Second click within 12s: force-kill the subprocess and respawn the
+            // handle with the same agent tag. This is the user's escape hatch when
+            // the agent ignores `CancelNotification` (e.g. wedged on a syscall).
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
-                if let Some(s) = sessions.iter().find(|s| s.id == sid) {
-                    if let Some(ref handle) = s.handle {
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    let now = std::time::Instant::now();
+                    let recent = s
+                        .last_cancel_at
+                        .map(|t| now.duration_since(t) < std::time::Duration::from_secs(12))
+                        .unwrap_or(false);
+
+                    if recent {
+                        let tag = s.tag.clone();
+                        s.retry_count = 0;
+                        s.reconnect_gen += 1;
+                        s.handle = None; // drop -> kill_on_drop fires on the child
+                        s.handle = acp::AcpHandle::connect(
+                            &format!("octomind acp {}", tag),
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok();
+                        s.last_cancel_at = None;
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setThinking && window.__setThinking({sid},false)"
+                        ));
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                        ));
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__appendError && window.__appendError({sid},`agent force-stopped and reconnected`)"
+                        ));
+                    } else if let Some(ref handle) = s.handle {
                         handle.cancel();
+                        s.last_cancel_at = Some(now);
                     }
                 }
             }
@@ -3466,6 +3509,7 @@ fn main() {
                         handle,
                         retry_count: 0,
                         reconnect_gen: 0,
+                        last_cancel_at: None,
                     });
                     active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
