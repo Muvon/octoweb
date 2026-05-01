@@ -149,6 +149,11 @@ struct AcpSession {
     /// A second `AcpCancel` within ~12s escalates to a force-kill + respawn.
     /// Cleared on any terminal event (Done/Cancelled/Error).
     last_cancel_at: Option<std::time::Instant>,
+    /// ACP protocol session id reported by the agent on `AgentEvent::Connected`.
+    /// Passed back as `--resume <id>` when force-respawning the subprocess so
+    /// the agent restores its in-memory conversation context. Cleared on
+    /// AcpSetAgent / AcpClearSession (which want a fresh chat).
+    acp_session_id: Option<String>,
 }
 
 /// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
@@ -1331,6 +1336,7 @@ fn main() {
         retry_count: 0,
         reconnect_gen: 0,
         last_cancel_at: None,
+        acp_session_id: None,
     };
     let mut active_session_id: u64 = next_session_id;
     next_session_id += 1;
@@ -1982,9 +1988,10 @@ fn main() {
         for (sid, events) in drained {
             for ev in events {
                 match ev {
-                    acp::AgentEvent::Connected => {
+                    acp::AgentEvent::Connected(acp_sid) => {
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.retry_count = 0;
+                            s.acp_session_id = Some(acp_sid);
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setSessionStatus && window.__setSessionStatus({sid},'ready')"
@@ -3419,11 +3426,16 @@ fn main() {
 
                     if recent {
                         let tag = s.tag.clone();
+                        let resume = s.acp_session_id.clone();
                         s.retry_count = 0;
                         s.reconnect_gen += 1;
                         s.handle = None; // drop -> kill_on_drop fires on the child
+                        let cmd = match &resume {
+                            Some(id) => format!("octomind acp {} --resume {}", tag, id),
+                            None => format!("octomind acp {}", tag),
+                        };
                         s.handle = acp::AcpHandle::connect(
-                            &format!("octomind acp {}", tag),
+                            &cmd,
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -3450,6 +3462,7 @@ fn main() {
                     s.tag = tag.clone();
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
+                    s.acp_session_id = None; // user switched agent — start fresh
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
@@ -3471,6 +3484,7 @@ fn main() {
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
+                    s.acp_session_id = None; // explicit fresh chat
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", s.tag),
@@ -3510,6 +3524,7 @@ fn main() {
                         retry_count: 0,
                         reconnect_gen: 0,
                         last_cancel_at: None,
+                        acp_session_id: None,
                     });
                     active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
@@ -3672,8 +3687,12 @@ fn main() {
                     } else {
                         tracing::info!(session_id = sid, retry = s.retry_count, "attempting ACP reconnection");
                         s.handle = None; // drop old handle if any
+                        let cmd = match &s.acp_session_id {
+                            Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
+                            None => format!("octomind acp {}", s.tag),
+                        };
                         s.handle = acp::AcpHandle::connect(
-                            &format!("octomind acp {}", s.tag),
+                            &cmd,
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
