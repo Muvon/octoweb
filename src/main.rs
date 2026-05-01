@@ -2068,6 +2068,18 @@ fn main() {
                         // Drop dead handle immediately so prompts aren't silently lost.
                         s.handle = None;
                         if s.retry_count < ACP_MAX_RETRIES {
+                            // First disconnect of this cycle: surface to chat so the user
+                            // knows their in-flight prompt is gone (it isn't replayed) and
+                            // so __appendError → __setThinking(false) flushes pending tool
+                            // rows into the message history. Subsequent retries don't spam.
+                            if s.retry_count == 0 {
+                                let escaped = webview_utils::escape_js_template(&format!(
+                                    "agent disconnected: {err} — reconnecting"
+                                ));
+                                let _ = sidebar_wv.evaluate_script(&format!(
+                                    "window.__appendError && window.__appendError({sid},`{escaped}`)"
+                                ));
+                            }
                             s.retry_count += 1;
                             let delay = std::cmp::min(
                                 ACP_BASE_DELAY_SECS * 2u64.pow(s.retry_count - 1),
