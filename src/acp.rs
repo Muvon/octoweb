@@ -439,12 +439,19 @@ async fn init_session(
                     break;
                 }
                 _ = cancel_rx.recv(), if !cancelled => {
-                    // Cancel received — notify agent, then keep waiting for prompt_fut
-                    let _ = conn
-                        .cancel(acp::CancelNotification::new(session_id.clone()))
-                        .await;
+                    // Arm the 10s deadline FIRST. The cancel notification below
+                    // can block if the agent's stdin is full or it's unresponsive;
+                    // arming the deadline up front guarantees the loop unwedges
+                    // and emits Cancelled even in that case.
                     cancelled = true;
                     cancel_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                    // Bound the cancel notification so a wedged agent can't pin
+                    // the select loop. Fire-and-forget on timeout.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        conn.cancel(acp::CancelNotification::new(session_id.clone())),
+                    )
+                    .await;
                     // Don't break — keep looping so prompt_fut completes cleanly
                 }
                 _ = &mut cancel_deadline, if cancelled => {
