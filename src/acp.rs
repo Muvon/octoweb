@@ -17,7 +17,9 @@ use agent_client_protocol::{self as acp, Agent};
 #[derive(Debug)]
 pub enum AgentEvent {
     /// ACP session is ready — agent connected and initialized.
-    Connected,
+    /// Carries the ACP protocol session id so the main thread can pass it
+    /// back as `--resume <id>` when force-respawning the subprocess.
+    Connected(String),
     /// A text chunk from the agent's response (streaming).
     Chunk(String),
     /// An image from the agent's response.
@@ -386,7 +388,7 @@ async fn init_session(
         .await?;
 
     let session_id = resp.session_id;
-    let _ = tx.send(AgentEvent::Connected);
+    let _ = tx.send(AgentEvent::Connected(session_id.0.to_string()));
     wake();
 
     // Process prompts sequentially — one at a time.
