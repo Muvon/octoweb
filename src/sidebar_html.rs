@@ -1879,6 +1879,9 @@ pub fn html() -> String {
       toolCount: 0,
       toolDetails: [],
       toolRows: {},
+      // per-message tool details (keyed by message wrap element) — drives
+      // the tool details modal opened by clicking the "N tools" label.
+      messageToolDetails: new WeakMap(),
       activityStart: 0,
       activityTimer: null,
       // commands
