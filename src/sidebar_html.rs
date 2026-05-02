@@ -2238,9 +2238,38 @@ pub fn html() -> String {
   });
 
   // ── Markdown render helper ─────────────────────────────────────────────
+  // During streaming, the accumulated text may contain an unclosed fenced
+  // code block (``` opened but closing ``` not yet received). marked.js
+  // renders that as broken HTML — the fence line becomes visible plain text
+  // and the content leaks out unstyled. We detect this and close the fence
+  // before parsing so the partial block renders correctly at every chunk.
+  function closeUnclosedFences(text) {
+    // Count ``` fence openings vs closings. A fence line starts with optional
+    // whitespace then 3+ backticks. We track open/close pairs; if an odd
+    // number of fence markers exist the last one is unclosed.
+    const lines = text.split('\n');
+    let inFence = false;
+    let fenceLang = '';
+    for (const line of lines) {
+      const m = line.match(/^[ \t]*(`{3,})(.*)/);
+      if (m) {
+        if (!inFence) {
+          inFence = true;
+          fenceLang = m[2].trim();
+        } else {
+          inFence = false;
+          fenceLang = '';
+        }
+      }
+    }
+    // If we ended inside a fence, append a closing marker so marked sees
+    // a complete block. The trailing newline is required by marked's lexer.
+    return inFence ? text + '\n```' : text;
+  }
+
   function renderMd(raw) {
     if (typeof marked === 'undefined') return escapeHtml(raw);
-    return marked.parse(raw);
+    return marked.parse(closeUnclosedFences(raw));
   }
 
   function escapeHtml(s) {
