@@ -2972,6 +2972,17 @@ pub fn html() -> String {
   });
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
+    // Ctrl+J → insert newline (alias for Shift+Enter). Browsers don't
+    // produce a newline natively for this combo in textareas, so do it manually.
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'J')) {
+      e.preventDefault();
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      input.value = input.value.slice(0, start) + '\n' + input.value.slice(end);
+      input.selectionStart = input.selectionEnd = start + 1;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
