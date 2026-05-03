@@ -1601,20 +1601,14 @@ fn main() {
         }};
     }
 
-    /// Switch visibility from the current active tab to `target`, handling pending_swap.
-    /// Also handles lazy loading: creates WebView on first access if tab was pending.
-    macro_rules! switch_visible_tab {
+    /// Lazy-load: ensure a WebView exists for `target`, creating it from `pending_tabs`
+    /// if hibernated/session-restored. Registers nav_error / dialog / termination handlers
+    /// and restores any frozen snapshot. Does NOT change visibility, active tab, or
+    /// address bar — caller is responsible for those if needed.
+    /// No-op if the WebView already exists or the tab id is unknown.
+    macro_rules! ensure_webview {
         ($target:expr) => {{
             let target = $target;
-            // Capture a frozen snapshot of the outgoing tab (async — fires callback later).
-            // Only for live WebViews that aren't about:blank / newtab / error pages.
-            if active_wv_id != target {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-                    capture_tab_snapshot(wv_ptr, active_wv_id, proxy.clone());
-                }
-            }
-            // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
             if !tab_webviews.contains_key(&target) {
                 if let Some(url) = pending_tabs.remove(&target) {
                     let has_snapshot = tab_snapshots.contains_key(&target);
@@ -1655,6 +1649,39 @@ fn main() {
                     tab_webviews.insert(target, wv);
                 }
             }
+        }};
+    }
+
+    /// Auto-restore for MCP handlers: if `target` is a known tab in TabManager but
+    /// has been hibernated (WebView dropped, URL parked in `pending_tabs`), recreate
+    /// the WebView in-place. Returns true if the tab is known, false if the id is bogus.
+    /// MCP handlers should fall through to "Tab not found" only when this returns false.
+    macro_rules! mcp_ensure_tab {
+        ($target:expr) => {{
+            let t = $target;
+            let known = tabs.lock().unwrap().tabs().iter().any(|tab| tab.id == t);
+            if known {
+                ensure_webview!(t);
+            }
+            known
+        }};
+    }
+
+    /// Switch visibility from the current active tab to `target`, handling pending_swap.
+    /// Also handles lazy loading: creates WebView on first access if tab was pending.
+    macro_rules! switch_visible_tab {
+        ($target:expr) => {{
+            let target = $target;
+            // Capture a frozen snapshot of the outgoing tab (async — fires callback later).
+            // Only for live WebViews that aren't about:blank / newtab / error pages.
+            if active_wv_id != target {
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    capture_tab_snapshot(wv_ptr, active_wv_id, proxy.clone());
+                }
+            }
+            // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
+            ensure_webview!(target);
             tabs.lock().unwrap().switch(target);
             if let Some((old_id, new_id)) = pending_swap.take() {
                 if let Some(wv) = tab_webviews.get(&old_id) {
@@ -2304,6 +2331,8 @@ fn main() {
                         } else {
                             // Navigate an existing tab in-place
                             let target_id = tab_id.unwrap_or(active_wv_id);
+                            // Auto-restore if the tab was hibernated
+                            let _ = mcp_ensure_tab!(target_id);
                             if let Some(wv) = tab_webviews.get(&target_id) {
                                 let resolved = url::resolve_url(&url, &search_engine);
                                 let _ = wv.load_url(&resolved);
@@ -2354,6 +2383,8 @@ fn main() {
                         drop(tm);
                         match base_info {
                             Some((id, title, url)) => {
+                                // Auto-restore if the tab was hibernated
+                                let _ = mcp_ensure_tab!(id);
                                 if let Some(wv) = tab_webviews.get(&id) {
                                     let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                     let response_cb = response.clone();
@@ -2389,6 +2420,7 @@ fn main() {
                     McpCommand::ExecuteJs { tab_id, script, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 // Wrap sender so we can reclaim it if the callback never fires
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -2416,6 +2448,7 @@ fn main() {
                     McpCommand::Click { tab_id, selector, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
                                     "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return true}})()",
@@ -2446,6 +2479,7 @@ fn main() {
                     McpCommand::Hover { tab_id, selector, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
                                     "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mouseenter',{{...o,bubbles:false}}));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new MouseEvent('mousemove',o));return true}})()",
@@ -2476,6 +2510,7 @@ fn main() {
                     McpCommand::Type { tab_id, selector, text, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
                                     "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.focus();if(el.isContentEditable){{var s=window.getSelection(),r=document.createRange();r.selectNodeContents(el);s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,{txt});return true}}var s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(s)s.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
@@ -2514,6 +2549,7 @@ fn main() {
                     McpCommand::GoBack { tab_id, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 match wv.evaluate_script("history.back()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
@@ -2529,6 +2565,7 @@ fn main() {
                     McpCommand::GoForward { tab_id, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 match wv.evaluate_script("history.forward()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
@@ -2563,6 +2600,7 @@ fn main() {
                     }
                     McpCommand::Reload { tab_id, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let _ = wv.reload();
                             let _ = response.send(Ok(()));
@@ -2572,6 +2610,7 @@ fn main() {
                     }
                     McpCommand::Screenshot { tab_id, full_page, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -2677,6 +2716,7 @@ fn main() {
                     }
                     McpCommand::GetPageContent { tab_id, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
@@ -2703,6 +2743,7 @@ fn main() {
                     }
                     McpCommand::Scroll { tab_id, direction, pixels, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let script = match direction.as_str() {
                                 "top" => "window.scrollTo(0, 0)".to_string(),
@@ -2730,6 +2771,7 @@ fn main() {
                     }
                     McpCommand::PressKey { tab_id, key, selector, modifiers, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let key_json = serde_json::to_string(&key).unwrap_or_default();
                             let has_shift = modifiers.iter().any(|m| m == "shift");
@@ -2778,6 +2820,7 @@ fn main() {
                     }
                     McpCommand::Wait { tab_id, event, timeout_ms, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let script = match event.as_str() {
                                 "load" => format!(
@@ -2815,6 +2858,7 @@ fn main() {
                     }
                     McpCommand::SelectOption { tab_id, selector, value, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let script = format!(
                                 "(function() {{ var _s={sel}; var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s); if (!el || el.tagName !== 'SELECT') return false; var opt = Array.from(el.options).find(function(o){{ return o.value === {val}; }}); if (!opt) return false; el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()",
@@ -2842,6 +2886,7 @@ fn main() {
                     }
                     McpCommand::Snapshot { tab_id, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
