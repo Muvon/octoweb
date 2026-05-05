@@ -218,9 +218,13 @@ fn main() {
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
     let inline_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     let sidebar_hotkey_visible = Arc::new(AtomicBool::new(false));
-    // Tracks whether the browser window is the frontmost app.
-    // CGEventTap fires system-wide, so we gate all hotkeys on this flag.
-    let app_focused = Arc::new(AtomicBool::new(false));
+    // Note: app-frontmost state is queried on demand via `is_app_active()`
+    // (NSApplication.isActive). We deliberately do NOT cache via
+    // WindowEvent::Focused — modal panels from other apps (1Password ⌘\,
+    // takeSnapshot, screenshot picker, system dialogs) steal key-window
+    // status from our NSWindow without macOS deactivating the app. tao
+    // delivers Focused(false) but never Focused(true) when they dismiss,
+    // so any cached flag stays stuck at false and breaks all hotkeys.
 
     // ── System stats for custom protocol (avoids evaluate_script leak) ─────
     // JS polls via fetch('octoweb-sys://stats') instead of evaluate_script.
@@ -262,7 +266,6 @@ fn main() {
     }
 
     let overlay_win = Arc::new(overlay_win);
-    let overlay_win_id = overlay_win.id();
     // ── Chrome window — borderless transparent layer for persistent UI ────
     // Floats above browser_win; holds sidebar, footer, notification toast.
     // Transparent areas pass clicks through to browser_win underneath.
@@ -1377,7 +1380,6 @@ fn main() {
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
         let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
-        let focused_state = Arc::clone(&app_focused);
         // Stores the raw CFMachPortRef so the callback can re-enable the tap
         // if macOS disables it due to timeout (see TapDisabledByTimeout below).
         let tap_port = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1408,7 +1410,7 @@ fn main() {
                     return CallbackResult::Keep;
                 }
                 // Only act when octoweb is the frontmost application.
-                if !focused_state.load(Ordering::Relaxed) {
+                if !is_app_active() {
                     return CallbackResult::Keep;
                 }
                 use core_graphics::event::{CGEventFlags, EventField};
@@ -2321,7 +2323,7 @@ fn main() {
                                 active_wv_id = new_id;
                                 pending_swap = Some((visible_id, new_id));
                                 macos::mru_push(&mut mru, new_id);
-                                if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
+                                if is_app_active() { browser_win.set_focus(); }
                             }
                             // Defer response until PageLoadFinished + DOM stability
                             if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
@@ -3224,7 +3226,7 @@ fn main() {
                     inline_edit_response.clear();
                 }
                 if tab_id == active_wv_id {
-                    if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
+                    if is_app_active() { browser_win.set_focus(); }
                     return;
                 }
                 switch_visible_tab!(tab_id);
@@ -3235,7 +3237,7 @@ fn main() {
                 sys_stats_mem.store(0, Ordering::Relaxed);
                 sys_stats_next_at = std::time::Instant::now();
                 let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
-                if app_focused.load(Ordering::Relaxed) { browser_win.set_focus(); }
+                if is_app_active() { browser_win.set_focus(); }
             }
 
             // ── Close tab ─────────────────────────────────────────────────
@@ -3288,7 +3290,7 @@ fn main() {
                             // sets active_wv_id + updates address bar — covers both loaded
                             // and not-yet-loaded tabs.
                             switch_visible_tab!(next);
-                            if app_focused.load(Ordering::Relaxed) {
+                            if is_app_active() {
                                 if overlay_visible {
                                     overlay_win.set_focus();
                                 } else {
@@ -4509,21 +4511,6 @@ fn main() {
                     modifiers = *mods;
                 }
 
-                WindowEvent::Focused(focused) if window_id == browser_win_id || window_id == chrome_win_id || window_id == overlay_win_id => {
-                    if *focused {
-                        app_focused.store(true, Ordering::Relaxed);
-                    } else {
-                        // Only mark unfocused if NO app window has focus.
-                        // When clicking between windows, one gains focus before
-                        // the other loses it, so we defer the check.
-                        let bf = browser_win.is_focused();
-                        let cf = chrome_win.is_focused();
-                        let of = overlay_win.is_focused();
-                        if !bf && !cf && !of {
-                            app_focused.store(false, Ordering::Relaxed);
-                        }
-                    }
-                }
 
                 WindowEvent::KeyboardInput {
                     event: key_event, ..
@@ -4671,7 +4658,7 @@ unsafe fn copy_png_to_clipboard(png_data: *mut objc2::runtime::AnyObject) {
 /// Viewport screenshot: takeSnapshot → PNG → clipboard.
 /// `ns_win_ptr` is the NSWindow pointer to restore key-window focus after the
 /// async snapshot completes — takeSnapshot can temporarily steal key-window
-/// status, which sets app_focused=false and breaks all keybindings.
+/// status — without this, takeSnapshot's ephemeral panel can leave our window
 fn screenshot_to_clipboard(wv_ptr: usize, ns_win_ptr: usize) {
     let handler = block2::RcBlock::new(
         move |image: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
@@ -5051,4 +5038,25 @@ fn save_and_exit(
     drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
+}
+
+/// Returns true when octoweb is the frontmost macOS application.
+///
+/// Stateless query of `[NSApp isActive]`. We use this instead of caching
+/// via `WindowEvent::Focused` because modal panels from other apps
+/// (1Password AutoFill ⌘\, screenshot picker, takeSnapshot, system
+/// dialogs) steal key-window status from our NSWindow without macOS
+/// deactivating the app — a cached flag would get stuck at false when
+/// the panel dismisses (no Focused(true) event arrives), breaking every
+/// CGEventTap-routed hotkey until the user ⌘-Tabs away and back.
+///
+/// Cost: one Objective-C msg_send per call — negligible.
+fn is_app_active() -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let active: bool = msg_send![app, isActive];
+        active
+    }
 }
