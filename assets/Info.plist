@@ -9,7 +9,7 @@
     <string>Octoweb</string>
 
     <key>CFBundleIdentifier</key>
-    <string>com.muvon.octoweb</string>
+    <string>io.muvon.octoweb</string>
 
     <key>CFBundleVersion</key>
     <string>1</string>

@@ -18,7 +18,7 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 APP_NAME="Octoweb"
-BUNDLE_ID="com.muvon.octoweb"
+BUNDLE_ID="io.muvon.octoweb"
 BINARY_NAME="octoweb"
 SIGN_IDENTITY="Developer ID Application: MUVON COMPANY LIMITED (34TUP8A7GK)"
 
@@ -97,13 +97,12 @@ if $DEV_BUILD; then
     "$APP_BUNDLE"
 else
   echo "▶ Signing with Developer ID…"
-  # Sign the main binary with entitlements + hardened runtime (required for notarization)
+  # Single codesign on the bundle — signs the main executable in place
+  # with entitlements and hardened runtime. A second codesign on the
+  # bundle without --entitlements would strip them, so we do not re-sign.
   codesign --force --sign "$SIGN_IDENTITY" \
     --entitlements "$ASSETS_DIR/entitlements.plist" \
     --options runtime \
-    "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
-  # Sign the bundle wrapper with hardened runtime
-  codesign --force --sign "$SIGN_IDENTITY" --options runtime \
     "$APP_BUNDLE"
 fi
 
