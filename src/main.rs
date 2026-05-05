@@ -16,7 +16,6 @@ mod nav_error_patch;
 mod newtab_html;
 mod notification_html;
 mod overlay_html;
-mod passkey_patch;
 mod progress_bar_html;
 mod prompt_history_js;
 mod quickslots;
@@ -519,9 +518,6 @@ fn main() {
                     if !prefs.is_null() {
                         let _: () = msg_send![prefs, setFraudulentWebsiteWarningEnabled: false];
                         let _: () = msg_send![prefs, _setUsesPageCache: true];
-                        // Enable WebAuthn / passkey support (cross-device QR
-                        // flow). Touch ID requires Apple's webkit entitlement.
-                        passkey_patch::enable(prefs);
                     }
                 }
             }
