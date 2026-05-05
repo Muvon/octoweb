@@ -5042,21 +5042,38 @@ fn save_and_exit(
 
 /// Returns true when octoweb is the frontmost macOS application.
 ///
-/// Stateless query of `[NSApp isActive]`. We use this instead of caching
-/// via `WindowEvent::Focused` because modal panels from other apps
-/// (1Password AutoFill ⌘\, screenshot picker, takeSnapshot, system
-/// dialogs) steal key-window status from our NSWindow without macOS
-/// deactivating the app — a cached flag would get stuck at false when
-/// the panel dismisses (no Focused(true) event arrives), breaking every
-/// CGEventTap-routed hotkey until the user ⌘-Tabs away and back.
+/// Compares `[[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier`
+/// to our own PID. We deliberately avoid both caching via `WindowEvent::Focused`
+/// AND `[NSApp isActive]`:
 ///
-/// Cost: one Objective-C msg_send per call — negligible.
+/// - Cached `Focused`: modal panels from other apps (1Password AutoFill ⌘\,
+///   screenshot picker, takeSnapshot, system dialogs) steal key-window status
+///   from our NSWindow without macOS deactivating the app — tao delivers
+///   `Focused(false)` but never `Focused(true)` when they dismiss, so a
+///   cached flag stays stuck at false and breaks every hotkey.
+///
+/// - `[NSApp isActive]`: AppKit's own active state can fail to clear when
+///   the user switches away (notification missed / not pumped fast enough),
+///   so it can read `true` even when another app is frontmost. CGEventTap
+///   would then keep consuming our hotkey keycodes globally and the user
+///   sees "octoweb steals my keyboard in other apps".
+///
+/// `NSWorkspace.frontmostApplication` queries live system state every call
+/// (no caching) and is the API Apple documents for "which app receives key
+/// events right now". Cost: one Objective-C msg_send chain per call.
 fn is_app_active() -> bool {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
     unsafe {
-        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let active: bool = msg_send![app, isActive];
-        active
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return false;
+        }
+        let frontmost: *mut AnyObject = msg_send![workspace, frontmostApplication];
+        if frontmost.is_null() {
+            return false;
+        }
+        let front_pid: i32 = msg_send![frontmost, processIdentifier];
+        front_pid == std::process::id() as i32
     }
 }
