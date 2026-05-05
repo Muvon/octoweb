@@ -7,7 +7,7 @@ on:
 
 env:
   APP_NAME: Octoweb
-  BUNDLE_ID: com.muvon.octoweb
+  BUNDLE_ID: io.muvon.octoweb
   BINARY_NAME: octoweb
   SIGN_IDENTITY: "Developer ID Application: MUVON COMPANY LIMITED (34TUP8A7GK)"
 
