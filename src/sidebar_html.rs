@@ -3004,18 +3004,26 @@ pub fn html() -> String {
     }
   });
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
-    // Ctrl+J → insert newline (alias for Shift+Enter). Browsers don't
-    // produce a newline natively for this combo in textareas, so do it manually.
-    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'J')) {
+    // Ctrl+J → insert newline (alias for Shift+Enter). On macOS WKWebView
+    // the NSResponder Emacs binding rewrites Ctrl+J to "insertNewline:" so
+    // e.key arrives as 'Enter' (not 'j'); match by e.code to be reliable.
+    // Must run BEFORE the plain-Enter branch so we don't fall through to send().
+    const isCtrlJ = e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+      && (e.code === 'KeyJ' || e.key === 'j' || e.key === 'J');
+    if (isCtrlJ) {
       e.preventDefault();
-      const start = input.selectionStart;
-      const end = input.selectionEnd;
-      input.value = input.value.slice(0, start) + '\n' + input.value.slice(end);
-      input.selectionStart = input.selectionEnd = start + 1;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Use execCommand to mirror Shift+Enter exactly — preserves undo stack
+      // and triggers native input events, unlike manual value mutation.
+      if (!document.execCommand('insertText', false, '\n')) {
+        const start = input.selectionStart;
+        const end = input.selectionEnd;
+        input.value = input.value.slice(0, start) + '\n' + input.value.slice(end);
+        input.selectionStart = input.selectionEnd = start + 1;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       return;
     }
+    if (e.key === 'Enter' && !e.shiftKey && !_ph.isInSearchMode()) { e.preventDefault(); send(); _ph.resetState(); return; }
   });
   input.addEventListener('input', () => {
     input.style.height = 'auto';
