@@ -5343,6 +5343,7 @@ fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize)
 }
 
 /// Save session state and exit the event loop.
+#[allow(clippy::too_many_arguments)]
 fn save_and_exit(
     tabs: &Arc<Mutex<browser::TabManager>>,
     favicon_cache: &std::collections::HashMap<String, String>,
