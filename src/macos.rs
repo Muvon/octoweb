@@ -141,6 +141,70 @@ pub fn set_app_icon() {
     }
 }
 
+/// Install an observer for `NSApplicationDidResignActiveNotification` that
+/// resigns key window status from `chrome_ns_window` when our app deactivates.
+///
+/// Why this is needed: `chrome_win` is a borderless transparent child window.
+/// We explicitly call `makeKeyWindow` on it to route input into the sidebar
+/// WebView. macOS does NOT reliably auto-resign key from borderless child
+/// windows when the app deactivates (Cmd+Tab, click on another app's window),
+/// so the chrome window can stay key — meaning typing in the other app
+/// (e.g. pressing Enter in Slack) routes back to our WebView and pulls
+/// octoweb back to the front.
+///
+/// Fix: on deactivation, explicitly call `[chrome_ns_window resignKeyWindow]`
+/// so AppKit hands key status to the actual frontmost app's window.
+///
+/// `chrome_ns_window` must be a non-null NSWindow pointer; the observer
+/// retains it for the app's lifetime (we never uninstall this observer).
+///
+/// # Safety
+/// Caller must pass a valid NSWindow pointer that lives for the duration of
+/// the app (chrome_win is never dropped).
+pub unsafe fn install_resign_key_on_deactivate(chrome_ns_window: *mut std::ffi::c_void) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    if chrome_ns_window.is_null() {
+        return;
+    }
+
+    // Build the block: on notification, resignKeyWindow on chrome_ns_window.
+    // Capture the pointer as usize so the block is `Send + 'static` safe.
+    let win_addr = chrome_ns_window as usize;
+    let block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
+        let win = win_addr as *mut AnyObject;
+        if win.is_null() {
+            return;
+        }
+        let is_key: bool = unsafe { msg_send![win, isKeyWindow] };
+        if is_key {
+            let _: () = unsafe { msg_send![win, resignKeyWindow] };
+            tracing::debug!("chrome_win resigned key on app deactivate");
+        }
+    });
+
+    let center: *mut AnyObject = msg_send![objc2::class!(NSNotificationCenter), defaultCenter];
+    if center.is_null() {
+        tracing::warn!("NSNotificationCenter defaultCenter is null");
+        return;
+    }
+    let name = NSString::from_str("NSApplicationDidResignActiveNotification");
+    // addObserverForName:object:queue:usingBlock: returns an opaque token; we
+    // intentionally leak it (observer lives for app lifetime).
+    let _token: *mut AnyObject = msg_send![
+        center,
+        addObserverForName: &*name,
+        object: std::ptr::null::<AnyObject>(),
+        queue: std::ptr::null::<AnyObject>(),
+        usingBlock: &*block,
+    ];
+    // Leak the block too — it must outlive the registration.
+    std::mem::forget(block);
+    tracing::debug!("installed NSApplicationDidResignActiveNotification observer");
+}
+
 /// Push tab_id to front of MRU list, removing any prior occurrence.
 /// Keeps the list bounded to 64 entries (more than enough for any session).
 pub fn mru_push(mru: &mut Vec<usize>, id: usize) {
