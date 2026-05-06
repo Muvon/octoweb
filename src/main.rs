@@ -1353,9 +1353,17 @@ fn main() {
         Some(h) if !h.sessions.is_empty() => {
             let mut sessions: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
             let mut max_id: u64 = 0;
-            for snap in h.sessions.into_iter() {
+            let cap = cfg.max_acp_session_messages;
+            for mut snap in h.sessions.into_iter() {
                 if snap.id > max_id {
                     max_id = snap.id;
+                }
+                // Defensive cap on load — if the file was hand-edited or the
+                // cap was lowered between runs, we don't want to bring oversized
+                // history back into memory. FIFO drop matches push_acp_msg.
+                if snap.messages.len() > cap {
+                    let drop = snap.messages.len() - cap;
+                    snap.messages.drain(..drop);
                 }
                 let cmd = match &snap.acp_session_id {
                     Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
@@ -2179,7 +2187,7 @@ fn main() {
                             // on each turn and don't survive replay anyway.
                             if !s.agent_buf.is_empty() {
                                 let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf);
+                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
                                 should_persist = true;
                             }
                         }
@@ -2203,7 +2211,7 @@ fn main() {
                             // the user sees the same thing they had on screen.
                             if !s.agent_buf.is_empty() {
                                 let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf);
+                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
                                 should_persist = true;
                             }
                         }
@@ -2232,7 +2240,7 @@ fn main() {
                             // mirrors what the user saw before the disconnect.
                             if !s.agent_buf.is_empty() {
                                 let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf);
+                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
                                 should_persist = true;
                             }
                             if s.retry_count < ACP_MAX_RETRIES {
@@ -2242,7 +2250,7 @@ fn main() {
                                 // rows into the message history. Subsequent retries don't spam.
                                 if s.retry_count == 0 {
                                     let m = format!("agent disconnected: {err} — reconnecting");
-                                    push_acp_msg(s, "error", m.clone());
+                                    push_acp_msg(s, "error", m.clone(), cfg.max_acp_session_messages);
                                     should_persist = true;
                                     user_facing_err = Some(m);
                                 }
@@ -2257,7 +2265,7 @@ fn main() {
                                 decision = Some(Decision::Reconnect(s.reconnect_gen, delay));
                             } else {
                                 tracing::error!(session_id = sid, "ACP max reconnection retries exceeded");
-                                push_acp_msg(s, "error", err.clone());
+                                push_acp_msg(s, "error", err.clone(), cfg.max_acp_session_messages);
                                 should_persist = true;
                                 user_facing_err = Some(err.clone());
                                 decision = Some(Decision::MaxExceeded);
@@ -3589,7 +3597,7 @@ fn main() {
                 let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     if !text.is_empty() {
-                        push_acp_msg(s, "user", text.clone());
+                        push_acp_msg(s, "user", text.clone(), cfg.max_acp_session_messages);
                         should_persist = true;
                     }
                     if let Some(ref handle) = s.handle {
@@ -3642,9 +3650,9 @@ fn main() {
                         // synthetic error so a restart shows the same trail.
                         if !s.agent_buf.is_empty() {
                             let buf = std::mem::take(&mut s.agent_buf);
-                            push_acp_msg(s, "agent", buf);
+                            push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
                         }
-                        push_acp_msg(s, "error", "agent force-stopped and reconnected".to_string());
+                        push_acp_msg(s, "error", "agent force-stopped and reconnected".to_string(), cfg.max_acp_session_messages);
                         should_persist = true;
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
@@ -5281,9 +5289,19 @@ fn build_learning_prompt(
 }
 
 /// Append a message to a session's persisted log, stamping it with the
-/// current wall-clock time. Cheap — caller is expected to call
-/// `persist_acp_history` afterwards (debounced via thread spawn).
-fn push_acp_msg(s: &mut AcpSession, role: &str, text: String) {
+/// current wall-clock time, and FIFO-drop the oldest once over the cap.
+/// Capping in memory (not just on disk) is what bounds long-running
+/// session growth — without it the in-memory `Vec<AcpMessage>` grows
+/// forever even though the on-disk snapshot stays bounded.
+///
+/// We do NOT rely on the agent subprocess to police context size:
+/// `octomind`'s own conversation `Vec<Message>` is unbounded, and it only
+/// compresses on explicit `/done` / `/truncate` slash commands — so the
+/// truncation responsibility lives here on the client side.
+///
+/// Caller is expected to dispatch `persist_acp_history` afterwards
+/// (fire-and-forget on a worker thread).
+fn push_acp_msg(s: &mut AcpSession, role: &str, text: String, max_msgs: usize) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -5293,6 +5311,10 @@ fn push_acp_msg(s: &mut AcpSession, role: &str, text: String) {
         text,
         ts,
     });
+    if s.messages.len() > max_msgs {
+        let drop = s.messages.len() - max_msgs;
+        s.messages.drain(..drop);
+    }
 }
 
 /// Snapshot every ACP session into `AcpHistory` and dispatch the JSON write
