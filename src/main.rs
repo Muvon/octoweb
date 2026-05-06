@@ -316,6 +316,14 @@ fn main() {
     let chrome_win = Arc::new(chrome_win);
     let chrome_win_id = chrome_win.id();
 
+    // Resign chrome_win's key status whenever the app deactivates. Without this,
+    // borderless child windows can hold key status across Cmd+Tab / app switch,
+    // routing keys (e.g. Enter pressed in Slack) back to our sidebar WebView
+    // and pulling octoweb back to the front.
+    unsafe {
+        macos::install_resign_key_on_deactivate(chrome_win.ns_window());
+    }
+
     // ── Browser WebView factory ───────────────────────────────────────────
     // Each tab gets its own WebView (build_as_child). Hide/show to switch —
     // no reload, full state (scroll, video, JS) preserved.
