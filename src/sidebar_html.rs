@@ -2066,11 +2066,19 @@ pub fn html() -> String {
   // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
   // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
   // before the sidebar HTML loads. We register it here so events arriving with
-  // sid=1 find a target.
+  // sid=1 find a target. If Rust restored persisted sessions from disk, it
+  // will push __addSession / __renameSession / __replayMessages on
+  // `sidebar_ready` to override this default.
   (function initDefault() {
     window.__addSession(1, 'Assistant', 'octoweb:assistant', 'connecting');
     switchTo(1);
   })();
+
+  // Tell Rust the JS layer is initialized. Rust uses this signal to push
+  // persisted-session restore (additional sessions, renamed titles, replayed
+  // messages, last-active session). Fires once per sidebar webview lifetime
+  // (the webview survives toggle visibility — JS state is not re-run).
+  window.ipc.postMessage(JSON.stringify({ type: 'sidebar_ready' }));
 
   // ── Clear current session (toolbar pencil button) ───────────────────────
   newSessBtn.addEventListener('click', () => {
@@ -2671,6 +2679,31 @@ pub fn html() -> String {
     if (!s) return;
     window.__setThinking(sid, false);
     appendMessage(s, 'error', text);
+  };
+
+  // Replay persisted messages on cold-start. Rust calls this once per session
+  // on sidebar bootstrap with the full message log restored from disk.
+  // Each entry: { role: 'user'|'agent'|'error', text: string, ts?: number }.
+  // Skips toolDetails/images — those aren't persisted (live-only).
+  window.__replayMessages = function(sid, msgs) {
+    const s = sessions.get(sid);
+    if (!s || !Array.isArray(msgs) || msgs.length === 0) return;
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      const role = m && m.role;
+      const text = (m && typeof m.text === 'string') ? m.text : '';
+      if (role === 'user' || role === 'error') {
+        appendMessage(s, role, text);
+      } else if (role === 'agent') {
+        const bubble = startAgentBubble(s);
+        if (!bubble) continue;
+        const cmdObj = tryParseCommandJson(text);
+        bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
+        // 0 tools, empty details — replay never carries tool history.
+        finishAgentBubble(s, bubble, text, 0, []);
+      }
+    }
+    if (sid === activeSid) { updateWelcome(); scrollToBottom(); }
   };
 
   function scrollToBottom() {

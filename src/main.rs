@@ -72,6 +72,7 @@ enum AppEvent {
     AcpSessionCloseActive,    // ⌘W in sidebar — close currently active session
     AcpSessionSwitch(u64),    // (session_id) — switch active session
     AcpSessionRename(u64, String), // (session_id, title) — rename session
+    SidebarReady,             // sidebar JS finished initializing — push restore
     AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
     OpenInNewTab(String),     // Cmd+click / target=_blank — open URL in new tab and switch to it
@@ -154,6 +155,19 @@ struct AcpSession {
     /// the agent restores its in-memory conversation context. Cleared on
     /// AcpSetAgent / AcpClearSession (which want a fresh chat).
     acp_session_id: Option<String>,
+    /// Persisted message log — user prompts, finalized agent responses,
+    /// errors. Survives app restarts via `acp_history.json`. Excludes tool
+    /// runs and inline images (live-only). Capped at `max_acp_session_messages`.
+    messages: Vec<config::AcpMessage>,
+    /// Accumulator for the in-flight agent response. Filled on every
+    /// `AgentEvent::Chunk` and flushed into `messages` on Done / Cancelled /
+    /// Error so the persisted log only contains finalized turns.
+    agent_buf: String,
+    /// Cached `AvailableCommands` payload (already JSON-serialized for direct
+    /// re-injection into JS). Set when the agent emits commands; re-pushed on
+    /// `sidebar_ready` so slash-command auto-complete survives sidebar opens
+    /// that occur after the agent already announced its commands.
+    available_commands_json: Option<String>,
 }
 
 /// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
@@ -936,6 +950,9 @@ fn main() {
                             let title = v["title"].as_str().unwrap_or("").to_string();
                             let _ = p.send_event(AppEvent::AcpSessionRename(sid, title));
                         }
+                        Some("sidebar_ready") => {
+                            let _ = p.send_event(AppEvent::SidebarReady);
+                        }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
                                 unsafe {
@@ -1326,24 +1343,67 @@ fn main() {
             let _ = proxy.send_event(AppEvent::AcpWake);
         }
     };
-    let mut next_session_id: u64 = 1;
-    let default_session = AcpSession {
-        id: next_session_id,
-        title: "Assistant".to_string(),
-        tag: "octoweb:assistant".to_string(),
-        handle: acp::AcpHandle::connect(
-            "octomind acp octoweb:assistant",
-            make_wake(acp_proxy.clone()),
-        )
-        .ok(),
-        retry_count: 0,
-        reconnect_gen: 0,
-        last_cancel_at: None,
-        acp_session_id: None,
+    // Restore persisted ACP history (sessions + per-session message log) if
+    // present, else start with a fresh default Assistant session. `--resume`
+    // is passed when an `acp_session_id` was captured before — the agent then
+    // restores its in-memory conversation context, matching what the user
+    // sees in the replayed message log.
+    let persisted_acp = config::load_acp_history();
+    let (mut sessions, mut next_session_id, mut active_session_id) = match persisted_acp {
+        Some(h) if !h.sessions.is_empty() => {
+            let mut sessions: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
+            let mut max_id: u64 = 0;
+            for snap in h.sessions.into_iter() {
+                if snap.id > max_id {
+                    max_id = snap.id;
+                }
+                let cmd = match &snap.acp_session_id {
+                    Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
+                    None => format!("octomind acp {}", snap.tag),
+                };
+                let handle = acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok();
+                sessions.push(AcpSession {
+                    id: snap.id,
+                    title: snap.title,
+                    tag: snap.tag,
+                    handle,
+                    retry_count: 0,
+                    reconnect_gen: 0,
+                    last_cancel_at: None,
+                    acp_session_id: snap.acp_session_id,
+                    messages: snap.messages,
+                    agent_buf: String::new(),
+                    available_commands_json: None,
+                });
+            }
+            let active = if sessions.iter().any(|s| s.id == h.active_id) {
+                h.active_id
+            } else {
+                sessions[0].id
+            };
+            (sessions, max_id + 1, active)
+        }
+        _ => {
+            let default_session = AcpSession {
+                id: 1,
+                title: "Assistant".to_string(),
+                tag: "octoweb:assistant".to_string(),
+                handle: acp::AcpHandle::connect(
+                    "octomind acp octoweb:assistant",
+                    make_wake(acp_proxy.clone()),
+                )
+                .ok(),
+                retry_count: 0,
+                reconnect_gen: 0,
+                last_cancel_at: None,
+                acp_session_id: None,
+                messages: Vec::new(),
+                agent_buf: String::new(),
+                available_commands_json: None,
+            };
+            (vec![default_session], 2u64, 1u64)
+        }
     };
-    let mut active_session_id: u64 = next_session_id;
-    next_session_id += 1;
-    let mut sessions: Vec<AcpSession> = vec![default_session];
 
     // ACP reconnection backoff bounds (shared across all sessions — backoff state
     // itself lives per-session in `AcpSession::retry_count` / `reconnect_gen`).
@@ -2018,13 +2078,23 @@ fn main() {
             for ev in events {
                 match ev {
                     acp::AgentEvent::Connected(acp_sid) => {
+                        let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.retry_count = 0;
-                            s.acp_session_id = Some(acp_sid);
+                            // Persist the new acp_session_id so a future cold-
+                            // start can pass `--resume <id>` and recover the
+                            // agent's own conversation context.
+                            if s.acp_session_id.as_deref() != Some(&acp_sid) {
+                                s.acp_session_id = Some(acp_sid);
+                                should_persist = true;
+                            }
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setSessionStatus && window.__setSessionStatus({sid},'ready')"
                         ));
+                        if should_persist {
+                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                        }
                     }
                     acp::AgentEvent::Image { data, mime_type } => {
                         let _ = sidebar_wv.evaluate_script(&format!(
@@ -2032,6 +2102,12 @@ fn main() {
                         ));
                     }
                     acp::AgentEvent::Chunk(chunk) => {
+                        // Accumulate the in-flight agent response so we can
+                        // commit one finalized "agent" message to the persisted
+                        // log on Done/Cancelled — no save during streaming.
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.agent_buf.push_str(&chunk);
+                        }
                         let escaped = webview_utils::escape_js_template(&chunk);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__appendChunk && window.__appendChunk({sid},`{escaped}`)"
@@ -2082,14 +2158,30 @@ fn main() {
                             serde_json::json!({"name": c.name, "description": c.description, "hint": c.hint})
                         }).collect();
                         let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "[]".into());
+                        // Cache so we can re-push to JS on `sidebar_ready` —
+                        // the agent only emits commands once on connect, but
+                        // the sidebar may not be open yet at that moment.
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.available_commands_json = Some(json_str.clone());
+                        }
                         let escaped = webview_utils::escape_js_template(&json_str);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
                         ));
                     }
                     acp::AgentEvent::Done => {
+                        let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
+                            // Flush the streamed response into the persisted
+                            // log as a single "agent" message. Tool runs and
+                            // images stay live-only — they're rebuilt fresh
+                            // on each turn and don't survive replay anyway.
+                            if !s.agent_buf.is_empty() {
+                                let buf = std::mem::take(&mut s.agent_buf);
+                                push_acp_msg(s, "agent", buf);
+                                should_persist = true;
+                            }
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
@@ -2099,73 +2191,122 @@ fn main() {
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                         }
+                        if should_persist {
+                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                        }
                     }
                     acp::AgentEvent::Cancelled => {
+                        let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
+                            // Save partial response (cancelled mid-stream) so
+                            // the user sees the same thing they had on screen.
+                            if !s.agent_buf.is_empty() {
+                                let buf = std::mem::take(&mut s.agent_buf);
+                                push_acp_msg(s, "agent", buf);
+                                should_persist = true;
+                            }
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
+                        if should_persist {
+                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                        }
                     }
                     acp::AgentEvent::Error(err) => {
                         tracing::warn!(session_id = sid, error = %err, "ACP connection error");
-                        // Find the session and schedule per-session reconnection.
-                        let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
-                        // Drop dead handle immediately so prompts aren't silently lost.
-                        s.handle = None;
-                        s.last_cancel_at = None;
-                        if s.retry_count < ACP_MAX_RETRIES {
-                            // First disconnect of this cycle: surface to chat so the user
-                            // knows their in-flight prompt is gone (it isn't replayed) and
-                            // so __appendError → __setThinking(false) flushes pending tool
-                            // rows into the message history. Subsequent retries don't spam.
-                            if s.retry_count == 0 {
-                                let escaped = webview_utils::escape_js_template(&format!(
-                                    "agent disconnected: {err} — reconnecting"
-                                ));
-                                let _ = sidebar_wv.evaluate_script(&format!(
-                                    "window.__appendError && window.__appendError({sid},`{escaped}`)"
-                                ));
+                        // Mutate session state in an inner scope so the &mut borrow
+                        // is released before we call evaluate_script + persist (both
+                        // read &sessions). Decision drives the post-borrow JS calls.
+                        enum Decision { Reconnect(u64, u64), MaxExceeded }
+                        let decision: Option<Decision>;
+                        let mut should_persist = false;
+                        let mut user_facing_err: Option<String> = None;
+                        {
+                            let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
+                            // Drop dead handle immediately so prompts aren't silently lost.
+                            s.handle = None;
+                            s.last_cancel_at = None;
+                            // Save partial in-flight response so the persisted log
+                            // mirrors what the user saw before the disconnect.
+                            if !s.agent_buf.is_empty() {
+                                let buf = std::mem::take(&mut s.agent_buf);
+                                push_acp_msg(s, "agent", buf);
+                                should_persist = true;
                             }
-                            s.retry_count += 1;
-                            let delay = std::cmp::min(
-                                ACP_BASE_DELAY_SECS * 2u64.pow(s.retry_count - 1),
-                                ACP_MAX_DELAY_SECS,
-                            );
-                            tracing::info!(session_id = sid, retry = s.retry_count, delay_s = delay, "scheduling ACP reconnection");
-                            let _ = sidebar_wv.evaluate_script(&format!(
-                                "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
-                            ));
-                            // Bump generation so any previously scheduled timer for this session is ignored.
-                            s.reconnect_gen += 1;
-                            let gen = s.reconnect_gen;
-                            let proxy_clone = acp_proxy.clone();
-                            std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_secs(delay));
-                                let _ = proxy_clone.send_event(AppEvent::AcpReconnect(sid, gen));
-                            });
-                        } else {
-                            tracing::error!(session_id = sid, "ACP max reconnection retries exceeded");
-                            let _ = sidebar_wv.evaluate_script(&format!(
-                                "window.__setSessionStatus && window.__setSessionStatus({sid},'error')"
-                            ));
-                            let escaped = webview_utils::escape_js_template(&err);
-                            let _ = sidebar_wv.evaluate_script(&format!(
-                                "window.__appendError && window.__appendError({sid},`{escaped}`)"
-                            ));
-                            if !sidebar_visible {
-                                let _ = address_bar_wv.evaluate_script(
-                                    "window.__setBadge && window.__setBadge(true)"
-                                );
-                                if !notification_visible {
-                                    let _ = notification_wv.set_visible(true);
-                                    notification_visible = true;
+                            if s.retry_count < ACP_MAX_RETRIES {
+                                // First disconnect of this cycle: surface to chat so the user
+                                // knows their in-flight prompt is gone (it isn't replayed) and
+                                // so __appendError → __setThinking(false) flushes pending tool
+                                // rows into the message history. Subsequent retries don't spam.
+                                if s.retry_count == 0 {
+                                    let m = format!("agent disconnected: {err} — reconnecting");
+                                    push_acp_msg(s, "error", m.clone());
+                                    should_persist = true;
+                                    user_facing_err = Some(m);
                                 }
-                                let _ = notification_wv.evaluate_script(&format!(
-                                    "window.__show && window.__show(`{escaped}`)"
-                                ));
+                                s.retry_count += 1;
+                                let delay = std::cmp::min(
+                                    ACP_BASE_DELAY_SECS * 2u64.pow(s.retry_count - 1),
+                                    ACP_MAX_DELAY_SECS,
+                                );
+                                tracing::info!(session_id = sid, retry = s.retry_count, delay_s = delay, "scheduling ACP reconnection");
+                                // Bump generation so any previously scheduled timer for this session is ignored.
+                                s.reconnect_gen += 1;
+                                decision = Some(Decision::Reconnect(s.reconnect_gen, delay));
+                            } else {
+                                tracing::error!(session_id = sid, "ACP max reconnection retries exceeded");
+                                push_acp_msg(s, "error", err.clone());
+                                should_persist = true;
+                                user_facing_err = Some(err.clone());
+                                decision = Some(Decision::MaxExceeded);
                             }
+                        }
+                        match decision {
+                            Some(Decision::Reconnect(gen, delay)) => {
+                                if let Some(m) = &user_facing_err {
+                                    let escaped = webview_utils::escape_js_template(m);
+                                    let _ = sidebar_wv.evaluate_script(&format!(
+                                        "window.__appendError && window.__appendError({sid},`{escaped}`)"
+                                    ));
+                                }
+                                let _ = sidebar_wv.evaluate_script(&format!(
+                                    "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                                ));
+                                let proxy_clone = acp_proxy.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_secs(delay));
+                                    let _ = proxy_clone.send_event(AppEvent::AcpReconnect(sid, gen));
+                                });
+                            }
+                            Some(Decision::MaxExceeded) => {
+                                let _ = sidebar_wv.evaluate_script(&format!(
+                                    "window.__setSessionStatus && window.__setSessionStatus({sid},'error')"
+                                ));
+                                if let Some(m) = &user_facing_err {
+                                    let escaped = webview_utils::escape_js_template(m);
+                                    let _ = sidebar_wv.evaluate_script(&format!(
+                                        "window.__appendError && window.__appendError({sid},`{escaped}`)"
+                                    ));
+                                    if !sidebar_visible {
+                                        let _ = address_bar_wv.evaluate_script(
+                                            "window.__setBadge && window.__setBadge(true)"
+                                        );
+                                        if !notification_visible {
+                                            let _ = notification_wv.set_visible(true);
+                                            notification_visible = true;
+                                        }
+                                        let _ = notification_wv.evaluate_script(&format!(
+                                            "window.__show && window.__show(`{escaped}`)"
+                                        ));
+                                    }
+                                }
+                            }
+                            None => {}
+                        }
+                        if should_persist {
+                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                         }
                     }
                 }
@@ -3445,7 +3586,12 @@ fn main() {
                     let snapshot = ai_prompt_history.clone();
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
+                let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    if !text.is_empty() {
+                        push_acp_msg(s, "user", text.clone());
+                        should_persist = true;
+                    }
                     if let Some(ref handle) = s.handle {
                         if !handle.send_prompt(text, images) {
                             // Channel dead — drop handle so reconnection can re-arm.
@@ -3456,6 +3602,9 @@ fn main() {
                         }
                     }
                 }
+                if should_persist {
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                }
             }
 
             // ── ACP cancel (stop button) ───────────────────────────────────────────
@@ -3464,6 +3613,7 @@ fn main() {
             // handle with the same agent tag. This is the user's escape hatch when
             // the agent ignores `CancelNotification` (e.g. wedged on a syscall).
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
+                let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     let now = std::time::Instant::now();
                     let recent = s
@@ -3487,6 +3637,15 @@ fn main() {
                         )
                         .ok();
                         s.last_cancel_at = None;
+                        // Save partial agent text (the user just force-killed
+                        // mid-stream — keep what they already saw) and the
+                        // synthetic error so a restart shows the same trail.
+                        if !s.agent_buf.is_empty() {
+                            let buf = std::mem::take(&mut s.agent_buf);
+                            push_acp_msg(s, "agent", buf);
+                        }
+                        push_acp_msg(s, "error", "agent force-stopped and reconnected".to_string());
+                        should_persist = true;
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
@@ -3501,10 +3660,14 @@ fn main() {
                         s.last_cancel_at = Some(now);
                     }
                 }
+                if should_persist {
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                }
             }
 
             // ── ACP set agent for an existing session (kills + respawns its handle) ──
             Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
+                let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
                     s.retry_count = 0;
@@ -3516,6 +3679,11 @@ fn main() {
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
+                    // Switching agents discards the prior conversation context.
+                    s.messages.clear();
+                    s.agent_buf.clear();
+                    s.available_commands_json = None;
+                    should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
                     ));
@@ -3524,10 +3692,14 @@ fn main() {
                         "window.__updateSessionTag && window.__updateSessionTag({sid},`{escaped}`)"
                     ));
                 }
+                if should_persist {
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                }
             }
 
             // ── ACP clear session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
+                let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
@@ -3538,9 +3710,16 @@ fn main() {
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
+                    // User asked for a fresh chat — drop the persisted log too.
+                    s.messages.clear();
+                    s.agent_buf.clear();
+                    should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
                     ));
+                }
+                if should_persist {
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -3572,6 +3751,9 @@ fn main() {
                         reconnect_gen: 0,
                         last_cancel_at: None,
                         acp_session_id: None,
+                        messages: Vec::new(),
+                        agent_buf: String::new(),
+                        available_commands_json: None,
                     });
                     active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
@@ -3582,6 +3764,7 @@ fn main() {
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__switchSession && window.__switchSession({sid})"
                     ));
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -3608,6 +3791,7 @@ fn main() {
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__removeSession && window.__removeSession({sid})"
                     ));
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -3619,17 +3803,88 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                     "window.__switchSession && window.__switchSession({sid})"
                 ));
+                persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
             }
 
             // ── ACP rename session (title only) ────────────────────────────────────
             Event::UserEvent(AppEvent::AcpSessionRename(sid, title)) => {
+                let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                     s.title = title.clone();
+                    should_persist = true;
                     let etitle = webview_utils::escape_js_template(&title);
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__renameSession && window.__renameSession({sid},`{etitle}`)"
                     ));
                 }
+                if should_persist {
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                }
+            }
+
+            // ── Sidebar JS finished init — push persisted state to JS ──────────────
+            // The JS initDefault always creates sid=1 as a placeholder. Here we
+            // reconcile JS state with Rust state: rename/retag sid=1 if needed,
+            // add any extra persisted sessions, replay messages, restore the
+            // last-active session, and re-broadcast cached available_commands.
+            Event::UserEvent(AppEvent::SidebarReady) => {
+                let rust_has_sid1 = sessions.iter().any(|s| s.id == 1);
+                for s in sessions.iter() {
+                    let sid = s.id;
+                    let etitle = webview_utils::escape_js_template(&s.title);
+                    let etag = webview_utils::escape_js_template(&s.tag);
+                    // Status mirrors the live handle state: ready iff connected,
+                    // else connecting (reconnect loop will resolve to error if needed).
+                    let status = if s.handle.is_some() && s.acp_session_id.is_some() {
+                        "ready"
+                    } else if s.handle.is_some() {
+                        "connecting"
+                    } else {
+                        "error"
+                    };
+                    // No-op if the session is already in the JS map (e.g. sid=1
+                    // from initDefault). Title/tag/status are pushed below.
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'{status}')"
+                    ));
+                    // Override the JS placeholder values for sid=1 (it was added
+                    // before we knew the persisted title/tag).
+                    if sid == 1 {
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__renameSession && window.__renameSession({sid},`{etitle}`)"
+                        ));
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__updateSessionTag && window.__updateSessionTag({sid},`{etag}`)"
+                        ));
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setSessionStatus && window.__setSessionStatus({sid},'{status}')"
+                        ));
+                    }
+                    if let Some(ref json) = s.available_commands_json {
+                        let escaped = webview_utils::escape_js_template(json);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
+                        ));
+                    }
+                    if !s.messages.is_empty() {
+                        if let Ok(msgs_json) = serde_json::to_string(&s.messages) {
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
+                            ));
+                        }
+                    }
+                }
+                // Strip the JS placeholder sid=1 if persisted history doesn't
+                // include it (user closed it before quitting last session).
+                if !rust_has_sid1 {
+                    let _ = sidebar_wv.evaluate_script(
+                        "window.__removeSession && window.__removeSession(1)"
+                    );
+                }
+                let active = active_session_id;
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__switchSession && window.__switchSession({active})"
+                ));
             }
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────
@@ -3888,7 +4143,16 @@ fn main() {
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
-                save_and_exit(&tabs, &favicon_cache, &prompt_history, &ai_prompt_history, control_flow);
+                save_and_exit(
+                    &tabs,
+                    &favicon_cache,
+                    &prompt_history,
+                    &ai_prompt_history,
+                    &sessions,
+                    active_session_id,
+                    cfg.max_acp_session_messages,
+                    control_flow,
+                );
             }
 
             // ── Title update ──────────────────────────────────────────────
@@ -4424,7 +4688,16 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
-                        save_and_exit(&tabs, &favicon_cache, &prompt_history, &ai_prompt_history, control_flow);
+                        save_and_exit(
+                            &tabs,
+                            &favicon_cache,
+                            &prompt_history,
+                            &ai_prompt_history,
+                            &sessions,
+                            active_session_id,
+                            cfg.max_acp_session_messages,
+                            control_flow,
+                        );
                     } else if window_id == chrome_win_id {
                         // Chrome window should not be closed independently — ignore.
                     } else {
@@ -5007,12 +5280,55 @@ fn build_learning_prompt(
     Some(out)
 }
 
+/// Append a message to a session's persisted log, stamping it with the
+/// current wall-clock time. Cheap — caller is expected to call
+/// `persist_acp_history` afterwards (debounced via thread spawn).
+fn push_acp_msg(s: &mut AcpSession, role: &str, text: String) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    s.messages.push(config::AcpMessage {
+        role: role.to_string(),
+        text,
+        ts,
+    });
+}
+
+/// Snapshot every ACP session into `AcpHistory` and dispatch the JSON write
+/// on a background thread. Mirrors `save_ai_prompt_history` — fire-and-forget,
+/// errors are logged but never block the event loop. Caps each session's
+/// message log at `max_msgs` (oldest dropped first).
+fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize) {
+    let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions
+        .iter()
+        .map(|s| {
+            let start = s.messages.len().saturating_sub(max_msgs);
+            config::AcpSessionSnapshot {
+                id: s.id,
+                title: s.title.clone(),
+                tag: s.tag.clone(),
+                acp_session_id: s.acp_session_id.clone(),
+                messages: s.messages[start..].to_vec(),
+            }
+        })
+        .collect();
+    let history = config::AcpHistory {
+        sessions: snap_sessions,
+        active_id,
+    };
+    std::thread::spawn(move || config::save_acp_history(&history));
+}
+
 /// Save session state and exit the event loop.
 fn save_and_exit(
     tabs: &Arc<Mutex<browser::TabManager>>,
     favicon_cache: &std::collections::HashMap<String, String>,
     prompt_history: &[String],
     ai_prompt_history: &[String],
+    acp_sessions: &[AcpSession],
+    acp_active_id: u64,
+    max_acp_session_messages: usize,
     control_flow: &mut ControlFlow,
 ) {
     let mut tm = tabs.lock().unwrap();
@@ -5035,6 +5351,25 @@ fn save_and_exit(
     config::save_history(tm.history());
     config::save_prompt_history(prompt_history);
     config::save_ai_prompt_history(ai_prompt_history);
+    // Synchronous final save so the ACP log is durable across cold restart
+    // even if the OS reaps background threads on app exit.
+    let acp_history = config::AcpHistory {
+        sessions: acp_sessions
+            .iter()
+            .map(|s| {
+                let start = s.messages.len().saturating_sub(max_acp_session_messages);
+                config::AcpSessionSnapshot {
+                    id: s.id,
+                    title: s.title.clone(),
+                    tag: s.tag.clone(),
+                    acp_session_id: s.acp_session_id.clone(),
+                    messages: s.messages[start..].to_vec(),
+                }
+            })
+            .collect(),
+        active_id: acp_active_id,
+    };
+    config::save_acp_history(&acp_history);
     drop(tm);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;

@@ -223,6 +223,79 @@ fn ai_prompt_history_path() -> PathBuf {
         .join("ai_prompt_history.json")
 }
 
+// ── ACP chat history persistence ──────────────────────────────────────────────
+// Persists every assistant session (id, title, tag, optional ACP resume id) and
+// its message log (user prompts, agent responses, errors) so the sidebar can
+// be restored verbatim across browser restarts. Tool details and inline images
+// are intentionally NOT persisted — they bloat the file and can't be replayed
+// faithfully (durations are stale, tool buttons are inert after restart).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpMessage {
+    /// "user" | "agent" | "error"
+    pub role: String,
+    /// Raw text. Markdown for agent, plain otherwise.
+    pub text: String,
+    /// Unix epoch milliseconds at the time the message was committed.
+    #[serde(default)]
+    pub ts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpSessionSnapshot {
+    pub id: u64,
+    pub title: String,
+    pub tag: String,
+    /// ACP-protocol session id reported by the agent on Connected. Passed back
+    /// as `--resume <id>` on next launch so the agent restores its in-memory
+    /// conversation context. None if the agent never connected successfully.
+    #[serde(default)]
+    pub acp_session_id: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<AcpMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcpHistory {
+    pub sessions: Vec<AcpSessionSnapshot>,
+    /// Last-active session id. Restored as the foreground session.
+    #[serde(default)]
+    pub active_id: u64,
+}
+
+pub fn save_acp_history(history: &AcpHistory) {
+    let path = acp_history_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string(history) {
+        Ok(s) => {
+            if let Err(e) = fs::write(&tmp, &s) {
+                tracing::warn!(error = %e, "Failed to write ACP history tmp");
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, "Failed to rename ACP history tmp");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize ACP history"),
+    }
+}
+
+pub fn load_acp_history() -> Option<AcpHistory> {
+    let path = acp_history_path();
+    let raw = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn acp_history_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+        .join("octoweb")
+        .join("acp_history.json")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// URL to load on startup
@@ -244,6 +317,10 @@ pub struct Config {
     /// Max prompt history entries to keep for AI sidebar assistant
     #[serde(default = "default_max_ai_prompt_history")]
     pub max_ai_prompt_history: usize,
+    /// Max persisted messages to keep per ACP chat session — older messages
+    /// are dropped from disk (FIFO) once a session exceeds this cap.
+    #[serde(default = "default_max_acp_session_messages")]
+    pub max_acp_session_messages: usize,
     /// Enable proactive background learning from browsing history
     #[serde(default = "default_true")]
     pub proactive_learning: bool,
@@ -258,6 +335,10 @@ fn default_max_prompt_history() -> usize {
 
 fn default_max_ai_prompt_history() -> usize {
     50
+}
+
+fn default_max_acp_session_messages() -> usize {
+    500
 }
 
 fn default_true() -> bool {
@@ -279,6 +360,7 @@ impl Default for Config {
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,
+            max_acp_session_messages: 500,
             proactive_learning: true,
             learning_interval_min: 30,
         }
