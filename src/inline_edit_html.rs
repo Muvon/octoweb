@@ -238,6 +238,13 @@ pub fn html() -> String {
     if (e.key === 'Escape') {
       e.preventDefault();
       ipc({ type: 'inline_edit_close' });
+    } else if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'J' || e.code === 'KeyJ')) {
+      // Ctrl+J → newline (mirrors Shift+Enter via the same WKWebView path)
+      e.preventDefault();
+      document.execCommand('insertText', false, '\n');
+      // Trailing "\n" doesn't expand scrollHeight, so caret can fall off the
+      // clipped textarea — keep it visible the same way Shift+Enter does.
+      input.scrollTop = input.scrollHeight;
     } else if (e.key === 'Enter' && !e.shiftKey && input.value.trim()) {
       e.preventDefault();
       ipc({ type: 'inline_edit_submit', prompt: input.value.trim() });
