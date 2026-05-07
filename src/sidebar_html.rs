@@ -3004,13 +3004,22 @@ pub fn html() -> String {
     }
   });
   input.addEventListener('keydown', e => {
-    // Send only on plain Enter (no modifiers). Shift+Enter inserts a newline
-    // natively in <textarea>; Ctrl+J is translated by AppKit to
-    // `insertLineBreak:` which also inserts \n natively — we must NOT consume
-    // it here. Excluding all modifier-keyed Enters makes both work identically
-    // even if AppKit synthesizes an Enter keydown from Ctrl+J on some macOS
-    // versions (in which case e.ctrlKey is still true and we let it through).
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !_ph.isInSearchMode()) {
+    if (_ph.isInSearchMode()) return;
+    // Ctrl+J → insert newline at caret. execCommand('insertText') is the same
+    // path WKWebView uses for Shift+Enter — preserves focus, caret, undo,
+    // scroll, and fires the 'input' event for auto-resize.
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'J' || e.code === 'KeyJ')) {
+      e.preventDefault();
+      document.execCommand('insertText', false, '\n');
+      // Browsers under-measure a trailing "\n" in scrollHeight, so the caret
+      // line ends up clipped after auto-resize. Pin the textarea scroll to
+      // the caret so the new empty line stays visible — Shift+Enter gets
+      // this for free via the native text view path.
+      input.scrollTop = input.scrollHeight;
+      return;
+    }
+    // Plain Enter sends. Shift+Enter falls through → native newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
       send();
       _ph.resetState();
