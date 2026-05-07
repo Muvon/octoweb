@@ -73,6 +73,7 @@ enum AppEvent {
     AcpSessionSwitch(u64),    // (session_id) — switch active session
     AcpSessionRename(u64, String), // (session_id, title) — rename session
     SidebarReady,             // sidebar JS finished initializing — push restore
+    SidebarReFocus,           // app reactivated while sidebar owned key — restore textarea focus
     AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
     OpenInNewTab(String),     // Cmd+click / target=_blank — open URL in new tab and switch to it
@@ -232,6 +233,11 @@ fn main() {
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
     let inline_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     let sidebar_hotkey_visible = Arc::new(AtomicBool::new(false));
+    // Tracks whether chrome_win (sidebar host) currently owns logical input
+    // focus. Read by the NSApplicationDidBecomeActive observer to decide
+    // whether to restore key status + textarea focus after a transient
+    // deactivation (notification banner, Spotlight, brief Cmd-Tab).
+    let sidebar_owns_key = Arc::new(AtomicBool::new(false));
     // Note: app-frontmost state is queried on demand via `is_app_active()`
     // (NSApplication.isActive). We deliberately do NOT cache via
     // WindowEvent::Focused — modal panels from other apps (1Password ⌘\,
@@ -316,12 +322,16 @@ fn main() {
     let chrome_win = Arc::new(chrome_win);
     let chrome_win_id = chrome_win.id();
 
-    // Resign chrome_win's key status whenever the app deactivates. Without this,
-    // borderless child windows can hold key status across Cmd+Tab / app switch,
-    // routing keys (e.g. Enter pressed in Slack) back to our sidebar WebView
-    // and pulling octoweb back to the front.
+    // Resign chrome_win's key status on deactivate (so Slack-Enter doesn't
+    // route back to us) and restore it on reactivate when the sidebar still
+    // owned focus (so transient deactivations — banners, Spotlight — don't
+    // silently steal the user's typing focus).
     unsafe {
-        macos::install_resign_key_on_deactivate(chrome_win.ns_window());
+        macos::install_app_active_observers(
+            chrome_win.ns_window(),
+            Arc::clone(&sidebar_owns_key),
+            proxy.clone(),
+        );
     }
 
     // ── Browser WebView factory ───────────────────────────────────────────
@@ -3509,6 +3519,7 @@ fn main() {
                     let _ = sidebar_wv.set_visible(false);
                     sidebar_visible = false;
                     sidebar_hotkey_visible.store(false, Ordering::Relaxed);
+                    sidebar_owns_key.store(false, Ordering::Relaxed);
                     // Return key window status to browser_win so the page
                     // WebView receives keyboard input again.
                     browser_win.set_focus();
@@ -3524,6 +3535,7 @@ fn main() {
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
                     sidebar_hotkey_visible.store(true, Ordering::Relaxed);
+                    sidebar_owns_key.store(true, Ordering::Relaxed);
                     // Seed sidebar with persisted AI prompt history so older prompts
                     // are reachable via Ctrl+P / Ctrl+N inside any session.
                     let hist_json = serde_json::to_string(&ai_prompt_history)
@@ -3901,6 +3913,21 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                     "window.__switchSession && window.__switchSession({active})"
                 ));
+            }
+
+            // ── Sidebar re-focus after transient app reactivation ─────────
+            // Posted by the NSApplicationDidBecomeActive observer (macos.rs)
+            // when our app reactivates and the sidebar still owns logical
+            // focus. Re-promotes the WKWebView and the textarea so the user's
+            // typing focus survives notification banners, Spotlight, etc.
+            Event::UserEvent(AppEvent::SidebarReFocus) if sidebar_visible => {
+                let _ = sidebar_wv.focus();
+                let _ = sidebar_wv.evaluate_script(
+                    "(function(){var el=document.getElementById('prompt-input');\
+                     if(!el)return;if(document.activeElement===el)return;\
+                     var n=0;(function f(){if(n++>20)return;el.focus();\
+                     if(document.activeElement===el)return;setTimeout(f,30)})()})()"
+                );
             }
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────
