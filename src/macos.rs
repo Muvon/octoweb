@@ -141,39 +141,64 @@ pub fn set_app_icon() {
     }
 }
 
-/// Install an observer for `NSApplicationDidResignActiveNotification` that
-/// resigns key window status from `chrome_ns_window` when our app deactivates.
+/// Install symmetric observers for `NSApplicationDidResignActiveNotification`
+/// and `NSApplicationDidBecomeActiveNotification` so that `chrome_ns_window`
+/// (our borderless transparent sidebar window) plays nicely with app
+/// activation transitions.
 ///
-/// Why this is needed: `chrome_win` is a borderless transparent child window.
-/// We explicitly call `makeKeyWindow` on it to route input into the sidebar
-/// WebView. macOS does NOT reliably auto-resign key from borderless child
-/// windows when the app deactivates (Cmd+Tab, click on another app's window),
-/// so the chrome window can stay key — meaning typing in the other app
-/// (e.g. pressing Enter in Slack) routes back to our WebView and pulls
-/// octoweb back to the front.
+/// **Resign on deactivate** — `chrome_win` is a borderless transparent child
+/// window. We explicitly call `makeKeyWindow` on it to route input into the
+/// sidebar WebView. macOS does NOT reliably auto-resign key from borderless
+/// child windows when the app deactivates (Cmd+Tab, click on another app's
+/// window), so the chrome window can stay key — meaning typing in the other
+/// app (e.g. pressing Enter in Slack) routes back to our WebView and pulls
+/// octoweb back to the front. On deactivation we explicitly call
+/// `[chrome_ns_window resignKeyWindow]` so AppKit hands key status to the
+/// actual frontmost app's window.
 ///
-/// Fix: on deactivation, explicitly call `[chrome_ns_window resignKeyWindow]`
-/// so AppKit hands key status to the actual frontmost app's window.
+/// **Restore on activate** — when our app reactivates after a *transient*
+/// deactivation (notification banner, Spotlight, brief Cmd-Tab) and the
+/// sidebar still owns input focus from the user's perspective
+/// (`sidebar_owns_key` is true), we re-promote `chrome_win` to key window
+/// and notify the event loop via `AppEvent::SidebarReFocus` so it can
+/// re-focus the sidebar WKWebView and the textarea inside it. Without this,
+/// the previous fix overshoots: any deactivation drops key permanently and
+/// the user's typing focus silently disappears.
 ///
-/// `chrome_ns_window` must be a non-null NSWindow pointer; the observer
-/// retains it for the app's lifetime (we never uninstall this observer).
+/// Both observers run on the main thread (queue: nil = posting thread; these
+/// notifications are posted on the main thread by NSApplication).
+///
+/// `chrome_ns_window` must be a non-null NSWindow pointer; observers retain
+/// it for the app's lifetime (we never uninstall them).
 ///
 /// # Safety
 /// Caller must pass a valid NSWindow pointer that lives for the duration of
 /// the app (chrome_win is never dropped).
-pub unsafe fn install_resign_key_on_deactivate(chrome_ns_window: *mut std::ffi::c_void) {
+pub unsafe fn install_app_active_observers(
+    chrome_ns_window: *mut std::ffi::c_void,
+    sidebar_owns_key: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    proxy: tao::event_loop::EventLoopProxy<crate::AppEvent>,
+) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_foundation::NSString;
+    use std::sync::atomic::Ordering;
 
     if chrome_ns_window.is_null() {
         return;
     }
 
-    // Build the block: on notification, resignKeyWindow on chrome_ns_window.
+    let center: *mut AnyObject = msg_send![objc2::class!(NSNotificationCenter), defaultCenter];
+    if center.is_null() {
+        tracing::warn!("NSNotificationCenter defaultCenter is null");
+        return;
+    }
+
     // Capture the pointer as usize so the block is `Send + 'static` safe.
     let win_addr = chrome_ns_window as usize;
-    let block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
+
+    // ── DidResignActive: drop key from chrome_win so it doesn't trap input ──
+    let resign_block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
         let win = win_addr as *mut AnyObject;
         if win.is_null() {
             return;
@@ -184,25 +209,45 @@ pub unsafe fn install_resign_key_on_deactivate(chrome_ns_window: *mut std::ffi::
             tracing::debug!("chrome_win resigned key on app deactivate");
         }
     });
-
-    let center: *mut AnyObject = msg_send![objc2::class!(NSNotificationCenter), defaultCenter];
-    if center.is_null() {
-        tracing::warn!("NSNotificationCenter defaultCenter is null");
-        return;
-    }
-    let name = NSString::from_str("NSApplicationDidResignActiveNotification");
-    // addObserverForName:object:queue:usingBlock: returns an opaque token; we
-    // intentionally leak it (observer lives for app lifetime).
-    let _token: *mut AnyObject = msg_send![
+    let resign_name = NSString::from_str("NSApplicationDidResignActiveNotification");
+    let _resign_token: *mut AnyObject = msg_send![
         center,
-        addObserverForName: &*name,
+        addObserverForName: &*resign_name,
         object: std::ptr::null::<AnyObject>(),
         queue: std::ptr::null::<AnyObject>(),
-        usingBlock: &*block,
+        usingBlock: &*resign_block,
     ];
-    // Leak the block too — it must outlive the registration.
-    std::mem::forget(block);
-    tracing::debug!("installed NSApplicationDidResignActiveNotification observer");
+    std::mem::forget(resign_block);
+
+    // ── DidBecomeActive: if sidebar owned key before, restore it ───────────
+    let activate_block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
+        if !sidebar_owns_key.load(Ordering::Relaxed) {
+            return;
+        }
+        let win = win_addr as *mut AnyObject;
+        if win.is_null() {
+            return;
+        }
+        let is_key: bool = unsafe { msg_send![win, isKeyWindow] };
+        if !is_key {
+            let _: () = unsafe { msg_send![win, makeKeyWindow] };
+            tracing::debug!("chrome_win re-promoted to key on app reactivate");
+        }
+        // Hand off to the event loop: wry WebView is !Send and must be
+        // touched on the main event-loop thread.
+        let _ = proxy.send_event(crate::AppEvent::SidebarReFocus);
+    });
+    let activate_name = NSString::from_str("NSApplicationDidBecomeActiveNotification");
+    let _activate_token: *mut AnyObject = msg_send![
+        center,
+        addObserverForName: &*activate_name,
+        object: std::ptr::null::<AnyObject>(),
+        queue: std::ptr::null::<AnyObject>(),
+        usingBlock: &*activate_block,
+    ];
+    std::mem::forget(activate_block);
+
+    tracing::debug!("installed NSApplication active/resign observers");
 }
 
 /// Push tab_id to front of MRU list, removing any prior occurrence.
