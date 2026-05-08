@@ -266,6 +266,13 @@ fn main() {
     let browser_win = Arc::new(browser_win);
     let browser_win_id = browser_win.id();
 
+    // First tao window has been built — its `TaoView` ObjC class is now
+    // registered with the runtime, so we can install our keyDown fix that
+    // prevents duplicate insertText: into WKWebViews under Lexical (x.com
+    // compose). See `macos::install_taoview_keyboard_fix` docstring for
+    // the full chain of why this is necessary and why it's safe.
+    macos::install_taoview_keyboard_fix();
+
     // ── Overlay window — transparent, always-on-top, hidden by default ────
     let overlay_win = WindowBuilder::new()
         .with_title("")

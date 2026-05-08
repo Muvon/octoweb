@@ -196,8 +196,8 @@ pub enum McpCommand {
 /// Statuses:
 /// - `"true"`         — action succeeded
 /// - `"stale"`        — `@ref` selector but `window.__octoweb_refs` is missing
-///                      or the ref was never registered. Most often: navigation
-///                      cleared refs. Fix: call `browser_snapshot` again.
+///   or the ref was never registered. Most often: navigation cleared refs.
+///   Fix: call `browser_snapshot` again.
 /// - `"missing"`      — CSS selector matched no element on the current page.
 /// - `"detached"`     — `@ref` resolved but the element is no longer in the DOM.
 /// - `"invalid:<msg>"`— `document.querySelector` threw on a malformed selector.
