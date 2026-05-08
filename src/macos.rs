@@ -105,6 +105,121 @@ pub fn init_env() {
     tracing::debug!(shell, imported, "inherited user shell environment");
 }
 
+/// Suppress tao's NSTextInputClient path so it cannot generate a duplicate
+/// `insertText:replacementRange:` call into the WKWebView during WebKit's
+/// keyDown-resend flow.
+///
+/// # The bug this fixes
+///
+/// Editors that call `event.preventDefault()` only on `textInput` (and not on
+/// `keydown`/`keypress`) — e.g. Lexical on x.com compose — leave WebKit's
+/// `EventHandler::keyEvent` returning `false` (`eventWasHandled = false`,
+/// see WebCore/page/EventHandler.cpp:4416). When that happens,
+/// `WebViewImpl::doneWithKeyEvent` resends the keystroke via `[NSApp sendEvent:]`
+/// (Source/WebKit/UIProcess/mac/WebViewImpl.mm:5489-5506).
+///
+/// The resent event walks the responder chain. WKWebView forwards via
+/// `_web_superKeyDown:` → `[NSResponder keyDown:]` → `nextResponder`, landing
+/// on tao's parent `NSView` (because we use `build_as_child` for every tab).
+/// Tao's `keyDown:` (tao-0.35.0/src/platform_impl/macos/view.rs:695) calls
+/// `interpretKeyEvents:` on itself. macOS's text-input system routes
+/// `insertText:replacementRange:` through the active `NSTextInputContext`
+/// whose client is the firstResponder — the WKWebView. WebKit then handles
+/// that second `insertText:` outside the keyDown-collection scope:
+/// `WebViewImpl::insertText` line 5715 takes the async branch →
+/// `WebPage::insertTextAsync` (WebPageCocoa.mm:2065) →
+/// `Editor::insertText(text, /*triggeringEvent=*/nullptr, ...)` →
+/// fresh `textInput` + `beforeinput` + `input` dispatch + DOM mutation.
+/// Result: the character inserts twice ("H" → "HH").
+///
+/// Safari's standalone WKWebView container has no NSTextInputClient-conforming
+/// parent in the chain, so the resend has nowhere to land and never produces a
+/// second `insertText:`. This same bug is tracked upstream as
+/// <https://github.com/tauri-apps/tauri/issues/8705>.
+///
+/// # The fix
+///
+/// We install a no-op `interpretKeyEvents:` on the `TaoView` ObjC class. Tao's
+/// `keyDown:` still runs end-to-end (so `WindowEvent::KeyboardInput` is still
+/// queued — used for `Cmd+[` / `Cmd+]` history-nav), but the call to
+/// `[self interpretKeyEvents:array]` becomes a no-op. The macOS text-input
+/// system never gets invoked from tao, so the duplicate `insertText:` to the
+/// WKWebView never happens.
+///
+/// Mirrors what `WryWebViewParent.keyDown:` does in wry's non-child path
+/// (wry-0.55.0/src/wkwebview/class/wry_web_view_parent.rs:29-38) — that view's
+/// `keyDown:` doesn't call `interpretKeyEvents:` either, which is why the bug
+/// only reproduces in `build_as_child` mode.
+///
+/// Safe because:
+/// - octoweb does not consume `WindowEvent::ReceivedImeText` anywhere — all
+///   text input lives inside WKWebViews. Suppressing tao's IME path loses
+///   nothing observable to the user.
+/// - Tao's `WindowEvent::KeyboardInput` (used for `Cmd+[` / `Cmd+]` shortcuts
+///   in the main event loop) is queued *after* the `interpretKeyEvents:` call
+///   in tao's `keyDown:`, so it remains intact.
+///
+/// Must be called once at startup, after the first tao window is built (which
+/// is when the `TaoView` ObjC class is registered). Idempotent.
+pub fn install_taoview_keyboard_fix() {
+    use objc2::ffi::{class_addMethod, objc_getClass};
+    use objc2::runtime::{AnyClass, Sel};
+    use objc2::sel;
+    use std::ffi::c_void;
+
+    // No-op replacement for `interpretKeyEvents:`. Signature must match the
+    // ObjC selector exactly: void return; receiver, _cmd, then the NSArray*
+    // argument. We don't read or release the argument — ObjC retains/release
+    // semantics for method arguments are handled by the caller.
+    extern "C-unwind" fn no_op(_self: *mut c_void, _sel: Sel, _events: *mut c_void) {}
+
+    unsafe {
+        let class_ptr = objc_getClass(c"TaoView".as_ptr());
+        if class_ptr.is_null() {
+            // Tao window hasn't been created yet (TaoView class isn't
+            // registered). The caller is expected to invoke this after the
+            // first window is built. Log so we'd notice if the order changes.
+            tracing::warn!(
+                "install_taoview_keyboard_fix: TaoView class not found; \
+                 typing-bug fix not applied. Call after first window build."
+            );
+            return;
+        }
+        let class = class_ptr as *mut AnyClass;
+
+        // ObjC type encoding: `v@:@` = void return, id (self), SEL (_cmd),
+        // id (NSArray * — the events array).
+        let types = c"v@:@";
+
+        // `interpretKeyEvents:` is inherited from NSResponder; TaoView itself
+        // doesn't define it. class_addMethod installs it as a direct override.
+        // Same call pattern as dialog_patch.rs.
+        let added = class_addMethod(
+            class,
+            sel!(interpretKeyEvents:),
+            std::mem::transmute::<
+                extern "C-unwind" fn(*mut c_void, Sel, *mut c_void),
+                unsafe extern "C-unwind" fn(),
+            >(no_op),
+            types.as_ptr(),
+        );
+
+        // `class_addMethod` returns `objc2::runtime::Bool`, not a Rust bool.
+        if added.into() {
+            tracing::debug!(
+                "TaoView interpretKeyEvents: override installed — suppresses \
+                 duplicate insertText: that would otherwise double-insert \
+                 characters in WKWebView editors (see fn docstring)"
+            );
+        } else {
+            tracing::warn!(
+                "install_taoview_keyboard_fix: class_addMethod returned false \
+                 (already present?); typing-bug fix may not be active."
+            );
+        }
+    }
+}
+
 /// Hand a URL with a custom scheme (e.g. `tg://`, `figma://`, `mailto:`) to
 /// macOS so the registered app can handle it. Returns `true` if the OS accepted
 /// the URL (an app was found and launched).
