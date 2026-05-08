@@ -1,30 +1,34 @@
 //! MCP (Model Context Protocol) server for AI assistant control.
 //!
-//! Exposes browser tools over HTTP JSON-RPC on localhost:3434/mcp:
-//! - browser_navigate: Open URL in current tab, new tab, or background tab
-//! - browser_get_tabs: List all open tabs
-//! - browser_get_current_tab: Get the active tab
-//! - browser_switch_tab: Switch to tab by ID
-//! - browser_close_tab: Close tab by ID
-//! - browser_get_page_info: Get title, URL, description
-//! - browser_get_page_content: Get readable text content of a page
-//! - browser_execute_js: Run JavaScript in page (returns result)
-//! - browser_click: Click element by selector
-//! - browser_hover: Hover over element by selector
-//! - browser_type: Type text into input or contenteditable element
-//! - browser_scroll: Scroll page up/down/top/bottom
-//! - browser_press_key: Press a keyboard key
-//! - browser_select_option: Select an option in a dropdown
-//! - browser_wait: Wait for page load or element to appear
-//! - browser_go_back: Navigate back in history
-//! - browser_go_forward: Navigate forward in history
-//! - browser_get_history: Get browsing history
-//! - browser_get_playing_tabs: Get tabs playing audio
-//! - browser_reload: Reload a tab
-//! - browser_screenshot: Take a screenshot
-//! - browser_get_html: Get HTML content of page or element
-//! - browser_snapshot: Get compact element map with numeric refs for efficient interaction
-//! - browser_handle_dialog: Accept/dismiss JS alert/confirm/prompt dialogs
+//! Exposes browser tools over HTTP JSON-RPC on http://127.0.0.1:3434/mcp.
+//!
+//! # Tool surface
+//!
+//! Discovery & reading:
+//! - `browser_snapshot`     — compact map of interactive elements with @N refs
+//! - `browser_get_page_info`/`browser_get_page_content` — metadata and readable text
+//! - `browser_execute_js`                                — escape hatch for custom DOM queries
+//!
+//! Tabs:
+//! - `browser_navigate` (new_tab/background optional, mutually exclusive with tab_id)
+//! - `browser_get_tabs` / `browser_get_current_tab` / `browser_switch_tab` / `browser_close_tab`
+//! - `browser_get_history` / `browser_get_playing_tabs`
+//! - `browser_go_back` / `browser_go_forward` / `browser_reload`
+//!
+//! Interaction (selector accepts a CSS selector or a `@N` ref from snapshot):
+//! - `browser_click` / `browser_hover` / `browser_type`
+//! - `browser_press_key` / `browser_select_option`
+//! - `browser_scroll` / `browser_wait` / `browser_screenshot`
+//! - `browser_handle_dialog` — resolve pending JS alert/confirm/prompt
+//!
+//! # Selector resolution
+//!
+//! `selector` is interpreted in JS by checking the first character: a leading
+//! `@` resolves against `window.__octoweb_refs` (populated by `browser_snapshot`)
+//! and anything else is passed to `document.querySelector`. The interaction
+//! tools all return distinct error reasons (`stale`, `missing`, `detached`,
+//! `invalid:<msg>`) so the AI knows whether to re-snapshot, fix the selector,
+//! or wait for the page to settle.
 
 use crate::sanitize;
 
@@ -183,6 +187,46 @@ pub enum McpCommand {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// DOM-result interpreter (shared by Click/Hover/Type/PressKey/SelectOption)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Map a status string returned by our injected DOM scripts into a
+/// `Result<bool, String>` with an actionable message for the AI.
+///
+/// Statuses:
+/// - `"true"`         — action succeeded
+/// - `"stale"`        — `@ref` selector but `window.__octoweb_refs` is missing
+///                      or the ref was never registered. Most often: navigation
+///                      cleared refs. Fix: call `browser_snapshot` again.
+/// - `"missing"`      — CSS selector matched no element on the current page.
+/// - `"detached"`     — `@ref` resolved but the element is no longer in the DOM.
+/// - `"invalid:<msg>"`— `document.querySelector` threw on a malformed selector.
+///
+/// `val` is the JSON-encoded return value from `evaluate_script_with_callback`,
+/// so it usually arrives as a quoted string (`"\"true\""`); the trim handles
+/// both quoted and unquoted forms.
+pub fn interpret_dom_result(val: &str, selector: &str) -> Result<bool, String> {
+    let trimmed = val.trim().trim_matches('"');
+    match trimmed {
+        "true" => Ok(true),
+        "stale" => Err(format!(
+            "@ref '{selector}' is stale — call browser_snapshot first to refresh refs (they invalidate on navigation)"
+        )),
+        "missing" => Err(format!(
+            "No element matched selector: {selector}"
+        )),
+        "detached" => Err(format!(
+            "Element for '{selector}' is no longer in the DOM — re-snapshot or wait for the page to settle"
+        )),
+        s if s.starts_with("invalid:") => Err(format!(
+            "Invalid CSS selector '{selector}': {}",
+            &s[8..]
+        )),
+        _ => Err(format!("Unexpected DOM result: {val}")),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Data types for MCP responses
 // ─────────────────────────────────────────────────────────────────────
 
@@ -251,27 +295,27 @@ impl HistoryInfo {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NavigateRequest {
-    #[schemars(description = "URL to navigate to")]
+    #[schemars(
+        description = "URL or search query. Bare hosts and queries are resolved automatically."
+    )]
     pub url: String,
     #[schemars(
-        description = "Tab ID to navigate in-place. Omit to use active tab (when new_tab is false) or create a new tab (when new_tab is true)"
+        description = "Existing tab to navigate in-place. If the tab still exists, it wins over new_tab — so passing a known tab_id always reuses that tab. Omit for the visible tab."
     )]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "Open in a new tab instead of navigating the current one (default: false)"
+        description = "Open in a new tab instead of navigating in place. Also acts as a fallback when tab_id is set but that tab is gone. Default false."
     )]
     pub new_tab: Option<bool>,
     #[schemars(
-        description = "Keep the new tab hidden in the background — user stays on their current page. Only applies when new_tab is true. (default: false)"
+        description = "Don't move focus to the navigated tab. Honored when opening a new tab; implicit (already non-disruptive) when navigating an existing non-active tab via tab_id. Default false."
     )]
     pub background: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TabIdRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
 }
 
@@ -289,9 +333,7 @@ pub struct CloseTabRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteJsRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(description = "JavaScript code to execute")]
     pub script: String,
@@ -299,117 +341,95 @@ pub struct ExecuteJsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClickRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-    #[schemars(description = "CSS selector for element to click")]
+    #[schemars(description = "CSS selector or @ref from browser_snapshot.")]
     pub selector: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct HoverRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-    #[schemars(description = "CSS selector for element to hover over")]
+    #[schemars(description = "CSS selector or @ref from browser_snapshot.")]
     pub selector: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-    #[schemars(description = "CSS selector for input element")]
+    #[schemars(
+        description = "CSS selector or @ref of an <input>, <textarea>, or contenteditable element."
+    )]
     pub selector: String,
-    #[schemars(description = "Text to type")]
+    #[schemars(description = "Text to set. Replaces the existing value — does not append.")]
     pub text: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "Capture the entire scrollable page instead of just the visible viewport. (default: false)"
+        description = "Capture the entire scrollable page instead of just the viewport. Default false."
     )]
     pub full_page: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetHistoryRequest {
-    #[schemars(
-        description = "Maximum number of entries to return (default: 50, most recent first)"
-    )]
+    #[schemars(description = "Max entries, most recent first. Default 50.")]
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScrollRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-    #[schemars(
-        description = "Scroll direction: \"up\", \"down\", \"top\" (page start), or \"bottom\" (page end)"
-    )]
+    #[schemars(description = "\"up\", \"down\", \"top\", or \"bottom\".")]
     pub direction: String,
-    #[schemars(
-        description = "Custom scroll distance in pixels. Overrides direction's default (~one viewport). Only used with \"up\" and \"down\"."
-    )]
+    #[schemars(description = "Distance in px (only with up/down). Default: ~one viewport.")]
     pub pixels: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PressKeyRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "Key to press — standard KeyboardEvent.key values: \"Enter\", \"Escape\", \"Tab\", \"ArrowDown\", \"Backspace\", \"a\", \"1\", etc."
+        description = "KeyboardEvent.key value: \"Enter\", \"Escape\", \"Tab\", \"ArrowDown\", \"Backspace\", \"a\", etc."
     )]
     pub key: String,
     #[schemars(
-        description = "CSS selector for element to target. Omit to use the currently focused element."
+        description = "Target element (CSS selector or @ref). Omit to use the focused element."
     )]
     pub selector: Option<String>,
-    #[schemars(
-        description = "Modifier keys to hold: \"shift\", \"ctrl\", \"alt\", \"meta\". Example: [\"ctrl\", \"shift\"]"
-    )]
+    #[schemars(description = "Modifiers to hold: any of \"shift\", \"ctrl\", \"alt\", \"meta\".")]
     pub modifiers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WaitRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "What to wait for: \"load\" (page fully loaded, default), \"domcontentloaded\" (DOM ready), or a CSS selector string (waits for that element to appear in DOM)"
+        description = "\"load\" (default), \"domcontentloaded\", or a CSS selector to wait for."
     )]
     pub event: Option<String>,
-    #[schemars(description = "Maximum time to wait in milliseconds (default: 10000, max: 30000)")]
+    #[schemars(description = "Timeout in ms. Default 10000, max 30000.")]
     pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SnapshotRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct HandleDialogRequest {
-    #[schemars(description = "true to accept (OK/Yes), false to dismiss (Cancel/No)")]
+    #[schemars(description = "true → OK/Yes, false → Cancel/No.")]
     pub accept: bool,
     #[schemars(description = "Text to enter for prompt() dialogs. Ignored for alert/confirm.")]
     pub text: Option<String>,
@@ -417,13 +437,11 @@ pub struct HandleDialogRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SelectOptionRequest {
-    #[schemars(
-        description = "Tab ID to target. Omit to default to the user's visible (foreground) tab."
-    )]
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-    #[schemars(description = "CSS selector for the <select> element")]
+    #[schemars(description = "CSS selector or @ref of the <select> element.")]
     pub selector: String,
-    #[schemars(description = "Value of the <option> to select")]
+    #[schemars(description = "Value attribute of the <option> to select.")]
     pub value: String,
 }
 
@@ -479,7 +497,7 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL and wait for the page to fully load (including SPA rendering). Blocks until DOM and network are idle — no need to call browser_wait afterwards. By default navigates the user's visible tab in-place. Set new_tab=true to open in a new tab (switches to it). Set background=true with new_tab=true to open a hidden background tab without disturbing the user's view — ideal for research. Set tab_id to navigate a specific tab (including background ones) in-place. Returns the tab ID."
+        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nFlags can be combined freely; the first matching rule wins:\n  • tab_id given AND that tab still exists → navigate it in-place (focus unchanged). Other flags are advisory.\n  • tab_id given but the tab is gone → if new_tab=true, open a fresh tab; otherwise error.\n  • no tab_id, new_tab=true → open a new tab (background=true keeps it hidden).\n  • no tab_id, new_tab=false → navigate the user's visible tab in-place.\n\nUse tab_id to reuse a tab you opened earlier (e.g. background research tabs)."
     )]
     async fn browser_navigate(
         &self,
@@ -509,9 +527,7 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(
-        description = "Navigate back in the browser history for a tab. Defaults to the user's visible tab if tab_id is omitted."
-    )]
+    #[tool(description = "Go back in this tab's history. Defaults to the visible tab.")]
     async fn browser_go_back(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -526,9 +542,7 @@ impl McpServer {
         )]))
     }
 
-    #[tool(
-        description = "Navigate forward in the browser history for a tab. Defaults to the user's visible tab if tab_id is omitted."
-    )]
+    #[tool(description = "Go forward in this tab's history. Defaults to the visible tab.")]
     async fn browser_go_forward(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -543,7 +557,7 @@ impl McpServer {
         )]))
     }
 
-    #[tool(description = "Reload a tab. Defaults to the user's visible tab if tab_id is omitted.")]
+    #[tool(description = "Reload the tab. Defaults to the visible tab.")]
     async fn browser_reload(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -559,7 +573,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Wait for a condition before proceeding. Not needed after browser_navigate (which already waits). Useful after browser_click that triggers SPA route changes, or to wait for lazily-loaded content. event=\"load\" (default) waits for full page load, \"domcontentloaded\" waits for DOM ready, or pass a CSS selector to wait for a specific element to appear. Returns \"ready\" on success or \"timeout\" if the condition wasn't met. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Wait for a condition. NOT needed after browser_navigate (already waits). Use after a click that triggers an SPA route change, or for lazily-loaded content. event: \"load\" (default) | \"domcontentloaded\" | a CSS selector to wait for. Returns \"ready\" or \"timeout\"."
     )]
     async fn browser_wait(
         &self,
@@ -581,7 +595,7 @@ impl McpServer {
     // ── Tab management ──────────────────────────────────────────────
 
     #[tool(
-        description = "List all open tabs in the browser. Returns array of {id, title, url, is_active, is_playing_audio}. is_active=true marks the tab the user is currently viewing. Use tab IDs from this list to target specific tabs with other tools."
+        description = "List all open tabs. Returns [{id, title, url, is_active, is_playing_audio}]. is_active marks the visible tab. Use the IDs to target other tools."
     )]
     async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
         let tabs = self
@@ -593,7 +607,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get the tab the user is currently viewing (the foreground tab). Returns {id, title, url, is_active, is_playing_audio}. Use this to understand what the user sees right now — NOT to get a tab you opened in the background (use browser_get_tabs for that)."
+        description = "Get the tab the user is currently viewing. Use this to know what's on screen right now. For background tabs, use browser_get_tabs instead."
     )]
     async fn browser_get_current_tab(&self) -> Result<CallToolResult, McpError> {
         let tab = self
@@ -605,7 +619,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Switch the user's visible tab to the one with the given ID. This changes what the user sees — only use when the task is done and the user needs to see the result, or they explicitly asked to go somewhere."
+        description = "Make a tab visible to the user. This changes what they see — only use when the task is done and they need to see the result, or they explicitly asked to switch."
     )]
     async fn browser_switch_tab(
         &self,
@@ -623,7 +637,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Close a tab by its ID. If it's the user's visible tab, the next tab becomes visible. Always close background tabs when you're done with them."
+        description = "Close a tab by ID. If it's the visible tab, the next tab becomes visible. Always close background tabs when you're done."
     )]
     async fn browser_close_tab(
         &self,
@@ -642,9 +656,7 @@ impl McpServer {
 
     // ── Page content ────────────────────────────────────────────────
 
-    #[tool(
-        description = "Get metadata about a page: title, URL, and meta description. Defaults to the user's visible tab if tab_id is omitted. Pass tab_id to read any tab including background ones."
-    )]
+    #[tool(description = "Page metadata: {title, url, description}. Defaults to the visible tab.")]
     async fn browser_get_page_info(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
@@ -661,7 +673,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get the readable text content of a page (innerText). Use for reading articles, search results, or extracting data. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to read background tabs."
+        description = "Readable text of the page (document.body.innerText). Use for reading articles, search results, or extracting data. Defaults to the visible tab."
     )]
     async fn browser_get_page_content(
         &self,
@@ -677,7 +689,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Get a compact map of all interactive elements on the page — links, buttons, inputs, selects, etc. Each element is assigned a @ref number (e.g. @1, @2) that you can pass directly as the selector to browser_click, browser_type, browser_hover, and other interaction tools. This is the most efficient way to discover what's on a page and interact with it. Includes elements inside same-origin iframes. Call this before interacting with a page you haven't seen yet. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Compact map of interactive elements with @ref selectors. Each link/button/input gets a @N ref you can pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Includes same-origin iframes. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Always start here on an unfamiliar page."
     )]
     async fn browser_snapshot(
         &self,
@@ -693,7 +705,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Execute JavaScript code in a page and return the result as a string. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to target background tabs. For reading page text prefer browser_get_page_content instead."
+        description = "Run JavaScript in the page and return its JSON-encoded result. Use only when other tools don't fit — prefer browser_get_page_content for text and browser_snapshot+click/type for interaction. Last expression is the return value (wrap multi-statement code in an IIFE). Defaults to the visible tab."
     )]
     async fn browser_execute_js(
         &self,
@@ -710,7 +722,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Take a screenshot of a tab's web page and copy it to the clipboard so the user can paste it anywhere. Set full_page to true to capture the entire scrollable page (not just the visible viewport). Defaults to the user's visible tab if tab_id is omitted."
+        description = "Screenshot the tab's content and copy the PNG to the clipboard. Returns the image to the caller too. full_page=true captures the entire scrollable page. Defaults to the visible tab."
     )]
     async fn browser_screenshot(
         &self,
@@ -732,7 +744,7 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element on the page by CSS selector or @ref from browser_snapshot. Returns whether the element was found and clicked. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to click in background tabs."
+        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, then dispatches mousedown+mouseup+click. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone from DOM. Defaults to the visible tab."
     )]
     async fn browser_click(
         &self,
@@ -758,7 +770,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Hover over an element on the page by CSS selector (or @ref from browser_snapshot). Triggers mouseenter, mouseover, and mousemove JS events — works for JS-based menus (Bootstrap, React, Material UI) but cannot activate pure CSS :hover pseudo-class (WebKit limitation). Returns whether the element was found. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Hover over an element. Dispatches mouseenter+mouseover+mousemove — works for JS-driven menus (Bootstrap, React, MUI). Pure CSS :hover cannot be activated synthetically (WebKit limitation). Defaults to the visible tab."
     )]
     async fn browser_hover(
         &self,
@@ -784,7 +796,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Type text into an element by CSS selector or @ref from browser_snapshot. Replaces the current value — does not append. Works with <input>, <textarea>, and contenteditable elements (rich text editors, Gmail compose, etc.). Focuses the element, sets its value, and fires input+change events. Returns whether the element was found. Defaults to the user's visible tab if tab_id is omitted — pass tab_id to type in background tabs."
+        description = "Set the value of an input. Works with <input>, <textarea>, and contenteditable (Gmail compose, rich editors). REPLACES the existing value — does not append. Bypasses React's controlled-input cache by using the prototype's value setter, then fires input+change. To press Enter / submit afterwards, use browser_press_key. Defaults to the visible tab."
     )]
     async fn browser_type(
         &self,
@@ -811,7 +823,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Scroll the page in a tab. Use \"up\"/\"down\" to scroll by roughly one viewport, \"top\"/\"bottom\" to jump to page start/end. Optionally set pixels for a custom scroll distance with \"up\"/\"down\". Defaults to the user's visible tab if tab_id is omitted."
+        description = "Scroll the page. up/down = ~one viewport (or custom pixels), top/bottom = jump to start/end. Defaults to the visible tab."
     )]
     async fn browser_scroll(
         &self,
@@ -831,7 +843,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Press a keyboard key, optionally with modifiers. Use for form submission (Enter), closing dialogs (Escape), moving focus (Tab), or any keyboard interaction. If selector is provided (CSS selector or @ref from browser_snapshot), focuses that element first. Returns whether the target element was found (always true when no selector is given). Defaults to the user's visible tab if tab_id is omitted."
+        description = "Press a key, optionally with modifiers. Use for Enter (submit), Escape (close), Tab (focus), arrows, etc. If selector is given, focus that element first; otherwise the currently focused element receives the key. Note: this dispatches synthetic KeyboardEvents — for *typing characters into an input* prefer browser_type. Defaults to the visible tab."
     )]
     async fn browser_press_key(
         &self,
@@ -860,7 +872,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Select an option in a <select> dropdown by its value. Accepts CSS selector or @ref from browser_snapshot. Dispatches a change event after selection. Returns whether the <select> element and the matching option were found. Defaults to the user's visible tab if tab_id is omitted."
+        description = "Pick an option in a <select> by its value attribute. Fires a change event. The visible options are listed in browser_snapshot's `options=[...]` attribute. Defaults to the visible tab."
     )]
     async fn browser_select_option(
         &self,
@@ -889,9 +901,7 @@ impl McpServer {
 
     // ── History & media ─────────────────────────────────────────────
 
-    #[tool(
-        description = "Get browsing history entries, most recent first. Optionally limit the number of results."
-    )]
+    #[tool(description = "Browsing history entries, most recent first.")]
     async fn browser_get_history(
         &self,
         Parameters(req): Parameters<GetHistoryRequest>,
@@ -907,9 +917,7 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(
-        description = "Get list of tabs currently playing audio/video. Returns array of {id, title, url, is_active, is_playing_audio}."
-    )]
+    #[tool(description = "Tabs currently playing audio or video.")]
     async fn browser_get_playing_tabs(&self) -> Result<CallToolResult, McpError> {
         let tabs = self
             .send_command(|tx| McpCommand::GetPlayingTabs { response: tx })
@@ -922,7 +930,7 @@ impl McpServer {
     // ── Dialogs ────────────────────────────────────────────────────
 
     #[tool(
-        description = "Handle a pending JavaScript dialog (alert, confirm, or prompt). JS dialogs block the page until resolved. Set accept=true to click OK/Yes, false to click Cancel/No. For prompt() dialogs, provide the text to enter. Returns the dialog type and message. Returns an error if no dialog is currently pending."
+        description = "Resolve a pending JS alert/confirm/prompt. These block the page until answered. accept=true → OK/Yes; false → Cancel/No. Provide text for prompt() dialogs. Errors if no dialog is pending."
     )]
     async fn browser_handle_dialog(
         &self,
@@ -947,7 +955,34 @@ impl ServerHandler for McpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions("Octoweb browser control. Start with browser_snapshot to discover interactive elements — it returns @ref numbers you can pass as selectors to click/type/hover. Tools that accept tab_id default to the user's visible (foreground) tab when omitted. Always pass tab_id explicitly when working with background tabs. Use browser_navigate with new_tab+background to open tabs the user doesn't see. Use browser_handle_dialog to respond to JS alert/confirm/prompt dialogs that block the page.".to_string())
+            .with_instructions(
+                "Octoweb browser control over MCP. Quick reference:\n\
+                \n\
+                Discovery: browser_snapshot returns a compact list of interactive elements with @N refs. \
+                Pass those refs directly as the `selector` to browser_click / browser_type / browser_hover / \
+                browser_press_key / browser_select_option — much cheaper than guessing CSS. Refs invalidate \
+                on navigation or full re-render; re-snapshot when interactions start failing with `stale`.\n\
+                \n\
+                Tabs: tab_id is optional everywhere — when omitted, tools target the user's visible tab. \
+                For research, open hidden tabs with browser_navigate(new_tab=true, background=true) and \
+                always pass that tab_id to subsequent reads/clicks. Close background tabs when done.\n\
+                \n\
+                Reading pages: prefer browser_get_page_content for text and browser_snapshot for \
+                actionable elements. Use browser_execute_js only when those don't fit (return value is \
+                JSON-encoded; wrap multi-statement code in an IIFE).\n\
+                \n\
+                Typing & submitting: browser_type sets a value (replaces, doesn't append) and fires \
+                input+change. To submit, follow with browser_press_key(key=\"Enter\"). For per-character \
+                key events use browser_press_key, not browser_type.\n\
+                \n\
+                Waiting: browser_navigate already blocks until the page is idle — no follow-up wait needed. \
+                After clicks that trigger SPA route changes, use browser_wait with a CSS selector for the \
+                new content.\n\
+                \n\
+                Dialogs: JS alert/confirm/prompt block the page. If a tool seems to hang or returns stale \
+                data, call browser_handle_dialog to resolve a pending one."
+                    .to_string(),
+            )
     }
 }
 

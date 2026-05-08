@@ -475,20 +475,12 @@ pub fn html() -> &'static str {
       return true;
     }
 
-    if (isMacCmd && e.key.toLowerCase() === 'v') {
-      navigator.clipboard.readText().then(text => {
-        if (!text) return;
-        const start = queryEl.selectionStart;
-        const end = queryEl.selectionEnd;
-        const before = queryEl.value.slice(0, start);
-        const after = queryEl.value.slice(end);
-        queryEl.value = before + text + after;
-        const pos = start + text.length;
-        queryEl.setSelectionRange(pos, pos);
-        render(queryEl.value);
-      }).catch(() => {});
-      return true;
-    }
+    // Cmd+V is intentionally NOT handled here — the Edit menu's paste: action
+    // already inserts the clipboard at the caret and fires an `input` event,
+    // which our `input` listener catches to refresh results. A custom handler
+    // here would race with the native paste and double the clipboard text
+    // (e.g. paste "L" → "LL"), because keydown.preventDefault() does not
+    // suppress key-equivalent menu items in WKWebView.
 
     if (!isCtrl) return false;
 

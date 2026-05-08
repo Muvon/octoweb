@@ -4,10 +4,17 @@
 //! `Map<string, Element>` on `window.__octoweb_refs` for subsequent tool calls
 //! (click, type, hover, etc.) to resolve by ref, and returns a compact text
 //! representation optimised for LLM token efficiency.
+//!
+//! Notes:
+//! - `__octoweb_refs` lives on `window` so it survives until the next navigation.
+//!   Refs become invalid after navigation, full reload, or DOM tear-down.
+//! - Cross-origin iframe contents are skipped (security boundary).
+//! - Sensitive input values (passwords, card numbers, etc.) are never returned.
 
 pub const SNAPSHOT_JS: &str = r#"
 (function() {
   var refs = new Map();
+  var seen = new WeakSet();
   var counter = 1;
   var lines = [];
 
@@ -103,8 +110,12 @@ pub const SNAPSHOT_JS: &str = r#"
     var elements = doc.querySelectorAll(selector);
     for (var i = 0; i < elements.length; i++) {
       var el = elements[i];
+      // Dedup across nested matches and recursive iframe scans.
+      // (Bug fix: original code used `refs.has(el)` but `refs` keys are ref
+      // strings, not elements — the check never triggered.)
+      if (seen.has(el)) continue;
       if (!isVisible(el)) continue;
-      if (refs.has(el)) continue;
+      seen.add(el);
       var ref = '@' + counter++;
       refs.set(ref, el);
       var role = getRole(el);
@@ -116,6 +127,7 @@ pub const SNAPSHOT_JS: &str = r#"
     var iframes = doc.querySelectorAll('iframe');
     for (var j = 0; j < iframes.length; j++) {
       try {
+        // Cross-origin frames throw on contentDocument access — caught and skipped.
         if (iframes[j].contentDocument) scan(iframes[j].contentDocument);
       } catch(e) {}
     }
@@ -123,6 +135,11 @@ pub const SNAPSHOT_JS: &str = r#"
 
   scan(document);
   window.__octoweb_refs = refs;
-  return lines.join('\n');
+  // Header tells the AI how many refs were captured and that they expire on
+  // navigation — saves a follow-up clarification round-trip.
+  var header = lines.length === 0
+    ? '(no interactive elements found)'
+    : lines.length + ' elements (refs valid until next navigation):';
+  return header + '\n' + lines.join('\n');
 })()
 "#;

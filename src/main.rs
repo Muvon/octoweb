@@ -47,7 +47,7 @@ use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewExtMacOS};
 
 use browser::TabManager;
 use config::Config;
-use mcp::{HistoryInfo, McpCommand, PageInfo, TabInfo};
+use mcp::{interpret_dom_result, HistoryInfo, McpCommand, PageInfo, TabInfo};
 
 #[derive(Debug)]
 enum AppEvent {
@@ -2467,7 +2467,13 @@ fn main() {
                     McpCommand::Navigate { url, tab_id, new_tab, background, response } => {
                         tracing::debug!(url = %url, ?tab_id, new_tab, background, "MCP navigate");
 
-                        // External scheme → hand off to macOS, not loadable in WebView
+                        if url.trim().is_empty() {
+                            let _ = response.send(Err("url is empty".into()));
+                            continue;
+                        }
+
+                        // External scheme → hand off to macOS, not loadable in WebView.
+                        // Resolves immediately (no page-load wait) since macOS handles it.
                         if url::is_external_scheme(&url) {
                             let ok = macos::open_external_url(&url);
                             let _ = response.send(if ok {
@@ -2478,43 +2484,93 @@ fn main() {
                             continue;
                         }
 
-                        if new_tab {
-                            // Open a new tab with its own WebView
-                            let resolved = url::resolve_url(&url, &search_engine);
-                            let new_id = tabs.lock().unwrap().open(resolved.clone());
-                            spawn_tab_webview!(new_id, &resolved);
+                        let resolved = url::resolve_url(&url, &search_engine);
 
-                            if !background {
-                                // Switch to the new tab (deferred swap)
-                                let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
-                                active_wv_id = new_id;
-                                pending_swap = Some((visible_id, new_id));
-                                macos::mru_push(&mut mru, new_id);
-                                if is_app_active() { browser_win.set_focus(); }
+                        // ── Decide the target tab ─────────────────────────────────
+                        //
+                        // The AI passes any combination of {tab_id, new_tab, background}
+                        // to express intent. We reduce that to one of three actions and
+                        // never reject a request just because the flags overlap:
+                        //
+                        //   InPlace(id) — navigate an existing tab; never moves focus.
+                        //                 `background` is implicit (we don't switch).
+                        //   OpenNew     — create a new tab; `background` controls focus.
+                        //   Error(msg)  — the request is unsatisfiable (only when
+                        //                 tab_id refers to a vanished tab and the AI
+                        //                 didn't allow new_tab fallback).
+                        //
+                        // Resolution rules (read top to bottom, first match wins):
+                        //   • tab_id given AND that tab exists → InPlace(tab_id).
+                        //         tab_id is the AI's strongest signal — honor it
+                        //         even if new_tab/background were also passed.
+                        //   • tab_id given but the tab is gone:
+                        //       - new_tab=true → OpenNew (graceful fallback, since
+                        //         the AI told us a new tab is acceptable).
+                        //       - new_tab=false → Error("Tab N not found").
+                        //   • no tab_id, new_tab=true → OpenNew.
+                        //   • no tab_id, new_tab=false → InPlace(active tab).
+                        enum Target { InPlace(usize), OpenNew }
+                        let target = if let Some(id) = tab_id {
+                            let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
+                            if exists {
+                                Target::InPlace(id)
+                            } else if new_tab {
+                                Target::OpenNew
+                            } else {
+                                let _ = response.send(Err(format!(
+                                    "Tab {id} not found — pass new_tab=true to open a fresh tab as fallback"
+                                )));
+                                continue;
                             }
-                            // Defer response until PageLoadFinished + DOM stability
-                            if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
-                                let _ = old.send(Err("Superseded by new navigation".into()));
-                            }
-                            mcp_nav_pending.insert(new_id, (std::time::Instant::now(), response));
+                        } else if new_tab {
+                            Target::OpenNew
                         } else {
-                            // Navigate an existing tab in-place
-                            let target_id = tab_id.unwrap_or(active_wv_id);
-                            // Auto-restore if the tab was hibernated
-                            let _ = mcp_ensure_tab!(target_id);
-                            if let Some(wv) = tab_webviews.get(&target_id) {
-                                let resolved = url::resolve_url(&url, &search_engine);
-                                let _ = wv.load_url(&resolved);
-                                if tabs.lock().unwrap().update_url(target_id, resolved) {
-                                    history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                            Target::InPlace(active_wv_id)
+                        };
+
+                        // ── Execute ───────────────────────────────────────────────
+                        match target {
+                            Target::InPlace(target_id) => {
+                                // Auto-restore if the tab was hibernated.
+                                let _ = mcp_ensure_tab!(target_id);
+                                if let Some(wv) = tab_webviews.get(&target_id) {
+                                    let _ = wv.load_url(&resolved);
+                                    if tabs.lock().unwrap().update_url(target_id, resolved) {
+                                        history_save_at.get_or_insert(
+                                            std::time::Instant::now() + std::time::Duration::from_secs(60),
+                                        );
+                                    }
+                                    // Replace any prior pending nav for this tab so
+                                    // only the latest navigate gets to resolve.
+                                    if let Some((_, old)) = mcp_nav_pending.remove(&target_id) {
+                                        let _ = old.send(Err("Superseded by new navigation".into()));
+                                    }
+                                    mcp_nav_pending.insert(target_id, (std::time::Instant::now(), response));
+                                } else {
+                                    // mcp_ensure_tab! returned false (tab id is in
+                                    // TabManager but WebView creation failed) — rare,
+                                    // but surface it cleanly.
+                                    let _ = response.send(Err(format!(
+                                        "Tab {target_id} could not be restored"
+                                    )));
                                 }
-                                // Defer response until PageLoadFinished + DOM stability
-                                if let Some((_, old)) = mcp_nav_pending.remove(&target_id) {
+                            }
+                            Target::OpenNew => {
+                                let new_id = tabs.lock().unwrap().open(resolved.clone());
+                                spawn_tab_webview!(new_id, &resolved);
+
+                                if !background {
+                                    // Switch to the new tab (deferred swap).
+                                    let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
+                                    active_wv_id = new_id;
+                                    pending_swap = Some((visible_id, new_id));
+                                    macos::mru_push(&mut mru, new_id);
+                                    if is_app_active() { browser_win.set_focus(); }
+                                }
+                                if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
                                     let _ = old.send(Err("Superseded by new navigation".into()));
                                 }
-                                mcp_nav_pending.insert(target_id, (std::time::Instant::now(), response));
-                            } else {
-                                let _ = response.send(Err("Tab not found".to_string()));
+                                mcp_nav_pending.insert(new_id, (std::time::Instant::now(), response));
                             }
                         }
                     }
@@ -2589,6 +2645,10 @@ fn main() {
                     McpCommand::ExecuteJs { tab_id, script, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            if script.trim().is_empty() {
+                                let _ = response.send(Err("script is empty".into()));
+                                continue;
+                            }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 // Wrap sender so we can reclaim it if the callback never fires
@@ -2617,18 +2677,26 @@ fn main() {
                     McpCommand::Click { tab_id, selector, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            if selector.trim().is_empty() {
+                                let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
+                                continue;
+                            }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
+                                // Returns: "true" | "stale" | "missing" | "detached"
+                                //   stale    → @ref but no snapshot taken yet (or refs cleared by navigation)
+                                //   missing  → selector matched no element
+                                //   detached → element existed but is no longer in the DOM
                                 let script = format!(
-                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return true}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
+                                let sel_for_err = selector.clone();
                                 match wv.evaluate_script_with_callback(&script, move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let found = val.trim() == "true";
-                                        let _ = tx.send(Ok(found));
+                                        let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
                                     Ok(()) => {}
@@ -2648,18 +2716,22 @@ fn main() {
                     McpCommand::Hover { tab_id, selector, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            if selector.trim().is_empty() {
+                                let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
+                                continue;
+                            }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.scrollIntoView({{block:'center',behavior:'instant'}});var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mouseenter',{{...o,bubbles:false}}));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new MouseEvent('mousemove',o));return true}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mouseenter',{{...o,bubbles:false}}));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new MouseEvent('mousemove',o));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
+                                let sel_for_err = selector.clone();
                                 match wv.evaluate_script_with_callback(&script, move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let found = val.trim() == "true";
-                                        let _ = tx.send(Ok(found));
+                                        let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
                                     Ok(()) => {}
@@ -2679,19 +2751,23 @@ fn main() {
                     McpCommand::Type { tab_id, selector, text, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
+                            if selector.trim().is_empty() {
+                                let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
+                                continue;
+                            }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
                                 let script = format!(
-                                    "(function(){{var _s={sel};var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s);if(!el||!el.isConnected)return false;el.focus();if(el.isContentEditable){{var s=window.getSelection(),r=document.createRange();r.selectNodeContents(el);s.removeAllRanges();s.addRange(r);document.execCommand('insertText',false,{txt});return true}}var s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(s)s.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.focus();if(el.isContentEditable){{var s=window.getSelection(),r2=document.createRange();r2.selectNodeContents(el);s.removeAllRanges();s.addRange(r2);document.execCommand('insertText',false,{txt});return 'true'}}var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(setter)setter.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default(),
                                     txt = serde_json::to_string(&text).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
+                                let sel_for_err = selector.clone();
                                 match wv.evaluate_script_with_callback(&script, move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let found = val.trim() == "true";
-                                        let _ = tx.send(Ok(found));
+                                        let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
                                     Ok(()) => {}
@@ -2940,6 +3016,16 @@ fn main() {
                     }
                     McpCommand::PressKey { tab_id, key, selector, modifiers, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        if key.is_empty() {
+                            let _ = response.send(Err("key is empty — pass a KeyboardEvent.key value like 'Enter', 'Escape', 'a'".into()));
+                            continue;
+                        }
+                        if let Some(ref s) = selector {
+                            if s.trim().is_empty() {
+                                let _ = response.send(Err("selector is empty — omit it to target the focused element, or pass a CSS selector / @ref".into()));
+                                continue;
+                            }
+                        }
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let key_json = serde_json::to_string(&key).unwrap_or_default();
@@ -2947,33 +3033,37 @@ fn main() {
                             let has_ctrl = modifiers.iter().any(|m| m == "ctrl");
                             let has_alt = modifiers.iter().any(|m| m == "alt");
                             let has_meta = modifiers.iter().any(|m| m == "meta");
-                            let target_expr = if let Some(ref sel) = selector {
+                            // Resolve the target with the same stale/missing/detached
+                            // diagnostics used by Click/Hover/Type. When no selector
+                            // is provided we target the focused element (or body) and
+                            // treat that as never-stale.
+                            let resolve_expr = if let Some(ref sel) = selector {
                                 let sel_json = serde_json::to_string(sel).unwrap_or_default();
                                 format!(
-                                    "(function(s){{return s[0]==='@'?(window.__octoweb_refs||new Map).get(s):document.querySelector(s)}})({})",
-                                    sel_json
+                                    "(function(s){{if(s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(s);if(!r)return 'stale';if(!r.isConnected)return 'detached';return r;}}var el;try{{el=document.querySelector(s);}}catch(e){{return 'invalid:'+e.message;}}return el||'missing';}})({sel_json})"
                                 )
                             } else {
-                                "document.activeElement || document.body".to_string()
+                                "(document.activeElement || document.body)".to_string()
                             };
                             let script = format!(
                                 "(function() {{\
-                                    const el = {target_expr};\
-                                    if (!el) return false;\
+                                    var el = {resolve_expr};\
+                                    if (typeof el === 'string') return el;\
+                                    if (!el) return 'missing';\
                                     if (el.focus) el.focus();\
-                                    const opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
+                                    var opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
                                     el.dispatchEvent(new KeyboardEvent('keydown', opts));\
                                     if ({key_json}.length===1) el.dispatchEvent(new KeyboardEvent('keypress', opts));\
                                     el.dispatchEvent(new KeyboardEvent('keyup', opts));\
-                                    return true;\
+                                    return 'true';\
                                 }})()"
                             );
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
+                            let sel_for_err = selector.clone().unwrap_or_else(|| "(focused element)".into());
                             match wv.evaluate_script_with_callback(&script, move |val| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
-                                    let found = val.trim() == "true";
-                                    let _ = tx.send(Ok(found));
+                                    let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                 }
                             }) {
                                 Ok(()) => {}
@@ -3027,19 +3117,31 @@ fn main() {
                     }
                     McpCommand::SelectOption { tab_id, selector, value, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
+                        if selector.trim().is_empty() {
+                            let _ = response.send(Err("selector is empty — pass a CSS selector or @ref of a <select>".into()));
+                            continue;
+                        }
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
+                            // Returns: "true" | "stale" | "missing" | "detached" | "not-select" | "no-such-option"
                             let script = format!(
-                                "(function() {{ var _s={sel}; var el=_s[0]==='@'?(window.__octoweb_refs||new Map).get(_s):document.querySelector(_s); if (!el || el.tagName !== 'SELECT') return false; var opt = Array.from(el.options).find(function(o){{ return o.value === {val}; }}); if (!opt) return false; el.value = opt.value; el.dispatchEvent(new Event('change', {{bubbles: true}})); return true; }})()",
+                                "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}if(el.tagName!=='SELECT')return 'not-select';var opt=Array.from(el.options).find(function(o){{return o.value==={val};}});if(!opt)return 'no-such-option';el.value=opt.value;el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true';}})()",
                                 sel = serde_json::to_string(&selector).unwrap_or_default(),
                                 val = serde_json::to_string(&value).unwrap_or_default()
                             );
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
+                            let sel_for_err = selector.clone();
+                            let val_for_err = value.clone();
                             match wv.evaluate_script_with_callback(&script, move |val| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
-                                    let found = val.trim() == "true";
-                                    let _ = tx.send(Ok(found));
+                                    let trimmed = val.trim().trim_matches('"');
+                                    let result = match trimmed {
+                                        "not-select" => Err(format!("Element matched by '{sel_for_err}' is not a <select>")),
+                                        "no-such-option" => Err(format!("<select> '{sel_for_err}' has no option with value='{val_for_err}'")),
+                                        _ => interpret_dom_result(&val, &sel_for_err),
+                                    };
+                                    let _ = tx.send(result);
                                 }
                             }) {
                                 Ok(()) => {}
