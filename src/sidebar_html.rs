@@ -30,7 +30,7 @@
 ///   { type: "acp_session_switch", session_id }
 ///   { type: "acp_session_rename", session_id, title }
 ///   { type: "sidebar_close" }
-pub fn html() -> String {
+pub fn html(max_ai_prompt_history: usize) -> String {
     let prompt_history_js = crate::prompt_history_js::prompt_history_js();
     r#"<!DOCTYPE html>
 <html>
@@ -1772,9 +1772,9 @@ pub fn html() -> String {
   const attachBtn      = document.getElementById('attach-btn');
   const attachMenu     = document.getElementById('attach-menu');
 
-  const MAX_SESSIONS = 4;
+  const MAX_SESSIONS = /* MAX_SESSIONS */;
   const MAX_QUEUE    = 2;
-  const MAX_PROMPT_HISTORY = 50;
+  const MAX_PROMPT_HISTORY = /* MAX_PROMPT_HISTORY */;
 
   const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
 
@@ -3004,6 +3004,24 @@ pub fn html() -> String {
     }
   });
   input.addEventListener('keydown', e => {
+    // Tab / Shift+Tab cycle ACP sessions. Handled here at the textarea level
+    // (not just at document capture) because WKWebView's native Tab focus
+    // traversal in <textarea> can race past a document-level capture listener
+    // and move focus to other page elements before our handler runs.
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (scPanel.classList.contains('visible')) return;
+      e.preventDefault();
+      const keys = Array.from(sessions.keys());
+      if (keys.length <= 1) { input.focus(); return; }
+      const idx = keys.indexOf(activeSid);
+      const nextIdx = e.shiftKey
+        ? (idx <= 0 ? keys.length - 1 : idx - 1)
+        : (idx >= keys.length - 1 ? 0 : idx + 1);
+      const nextSid = keys[nextIdx];
+      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
+      input.focus();
+      return;
+    }
     if (_ph.isInSearchMode()) return;
     // Ctrl+J → insert newline at caret. execCommand('insertText') is the same
     // path WKWebView uses for Shift+Enter — preserves focus, caret, undo,
@@ -3127,23 +3145,18 @@ pub fn html() -> String {
     if (e.key === 'Escape' && toolModal.classList.contains('show')) hideToolModal();
   });
 
-  // Tab / Shift+Tab cycle ACP sessions globally, regardless of which element
-  // has focus. Capture phase + skip when modifier keys are present so the
-  // shortcut doesn't collide with browser focus traversal in modals or
-  // ⌘⇧⇥ system shortcuts. Always returns focus to the prompt input so users
-  // can keep typing without an extra click.
+  // Tab / Shift+Tab fallback for when focus is NOT in the prompt input
+  // (e.g. user clicked a session tab header). The textarea's own keydown
+  // handler covers the common case; this one catches everything else.
+  // Capture phase so we win against any other listener.
   document.addEventListener('keydown', e => {
     if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
-    // Don't hijack Tab when the create-session panel is open (its inputs
-    // need normal Tab navigation between title/tag fields).
+    if (e.defaultPrevented) return;
+    if (document.activeElement === input) return; // textarea handler already ran
     if (scPanel.classList.contains('visible')) return;
-    const keys = Array.from(sessions.keys());
-    if (keys.length <= 1) {
-      e.preventDefault();
-      input.focus();
-      return;
-    }
     e.preventDefault();
+    const keys = Array.from(sessions.keys());
+    if (keys.length <= 1) { input.focus(); return; }
     const idx = keys.indexOf(activeSid);
     const nextIdx = e.shiftKey
       ? (idx <= 0 ? keys.length - 1 : idx - 1)
@@ -3164,4 +3177,9 @@ pub fn html() -> String {
 </script>
 </body>
 </html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
+        .replace("/* MAX_SESSIONS */", &crate::MAX_SESSIONS.to_string())
+        .replace(
+            "/* MAX_PROMPT_HISTORY */",
+            &max_ai_prompt_history.to_string(),
+        )
 }
