@@ -172,8 +172,8 @@ struct AcpSession {
 }
 
 /// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
-/// memory footprint. 4 is plenty for current use cases; raise if needed.
-const MAX_SESSIONS: usize = 4;
+/// memory footprint.
+pub const MAX_SESSIONS: usize = 10;
 
 fn main() {
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
@@ -858,7 +858,7 @@ fn main() {
     const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
     let notif_margin = (NOTIF_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
     let sidebar_wv = WebViewBuilder::new()
-        .with_html(sidebar_html::html())
+        .with_html(sidebar_html::html(cfg.max_ai_prompt_history))
         .with_transparent(true)
         .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
             let path = request.uri().path().trim_start_matches('/');
