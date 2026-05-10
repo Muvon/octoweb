@@ -19,7 +19,6 @@
 //! - `browser_click` / `browser_hover` / `browser_type`
 //! - `browser_press_key` / `browser_select_option`
 //! - `browser_scroll` / `browser_wait` / `browser_screenshot`
-//! - `browser_handle_dialog` — resolve pending JS alert/confirm/prompt
 //!
 //! # Selector resolution
 //!
@@ -176,12 +175,6 @@ pub enum McpCommand {
     /// Take a snapshot of interactive elements on the page
     Snapshot {
         tab_id: Option<usize>,
-        response: oneshot::Sender<Result<String, String>>,
-    },
-    /// Handle (accept/dismiss) a pending JS dialog
-    HandleDialog {
-        accept: bool,
-        text: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
 }
@@ -425,14 +418,6 @@ pub struct WaitRequest {
 pub struct SnapshotRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct HandleDialogRequest {
-    #[schemars(description = "true → OK/Yes, false → Cancel/No.")]
-    pub accept: bool,
-    #[schemars(description = "Text to enter for prompt() dialogs. Ignored for alert/confirm.")]
-    pub text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -927,24 +912,11 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    // ── Dialogs ────────────────────────────────────────────────────
-
-    #[tool(
-        description = "Resolve a pending JS alert/confirm/prompt. These block the page until answered. accept=true → OK/Yes; false → Cancel/No. Provide text for prompt() dialogs. Errors if no dialog is pending."
-    )]
-    async fn browser_handle_dialog(
-        &self,
-        Parameters(req): Parameters<HandleDialogRequest>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .send_command(|tx| McpCommand::HandleDialog {
-                accept: req.accept,
-                text: req.text,
-                response: tx,
-            })
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
+    // ── Dialogs ───────────────────────────────
+    // (browser_handle_dialog removed: WKWebView's CompletionHandlerCallChecker
+    // requires the completion handler to be invoked synchronously inside the
+    // delegate method — deferring to MCP causes SIGABRT. Dialogs are now
+    // auto-dismissed in dialog_patch.rs and only logged for visibility.)
 }
 
 #[tool_handler]
@@ -979,8 +951,8 @@ impl ServerHandler for McpServer {
                 After clicks that trigger SPA route changes, use browser_wait with a CSS selector for the \
                 new content.\n\
                 \n\
-                Dialogs: JS alert/confirm/prompt block the page. If a tool seems to hang or returns stale \
-                data, call browser_handle_dialog to resolve a pending one."
+                Dialogs: JS alert/confirm/prompt are auto-dismissed (the page sees Cancel/nil). They cannot \
+                be answered through MCP."
                     .to_string(),
             )
     }
