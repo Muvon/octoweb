@@ -1,13 +1,11 @@
 //! Injects WKUIDelegate methods for JavaScript alert/confirm/prompt dialogs
 //! into wry's delegate class at runtime via `class_addMethod`.
 //!
-//! Without this, WKWebView silently dismisses JS dialogs (no callback fires).
-//! This patch captures them and routes to the main event loop so MCP can
-//! respond (accept/dismiss/provide text).
-//!
-//! # Usage
-//! After building a tab WebView, call `register(wkwebview_ptr, tab_id, callback)`.
-//! On tab close, call `unregister(wkwebview_ptr)`.
+//! WebKit's `CompletionHandlerCallChecker` aborts the process via a CFRunLoop
+//! observer if the completion handler isn't invoked before the delegate method
+//! returns. We show a native NSAlert modal synchronously (its own run loop
+//! spin), then call the completion handler before returning. This satisfies
+//! the checker while still presenting real UI to the user.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -16,87 +14,20 @@ use std::sync::{Mutex, OnceLock};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
 
-/// Dialog type surfaced to MCP.
+/// Dialog type surfaced to the main event loop.
 #[derive(Debug, Clone)]
 pub enum DialogType {
     Alert,
     Confirm,
-    Prompt { default_text: String },
+    Prompt,
 }
 
-/// A pending dialog whose completion handler has not yet been called.
-/// Stored in PENDING_DIALOGS, resolved by `resolve()`.
-struct PendingCompletion {
-    dialog_type: DialogType,
-    /// Retained ObjC block pointer — must be called exactly once, then released.
-    completion: *mut AnyObject,
-}
-
-// SAFETY: We only access completions from the main thread (via event loop).
-unsafe impl Send for PendingCompletion {}
-
-/// Info sent through AppEvent (all Send-safe, no raw pointers).
+/// Info sent through AppEvent (Send-safe, no raw pointers).
 #[derive(Debug, Clone)]
 pub struct DialogInfo {
     pub tab_id: usize,
     pub dialog_type: DialogType,
     pub message: String,
-    pub dialog_id: u64,
-}
-
-// Global: dialog_id → PendingCompletion
-static PENDING_DIALOGS: OnceLock<Mutex<HashMap<u64, PendingCompletion>>> = OnceLock::new();
-static DIALOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-fn pending_dialogs() -> &'static Mutex<HashMap<u64, PendingCompletion>> {
-    PENDING_DIALOGS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Resolve a pending dialog by its ID.
-/// - accept=true: OK/Yes for alert/confirm, submit text for prompt
-/// - accept=false: Cancel/No
-pub fn resolve(dialog_id: u64, accept: bool, text: Option<&str>) -> Option<DialogInfo> {
-    let pending = pending_dialogs().lock().unwrap().remove(&dialog_id)?;
-    if pending.completion.is_null() {
-        return None;
-    }
-    unsafe {
-        match &pending.dialog_type {
-            DialogType::Alert => {
-                // completionHandler: ^(void)
-                let block = pending.completion as *const block2::Block<dyn Fn()>;
-                (*block).call(());
-            }
-            DialogType::Confirm => {
-                // completionHandler: ^(BOOL)
-                // ObjC BOOL is i8 on arm64. Cast to block that takes no args and use msg_send.
-                // Simplest: call the block via objc2 msg_send (blocks are ObjC objects).
-                let val: i8 = if accept { 1 } else { 0 };
-                let _: () = msg_send![&*pending.completion, invoke: val];
-            }
-            DialogType::Prompt { .. } => {
-                // completionHandler: ^(NSString*)
-                if accept {
-                    let text = text.unwrap_or("");
-                    let ns_string: *mut AnyObject = msg_send![
-                        objc2::class!(NSString),
-                        stringWithUTF8String: text.as_ptr() as *const i8
-                    ];
-                    let _: () = msg_send![&*pending.completion, invoke: ns_string];
-                } else {
-                    let nil: *mut AnyObject = std::ptr::null_mut();
-                    let _: () = msg_send![&*pending.completion, invoke: nil];
-                }
-            }
-        }
-        let _: () = msg_send![&*pending.completion, release];
-    }
-    None // info already consumed
-}
-
-/// Auto-dismiss a stale dialog (timeout).
-pub fn dismiss(dialog_id: u64) {
-    resolve(dialog_id, false, None);
 }
 
 /// Callback type: receives DialogInfo when a dialog fires.
@@ -223,55 +154,17 @@ fn nsstring_to_string(ns: *mut AnyObject) -> String {
     }
 }
 
-fn fire_dialog(
-    webview: *mut AnyObject,
-    dialog_type: DialogType,
-    message: String,
-    completion_handler: *mut AnyObject,
-) {
+/// Notify the registered callback (best-effort, no panic on poison).
+fn notify(webview: *mut AnyObject, dialog_type: DialogType, message: String) {
     let ptr = webview as usize;
-    // Retain the completion handler so it survives past this callback
-    let retained: *mut AnyObject = unsafe { msg_send![&*completion_handler, retain] };
-
-    let dialog_id = DIALOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
     if let Ok(guard) = registry().lock() {
         if let Some((tab_id, cb)) = guard.get(&ptr) {
-            // Store completion handler in pending map
-            pending_dialogs().lock().unwrap().insert(
-                dialog_id,
-                PendingCompletion {
-                    dialog_type: dialog_type.clone(),
-                    completion: retained,
-                },
-            );
-            // Notify main event loop (no raw pointers in DialogInfo)
             cb(DialogInfo {
                 tab_id: *tab_id,
                 dialog_type,
                 message,
-                dialog_id,
             });
-            return;
         }
-    }
-    // No callback registered — auto-dismiss immediately
-    unsafe {
-        match dialog_type {
-            DialogType::Alert => {
-                let block = retained as *const block2::Block<dyn Fn()>;
-                (*block).call(());
-            }
-            DialogType::Confirm => {
-                let val: i8 = 0; // reject
-                let _: () = msg_send![&*retained, invoke: val];
-            }
-            DialogType::Prompt { .. } => {
-                let nil: *mut AnyObject = std::ptr::null_mut();
-                let _: () = msg_send![&*retained, invoke: nil];
-            }
-        }
-        let _: () = msg_send![&*retained, release];
     }
 }
 
@@ -285,7 +178,18 @@ extern "C-unwind" fn handle_alert(
 ) {
     let msg = nsstring_to_string(message);
     tracing::debug!(ptr = webview as usize, %msg, "JS alert dialog");
-    fire_dialog(webview, DialogType::Alert, msg, completion_handler);
+    unsafe {
+        // Show native dialog (synchronous — its own run loop spin satisfies
+        // CompletionHandlerCallChecker before we call the block).
+        let mtm = objc2::MainThreadMarker::new_unchecked();
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&*(message as *const objc2_foundation::NSString));
+        alert.runModal();
+
+        let block = completion_handler as *const block2::Block<dyn Fn()>;
+        (*block).call(());
+    }
+    notify(webview, DialogType::Alert, msg);
 }
 
 extern "C-unwind" fn handle_confirm(
@@ -298,7 +202,23 @@ extern "C-unwind" fn handle_confirm(
 ) {
     let msg = nsstring_to_string(message);
     tracing::debug!(ptr = webview as usize, %msg, "JS confirm dialog");
-    fire_dialog(webview, DialogType::Confirm, msg, completion_handler);
+    let accepted = unsafe {
+        let mtm = objc2::MainThreadMarker::new_unchecked();
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&*(message as *const objc2_foundation::NSString));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("OK"));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("Cancel"));
+        alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
+    };
+    unsafe {
+        let block = completion_handler as *const block2::Block<dyn Fn(objc2::runtime::Bool)>;
+        (*block).call((if accepted {
+            objc2::runtime::Bool::YES
+        } else {
+            objc2::runtime::Bool::NO
+        },));
+    }
+    notify(webview, DialogType::Confirm, msg);
 }
 
 extern "C-unwind" fn handle_prompt(
@@ -313,12 +233,47 @@ extern "C-unwind" fn handle_prompt(
     let msg = nsstring_to_string(prompt);
     let default = nsstring_to_string(default_text);
     tracing::debug!(ptr = webview as usize, %msg, %default, "JS prompt dialog");
-    fire_dialog(
-        webview,
-        DialogType::Prompt {
-            default_text: default,
-        },
-        msg,
-        completion_handler,
-    );
+    let result: Option<String> = unsafe {
+        use objc2_app_kit::NSTextField;
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let mtm = objc2::MainThreadMarker::new_unchecked();
+        let alert = objc2_app_kit::NSAlert::new(mtm);
+        alert.setMessageText(&*(prompt as *const objc2_foundation::NSString));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("OK"));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("Cancel"));
+
+        // Text input field
+        let frame = NSRect {
+            origin: NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize {
+                width: 300.0,
+                height: 24.0,
+            },
+        };
+        let field = NSTextField::initWithFrame(mtm.alloc::<NSTextField>(), frame);
+        if !default_text.is_null() {
+            field.setStringValue(&*(default_text as *const objc2_foundation::NSString));
+        }
+        alert.setAccessoryView(Some(&field));
+
+        if alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn {
+            Some(field.stringValue().to_string())
+        } else {
+            None
+        }
+    };
+    unsafe {
+        let block = completion_handler as *const block2::Block<dyn Fn(*mut AnyObject)>;
+        match result {
+            Some(text) => {
+                let ns: *mut AnyObject = msg_send![
+                    objc2::class!(NSString),
+                    stringWithUTF8String: text.as_ptr() as *const i8
+                ];
+                (*block).call((ns,));
+            }
+            None => (*block).call((std::ptr::null_mut(),)),
+        }
+    }
+    notify(webview, DialogType::Prompt, msg);
 }

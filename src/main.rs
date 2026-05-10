@@ -610,9 +610,6 @@ fn main() {
             tokio::sync::oneshot::Sender<Result<usize, String>>,
         ),
     > = HashMap::new();
-    // MCP dialog: at most one pending JS dialog at a time (alert/confirm/prompt).
-    // The dialog blocks the page until resolved — stored here for browser_handle_dialog.
-    let mut mcp_pending_dialog: Option<(std::time::Instant, dialog_patch::DialogInfo)> = None;
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
@@ -3188,38 +3185,6 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::HandleDialog { accept, text, response } => {
-                        if let Some((_at, info)) = mcp_pending_dialog.take() {
-                            let dialog_type = match &info.dialog_type {
-                                dialog_patch::DialogType::Alert => "alert",
-                                dialog_patch::DialogType::Confirm => "confirm",
-                                dialog_patch::DialogType::Prompt { default_text: ref dt } => {
-                                    if !dt.is_empty() {
-                                        tracing::debug!(default_text = %dt, "Prompt default");
-                                    }
-                                    "prompt"
-                                }
-                            };
-                            let msg = info.message.clone();
-                            dialog_patch::resolve(info.dialog_id, accept, text.as_deref());
-                            let action = if accept { "accepted" } else { "dismissed" };
-                            let _ = response.send(Ok(format!(
-                                "Dialog {action}: [{dialog_type}] {msg}"
-                            )));
-                        } else {
-                            let _ = response.send(Err("No dialog pending".to_string()));
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Auto-dismiss stale JS dialogs (30s timeout) ─────────────────
-        if let Some((at, _)) = &mcp_pending_dialog {
-            if at.elapsed() > std::time::Duration::from_secs(30) {
-                tracing::warn!("Auto-dismissing stale JS dialog (>30s)");
-                if let Some((_, info)) = mcp_pending_dialog.take() {
-                    dialog_patch::dismiss(info.dialog_id);
                 }
             }
         }
@@ -4281,15 +4246,9 @@ fn main() {
                 ));
             }
 
-            // ── JS Dialog captured by dialog_patch ────────────────────────
+            // ── JS Dialog captured by dialog_patch (auto-dismissed; logged for visibility) ─
             Event::UserEvent(AppEvent::JsDialog(info)) => {
-                tracing::debug!(tab_id = info.tab_id, ?info.dialog_type, %info.message, "JS dialog received");
-                // If there's already a pending dialog, auto-dismiss the old one
-                if let Some((_, old_info)) = mcp_pending_dialog.take() {
-                    tracing::warn!("Auto-dismissing previous dialog (new one arrived)");
-                    dialog_patch::dismiss(old_info.dialog_id);
-                }
-                mcp_pending_dialog = Some((std::time::Instant::now(), info));
+                tracing::debug!(tab_id = info.tab_id, ?info.dialog_type, %info.message, "JS dialog auto-dismissed");
             }
 
             // ── Quit ──────────────────────────────────────────────────────

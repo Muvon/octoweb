@@ -13,7 +13,7 @@ wry = { version = "0.55", features = ["transparent", "devtools", "fullscreen"] }
 tao = "0.35"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSCursor", "NSImage", "NSMenu", "NSMenuItem", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSButton", "NSControl", "NSCursor", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSText", "NSTextField", "NSView", "NSWorkspace"] }
 objc2-core-foundation = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSString", "NSURL"] }
 objc2-web-kit = { version = "0.3", features = ["WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "block2"] }
