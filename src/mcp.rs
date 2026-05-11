@@ -32,7 +32,7 @@
 use crate::sanitize;
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::wrapper::Parameters,
     model::{
         CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
     },
@@ -445,7 +445,6 @@ pub struct McpState {
 #[derive(Clone)]
 pub struct McpServer {
     state: McpState,
-    tool_router: ToolRouter<Self>,
 }
 
 /// Helpers (separate impl block so the #[tool_router] macro doesn't interfere).
@@ -475,7 +474,6 @@ impl McpServer {
     pub fn new(command_tx: mpsc::UnboundedSender<McpCommand>) -> Self {
         Self {
             state: McpState { command_tx },
-            tool_router: Self::tool_router(),
         }
     }
 
