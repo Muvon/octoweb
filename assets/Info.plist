@@ -55,6 +55,26 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Octoweb needs microphone access for websites that request it (e.g. voice/video calls).</string>
 
+    <!-- Location access for websites using HTML5 geolocation -->
+    <key>NSLocationUsageDescription</key>
+    <string>Octoweb needs location access for websites that request it (e.g. maps, local search).</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Octoweb needs location access for websites that request it (e.g. maps, local search).</string>
+
+    <!-- Local network access (macOS Sequoia+): required for sites that talk to
+         localhost / LAN services such as uTorrent Web, Plex, dev servers, etc. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Octoweb needs local network access for websites that connect to apps on this Mac or your LAN (e.g. uTorrent Web, Plex, dev servers).</string>
+
+    <!-- Bonjour service types we may discover on the local network. The wildcards
+         cover the common service families used by web-based local apps. -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_http._tcp</string>
+        <string>_https._tcp</string>
+        <string>_utweb._tcp</string>
+    </array>
+
     <!-- Minimum macOS version -->
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>

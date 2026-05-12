@@ -25,5 +25,14 @@
     <!-- Microphone device access for getUserMedia() -->
     <key>com.apple.security.device.audio-input</key>
     <true/>
+
+    <!-- Location access for HTML5 navigator.geolocation -->
+    <key>com.apple.security.personal-information.location</key>
+    <true/>
+
+    <!-- Send Apple Events (e.g. open URL in default app, talk to Finder/System Events) -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
 </dict>
 </plist>
