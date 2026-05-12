@@ -1248,6 +1248,11 @@ fn main() {
     // Sampled every 2 s from the active tab's WebContent XPC process.
     let mut sys_stats_last: Option<tab_stats::TabStatsSample> = None;
     let mut sys_stats_next_at = std::time::Instant::now();
+    // System memory-pressure poll cadence. `host_statistics64` is a Mach
+    // syscall — sampling it on every event-loop tick (~60Hz) is wasteful.
+    // 2s is plenty for hibernation decisions.
+    let mut mem_pressure_next_at = std::time::Instant::now();
+    let mut cached_pressure = hibernation::MemoryPressure::Normal;
     // Tabs with active media playback — used to throttle sys_stats polling
     let mut media_playing_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
@@ -1376,6 +1381,10 @@ fn main() {
             let mut sessions: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
             let mut max_id: u64 = 0;
             let cap = cfg.max_acp_session_messages;
+            // Only spawn the active session's subprocess at startup. Others
+            // connect lazily on first switch — keeps cold-start fast and
+            // baseline CPU/RAM low when many sessions are persisted.
+            let active_target = h.active_id;
             for mut snap in h.sessions.into_iter() {
                 if snap.id > max_id {
                     max_id = snap.id;
@@ -1387,11 +1396,15 @@ fn main() {
                     let drop = snap.messages.len() - cap;
                     snap.messages.drain(..drop);
                 }
-                let cmd = match &snap.acp_session_id {
-                    Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
-                    None => format!("octomind acp {}", snap.tag),
+                let handle = if snap.id == active_target {
+                    let cmd = match &snap.acp_session_id {
+                        Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
+                        None => format!("octomind acp {}", snap.tag),
+                    };
+                    acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok()
+                } else {
+                    None // lazy: connect on AcpSessionSwitch
                 };
-                let handle = acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok();
                 sessions.push(AcpSession {
                     id: snap.id,
                     title: snap.title,
@@ -1960,7 +1973,7 @@ fn main() {
             health_log_next_at = now + std::time::Duration::from_secs(30);
             let active_rss_mb = sys_stats_mem.load(Ordering::Relaxed);
             let main_rss_mb = crash_report::main_process_rss() / (1024 * 1024);
-            let pressure = hibernation::system_memory_pressure();
+            let pressure = cached_pressure;
             let pressure_str = match pressure {
                 hibernation::MemoryPressure::Normal => "normal",
                 hibernation::MemoryPressure::Warning => "warning",
@@ -1996,11 +2009,14 @@ fn main() {
         }
 
         // ── Tab hibernation: offload idle tabs under memory pressure ─────
-        // Piggybacks on the sys_stats timer — checked every 2 s.
-        // Under memory pressure, destroys WebViews of idle background tabs
-        // (moving them to pending_tabs for lazy reload on next switch).
+        // Re-samples system memory pressure on a 2s timer (the Mach
+        // `host_statistics64` syscall is too expensive to call every tick).
         {
-            let pressure = hibernation::system_memory_pressure();
+            if now >= mem_pressure_next_at {
+                mem_pressure_next_at = now + std::time::Duration::from_secs(2);
+                cached_pressure = hibernation::system_memory_pressure();
+            }
+            let pressure = cached_pressure;
             if pressure != hibernation::MemoryPressure::Normal {
                 let victims = {
                     let tm = tabs.lock().unwrap();
@@ -3694,6 +3710,21 @@ fn main() {
                         push_acp_msg(s, "user", text.clone(), cfg.max_acp_session_messages);
                         should_persist = true;
                     }
+                    // Lazy-spawn safety net: prompts can race ahead of an
+                    // explicit switch on first activation of a persisted session.
+                    if s.handle.is_none() {
+                        let cmd = match &s.acp_session_id {
+                            Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
+                            None => format!("octomind acp {}", s.tag),
+                        };
+                        s.handle = acp::AcpHandle::connect(
+                            &cmd,
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok();
+                        s.retry_count = 0;
+                        s.reconnect_gen += 1;
+                    }
                     if let Some(ref handle) = s.handle {
                         if !handle.send_prompt(text, images) {
                             // Channel dead — drop handle so reconnection can re-arm.
@@ -3902,6 +3933,26 @@ fn main() {
                 if sessions.iter().any(|s| s.id == sid) =>
             {
                 active_session_id = sid;
+                // Lazy-spawn: if this session has no live handle (persisted
+                // but not yet connected this run), bring it up now.
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    if s.handle.is_none() {
+                        let cmd = match &s.acp_session_id {
+                            Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
+                            None => format!("octomind acp {}", s.tag),
+                        };
+                        s.handle = acp::AcpHandle::connect(
+                            &cmd,
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok();
+                        s.retry_count = 0;
+                        s.reconnect_gen += 1;
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                        ));
+                    }
+                }
                 let _ = sidebar_wv.evaluate_script(&format!(
                     "window.__switchSession && window.__switchSession({sid})"
                 ));
@@ -3935,14 +3986,16 @@ fn main() {
                     let sid = s.id;
                     let etitle = webview_utils::escape_js_template(&s.title);
                     let etag = webview_utils::escape_js_template(&s.tag);
-                    // Status mirrors the live handle state: ready iff connected,
-                    // else connecting (reconnect loop will resolve to error if needed).
+                    // Status mirrors the live handle state. Lazy sessions
+                    // (handle=None, no error) appear 'ready' — they connect
+                    // on first switch. Truly errored sessions don't survive
+                    // restart because we drop the handle on connection error.
                     let status = if s.handle.is_some() && s.acp_session_id.is_some() {
                         "ready"
                     } else if s.handle.is_some() {
                         "connecting"
                     } else {
-                        "error"
+                        "ready" // lazy — not yet spawned, will connect on switch
                     };
                     // No-op if the session is already in the JS map (e.g. sid=1
                     // from initDefault). Title/tag/status are pushed below.
