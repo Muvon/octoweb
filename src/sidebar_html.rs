@@ -1007,7 +1007,145 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     min-width: 24px;
     text-align: right;
   }
-  .a2ui-list { display: flex; flex-direction: column; gap: 6px; }
+  .a2ui-list { display: flex; gap: 6px; }
+  .a2ui-list-vertical { flex-direction: column; }
+  .a2ui-list-horizontal { flex-direction: row; flex-wrap: wrap; }
+  .a2ui-divider { background: var(--divider); margin: 4px 0; }
+  .a2ui-divider-horizontal { height: 1px; width: 100%; }
+  .a2ui-divider-vertical { width: 1px; align-self: stretch; min-height: 16px; margin: 0 4px; }
+  .a2ui-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    padding: 0 6px;
+    height: 18px;
+    border-radius: 4px;
+    background: var(--md-code-bg);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .a2ui-video, .a2ui-audio audio { max-width: 100%; border-radius: 8px; display: block; }
+  .a2ui-audio { display: flex; flex-direction: column; gap: 4px; }
+  /* Text variants (official v0.9: h1-h5, caption, body) */
+  .a2ui-text-h1 { font-size: 17px; font-weight: 600; line-height: 1.2; margin: 0; }
+  .a2ui-text-h2 { font-size: 15px; font-weight: 600; line-height: 1.25; margin: 0; }
+  .a2ui-text-h3 { font-size: 14px; font-weight: 600; line-height: 1.3; margin: 0; }
+  .a2ui-text-h4 { font-size: 13px; font-weight: 600; line-height: 1.3; margin: 0; }
+  .a2ui-text-h5 { font-size: 12px; font-weight: 600; line-height: 1.35; text-transform: uppercase; letter-spacing: 0.04em; }
+  .a2ui-text-caption { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+  .a2ui-text-body { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
+  /* Image variants */
+  .a2ui-img-icon { width: 16px; height: 16px; }
+  .a2ui-img-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
+  .a2ui-img-smallFeature  { max-height: 80px;  width: auto; }
+  .a2ui-img-mediumFeature { max-height: 160px; width: auto; }
+  .a2ui-img-largeFeature  { max-height: 240px; width: auto; }
+  .a2ui-img-header { width: 100%; max-height: 180px; object-fit: cover; }
+  /* Choice variants */
+  .a2ui-choice .a2ui-check-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+  }
+  .a2ui-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .a2ui-chip {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    color: var(--text-primary);
+    font-size: 11.5px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  .a2ui-chip:hover { border-color: var(--input-focus-border); }
+  .a2ui-chip.on {
+    background: var(--a2ui-primary, var(--accent));
+    border-color: var(--a2ui-primary, var(--accent));
+    color: white;
+  }
+  /* Tabs */
+  .a2ui-tabs { display: flex; flex-direction: column; gap: 6px; }
+  .a2ui-tabs-bar {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: var(--md-code-bg);
+    border: 1px solid var(--md-code-border);
+  }
+  .a2ui-tab {
+    flex: 1;
+    padding: 5px 10px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .a2ui-tab:hover { color: var(--text-primary); }
+  .a2ui-tab.active {
+    background: var(--glass-solid);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    .a2ui-tab.active { box-shadow: 0 1px 3px rgba(0,0,0,0.35); }
+  }
+  .a2ui-tabs-pane { padding: 4px 2px; }
+  /* Modal */
+  .a2ui-modal-trigger-wrap { display: inline-flex; }
+  .a2ui-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.42);
+    z-index: 9998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: a2ui-modal-fade 0.18s ease-out;
+  }
+  @keyframes a2ui-modal-fade { from { opacity: 0; } to { opacity: 1; } }
+  .a2ui-modal-panel {
+    position: relative;
+    max-width: 560px;
+    width: 100%;
+    max-height: 80vh;
+    overflow: auto;
+    border-radius: 14px;
+    background: var(--glass-solid);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    padding: 16px 16px 14px;
+  }
+  .a2ui-modal-close {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .a2ui-modal-close:hover { background: var(--md-code-bg); color: var(--text-primary); }
   .a2ui-btn {
     padding: 6px 13px;
     border-radius: 8px;
@@ -3659,41 +3797,54 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       appendKids(el);
       return el;
     }
-    if (type === 'Column') {
+    if (type === 'Column' || type === 'Row') {
       const el = document.createElement('div');
-      el.className = 'a2ui-col';
+      el.className = type === 'Row' ? 'a2ui-row' : 'a2ui-col';
       if (def.gap != null) el.style.gap = def.gap + 'px';
-      if (typeof def.align === 'string') el.style.alignItems = def.align;
-      appendKids(el);
-      return el;
-    }
-    if (type === 'Row') {
-      const el = document.createElement('div');
-      el.className = 'a2ui-row';
-      if (def.gap != null) el.style.gap = def.gap + 'px';
-      if (typeof def.align === 'string') el.style.alignItems = def.align;
-      if (typeof def.justify === 'string') el.style.justifyContent = def.justify;
+      // v0.9 enum → CSS: start|center|end|stretch (plus justify's spaceX variants).
+      const flexMap = {
+        start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch',
+        spaceAround: 'space-around', spaceBetween: 'space-between', spaceEvenly: 'space-evenly',
+      };
+      if (typeof def.align === 'string') {
+        el.style.alignItems = flexMap[def.align] || def.align;
+      }
+      if (typeof def.justify === 'string') {
+        el.style.justifyContent = flexMap[def.justify] || def.justify;
+      }
       appendKids(el);
       return el;
     }
     if (type === 'Spacer') {
+      // Custom (not in official v0.9 catalog) — kept for render_ui description compat.
       const el = document.createElement('div');
       el.className = 'a2ui-spacer';
       if (def.size != null) el.style.minHeight = def.size + 'px';
       return el;
     }
     if (type === 'Divider') {
-      const h = document.createElement('hr');
-      h.className = 'a2ui-divider';
-      return h;
+      const axis = typeof def.axis === 'string' ? def.axis : 'horizontal';
+      const el = document.createElement('div');
+      el.className = 'a2ui-divider a2ui-divider-' + axis;
+      return el;
     }
     if (type === 'Text') {
-      const el = document.createElement('div');
-      el.className = 'a2ui-text' + (def.muted ? ' muted' : '');
+      // Official v0.9 supports `variant: h1|h2|h3|h4|h5|caption|body`. We map
+      // h1-h4 to actual heading tags so semantics carry; h5 + caption render
+      // as styled divs.
+      const variant = typeof def.variant === 'string' ? def.variant : 'body';
+      let el;
+      if (variant === 'h1') el = document.createElement('h1');
+      else if (variant === 'h2') el = document.createElement('h2');
+      else if (variant === 'h3') el = document.createElement('h3');
+      else if (variant === 'h4') el = document.createElement('h4');
+      else el = document.createElement('div');
+      el.className = 'a2ui-text a2ui-text-' + variant + (def.muted ? ' muted' : '');
       el.textContent = text == null ? '' : (typeof text === 'object' ? JSON.stringify(text) : String(text));
       return el;
     }
     if (type === 'Heading') {
+      // render_ui-only extension — official v0.9 uses Text variants instead.
       const lvl = Math.min(Math.max(1, Number(def.level == null ? 2 : def.level)), 4);
       const el = document.createElement('h' + lvl);
       el.className = 'a2ui-heading';
@@ -3701,27 +3852,86 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return el;
     }
     if (type === 'Markdown') {
+      // render_ui extension — official v0.9 puts simple Markdown directly in Text.
       const el = document.createElement('div');
       el.className = 'a2ui-md';
       el.innerHTML = a2uiRenderMarkdown(String(text == null ? '' : text));
       return el;
     }
     if (type === 'Image') {
-      const src = String(r(def.src) == null ? '' : r(def.src));
+      // Official v0.9 fields: url, description, fit, variant.
+      // render_ui description fields: src, alt, width, height.
+      const url = String((r(def.url) != null ? r(def.url) : r(def.src)) || '');
+      const desc = String((r(def.description) != null ? r(def.description) : r(def.alt)) || '');
+      const fit = typeof def.fit === 'string' ? def.fit : null;
+      const variant = typeof def.variant === 'string' ? def.variant : null;
       const img = document.createElement('img');
-      img.className = 'a2ui-img';
+      img.className = 'a2ui-img' + (variant ? ' a2ui-img-' + variant : '');
       img.loading = 'lazy';
-      if (/^https?:\/\//i.test(src)) img.src = src;
-      img.alt = String(r(def.alt) == null ? '' : r(def.alt));
+      if (/^https?:\/\//i.test(url)) img.src = url;
+      img.alt = desc;
+      if (fit) {
+        const map = { contain:'contain', cover:'cover', fill:'fill', none:'none', scaleDown:'scale-down' };
+        if (map[fit]) img.style.objectFit = map[fit];
+      }
       if (def.width  != null) img.style.width  = def.width  + 'px';
       if (def.height != null) img.style.height = def.height + 'px';
       return img;
     }
+    if (type === 'Icon') {
+      // v0.9: { name: string }. We render as a small badge with the name —
+      // upgrading to a real icon font is out of scope.
+      const span = document.createElement('span');
+      span.className = 'a2ui-icon';
+      const iname = String((r(def.name) != null ? r(def.name) : '') || '');
+      span.textContent = iname;
+      span.setAttribute('aria-label', iname);
+      return span;
+    }
+    if (type === 'Video') {
+      const url = String((r(def.url) != null ? r(def.url) : '') || '');
+      const v = document.createElement('video');
+      v.className = 'a2ui-video';
+      v.controls = true;
+      v.preload = 'metadata';
+      if (/^https?:\/\//i.test(url)) v.src = url;
+      return v;
+    }
+    if (type === 'AudioPlayer') {
+      const url = String((r(def.url) != null ? r(def.url) : '') || '');
+      const desc = String((r(def.description) != null ? r(def.description) : '') || '');
+      const wrap = document.createElement('div');
+      wrap.className = 'a2ui-audio';
+      if (desc) {
+        const lbl = document.createElement('span');
+        lbl.className = 'a2ui-label';
+        lbl.textContent = desc;
+        wrap.appendChild(lbl);
+      }
+      const a = document.createElement('audio');
+      a.controls = true;
+      a.preload = 'metadata';
+      if (/^https?:\/\//i.test(url)) a.src = url;
+      wrap.appendChild(a);
+      return wrap;
+    }
     if (type === 'Button') {
+      // Official v0.9: { child: ComponentId, variant: default|primary|borderless, action }
+      // render_ui description: { text, label, kind: primary|danger|warn|success, disabled, checks, action }
+      const kind = typeof def.kind === 'string' ? def.kind : null;
+      const variant = typeof def.variant === 'string' ? def.variant : null;
+      const cls = kind || (variant ? (variant === 'default' ? 'primary' : variant) : 'primary');
       const btn = document.createElement('button');
-      btn.className = 'a2ui-btn ' + (typeof def.kind === 'string' ? def.kind : 'primary');
+      btn.className = 'a2ui-btn ' + cls;
       if (def.disabled) btn.disabled = true;
-      btn.textContent = String(text == null ? (def.label == null ? 'Button' : def.label) : text);
+      // If `child` is provided (v0.9), render the inner component for richer labels.
+      if (typeof def.child === 'string') {
+        const inner = block.componentsMap.get(def.child);
+        if (inner) btn.appendChild(a2uiRenderNode(block, inner, scope));
+        else btn.textContent = '';
+      } else {
+        btn.textContent = String(text == null ? (def.label == null ? 'Button' : def.label) : text);
+      }
       btn.addEventListener('click', () => {
         if (block.resolved) return;
         const checks = Array.isArray(def.checks) ? def.checks : [];
@@ -3752,7 +3962,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
             dataModel: block.dataModel,
           },
         }));
-        // Optimistic gray-out — watcher re-confirms via __a2uiResolved.
         block.resolved = true;
         block.resolutionLabel = ev.name;
         a2uiRerender(block);
@@ -3760,6 +3969,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return btn;
     }
     if (type === 'TextField') {
+      // Official v0.9: { label, value, variant: longText|number|shortText|obscured, validationRegexp }
+      // render_ui description: { label, placeholder, type: text|email|password|number|tel, multiline, rows, value }
+      const variant = typeof def.variant === 'string' ? def.variant : null;
+      const isMultiline = def.multiline || variant === 'longText';
+      const isNumber = def.type === 'number' || variant === 'number';
+      const inputType = (() => {
+        if (variant === 'obscured') return 'password';
+        if (typeof def.type === 'string' && ['password','email','number','tel'].indexOf(def.type) >= 0) return def.type;
+        if (isNumber) return 'number';
+        return 'text';
+      })();
       const wrap = document.createElement('label');
       wrap.className = 'a2ui-field';
       if (label != null && label !== '') {
@@ -3768,22 +3988,24 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         lbl.textContent = String(label);
         wrap.appendChild(lbl);
       }
-      if (def.multiline) {
+      if (isMultiline) {
         const ta = document.createElement('textarea');
         if (def.rows != null) ta.rows = Number(def.rows);
         if (placeholder != null) ta.placeholder = String(placeholder);
         ta.value = valueRaw == null ? '' : String(valueRaw);
+        if (typeof def.validationRegexp === 'string') ta.pattern = def.validationRegexp;
         ta.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
         wrap.appendChild(ta);
       } else {
         const inp = document.createElement('input');
-        inp.type = typeof def.type === 'string' && ['password','email','number','tel'].indexOf(def.type) >= 0 ? def.type : 'text';
+        inp.type = inputType;
         if (placeholder != null) inp.placeholder = String(placeholder);
         inp.value = valueRaw == null ? '' : String(valueRaw);
+        if (typeof def.validationRegexp === 'string') inp.pattern = def.validationRegexp;
         inp.addEventListener('input', e => {
           if (!path) return;
           const raw = e.currentTarget.value;
-          const v = def.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
+          const v = isNumber ? (raw === '' ? null : Number(raw)) : raw;
           writeBinding(path, v);
         });
         wrap.appendChild(inp);
@@ -3830,36 +4052,112 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return wrap;
     }
     if (type === 'ChoicePicker') {
-      const wrap = document.createElement('label');
-      wrap.className = 'a2ui-field';
+      // Official v0.9: { options: array, variant: multipleSelection|mutuallyExclusive,
+      //   displayStyle: checkbox|chips, filterable }
+      // render_ui description: { choices: [scalar | {label,value}] }
+      const optionsRaw = Array.isArray(def.options) ? def.options
+                       : Array.isArray(def.choices) ? def.choices : [];
+      const variant = typeof def.variant === 'string' ? def.variant : 'mutuallyExclusive';
+      const isMulti = variant === 'multipleSelection';
+      const style = typeof def.displayStyle === 'string' ? def.displayStyle : null;
+      const useChips = style === 'chips';
+      // Normalize {label, value} or scalar entries.
+      const opts = optionsRaw.map(c => {
+        if (c != null && typeof c === 'object') {
+          return { label: r(c.label), value: r(c.value) };
+        }
+        return { label: String(c), value: String(c) };
+      });
+      const wrap = document.createElement('div');
+      wrap.className = 'a2ui-field a2ui-choice ' + (useChips ? 'as-chips' : 'as-list');
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
         lbl.textContent = String(label);
         wrap.appendChild(lbl);
       }
-      const sel = document.createElement('select');
-      const choices = Array.isArray(def.choices) ? def.choices : [];
-      for (const c of choices) {
-        const opt = document.createElement('option');
-        if (c != null && typeof c === 'object') {
-          const lbl2 = r(c.label);
-          const val  = r(c.value);
-          opt.value = String(val == null ? '' : val);
-          opt.textContent = String(lbl2 == null ? (val == null ? '' : val) : lbl2);
-        } else {
-          opt.value = String(c);
-          opt.textContent = String(c);
+      const selected = (() => {
+        if (isMulti) {
+          if (Array.isArray(valueRaw)) return new Set(valueRaw.map(String));
+          if (valueRaw == null) return new Set();
+          return new Set([String(valueRaw)]);
         }
-        if (valueRaw != null && String(valueRaw) === opt.value) opt.selected = true;
-        sel.appendChild(opt);
+        return valueRaw == null ? null : String(valueRaw);
+      })();
+      // For mutually-exclusive non-chip: use a native <select>.
+      if (!isMulti && !useChips && style !== 'checkbox') {
+        const sel = document.createElement('select');
+        for (const o of opts) {
+          const opt = document.createElement('option');
+          opt.value = String(o.value == null ? '' : o.value);
+          opt.textContent = String(o.label == null ? (o.value == null ? '' : o.value) : o.label);
+          if (selected != null && String(selected) === opt.value) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        sel.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
+        wrap.appendChild(sel);
+        return wrap;
       }
-      sel.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
-      wrap.appendChild(sel);
+      // Chips or checkbox list (either multi or single).
+      const list = document.createElement('div');
+      list.className = useChips ? 'a2ui-chip-row' : 'a2ui-check-list';
+      for (const o of opts) {
+        const v = String(o.value == null ? '' : o.value);
+        const lblTxt = String(o.label == null ? v : o.label);
+        const isOn = isMulti
+          ? selected.has(v)
+          : (selected != null && selected === v);
+        if (useChips) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'a2ui-chip' + (isOn ? ' on' : '');
+          chip.textContent = lblTxt;
+          chip.addEventListener('click', () => {
+            if (!path) return;
+            if (isMulti) {
+              const next = new Set(selected);
+              if (next.has(v)) next.delete(v); else next.add(v);
+              writeBinding(path, Array.from(next));
+            } else {
+              writeBinding(path, v);
+            }
+          });
+          list.appendChild(chip);
+        } else {
+          const item = document.createElement('label');
+          item.className = 'a2ui-check';
+          const inp = document.createElement('input');
+          inp.type = isMulti ? 'checkbox' : 'radio';
+          if (!isMulti) inp.name = (def.id || 'choice') + '_' + (block.fileId || '');
+          inp.checked = isOn;
+          inp.addEventListener('change', () => {
+            if (!path) return;
+            if (isMulti) {
+              const next = new Set(selected);
+              if (inp.checked) next.add(v); else next.delete(v);
+              writeBinding(path, Array.from(next));
+            } else if (inp.checked) {
+              writeBinding(path, v);
+            }
+          });
+          const sp = document.createElement('span');
+          sp.textContent = lblTxt;
+          item.appendChild(inp);
+          item.appendChild(sp);
+          list.appendChild(item);
+        }
+      }
+      wrap.appendChild(list);
       return wrap;
     }
     if (type === 'DateTimeInput') {
-      const mode = typeof def.mode === 'string' ? def.mode : 'date';
+      // Official v0.9: { enableDate, enableTime, min, max, label, value }
+      // render_ui description: { mode: date|datetime|time, min, max, label, value }
+      const enableDate = def.enableDate != null ? !!def.enableDate : (def.mode === 'date' || def.mode === 'datetime' || def.mode == null);
+      const enableTime = def.enableTime != null ? !!def.enableTime : (def.mode === 'time' || def.mode === 'datetime');
+      const inputType = enableDate && enableTime ? 'datetime-local'
+                      : enableTime ? 'time'
+                      : 'date';
       const wrap = document.createElement('label');
       wrap.className = 'a2ui-field';
       if (label != null && label !== '') {
@@ -3869,7 +4167,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         wrap.appendChild(lbl);
       }
       const inp = document.createElement('input');
-      inp.type = mode === 'datetime' ? 'datetime-local' : (mode === 'time' ? 'time' : 'date');
+      inp.type = inputType;
       inp.value = valueRaw != null ? String(valueRaw) : '';
       if (def.min != null) inp.min = String(def.min);
       if (def.max != null) inp.max = String(def.max);
@@ -3878,8 +4176,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return wrap;
     }
     if (type === 'List') {
+      // Official v0.9 + render_ui description both use children:{path, componentId}.
+      // Plus direction (vertical|horizontal) and align from official spec.
       const el = document.createElement('div');
-      el.className = 'a2ui-list';
+      const dir = typeof def.direction === 'string' ? def.direction : 'vertical';
+      el.className = 'a2ui-list a2ui-list-' + dir;
+      if (typeof def.align === 'string') el.style.alignItems = def.align;
       const ch = def.children;
       if (ch && typeof ch === 'object' && !Array.isArray(ch) && typeof ch.path === 'string' && typeof ch.componentId === 'string') {
         const items = r({ path: ch.path });
@@ -3893,6 +4195,88 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       }
       appendKids(el);
       return el;
+    }
+    if (type === 'Tabs') {
+      // v0.9: { tabs: [{ title, content (componentId) }, ...] }
+      const tabs = Array.isArray(def.tabs) ? def.tabs : [];
+      if (!tabs.length) return document.createComment('empty tabs');
+      const wrap = document.createElement('div');
+      wrap.className = 'a2ui-tabs';
+      const bar = document.createElement('div');
+      bar.className = 'a2ui-tabs-bar';
+      const pane = document.createElement('div');
+      pane.className = 'a2ui-tabs-pane';
+      // Active tab is tracked per def.id in the block — survives re-renders.
+      block.tabState = block.tabState || {};
+      const key = typeof def.id === 'string' ? def.id : 'tabs';
+      let active = block.tabState[key] != null ? block.tabState[key] : 0;
+      if (active >= tabs.length) active = 0;
+      tabs.forEach((t, i) => {
+        const titleResolved = r(t && t.title);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'a2ui-tab' + (i === active ? ' active' : '');
+        btn.textContent = String(titleResolved == null ? ('Tab ' + (i + 1)) : titleResolved);
+        btn.addEventListener('click', () => {
+          block.tabState[key] = i;
+          a2uiRerender(block);
+        });
+        bar.appendChild(btn);
+      });
+      const activeTab = tabs[active] || {};
+      const contentId = typeof activeTab.content === 'string' ? activeTab.content : null;
+      const contentDef = contentId ? block.componentsMap.get(contentId) : null;
+      if (contentDef) pane.appendChild(a2uiRenderNode(block, contentDef, scope));
+      wrap.appendChild(bar);
+      wrap.appendChild(pane);
+      return wrap;
+    }
+    if (type === 'Modal') {
+      // v0.9: { trigger: ComponentId, content: ComponentId }
+      // We render the trigger inline; clicking it shows `content` in an
+      // overlay. The visibility flag lives on the block so re-renders preserve it.
+      const triggerId = typeof def.trigger === 'string' ? def.trigger : null;
+      const contentId = typeof def.content === 'string' ? def.content : null;
+      const wrap = document.createElement('span');
+      wrap.className = 'a2ui-modal-trigger-wrap';
+      block.modalState = block.modalState || {};
+      const key = typeof def.id === 'string' ? def.id : 'modal';
+      const triggerDef = triggerId ? block.componentsMap.get(triggerId) : null;
+      if (triggerDef) {
+        const trig = a2uiRenderNode(block, triggerDef, scope);
+        trig.addEventListener('click', (e) => {
+          e.stopPropagation();
+          block.modalState[key] = true;
+          a2uiRerender(block);
+        }, true);
+        wrap.appendChild(trig);
+      }
+      if (block.modalState[key] && contentId) {
+        const contentDef = block.componentsMap.get(contentId);
+        const overlay = document.createElement('div');
+        overlay.className = 'a2ui-modal-overlay';
+        overlay.addEventListener('click', () => {
+          block.modalState[key] = false;
+          a2uiRerender(block);
+        });
+        const panel = document.createElement('div');
+        panel.className = 'a2ui-modal-panel';
+        panel.addEventListener('click', (e) => e.stopPropagation());
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'a2ui-modal-close';
+        close.setAttribute('aria-label', 'Close');
+        close.textContent = '×';
+        close.addEventListener('click', () => {
+          block.modalState[key] = false;
+          a2uiRerender(block);
+        });
+        panel.appendChild(close);
+        if (contentDef) panel.appendChild(a2uiRenderNode(block, contentDef, scope));
+        overlay.appendChild(panel);
+        wrap.appendChild(overlay);
+      }
+      return wrap;
     }
     const unk = document.createElement('div');
     unk.className = 'a2ui-unknown';
