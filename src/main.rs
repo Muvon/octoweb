@@ -4184,6 +4184,13 @@ fn main() {
                         "window.__a2uiResolved && window.__a2uiResolved({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`))"
                     ));
                 }
+                // Persist the surface alongside the chat log so a cold restart
+                // can rebuild the bubble. Same fileId upserts in place — keeps
+                // pending→resolved transitions to a single bubble.
+                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    upsert_a2ui_msg(s, &snap.id, snap.body, cfg.max_acp_session_messages);
+                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                }
             }
             // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
             Event::UserEvent(AppEvent::LearningWake) => {}
@@ -5526,6 +5533,37 @@ fn push_acp_msg(s: &mut AcpSession, role: &str, text: String, max_msgs: usize) {
         role: role.to_string(),
         text,
         ts,
+        a2ui: None,
+    });
+    if s.messages.len() > max_msgs {
+        let drop = s.messages.len() - max_msgs;
+        s.messages.drain(..drop);
+    }
+}
+
+/// Upsert an A2UI surface snapshot in the session's message log. Same envelope
+/// (matched by `file_id`) updates in place — keeps the chat showing one bubble
+/// per surface across pending→resolved transitions instead of stacking dupes.
+fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, max_msgs: usize) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some(m) = s
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == "ui" && m.text == file_id)
+    {
+        m.a2ui = Some(body);
+        m.ts = ts;
+        return;
+    }
+    s.messages.push(config::AcpMessage {
+        role: "ui".into(),
+        text: file_id.into(),
+        ts,
+        a2ui: Some(body),
     });
     if s.messages.len() > max_msgs {
         let drop = s.messages.len() - max_msgs;
