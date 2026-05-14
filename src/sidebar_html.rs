@@ -1374,33 +1374,33 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .cmd-item.active .cmd-desc { color: rgba(255,255,255,0.75); }
 
-  /* ── Command output card ──────────────────────────────────────────── */
+  /* ── Command output (Tahoe — minimal chrome, hairline dividers) ─── */
   .cmd-output {
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--text-primary);
   }
+  /* Subtle slash-tag, not a banner */
   .cmd-output-header {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--accent);
+    display: inline-block;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
     margin-bottom: 6px;
+    letter-spacing: 0;
+    text-transform: none;
   }
-  .cmd-output-table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  .cmd-output-table tr {
-    border-bottom: 1px solid var(--divider);
-  }
-  .cmd-output-table tr:last-child {
-    border-bottom: none;
-  }
+  /* Generic fallback table — flat, no borders */
+  .cmd-output-table { width: 100%; border-collapse: collapse; }
+  .cmd-output-table tr { border-bottom: 1px solid var(--divider); }
+  .cmd-output-table tr:last-child { border-bottom: none; }
   .cmd-output-key {
-    padding: 3px 8px 3px 0;
-    color: var(--text-secondary);
-    font-size: 11px;
+    padding: 3px 10px 3px 0;
+    color: var(--text-tertiary);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
     white-space: nowrap;
     vertical-align: top;
     width: 1%;
@@ -1408,7 +1408,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-output-val {
     padding: 3px 0;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: 11.5px;
     word-break: break-word;
   }
   .cmd-output-val.null { color: var(--text-tertiary); font-style: italic; }
@@ -1417,125 +1417,116 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-output-val.number { font-variant-numeric: tabular-nums; }
   .cmd-output-nested {
     margin: 2px 0;
-    padding: 4px 0 4px 8px;
-    border-left: 2px solid var(--divider);
+    padding: 2px 0 2px 8px;
+    border-left: 1px solid var(--divider);
     font-size: 11px;
   }
-  .cmd-output-list {
-    margin: 0;
-    padding-left: 16px;
-  }
-  .cmd-output-list li {
-    margin: 1px 0;
-    font-size: 12px;
-  }
-  .cmd-output-single-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
+  .cmd-output-list { margin: 0; padding-left: 16px; }
+  .cmd-output-list li { margin: 1px 0; font-size: 11.5px; }
+  .cmd-output-single-list { display: flex; flex-direction: column; gap: 2px; }
   .cmd-output-list-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  /* ── Beautiful per-command renderers ───────────────────────────────── */
-  /* Switch cards: model, role, effort, loglevel */
-  .cmd-switch {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    border-radius: 10px;
-  }
-  .cmd-switch-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 8px;
-    background: var(--accent);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    font-weight: 700;
-    flex-shrink: 0;
-  }
-  .cmd-switch.no-change .cmd-switch-icon {
-    background: var(--text-tertiary);
-  }
-  .cmd-switch-body { flex: 1; min-width: 0; }
-  .cmd-switch-label {
     font-size: 10px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 2px;
+    letter-spacing: 0.04em;
   }
-  .cmd-switch-flow {
-    display: flex;
+
+  /* Section title — small caps hairline label */
+  .cmd-section-title {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin: 10px 0 4px;
+  }
+  .cmd-section-title:first-child { margin-top: 0; }
+
+  /* Switch — single inline line, no card */
+  .cmd-switch {
+    display: inline-flex;
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
+    font-size: 11.5px;
   }
-  .cmd-pill {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: rgba(0, 122, 255, 0.10);
-    color: var(--accent);
-    font-size: 12px;
-    font-weight: 600;
-    font-family: 'SF Mono', Monaco, monospace;
-  }
-  .cmd-pill.muted {
-    background: var(--divider);
-    color: var(--text-secondary);
-    text-decoration: line-through;
-    text-decoration-color: var(--text-tertiary);
+  .cmd-switch-label {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-right: 2px;
   }
   .cmd-arrow {
     color: var(--text-tertiary);
-    font-size: 12px;
+    font-size: 11px;
   }
   .cmd-current {
-    font-size: 11px;
-    color: var(--text-secondary);
-    margin-left: 4px;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    margin-left: 2px;
+    font-style: italic;
   }
 
-  /* Stat grid: info, report */
+  /* Pills — mono token highlights */
+  .cmd-pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--divider);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 500;
+    font-family: 'SF Mono', Monaco, monospace;
+  }
+  .cmd-pill.accent {
+    background: rgba(0, 122, 255, 0.12);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .cmd-pill.muted {
+    background: transparent;
+    color: var(--text-tertiary);
+    text-decoration: line-through;
+    text-decoration-color: var(--text-tertiary);
+  }
+
+  /* Stats — inline strip with vertical hairline separators */
   .cmd-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-    gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    align-items: stretch;
+    margin: 2px 0;
   }
   .cmd-stat {
-    background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    border-radius: 8px;
-    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    padding: 2px 12px;
+    border-right: 1px solid var(--divider);
+    min-width: 0;
   }
+  .cmd-stat:first-child { padding-left: 0; }
+  .cmd-stat:last-child { border-right: none; padding-right: 0; }
   .cmd-stat-label {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--text-secondary);
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--text-tertiary);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 2px;
+    letter-spacing: 0.07em;
+    line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .cmd-stat-val {
-    font-size: 14px;
+    font-size: 12.5px;
     font-weight: 600;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
+    line-height: 1.3;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1543,173 +1534,170 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-stat.accent .cmd-stat-val { color: var(--accent); }
   .cmd-stat.success .cmd-stat-val { color: #34c759; }
   .cmd-stat-sub {
-    font-size: 10px;
+    font-size: 9.5px;
     color: var(--text-tertiary);
-    margin-top: 1px;
-  }
-  .cmd-section-title {
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin: 10px 0 6px;
+    line-height: 1.2;
   }
 
-  /* Chip list: help, available_levels, etc. */
+  /* Chips — flat, mono, tight */
   .cmd-chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: 3px;
   }
   .cmd-chip {
     display: inline-block;
-    padding: 3px 8px;
-    border-radius: 6px;
-    background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    color: var(--text-primary);
-    font-size: 11.5px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--divider);
+    color: var(--text-secondary);
+    font-size: 10.5px;
     font-family: 'SF Mono', Monaco, monospace;
+    border: none;
   }
   .cmd-chip.active {
-    background: rgba(0, 122, 255, 0.12);
-    border-color: rgba(0, 122, 255, 0.30);
+    background: rgba(0, 122, 255, 0.14);
     color: var(--accent);
+    font-weight: 600;
   }
 
-  /* Item list: prompts, workflows, run commands, skills, mcp servers */
+  /* Items — hairline rows, no card per item */
   .cmd-items {
     display: flex;
     flex-direction: column;
-    gap: 4px;
   }
   .cmd-item-row {
     display: flex;
-    align-items: flex-start;
+    align-items: baseline;
     gap: 8px;
-    padding: 7px 10px;
-    background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    border-radius: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--divider);
+    font-size: 11.5px;
+  }
+  .cmd-item-row:last-child { border-bottom: none; }
+  .cmd-item-row.stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .cmd-item-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
   }
   .cmd-item-name {
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--text-primary);
     font-family: 'SF Mono', Monaco, monospace;
     flex-shrink: 0;
-    min-width: 110px;
+  }
+  .cmd-item-row:not(.stack) .cmd-item-name {
+    min-width: 90px;
   }
   .cmd-item-desc {
-    font-size: 11.5px;
+    font-size: 11px;
     color: var(--text-secondary);
-    line-height: 1.4;
+    line-height: 1.45;
     flex: 1;
   }
   .cmd-item-meta {
-    font-size: 10px;
+    font-size: 9.5px;
     color: var(--text-tertiary);
-    margin-top: 2px;
   }
 
-  /* Status badges */
+  /* Badges — small, flat */
   .cmd-badge {
     display: inline-block;
-    padding: 1px 6px;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 9.5px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
+    line-height: 14px;
+    vertical-align: middle;
   }
   .cmd-badge.ok      { background: rgba(52, 199, 89, 0.16);  color: #1f8f3a; }
   .cmd-badge.warn    { background: rgba(255, 149, 0, 0.16);  color: #b65b00; }
   .cmd-badge.err     { background: rgba(255, 59, 48, 0.16);  color: #c1271d; }
   .cmd-badge.info    { background: rgba(0, 122, 255, 0.14);  color: var(--accent); }
-  .cmd-badge.muted   { background: var(--divider);           color: var(--text-secondary); }
+  .cmd-badge.muted   { background: var(--divider);           color: var(--text-tertiary); }
   @media (prefers-color-scheme: dark) {
     .cmd-badge.ok    { color: #69db7c; }
     .cmd-badge.warn  { color: #ffb454; }
     .cmd-badge.err   { color: #ff6961; }
   }
 
-  /* Toast/result line */
+  /* Toast — inline glyph + text, no panel */
   .cmd-toast {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-radius: 8px;
-    background: rgba(52, 199, 89, 0.10);
-    border: 1px solid rgba(52, 199, 89, 0.25);
+    gap: 6px;
+    font-size: 11.5px;
     color: var(--text-primary);
-    font-size: 12.5px;
-  }
-  .cmd-toast.err {
-    background: rgba(255, 59, 48, 0.10);
-    border-color: rgba(255, 59, 48, 0.25);
   }
   .cmd-toast-icon {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #34c759;
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 11px;
+    color: #34c759;
     font-weight: 700;
-    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 1;
   }
-  .cmd-toast.err .cmd-toast-icon { background: #ff3b30; }
+  .cmd-toast.err .cmd-toast-icon { color: #ff3b30; }
 
-  /* Empty state */
+  /* Empty state — quiet hairline note */
   .cmd-empty {
-    padding: 12px;
-    text-align: center;
+    padding: 4px 0;
     color: var(--text-tertiary);
-    font-size: 12px;
+    font-size: 11px;
     font-style: italic;
   }
 
-  /* Tools list inline (mcp servers) */
+  /* Tool tags inline (mcp servers) */
   .cmd-tools-inline {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
-    margin-top: 4px;
   }
   .cmd-tool-tag {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 4px;
+    font-size: 9.5px;
+    padding: 0 5px;
+    border-radius: 3px;
     background: var(--divider);
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
     font-family: 'SF Mono', Monaco, monospace;
+    line-height: 14px;
   }
 
-  /* Markdown passthrough wrapper */
+  /* Markdown passthrough — tighter typography */
   .cmd-md {
-    font-size: 12.5px;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .cmd-md p { margin: 4px 0; }
+  .cmd-md h1, .cmd-md h2, .cmd-md h3 {
+    font-size: 12px;
+    margin: 8px 0 4px;
+    font-weight: 600;
   }
   .cmd-md table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 11.5px;
+    font-size: 11px;
+    margin: 4px 0;
   }
   .cmd-md th, .cmd-md td {
-    padding: 4px 8px;
+    padding: 3px 6px;
     border-bottom: 1px solid var(--divider);
     text-align: left;
   }
   .cmd-md th {
-    color: var(--text-secondary);
-    font-weight: 600;
-    font-size: 10.5px;
+    color: var(--text-tertiary);
+    font-weight: 700;
+    font-size: 9.5px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
   }
 
   #input-row {
@@ -3074,29 +3062,24 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       '<div class="cmd-stat-val">' + escapeHtml(String(val)) + '</div>' + sub +
       '</div>';
   }
-  function switchCard(label, oldVal, newVal, changed, iconLetter) {
-    var icon = iconLetter || (label.charAt(0).toUpperCase());
+  function switchCard(label, oldVal, newVal, changed, _icon) {
     var flow;
     if (changed && oldVal && newVal && oldVal !== newVal) {
       flow = '<span class="cmd-pill muted">' + escapeHtml(String(oldVal)) + '</span>' +
              '<span class="cmd-arrow">→</span>' +
-             '<span class="cmd-pill">' + escapeHtml(String(newVal)) + '</span>';
+             '<span class="cmd-pill accent">' + escapeHtml(String(newVal)) + '</span>';
     } else {
       var cur = newVal || oldVal || '—';
-      flow = '<span class="cmd-pill">' + escapeHtml(String(cur)) + '</span>' +
-             (changed ? '' : '<span class="cmd-current">no change</span>');
+      flow = '<span class="cmd-pill accent">' + escapeHtml(String(cur)) + '</span>' +
+             (changed ? '' : '<span class="cmd-current">unchanged</span>');
     }
-    return '<div class="cmd-switch' + (changed ? '' : ' no-change') + '">' +
-      '<div class="cmd-switch-icon">' + escapeHtml(icon) + '</div>' +
-      '<div class="cmd-switch-body">' +
-        '<div class="cmd-switch-label">' + escapeHtml(label) + '</div>' +
-        '<div class="cmd-switch-flow">' + flow + '</div>' +
-      '</div>' +
+    return '<div class="cmd-switch">' +
+      '<span class="cmd-switch-label">' + escapeHtml(label) + '</span>' + flow +
     '</div>';
   }
   function toast(msg, isErr) {
     return '<div class="cmd-toast' + (isErr ? ' err' : '') + '">' +
-      '<span class="cmd-toast-icon">' + (isErr ? '!' : '✓') + '</span>' +
+      '<span class="cmd-toast-icon">' + (isErr ? '✕' : '✓') + '</span>' +
       '<span>' + escapeHtml(String(msg)) + '</span>' +
     '</div>';
   }
@@ -3170,9 +3153,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       var d = o.data || {};
       var msg = String(d.message || '');
       if (d.is_error) return toast(msg, true);
-      // Markdown-friendly multi-line message — render as text with linebreaks
       var lines = msg.split('\n').map(escapeHtml).join('<br>');
-      return '<div class="cmd-toast"><span class="cmd-toast-icon">⏰</span><span>' + lines + '</span></div>';
+      return '<div class="cmd-toast"><span class="cmd-toast-icon" style="color:var(--accent)">⏱</span><span>' + lines + '</span></div>';
     },
     help: function(o) {
       var arr = Array.isArray(o.commands) ? o.commands : [];
@@ -3186,10 +3168,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return html;
     },
     list: function(o) {
-      // Sessions list — server already gives us markdown.
       var md = String(o.plain_text || '');
       var html = '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(md) : escapeHtml(md)) + '</div>';
-      if (o.page) html += '<div class="cmd-stat-sub" style="margin-top:6px">Page ' + escapeHtml(String(o.page)) + '</div>';
+      if (o.page) html += '<div class="cmd-stat-sub">Page ' + escapeHtml(String(o.page)) + '</div>';
       return html;
     },
     run: function(o) {
@@ -3230,20 +3211,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       var d = o.data || {};
       var srv = Array.isArray(d.servers) ? d.servers : [];
       if (!srv.length) return emptyState('No MCP servers configured');
-      var html = '<div class="cmd-section-title">' + srv.length + ' MCP servers</div>';
+      var html = '<div class="cmd-section-title">' + srv.length + ' servers</div>';
       html += '<div class="cmd-items">';
       for (var i = 0; i < srv.length; i++) {
         var s = srv[i];
         var hKind = (s.health === 'running' ? 'ok' : (s.health === 'failed' || s.health === 'error' ? 'err' : 'warn'));
         var tools = Array.isArray(s.tools) ? s.tools : [];
-        var meta = (s.connection_type ? s.connection_type : '') +
-                   (s.restart_count ? ' · ' + s.restart_count + ' restarts' : '') +
-                   (s.consecutive_failures ? ' · ' + s.consecutive_failures + ' failures' : '');
-        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
-          '<div style="display:flex;align-items:center;gap:8px">' +
-            '<span class="cmd-item-name" style="min-width:0">' + escapeHtml(s.name || '?') + '</span>' +
+        var meta = [];
+        if (s.connection_type) meta.push(s.connection_type);
+        if (s.restart_count) meta.push(s.restart_count + ' restarts');
+        if (s.consecutive_failures) meta.push(s.consecutive_failures + ' failures');
+        html += '<div class="cmd-item-row stack">' +
+          '<div class="cmd-item-head">' +
+            '<span class="cmd-item-name">' + escapeHtml(s.name || '?') + '</span>' +
             '<span class="cmd-badge ' + hKind + '">' + escapeHtml(s.health || 'unknown') + '</span>' +
-            '<span class="cmd-item-meta" style="margin:0">' + escapeHtml(meta) + '</span>' +
+            (meta.length ? '<span class="cmd-item-meta">' + escapeHtml(meta.join(' · ')) + '</span>' : '') +
           '</div>';
         if (tools.length) {
           html += '<div class="cmd-tools-inline">';
@@ -3285,22 +3267,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     skill: function(o) {
       var d = o.data || {};
       var skills = Array.isArray(d.skills) ? d.skills : [];
-      var html = '<div class="cmd-stats" style="margin-bottom:8px">';
+      var html = '<div class="cmd-stats">';
       html += statTile('Total', skills.length, { cls: 'accent' });
       if (d.active_count != null) html += statTile('Active', d.active_count, { cls: 'success' });
       if (d.page) html += statTile('Page', d.page);
       if (d.pattern) html += statTile('Filter', d.pattern);
       html += '</div>';
       if (!skills.length) return html + emptyState('No skills');
+      html += '<div class="cmd-section-title">Skills</div>';
       html += '<div class="cmd-items">';
       for (var i = 0; i < skills.length; i++) {
         var s = skills[i];
         var doms = Array.isArray(s.domains) && s.domains.length ? s.domains.join(', ') : '';
-        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
-          '<div style="display:flex;align-items:center;gap:8px">' +
-            '<span class="cmd-item-name" style="min-width:0">' + escapeHtml(s.name || '') + '</span>' +
-            '<span class="cmd-badge ' + (s.active ? 'ok' : 'muted') + '">' + (s.active ? 'active' : 'off') + '</span>' +
-            (doms ? '<span class="cmd-item-meta" style="margin:0">' + escapeHtml(doms) + '</span>' : '') +
+        html += '<div class="cmd-item-row stack">' +
+          '<div class="cmd-item-head">' +
+            '<span class="cmd-item-name">' + escapeHtml(s.name || '') + '</span>' +
+            '<span class="cmd-badge ' + (s.active ? 'ok' : 'muted') + '">' + (s.active ? 'on' : 'off') + '</span>' +
+            (doms ? '<span class="cmd-item-meta">' + escapeHtml(doms) + '</span>' : '') +
           '</div>' +
           '<div class="cmd-item-desc">' + escapeHtml(s.description || '') + '</div>' +
         '</div>';
@@ -3339,24 +3322,25 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     },
     context: function(o) {
       var msgs = Array.isArray(o.filtered_messages) ? o.filtered_messages : [];
-      var html = '<div class="cmd-stats" style="margin-bottom:8px">';
+      var html = '<div class="cmd-stats">';
       html += statTile('Messages', msgs.length, { cls: 'accent' });
       if (o.filter) html += statTile('Filter', o.filter);
       html += '</div>';
       if (!msgs.length) return html + emptyState('No messages in context');
+      html += '<div class="cmd-section-title">Context</div>';
       html += '<div class="cmd-items">';
       for (var i = 0; i < Math.min(msgs.length, 50); i++) {
         var m = msgs[i];
         var role = m.role || 'message';
         var content = String(m.content || '');
-        var preview = content.length > 240 ? content.slice(0, 240) + '…' : content;
-        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
-          '<span class="cmd-badge info">' + escapeHtml(role) + '</span>' +
+        var preview = content.length > 220 ? content.slice(0, 220) + '…' : content;
+        html += '<div class="cmd-item-row stack">' +
+          '<div class="cmd-item-head"><span class="cmd-badge info">' + escapeHtml(role) + '</span></div>' +
           '<div class="cmd-item-desc" style="white-space:pre-wrap">' + escapeHtml(preview) + '</div>' +
         '</div>';
       }
       if (msgs.length > 50) {
-        html += '<div class="cmd-stat-sub">… and ' + (msgs.length - 50) + ' more</div>';
+        html += '<div class="cmd-stat-sub" style="margin-top:4px">… and ' + (msgs.length - 50) + ' more</div>';
       }
       html += '</div>';
       return html;
