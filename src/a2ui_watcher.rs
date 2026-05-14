@@ -17,6 +17,10 @@ use std::time::Duration;
 pub struct A2uiSnapshot {
     pub id: String,
     pub status: String,
+    /// Pid of the octomind process that invoked `render_ui` (the bash
+    /// script stamps `$PPID` into the envelope). 0 if absent. Used to
+    /// route the surface back to the originating session.
+    pub parent_pid: u32,
     /// Full body — main.rs forwards it to the sidebar as-is.
     pub body: serde_json::Value,
 }
@@ -107,9 +111,11 @@ where
             }
             map.insert(id.clone(), status.clone());
         }
+        let parent_pid = v.get("parent_pid").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
         emit(A2uiSnapshot {
             id,
             status,
+            parent_pid,
             body: v,
         });
     }

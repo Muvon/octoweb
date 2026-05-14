@@ -67,6 +67,14 @@ set -euo pipefail
 
 input="$(cat)"
 
+# Reject empty envelopes early — an envelope with no messages targets no
+# surface and just creates an orphan "Loading…" bubble in the sidebar.
+msg_count=$(jq -r '.messages // [] | length' <<<"$input" 2>/dev/null || echo 0)
+if [[ "$msg_count" == "0" ]]; then
+  echo '{"ok":false,"error":"render_ui requires at least one message — createSurface, updateComponents, updateDataModel, or deleteSurface (each with surfaceId)"}'
+  exit 1
+fi
+
 queue="${HOME}/.local/share/a2ui"
 mkdir -p "$queue"
 

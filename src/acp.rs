@@ -47,6 +47,11 @@ pub enum AgentEvent {
     Error(String),
     /// Agent sent updated list of available slash commands.
     AvailableCommands(Vec<CommandInfo>),
+    /// Emitted once, right after spawn — the OS pid of the agent subprocess.
+    /// Used by the A2UI watcher to route surface envelopes back to the
+    /// session whose octomind invoked `render_ui` (the bash script stamps
+    /// its parent pid into the envelope file).
+    ProcessPid(u32),
 }
 
 /// A prompt with optional image attachments.
@@ -338,6 +343,13 @@ async fn init_session(
         .current_dir(dirs::home_dir().unwrap_or_else(|| "/".into()))
         .kill_on_drop(true)
         .spawn()?;
+
+    // Surface the spawned pid so main can map A2UI envelopes (which carry
+    // the agent's pid via the bash script's $PPID) back to this session.
+    if let Some(pid) = child.id() {
+        let _ = tx.send(AgentEvent::ProcessPid(pid));
+        wake();
+    }
 
     let outgoing = child.stdin.take().unwrap().compat_write();
     let incoming = child.stdout.take().unwrap().compat();

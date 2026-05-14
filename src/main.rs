@@ -177,6 +177,12 @@ struct AcpSession {
     /// `sidebar_ready` so slash-command auto-complete survives sidebar opens
     /// that occur after the agent already announced its commands.
     available_commands_json: Option<String>,
+    /// OS pid of this session's octomind subprocess. Set on `ProcessPid`.
+    /// Used by the A2UI watcher to route incoming envelopes to the session
+    /// whose octomind actually invoked `render_ui` — the bash script
+    /// stamps `parent_pid` into each envelope, and we match against this.
+    /// Cleared on Error/respawn; the next spawn fills it again.
+    octomind_pid: Option<u32>,
 }
 
 /// Hard cap on parallel ACP sessions — each is a forked subprocess with its own
@@ -1010,6 +1016,28 @@ fn main() {
                                 }
                             }
                         }
+                        Some("a2ui_replay_event") => {
+                            // Click on a ghost surface (bash poll loop dead).
+                            // Deliver the event to the agent as a synthetic
+                            // prompt in this session — the agent has the
+                            // surface in chat history and can resume in a
+                            // fresh turn.
+                            let sid = v["sid"].as_u64().unwrap_or(0);
+                            let action = &v["action"];
+                            let name = action["name"].as_str().unwrap_or("");
+                            let surface_id = action["surfaceId"].as_str().unwrap_or("");
+                            let source = action["sourceComponentId"].as_str().unwrap_or("");
+                            let context_json = serde_json::to_string(&action["context"])
+                                .unwrap_or_else(|_| "{}".into());
+                            let data_model_json = serde_json::to_string(&action["dataModel"])
+                                .unwrap_or_else(|_| "{}".into());
+                            let prompt = format!(
+                                "[A2UI event — prior surface]\nThe `render_ui` tool call that rendered this surface has already exited (this surface comes from earlier in our chat). Treat the click below as the user's choice and continue the flow — re-render with `render_ui` if you need a fresh interactive surface.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
+                            );
+                            if sid != 0 {
+                                let _ = p.send_event(AppEvent::AcpPrompt(sid, prompt, vec![]));
+                            }
+                        }
                         Some("a2ui_open_url") => {
                             // A2UI `Button.action.openUrl` — open in a new browser tab.
                             if let Some(url) = v["url"].as_str() {
@@ -1477,6 +1505,7 @@ fn main() {
                     messages: snap.messages,
                     agent_buf: String::new(),
                     available_commands_json: None,
+                    octomind_pid: None,
                 });
             }
             let active = if sessions.iter().any(|s| s.id == h.active_id) {
@@ -1503,6 +1532,7 @@ fn main() {
                 messages: Vec::new(),
                 agent_buf: String::new(),
                 available_commands_json: None,
+                octomind_pid: None,
             };
             (vec![default_session], 2u64, 1u64)
         }
@@ -2210,6 +2240,11 @@ fn main() {
                             persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                         }
                     }
+                    acp::AgentEvent::ProcessPid(pid) => {
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.octomind_pid = Some(pid);
+                        }
+                    }
                     acp::AgentEvent::Image { data, mime_type } => {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__appendImage && window.__appendImage({sid},`{mime_type}`,`{data}`)"
@@ -2341,6 +2376,7 @@ fn main() {
                             let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
                             // Drop dead handle immediately so prompts aren't silently lost.
                             s.handle = None;
+                            s.octomind_pid = None; // pid is now stale — next spawn fills it
                             s.last_cancel_at = None;
                             // Save partial in-flight response so the persisted log
                             // mirrors what the user saw before the disconnect.
@@ -3992,6 +4028,7 @@ fn main() {
                         messages: Vec::new(),
                         agent_buf: String::new(),
                         available_commands_json: None,
+                        octomind_pid: None,
                     });
                     active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
@@ -4236,13 +4273,33 @@ fn main() {
             // The agent only renders during its own turn, so the foreground
             // session is the right place for the surface to appear.
             Event::UserEvent(AppEvent::A2uiUpdate(snap)) => {
-                let sid = active_session_id;
+                // Route by `parent_pid` — match the session whose octomind
+                // subprocess invoked render_ui. The bash script stamps its
+                // $PPID into the envelope on creation. Falls back to the
+                // active session only if no match (e.g. before any session
+                // has registered its pid, or for envelopes from outside).
+                let target_sid = sessions
+                    .iter()
+                    .find(|s| s.octomind_pid == Some(snap.parent_pid) && snap.parent_pid != 0)
+                    .map(|s| s.id)
+                    .unwrap_or(active_session_id);
+                let sid = target_sid;
+                // A surface is "live" only if its render_ui bash subprocess is
+                // still polling — i.e. its parent octomind subprocess matches
+                // a session we're currently running. Anything else is a ghost:
+                // file on disk, but no one to receive the resolution. Clicks
+                // on ghost surfaces are suppressed with a toast in the sidebar.
+                let is_live = snap.parent_pid != 0
+                    && sessions
+                        .iter()
+                        .any(|s| s.octomind_pid == Some(snap.parent_pid));
+                let live_js = if is_live { "true" } else { "false" };
                 let body_json = serde_json::to_string(&snap.body).unwrap_or_else(|_| "{}".into());
                 let escaped_id = webview_utils::escape_js_template(&snap.id);
                 let escaped_body = webview_utils::escape_js_template(&body_json);
                 if snap.status == "pending" {
                     let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`))"
+                        "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`),{live_js})"
                     ));
                 } else {
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -5624,6 +5681,16 @@ fn push_acp_msg(s: &mut AcpSession, role: &str, text: String, max_msgs: usize) {
 /// (matched by `file_id`) updates in place — keeps the chat showing one bubble
 /// per surface across pending→resolved transitions instead of stacking dupes.
 fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, max_msgs: usize) {
+    // Skip vacuous envelopes — no messages means no surface target, and
+    // persisting them would replay as orphan "Loading…" bubbles on restart.
+    let has_messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if !has_messages {
+        return;
+    }
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
