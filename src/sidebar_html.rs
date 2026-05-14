@@ -19,6 +19,8 @@
 ///   window.__setThinking(sid, bool)               — show/hide activity feed
 ///   window.__appendError(sid, text)               — show an error bubble
 ///   window.__setAvailableCommands(sid, json)      — populate slash-command list
+///   window.__a2uiUpdate(sid, fileId, payload)     — render / update an A2UI surface
+///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
 ///
 /// IPC messages sent to Rust (all session-scoped messages include `session_id`):
 ///   { type: "acp_prompt",    session_id, text, images }
@@ -30,6 +32,8 @@
 ///   { type: "acp_session_switch", session_id }
 ///   { type: "acp_session_rename", session_id, title }
 ///   { type: "sidebar_close" }
+///   { type: "a2ui_resolve",  file_id, action } — A2UI Button event → unblocks the bash tool
+///   { type: "a2ui_open_url", url }              — A2UI Button.openUrl → open in a browser tab
 pub fn html(max_ai_prompt_history: usize) -> String {
     let prompt_history_js = crate::prompt_history_js::prompt_history_js();
     r#"<!DOCTYPE html>
@@ -842,6 +846,214 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   /* Strong / em */
   .msg.agent .msg-bubble strong { font-weight: 600; }
   .msg.agent .msg-bubble em     { font-style: italic; }
+
+  /* ── A2UI surface bubble ──────────────────────────────────────────────── */
+  /* Inline UI surfaces rendered from `render_ui` envelopes. Same Tahoe glass
+     vocabulary as agent bubbles but a denser, full-width form layout, with a
+     resolved-state affordance. */
+  .msg.ui .msg-bubble {
+    background: var(--agent-bg);
+    border: 1px solid var(--agent-border);
+    border-radius: 14px;
+    padding: 0;
+    overflow: hidden;
+    align-self: stretch;
+    max-width: 100%;
+    transition: opacity 0.2s, filter 0.2s;
+  }
+  .msg.ui.resolved .msg-bubble { opacity: 0.78; filter: saturate(0.85); }
+  .a2ui-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--divider);
+    background: linear-gradient(to bottom, rgba(0,0,0,0.015), transparent);
+    font-size: 10px;
+    color: var(--text-tertiary);
+  }
+  @media (prefers-color-scheme: dark) {
+    .a2ui-head { background: linear-gradient(to bottom, rgba(255,255,255,0.02), transparent); }
+  }
+  .a2ui-head .kind-tag {
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--a2ui-primary, var(--accent));
+    color: white;
+    font-size: 9px;
+  }
+  .a2ui-head .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    opacity: 0.6;
+  }
+  .a2ui-body { padding: 10px 12px; }
+  .a2ui-resolved-note {
+    padding: 5px 10px;
+    border-top: 1px solid var(--divider);
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    background: rgba(0,0,0,0.025);
+  }
+  @media (prefers-color-scheme: dark) {
+    .a2ui-resolved-note { background: rgba(255,255,255,0.04); }
+  }
+  .a2ui-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 9px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--md-table-border);
+    background: rgba(0,0,0,0.018);
+  }
+  @media (prefers-color-scheme: dark) {
+    .a2ui-card { background: rgba(255,255,255,0.025); }
+  }
+  .a2ui-col { display: flex; flex-direction: column; }
+  .a2ui-row { display: flex; flex-direction: row; flex-wrap: wrap; }
+  .a2ui-spacer { display: block; min-height: 6px; }
+  .a2ui-divider { border: none; border-top: 1px solid var(--divider); margin: 4px 0; }
+  .a2ui-text { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
+  .a2ui-text.muted { color: var(--text-secondary); font-size: 12px; }
+  .a2ui-heading { font-weight: 600; line-height: 1.3; margin: 0; color: var(--text-primary); }
+  h1.a2ui-heading { font-size: 15px; }
+  h2.a2ui-heading { font-size: 14px; }
+  h3.a2ui-heading { font-size: 13px; }
+  h4.a2ui-heading { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .a2ui-md { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
+  .a2ui-md p { margin: 0 0 6px; }
+  .a2ui-md p:last-child { margin-bottom: 0; }
+  .a2ui-md code,
+  .a2ui-md-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11.5px;
+    background: var(--md-code-bg);
+    border: 1px solid var(--md-code-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .a2ui-md pre,
+  .a2ui-md-pre {
+    background: var(--md-pre-bg);
+    border: 1px solid var(--md-code-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 5px 0;
+    overflow-x: auto;
+    font-size: 11.5px;
+  }
+  .a2ui-md a { color: var(--accent); text-decoration: none; }
+  .a2ui-md a:hover { text-decoration: underline; }
+  .a2ui-img { max-width: 100%; border-radius: 6px; display: block; }
+  .a2ui-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 12px;
+  }
+  .a2ui-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+  }
+  .a2ui-field input[type="text"],
+  .a2ui-field input[type="email"],
+  .a2ui-field input[type="password"],
+  .a2ui-field input[type="number"],
+  .a2ui-field input[type="tel"],
+  .a2ui-field input[type="date"],
+  .a2ui-field input[type="datetime-local"],
+  .a2ui-field input[type="time"],
+  .a2ui-field textarea,
+  .a2ui-field select {
+    padding: 6px 9px;
+    border-radius: 7px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 12.5px;
+    outline: none;
+    box-shadow: var(--input-shadow);
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  .a2ui-field textarea { resize: vertical; min-height: 60px; }
+  .a2ui-field input:focus,
+  .a2ui-field textarea:focus,
+  .a2ui-field select:focus {
+    border-color: var(--input-focus-border);
+    box-shadow: 0 0 0 2.5px rgba(0,122,255,0.13);
+  }
+  .a2ui-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-primary);
+  }
+  .a2ui-check input { margin: 0; cursor: pointer; }
+  .a2ui-slider-row { display: flex; align-items: center; gap: 8px; }
+  .a2ui-slider-row input[type="range"] { flex: 1; accent-color: var(--a2ui-primary, var(--accent)); }
+  .a2ui-slider-val {
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+    font-size: 11px;
+    min-width: 24px;
+    text-align: right;
+  }
+  .a2ui-list { display: flex; flex-direction: column; gap: 6px; }
+  .a2ui-btn {
+    padding: 6px 13px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.12s, box-shadow 0.12s, transform 0.08s;
+    color: white;
+  }
+  .a2ui-btn:active:not(:disabled) { transform: translateY(0.5px); }
+  .a2ui-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .a2ui-btn.primary { background: var(--a2ui-primary, var(--accent)); }
+  .a2ui-btn.primary:hover:not(:disabled) { filter: brightness(1.07); box-shadow: 0 1px 6px rgba(0,122,255,0.22); }
+  .a2ui-btn.success { background: var(--dot-ok); }
+  .a2ui-btn.warn    { background: var(--dot-wait); }
+  .a2ui-btn.danger  { background: var(--dot-err); }
+  .a2ui-btn.success:hover:not(:disabled),
+  .a2ui-btn.warn:hover:not(:disabled),
+  .a2ui-btn.danger:hover:not(:disabled) { filter: brightness(1.07); }
+  .a2ui-unknown {
+    padding: 4px 8px;
+    border-radius: 5px;
+    background: var(--error-bg);
+    color: var(--error-text);
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .a2ui-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 7px 13px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.82);
+    color: white;
+    font-size: 12px;
+    z-index: 9999;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.32);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.18s;
+  }
+  .a2ui-toast.show { opacity: 1; }
 
   /* ── Activity indicator ─────────────────────────────────────────────────────────────── */
   #thinking {
@@ -2571,9 +2783,20 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
   }
 
+  // `render_ui` is rendered as a full A2UI bubble inline (window.__a2uiUpdate);
+  // a tool row alongside it would be redundant chrome, so we drop those.
+  function isRenderUiTool(title) {
+    return title === 'render_ui' || (typeof title === 'string' && title.indexOf('render_ui') === 0);
+  }
+
   window.__toolStart = function(sid, id, title, kind, rawInput, locations) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (isRenderUiTool(title)) {
+      s.suppressedToolIds = s.suppressedToolIds || new Set();
+      s.suppressedToolIds.add(id);
+      return;
+    }
     s.toolCount++;
     s.toolDetails.push({ id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null });
     const row = document.createElement('div');
@@ -2598,6 +2821,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   window.__toolUpdate = function(sid, id, title, status, rawOutput) {
     const s = sessions.get(sid);
     if (!s) return;
+    if (s.suppressedToolIds && s.suppressedToolIds.has(id)) return;
     const t = s.toolRows[id];
     if (!t) return;
     if (title) {
@@ -3165,6 +3389,633 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
     input.focus();
   }, true);
+
+  // ── A2UI v0.9 renderer ─────────────────────────────────────────────────
+  // Inline interactive surfaces produced by the agent's `render_ui` tool.
+  // Each envelope file (`~/.local/share/a2ui/<id>.json`) becomes one
+  // `.msg.ui` bubble. Button clicks IPC `a2ui_resolve` back to Rust, which
+  // writes the resolution into the file and unblocks the tool's bash poll.
+  const a2uiBlocks = new Map();        // fileId -> block state
+  const a2uiBubbleByFile = new Map();  // fileId -> wrapper element
+
+  // JSON-Pointer (RFC 6901)
+  function a2uiPtrParts(path) {
+    return path.split('/').slice(1).map(p => p.replace(/~1/g, '/').replace(/~0/g, '~'));
+  }
+  function a2uiPtrGet(model, path) {
+    if (!path || path === '/') return model;
+    const parts = a2uiPtrParts(path);
+    let cur = model;
+    for (const p of parts) {
+      if (cur == null || typeof cur !== 'object') return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  }
+  function a2uiPtrSet(model, path, value) {
+    if (!path || path === '/') return value;
+    const parts = a2uiPtrParts(path);
+    let cur = model;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const k = parts[i];
+      if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {};
+      cur = cur[k];
+    }
+    cur[parts[parts.length - 1]] = value;
+    return model;
+  }
+
+  // Function registry — every call entry the agent can put in a ValueRef.
+  const A2UI_FN = {
+    required: ({ value }) => value != null && value !== '' && !(Array.isArray(value) && value.length === 0),
+    email: ({ value }) => value == null || value === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value)),
+    numeric: ({ value }) => value == null || value === '' || !isNaN(Number(value)),
+    regex: ({ value, pattern }) => {
+      if (value == null || value === '') return true;
+      try { return new RegExp(String(pattern)).test(String(value)); } catch (e) { return false; }
+    },
+    length: ({ value, min, max }) => {
+      const len = String(value == null ? '' : value).length;
+      if (min != null && len < Number(min)) return false;
+      if (max != null && len > Number(max)) return false;
+      return true;
+    },
+    range: ({ value, min, max }) => {
+      const n = Number(value);
+      if (isNaN(n)) return false;
+      if (min != null && n < Number(min)) return false;
+      if (max != null && n > Number(max)) return false;
+      return true;
+    },
+    and: ({ values }) => Array.isArray(values) && values.every(v => !!v),
+    or:  ({ values }) => Array.isArray(values) && values.some(v => !!v),
+    not: ({ value }) => !value,
+    eq:  ({ a, b }) => a === b || String(a) === String(b),
+    neq: ({ a, b }) => !(a === b || String(a) === String(b)),
+    formatString: ({ template, args }) => String(template == null ? '' : template).replace(/\{(\w+)\}/g, (_, k) => {
+      const m = args || {};
+      return m[k] != null ? String(m[k]) : '';
+    }),
+    formatDate: ({ value, locale }) => {
+      if (value == null || value === '') return '';
+      const d = new Date(value);
+      if (isNaN(d.getTime())) return String(value);
+      try { return d.toLocaleDateString(typeof locale === 'string' ? locale : undefined); }
+      catch (e) { return d.toISOString().slice(0, 10); }
+    },
+    formatNumber: ({ value, decimals, locale }) => {
+      const n = Number(value);
+      if (isNaN(n)) return '';
+      try {
+        return new Intl.NumberFormat(
+          typeof locale === 'string' ? locale : undefined,
+          decimals != null ? { minimumFractionDigits: Number(decimals), maximumFractionDigits: Number(decimals) } : {}
+        ).format(n);
+      } catch (e) {
+        return decimals != null ? n.toFixed(Number(decimals)) : String(n);
+      }
+    },
+    formatCurrency: ({ value, currency, locale }) => {
+      const n = Number(value);
+      if (isNaN(n)) return '';
+      try {
+        return new Intl.NumberFormat(typeof locale === 'string' ? locale : undefined, {
+          style: 'currency',
+          currency: typeof currency === 'string' ? currency : 'USD',
+        }).format(n);
+      } catch (e) { return String(n); }
+    },
+    // openUrl routes through Rust so we can open the URL as a new browser tab
+    // instead of trying to open a window from the sidebar webview.
+    openUrl: ({ url }) => {
+      const u = String(url == null ? '' : url);
+      if (!/^(https?:\/\/|mailto:)/i.test(u)) return false;
+      window.ipc.postMessage(JSON.stringify({ type: 'a2ui_open_url', url: u }));
+      return true;
+    },
+  };
+
+  function a2uiResolveValue(v, scope) {
+    if (v == null) return v;
+    if (typeof v !== 'object') return v;
+    if (Array.isArray(v)) return v.map(x => a2uiResolveValue(x, scope));
+    if (typeof v.path === 'string') {
+      const p = v.path;
+      if (p.charAt(0) === '/') return a2uiPtrGet(scope.root, p);
+      if (scope.local != null) return a2uiPtrGet(scope.local, '/' + p);
+      return undefined;
+    }
+    if (typeof v.call === 'string') {
+      const fn = A2UI_FN[v.call];
+      if (!fn) return undefined;
+      const args = {};
+      const rawArgs = v.args || {};
+      for (const k in rawArgs) args[k] = a2uiResolveValue(rawArgs[k], scope);
+      try { return fn(args); } catch (e) { return undefined; }
+    }
+    return v;
+  }
+
+  function a2uiPathOf(v) {
+    if (v && typeof v === 'object' && typeof v.path === 'string' && v.path.charAt(0) === '/') {
+      return v.path;
+    }
+    return null;
+  }
+
+  // Minimal safe Markdown — escape-then-allow-list. Sufficient for Markdown
+  // component content; we don't want to expose unrestricted innerHTML here.
+  function a2uiEscapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      c === '&' ? '&amp;' :
+      c === '<' ? '&lt;' :
+      c === '>' ? '&gt;' :
+      c === '"' ? '&quot;' : '&#39;');
+  }
+  function a2uiRenderMarkdown(src) {
+    let s = a2uiEscapeHtml(src);
+    const blocks = [];
+    s = s.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+      const idx = blocks.push('<pre class="a2ui-md-pre" data-lang="' + lang + '"><code>' + code + '</code></pre>') - 1;
+      return ' CB' + idx + ' ';
+    });
+    s = s.replace(/`([^`\n]+?)`/g, '<code class="a2ui-md-code">$1</code>');
+    s = s.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
+    s = s.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
+    s = s.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
+    s = s.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+    s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+|mailto:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    s = s.replace(/(?:^- .+(?:\n|$))+/gm, m => {
+      const items = m.trim().split('\n').map(l => l.replace(/^-\s+/, ''));
+      return '<ul>' + items.map(i => '<li>' + i + '</li>').join('') + '</ul>';
+    });
+    s = s.replace(/(?:^\d+\.\s.+(?:\n|$))+/gm, m => {
+      const items = m.trim().split('\n').map(l => l.replace(/^\d+\.\s+/, ''));
+      return '<ol>' + items.map(i => '<li>' + i + '</li>').join('') + '</ol>';
+    });
+    s = s.split(/\n{2,}/).map(p => {
+      const t = p.trim();
+      if (!t) return '';
+      if (/^<(h\d|ul|ol|pre|p)\b/.test(t)) return t;
+      return '<p>' + t.replace(/\n/g, '<br>') + '</p>';
+    }).join('');
+    s = s.replace(/ CB(\d+) /g, (_, idx) => blocks[Number(idx)] || '');
+    return s;
+  }
+
+  function a2uiApplyMessages(block, messages) {
+    for (const msg of messages || []) {
+      if (msg.createSurface) {
+        const s = msg.createSurface;
+        if (s.surfaceId != null) block.surfaceId = s.surfaceId;
+        if (s.catalogId != null) block.catalogId = s.catalogId;
+        if (s.theme != null) block.theme = s.theme;
+      } else if (msg.updateComponents) {
+        const arr = msg.updateComponents.components || [];
+        for (const c of arr) {
+          if (c && typeof c.id === 'string') block.componentsMap.set(c.id, c);
+        }
+      } else if (msg.updateDataModel) {
+        const u = msg.updateDataModel;
+        if (!u.path || u.path === '/') {
+          block.dataModel = (u.value == null ? {} : u.value);
+        } else if (u.value === undefined) {
+          try { a2uiPtrSet(block.dataModel, u.path, undefined); } catch (e) {}
+        } else {
+          a2uiPtrSet(block.dataModel, u.path, u.value);
+        }
+      } else if (msg.deleteSurface) {
+        block.componentsMap.clear();
+        block.dataModel = {};
+      }
+    }
+    block.version++;
+  }
+
+  function a2uiToast(text) {
+    const el = document.createElement('div');
+    el.className = 'a2ui-toast';
+    el.textContent = text;
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 250);
+    }, 2400);
+  }
+
+  // Builds a fresh DOM tree from `def` and its children-by-id refs in
+  // `block.componentsMap`. Re-rendered on every mutation — components are
+  // small enough (typical surface: <20 nodes) that we don't need a smart diff.
+  function a2uiRenderNode(block, def, scope) {
+    if (!def) return document.createComment('missing');
+    const type = typeof def.component === 'string' ? def.component : '';
+    const r = v => a2uiResolveValue(v, scope);
+    const text = r(def.text);
+    const label = r(def.label);
+    const placeholder = r(def.placeholder);
+    const valueRaw = r(def.value);
+    const path = a2uiPathOf(def.value);
+
+    function children() {
+      const out = [];
+      if (typeof def.child === 'string') {
+        const c = block.componentsMap.get(def.child);
+        if (c) out.push(c);
+      }
+      if (Array.isArray(def.children)) {
+        for (const id of def.children) {
+          if (typeof id === 'string') {
+            const c = block.componentsMap.get(id);
+            if (c) out.push(c);
+          }
+        }
+      }
+      return out;
+    }
+    function appendKids(el) {
+      for (const c of children()) el.appendChild(a2uiRenderNode(block, c, scope));
+    }
+    function writeBinding(p, v) {
+      a2uiPtrSet(block.dataModel, p, v);
+      block.version++;
+      a2uiRerender(block);
+    }
+
+    if (type === 'Card') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-card';
+      appendKids(el);
+      return el;
+    }
+    if (type === 'Column') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-col';
+      if (def.gap != null) el.style.gap = def.gap + 'px';
+      if (typeof def.align === 'string') el.style.alignItems = def.align;
+      appendKids(el);
+      return el;
+    }
+    if (type === 'Row') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-row';
+      if (def.gap != null) el.style.gap = def.gap + 'px';
+      if (typeof def.align === 'string') el.style.alignItems = def.align;
+      if (typeof def.justify === 'string') el.style.justifyContent = def.justify;
+      appendKids(el);
+      return el;
+    }
+    if (type === 'Spacer') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-spacer';
+      if (def.size != null) el.style.minHeight = def.size + 'px';
+      return el;
+    }
+    if (type === 'Divider') {
+      const h = document.createElement('hr');
+      h.className = 'a2ui-divider';
+      return h;
+    }
+    if (type === 'Text') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-text' + (def.muted ? ' muted' : '');
+      el.textContent = text == null ? '' : (typeof text === 'object' ? JSON.stringify(text) : String(text));
+      return el;
+    }
+    if (type === 'Heading') {
+      const lvl = Math.min(Math.max(1, Number(def.level == null ? 2 : def.level)), 4);
+      const el = document.createElement('h' + lvl);
+      el.className = 'a2ui-heading';
+      el.textContent = String(text == null ? '' : text);
+      return el;
+    }
+    if (type === 'Markdown') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-md';
+      el.innerHTML = a2uiRenderMarkdown(String(text == null ? '' : text));
+      return el;
+    }
+    if (type === 'Image') {
+      const src = String(r(def.src) == null ? '' : r(def.src));
+      const img = document.createElement('img');
+      img.className = 'a2ui-img';
+      img.loading = 'lazy';
+      if (/^https?:\/\//i.test(src)) img.src = src;
+      img.alt = String(r(def.alt) == null ? '' : r(def.alt));
+      if (def.width  != null) img.style.width  = def.width  + 'px';
+      if (def.height != null) img.style.height = def.height + 'px';
+      return img;
+    }
+    if (type === 'Button') {
+      const btn = document.createElement('button');
+      btn.className = 'a2ui-btn ' + (typeof def.kind === 'string' ? def.kind : 'primary');
+      if (def.disabled) btn.disabled = true;
+      btn.textContent = String(text == null ? (def.label == null ? 'Button' : def.label) : text);
+      btn.addEventListener('click', () => {
+        if (block.resolved) return;
+        const checks = Array.isArray(def.checks) ? def.checks : [];
+        for (const c of checks) {
+          const ok = r(c);
+          if (!ok) {
+            const msg = c && typeof c === 'object' && c.message != null ? String(c.message) : 'validation failed';
+            a2uiToast(msg);
+            return;
+          }
+        }
+        const action = def.action || {};
+        if (action.openUrl) {
+          a2uiResolveValue({ call: 'openUrl', args: { url: action.openUrl } }, scope);
+          return;
+        }
+        const ev = action.event;
+        if (!ev || !ev.name) return;
+        const context = {};
+        for (const k in (ev.context || {})) context[k] = r(ev.context[k]);
+        window.ipc.postMessage(JSON.stringify({
+          type: 'a2ui_resolve',
+          file_id: block.fileId,
+          action: {
+            name: ev.name,
+            sourceComponentId: typeof def.id === 'string' ? def.id : undefined,
+            context,
+            dataModel: block.dataModel,
+          },
+        }));
+        // Optimistic gray-out — watcher re-confirms via __a2uiResolved.
+        block.resolved = true;
+        block.resolutionLabel = ev.name;
+        a2uiRerender(block);
+      });
+      return btn;
+    }
+    if (type === 'TextField') {
+      const wrap = document.createElement('label');
+      wrap.className = 'a2ui-field';
+      if (label != null && label !== '') {
+        const lbl = document.createElement('span');
+        lbl.className = 'a2ui-label';
+        lbl.textContent = String(label);
+        wrap.appendChild(lbl);
+      }
+      if (def.multiline) {
+        const ta = document.createElement('textarea');
+        if (def.rows != null) ta.rows = Number(def.rows);
+        if (placeholder != null) ta.placeholder = String(placeholder);
+        ta.value = valueRaw == null ? '' : String(valueRaw);
+        ta.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
+        wrap.appendChild(ta);
+      } else {
+        const inp = document.createElement('input');
+        inp.type = typeof def.type === 'string' && ['password','email','number','tel'].indexOf(def.type) >= 0 ? def.type : 'text';
+        if (placeholder != null) inp.placeholder = String(placeholder);
+        inp.value = valueRaw == null ? '' : String(valueRaw);
+        inp.addEventListener('input', e => {
+          if (!path) return;
+          const raw = e.currentTarget.value;
+          const v = def.type === 'number' ? (raw === '' ? null : Number(raw)) : raw;
+          writeBinding(path, v);
+        });
+        wrap.appendChild(inp);
+      }
+      return wrap;
+    }
+    if (type === 'CheckBox') {
+      const wrap = document.createElement('label');
+      wrap.className = 'a2ui-check';
+      const inp = document.createElement('input');
+      inp.type = 'checkbox';
+      inp.checked = !!valueRaw;
+      inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.checked));
+      const sp = document.createElement('span');
+      sp.textContent = String(label == null ? '' : label);
+      wrap.appendChild(inp);
+      wrap.appendChild(sp);
+      return wrap;
+    }
+    if (type === 'Slider') {
+      const wrap = document.createElement('label');
+      wrap.className = 'a2ui-field a2ui-slider';
+      if (label != null && label !== '') {
+        const lbl = document.createElement('span');
+        lbl.className = 'a2ui-label';
+        lbl.textContent = String(label);
+        wrap.appendChild(lbl);
+      }
+      const row = document.createElement('div');
+      row.className = 'a2ui-slider-row';
+      const inp = document.createElement('input');
+      inp.type = 'range';
+      if (def.min  != null) inp.min  = String(def.min);
+      if (def.max  != null) inp.max  = String(def.max);
+      if (def.step != null) inp.step = String(def.step);
+      inp.value = valueRaw != null ? String(valueRaw) : (def.min != null ? String(def.min) : '0');
+      inp.addEventListener('input', e => path && writeBinding(path, Number(e.currentTarget.value)));
+      const out = document.createElement('output');
+      out.className = 'a2ui-slider-val';
+      out.textContent = inp.value;
+      row.appendChild(inp);
+      row.appendChild(out);
+      wrap.appendChild(row);
+      return wrap;
+    }
+    if (type === 'ChoicePicker') {
+      const wrap = document.createElement('label');
+      wrap.className = 'a2ui-field';
+      if (label != null && label !== '') {
+        const lbl = document.createElement('span');
+        lbl.className = 'a2ui-label';
+        lbl.textContent = String(label);
+        wrap.appendChild(lbl);
+      }
+      const sel = document.createElement('select');
+      const choices = Array.isArray(def.choices) ? def.choices : [];
+      for (const c of choices) {
+        const opt = document.createElement('option');
+        if (c != null && typeof c === 'object') {
+          const lbl2 = r(c.label);
+          const val  = r(c.value);
+          opt.value = String(val == null ? '' : val);
+          opt.textContent = String(lbl2 == null ? (val == null ? '' : val) : lbl2);
+        } else {
+          opt.value = String(c);
+          opt.textContent = String(c);
+        }
+        if (valueRaw != null && String(valueRaw) === opt.value) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      sel.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
+      wrap.appendChild(sel);
+      return wrap;
+    }
+    if (type === 'DateTimeInput') {
+      const mode = typeof def.mode === 'string' ? def.mode : 'date';
+      const wrap = document.createElement('label');
+      wrap.className = 'a2ui-field';
+      if (label != null && label !== '') {
+        const lbl = document.createElement('span');
+        lbl.className = 'a2ui-label';
+        lbl.textContent = String(label);
+        wrap.appendChild(lbl);
+      }
+      const inp = document.createElement('input');
+      inp.type = mode === 'datetime' ? 'datetime-local' : (mode === 'time' ? 'time' : 'date');
+      inp.value = valueRaw != null ? String(valueRaw) : '';
+      if (def.min != null) inp.min = String(def.min);
+      if (def.max != null) inp.max = String(def.max);
+      inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
+      wrap.appendChild(inp);
+      return wrap;
+    }
+    if (type === 'List') {
+      const el = document.createElement('div');
+      el.className = 'a2ui-list';
+      const ch = def.children;
+      if (ch && typeof ch === 'object' && !Array.isArray(ch) && typeof ch.path === 'string' && typeof ch.componentId === 'string') {
+        const items = r({ path: ch.path });
+        const tpl = block.componentsMap.get(ch.componentId);
+        if (Array.isArray(items) && tpl) {
+          for (const item of items) {
+            el.appendChild(a2uiRenderNode(block, tpl, { root: scope.root, local: item }));
+          }
+          return el;
+        }
+      }
+      appendKids(el);
+      return el;
+    }
+    const unk = document.createElement('div');
+    unk.className = 'a2ui-unknown';
+    unk.textContent = '[unsupported component: ' + (type || '?') + ']';
+    return unk;
+  }
+
+  function a2uiRerender(block) {
+    const wrap = a2uiBubbleByFile.get(block.fileId);
+    if (!wrap) return;
+    wrap.classList.toggle('resolved', !!block.resolved);
+    if (block.theme && typeof block.theme === 'object' && typeof block.theme.primaryColor === 'string') {
+      wrap.style.setProperty('--a2ui-primary', block.theme.primaryColor);
+    }
+    const head = wrap.querySelector('.a2ui-head');
+    if (head) {
+      head.innerHTML = '';
+      const tag = document.createElement('span');
+      tag.className = 'kind-tag';
+      tag.textContent = 'ui';
+      head.appendChild(tag);
+      const agentName = block.theme && typeof block.theme.agentDisplayName === 'string' ? block.theme.agentDisplayName : null;
+      if (agentName) {
+        const sp = document.createElement('span');
+        sp.textContent = agentName;
+        head.appendChild(sp);
+      }
+      if (block.surfaceId) {
+        const sp = document.createElement('span');
+        sp.className = 'mono';
+        sp.textContent = block.surfaceId;
+        head.appendChild(sp);
+      }
+    }
+    const body = wrap.querySelector('.a2ui-body');
+    if (body) {
+      body.innerHTML = '';
+      const rootDef = block.componentsMap.get('root');
+      if (rootDef) {
+        body.appendChild(a2uiRenderNode(block, rootDef, { root: block.dataModel, local: null }));
+      } else {
+        const empty = document.createElement('div');
+        empty.className = 'a2ui-text muted';
+        empty.textContent = '(no root component yet)';
+        body.appendChild(empty);
+      }
+    }
+    let note = wrap.querySelector('.a2ui-resolved-note');
+    if (block.resolved && block.resolutionLabel) {
+      if (!note) {
+        note = document.createElement('div');
+        note.className = 'a2ui-resolved-note';
+        wrap.querySelector('.msg-bubble').appendChild(note);
+      }
+      note.textContent = '→ ' + block.resolutionLabel;
+    } else if (note) {
+      note.remove();
+    }
+  }
+
+  function a2uiEnsureBlock(sid, fileId) {
+    let block = a2uiBlocks.get(fileId);
+    if (block) return block;
+    const s = sessions.get(sid);
+    if (!s) return null;
+    block = {
+      fileId,
+      sid,
+      surfaceId: null,
+      catalogId: null,
+      theme: {},
+      componentsMap: new Map(),
+      dataModel: {},
+      awaitEvents: [],
+      resolved: false,
+      resolutionLabel: null,
+      version: 0,
+    };
+    a2uiBlocks.set(fileId, block);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ui a2ui-block';
+    const label = document.createElement('div');
+    label.className = 'msg-label';
+    const who = document.createElement('span');
+    who.className = 'msg-who';
+    who.textContent = 'UI';
+    const time = document.createElement('span');
+    time.className = 'msg-time';
+    time.textContent = fmtTime(new Date());
+    label.appendChild(who);
+    label.appendChild(time);
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    const head = document.createElement('header');
+    head.className = 'a2ui-head';
+    const body = document.createElement('div');
+    body.className = 'a2ui-body';
+    bubble.appendChild(head);
+    bubble.appendChild(body);
+    wrap.appendChild(label);
+    wrap.appendChild(bubble);
+    s.container.insertBefore(wrap, s.thinking);
+    a2uiBubbleByFile.set(fileId, wrap);
+    if (s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
+    return block;
+  }
+
+  window.__a2uiUpdate = function(sid, fileId, payload) {
+    const block = a2uiEnsureBlock(sid, fileId);
+    if (!block) return;
+    if (Array.isArray(payload.await_events)) block.awaitEvents = payload.await_events;
+    a2uiApplyMessages(block, payload.messages || []);
+    if (payload.status === 'resolved' || payload.status === 'expired' || payload.status === 'cancelled') {
+      block.resolved = true;
+      const resName = payload.resolution && typeof payload.resolution === 'object' ? payload.resolution.name : payload.status;
+      block.resolutionLabel = resName || payload.status;
+    }
+    a2uiRerender(block);
+  };
+
+  window.__a2uiResolved = function(sid, fileId, payload) {
+    const block = a2uiBlocks.get(fileId);
+    if (!block) return;
+    block.resolved = true;
+    const resName = payload && typeof payload === 'object' && payload.resolution && typeof payload.resolution === 'object'
+      ? payload.resolution.name
+      : (payload && payload.status) || 'resolved';
+    block.resolutionLabel = resName;
+    a2uiRerender(block);
+  };
 
   // ── Inject prompt (from Rust "Ask AI") ───────────────────────────────
   window.__injectPrompt = function(text) {
