@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.7.0] - 2026-05-14
+
+### 📋 Release Summary
+
+This release introduces persistent chat session history and enhanced sidebar navigation, featuring new keyboard shortcuts, slash command autocomplete, and a welcome screen for empty sessions (69d34008, 60b191ac, d41e1935). macOS users will benefit from improved native integration, including local network permissions, synchronous JS dialogs, and more reliable window focus management (9e2a5728, 80408d66, 73ce5445). Stability is further bolstered by refined input handling, optimized memory polling, and several fixes to message processing and UI responsiveness (7bdb182f, 92110051, 7fd6203b).
+
+
+### ✨ New Features & Enhancements
+
+- **macos**: add location and local network permissions `9e2a5728`
+- **macos**: implement native synchronous JS dialogs `80408d66`
+- **sidebar**: increase session limit and add tab navigation `1e41bd57`
+- **mcp**: enhance DOM interaction reliability and tool diagnostics `265b9182`
+- **ui**: add Ctrl+J shortcut for newlines `d03dc99b`
+- **macos**: restore sidebar focus on app reactivation `73ce5445`
+- **acp**: enforce message history limits on load and push `d3f7d892`
+- **acp**: implement persistent chat session history `69d34008`
+- **webkit**: enable WebAuthn and passkey support `05f413f9`
+- **mcp**: auto-restore hibernated tabs for commands `cf33659e`
+- **sidebar**: add Ctrl+J shortcut for newlines `52939423`
+- **sidebar**: track per-message tool details `814d428c`
+- **acp**: persist and resume session ids `4d0e8e4d`
+- **sidebar**: add welcome screen for empty sessions `d41e1935`
+- **sidebar**: globalize session cycling shortcut `bfcf0eba`
+- **ai**: implement persistent history for sidebar prompts `f67a0a53`
+- **sidebar**: add keyboard shortcuts for sessions `a268de74`
+- **sidebar**: isolate prompt history and session state `c7c92158`
+- **sidebar**: add command output card display `8fb39c58`
+- **sidebar**: add slash command autocomplete `605b91ac`
+
+### 🔧 Improvements & Optimizations
+
+- **main**: throttle memory polling and lazy-load sessions `7bdb182f`
+- **mcp**: remove unused tool router field `4b194ec5`
+- **github**: add automated pull request briefing job `659c8a8b`
+- **sidebar**: unify prompt history across sessions `c4cca880`
+
+### 🐛 Bug Fixes & Stability
+
+- **macos**: prevent duplicate text input in WKWebView `92110051`
+- **sidebar**: prevent message send on modified Enter `c1d6a83a`
+- **macos**: resign key window on app deactivation `711c52fb`
+- **sidebar**: improve Ctrl+J newline behavior `95333fd2`
+- **macos**: use NSWorkspace PID for active state check `54c1790d`
+- **build**: correct bundle identifier and signing `6aeafab1`
+- **macos**: replace cached focus state with active app query `60c81d85`
+- **sidebar**: auto-close unclosed markdown fences `6b1ebb52`
+- **acp**: implement force-kill for wedged agents `ddd99e4c`
+- **acp**: extend idle timeout and improve error reporting `b8b6532c`
+- **sidebar**: decouple agent busy state from spinner UI `49ea687c`
+- **sidebar**: restore caret position on session switch `017caa04`
+- **sidebar**: enable parallel message processing and cleanup legacy files `7fd6203b`
+- **ui**: delegate window dragging to native macOS `5b5735a2`
+- **input**: prevent quit trigger when ctrl is held `6f04c5a6`
+- **sanitize**: handle # before ? in URLs `e258c66a`
+
+### 🔄 Other Changes
+
+4 maintenance, dependency, and tooling updates not listed individually.
+
 ## [0.6.0] - 2026-04-21
 
 ### 📋 Release Summary
