@@ -232,13 +232,18 @@ fn ai_prompt_history_path() -> PathBuf {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpMessage {
-    /// "user" | "agent" | "error"
+    /// "user" | "agent" | "error" | "ui"
     pub role: String,
-    /// Raw text. Markdown for agent, plain otherwise.
+    /// Raw text. Markdown for agent, plain otherwise. For role="ui" this
+    /// holds the envelope file id (so replay can rebuild the bubble).
     pub text: String,
     /// Unix epoch milliseconds at the time the message was committed.
     #[serde(default)]
     pub ts: u64,
+    /// For role="ui": the full A2UI envelope body so we can re-render the
+    /// surface bubble on cold-start. None for all other roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2ui: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -946,6 +946,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     font-size: 11.5px;
   }
   .a2ui-md a { color: var(--accent); text-decoration: none; }
+  .a2ui-md ul, .a2ui-md ol { margin: 4px 0 6px 18px; padding: 0; }
+  .a2ui-md li { margin: 2px 0; }
+  .a2ui-md blockquote,
+  .a2ui-md-quote {
+    border-left: 3px solid var(--md-blockquote);
+    margin: 6px 0;
+    padding: 3px 0 3px 10px;
+    color: var(--text-secondary);
+  }
   .a2ui-md a:hover { text-decoration: underline; }
   .a2ui-img { max-width: 100%; border-radius: 6px; display: block; }
   .a2ui-field {
@@ -3646,8 +3655,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   // Replay persisted messages on cold-start. Rust calls this once per session
   // on sidebar bootstrap with the full message log restored from disk.
-  // Each entry: { role: 'user'|'agent'|'error', text: string, ts?: number }.
-  // Skips toolDetails/images — those aren't persisted (live-only).
+  // Entries: { role: 'user'|'agent'|'error'|'ui', text: string, ts?: number,
+  //            a2ui?: <envelope-body> }. Skips toolDetails/images — those
+  // aren't persisted (live-only).
   window.__replayMessages = function(sid, msgs) {
     const s = sessions.get(sid);
     if (!s || !Array.isArray(msgs) || msgs.length === 0) return;
@@ -3662,8 +3672,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (!bubble) continue;
         const cmdObj = tryParseCommandJson(text);
         bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
-        // 0 tools, empty details — replay never carries tool history.
         finishAgentBubble(s, bubble, text, 0, []);
+      } else if (role === 'ui' && m && m.a2ui) {
+        // Rebuild the A2UI bubble from the persisted envelope body. Buttons
+        // are inert if the surface was already resolved — the bash poll's
+        // long gone — but pending-status surfaces can still resolve if the
+        // user clicks (the queue file is still on disk).
+        window.__a2uiUpdate(sid, text, m.a2ui);
       }
     }
     if (sid === activeSid) { updateWelcome(); scrollToBottom(); }
@@ -4281,18 +4296,31 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   function a2uiRenderMarkdown(src) {
     let s = a2uiEscapeHtml(src);
+    // Use a placeholder that can't collide with prose ("CB0" did, as you
+    // saw at end-of-input where the space-bounded marker matcher failed).
+    //   are control chars escapeHtml leaves alone and that
+    // never appear in normal text.
     const blocks = [];
     s = s.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
       const idx = blocks.push('<pre class="a2ui-md-pre" data-lang="' + lang + '"><code>' + code + '</code></pre>') - 1;
-      return ' CB' + idx + ' ';
+      return 'CB' + idx + '';
     });
     s = s.replace(/`([^`\n]+?)`/g, '<code class="a2ui-md-code">$1</code>');
     s = s.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
     s = s.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>');
     s = s.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>');
     s = s.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>');
+    // Blockquote — leading ">", optionally multiple lines.
+    s = s.replace(/(?:^&gt;\s?.*(?:\n|$))+/gm, m => {
+      const inner = m.split('\n').map(l => l.replace(/^&gt;\s?/, '')).join('<br>').replace(/(<br>)+$/, '');
+      return '<blockquote class="a2ui-md-quote">' + inner + '</blockquote>';
+    });
+    // Bold: ** ** and __ __
     s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+    s = s.replace(/__([^_\n]+?)__/g, '<strong>$1</strong>');
+    // Italic: * * (not **) and _ _ (not __)
+    s = s.replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^_\w])_([^_\n]+?)_(?!_)/g, '$1<em>$2</em>');
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+|mailto:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\)/g,
       '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     s = s.replace(/(?:^- .+(?:\n|$))+/gm, m => {
@@ -4306,10 +4334,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s = s.split(/\n{2,}/).map(p => {
       const t = p.trim();
       if (!t) return '';
-      if (/^<(h\d|ul|ol|pre|p)\b/.test(t)) return t;
+      if (/^<(h\d|ul|ol|pre|p|blockquote)\b/.test(t)) return t;
       return '<p>' + t.replace(/\n/g, '<br>') + '</p>';
     }).join('');
-    s = s.replace(/ CB(\d+) /g, (_, idx) => blocks[Number(idx)] || '');
+    // Restore code-fence blocks (uses unambiguous control-char markers).
+    s = s.replace(/CB(\d+)/g, (_, idx) => blocks[Number(idx)] || '');
     return s;
   }
 
