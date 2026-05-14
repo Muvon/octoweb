@@ -1431,6 +1431,278 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-secondary);
   }
 
+  /* ── Beautiful per-command renderers ───────────────────────────────── */
+  /* Switch cards: model, role, effort, loglevel */
+  .cmd-switch {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--agent-bg);
+    border: 1px solid var(--agent-border);
+    border-radius: 10px;
+  }
+  .cmd-switch-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .cmd-switch.no-change .cmd-switch-icon {
+    background: var(--text-tertiary);
+  }
+  .cmd-switch-body { flex: 1; min-width: 0; }
+  .cmd-switch-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 2px;
+  }
+  .cmd-switch-flow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .cmd-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(0, 122, 255, 0.10);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: 'SF Mono', Monaco, monospace;
+  }
+  .cmd-pill.muted {
+    background: var(--divider);
+    color: var(--text-secondary);
+    text-decoration: line-through;
+    text-decoration-color: var(--text-tertiary);
+  }
+  .cmd-arrow {
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+  .cmd-current {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-left: 4px;
+  }
+
+  /* Stat grid: info, report */
+  .cmd-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 6px;
+  }
+  .cmd-stat {
+    background: var(--agent-bg);
+    border: 1px solid var(--agent-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .cmd-stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cmd-stat-val {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cmd-stat.accent .cmd-stat-val { color: var(--accent); }
+  .cmd-stat.success .cmd-stat-val { color: #34c759; }
+  .cmd-stat-sub {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    margin-top: 1px;
+  }
+  .cmd-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 10px 0 6px;
+  }
+
+  /* Chip list: help, available_levels, etc. */
+  .cmd-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .cmd-chip {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--agent-bg);
+    border: 1px solid var(--agent-border);
+    color: var(--text-primary);
+    font-size: 11.5px;
+    font-family: 'SF Mono', Monaco, monospace;
+  }
+  .cmd-chip.active {
+    background: rgba(0, 122, 255, 0.12);
+    border-color: rgba(0, 122, 255, 0.30);
+    color: var(--accent);
+  }
+
+  /* Item list: prompts, workflows, run commands, skills, mcp servers */
+  .cmd-items {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .cmd-item-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 10px;
+    background: var(--agent-bg);
+    border: 1px solid var(--agent-border);
+    border-radius: 8px;
+  }
+  .cmd-item-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    font-family: 'SF Mono', Monaco, monospace;
+    flex-shrink: 0;
+    min-width: 110px;
+  }
+  .cmd-item-desc {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    flex: 1;
+  }
+  .cmd-item-meta {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+
+  /* Status badges */
+  .cmd-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .cmd-badge.ok      { background: rgba(52, 199, 89, 0.16);  color: #1f8f3a; }
+  .cmd-badge.warn    { background: rgba(255, 149, 0, 0.16);  color: #b65b00; }
+  .cmd-badge.err     { background: rgba(255, 59, 48, 0.16);  color: #c1271d; }
+  .cmd-badge.info    { background: rgba(0, 122, 255, 0.14);  color: var(--accent); }
+  .cmd-badge.muted   { background: var(--divider);           color: var(--text-secondary); }
+  @media (prefers-color-scheme: dark) {
+    .cmd-badge.ok    { color: #69db7c; }
+    .cmd-badge.warn  { color: #ffb454; }
+    .cmd-badge.err   { color: #ff6961; }
+  }
+
+  /* Toast/result line */
+  .cmd-toast {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(52, 199, 89, 0.10);
+    border: 1px solid rgba(52, 199, 89, 0.25);
+    color: var(--text-primary);
+    font-size: 12.5px;
+  }
+  .cmd-toast.err {
+    background: rgba(255, 59, 48, 0.10);
+    border-color: rgba(255, 59, 48, 0.25);
+  }
+  .cmd-toast-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #34c759;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .cmd-toast.err .cmd-toast-icon { background: #ff3b30; }
+
+  /* Empty state */
+  .cmd-empty {
+    padding: 12px;
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  /* Tools list inline (mcp servers) */
+  .cmd-tools-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 4px;
+  }
+  .cmd-tool-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--divider);
+    color: var(--text-secondary);
+    font-family: 'SF Mono', Monaco, monospace;
+  }
+
+  /* Markdown passthrough wrapper */
+  .cmd-md {
+    font-size: 12.5px;
+  }
+  .cmd-md table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+  }
+  .cmd-md th, .cmd-md td {
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--divider);
+    text-align: left;
+  }
+  .cmd-md th {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
   #input-row {
     display: flex;
     align-items: center;
@@ -2759,8 +3031,340 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return html + '</table>';
   }
 
+  // ── Per-command beautiful renderers ─────────────────────────────────
+  // Each renderer returns inner HTML for the body of the .cmd-output card.
+  // Schemas were captured by probing `octomind acp assistant:general`.
+  // Unknown command_type falls back to the generic key/value table.
+  function fmtTokens(n) {
+    if (n == null) return '0';
+    n = Number(n);
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  }
+  function fmtCost(n) {
+    var v = Number(n) || 0;
+    if (v === 0) return '$0';
+    if (v < 0.01) return '$' + v.toFixed(5);
+    return '$' + v.toFixed(4);
+  }
+  function fmtMs(ms) {
+    var v = Number(ms) || 0;
+    if (v < 1000) return v + 'ms';
+    if (v < 60000) return (v / 1000).toFixed(1) + 's';
+    if (v < 3600000) return Math.floor(v / 60000) + 'm ' + Math.floor((v % 60000) / 1000) + 's';
+    return Math.floor(v / 3600000) + 'h ' + Math.floor((v % 3600000) / 60000) + 'm';
+  }
+  function statTile(label, val, opts) {
+    opts = opts || {};
+    var cls = 'cmd-stat' + (opts.cls ? ' ' + opts.cls : '');
+    var sub = opts.sub ? '<div class="cmd-stat-sub">' + escapeHtml(opts.sub) + '</div>' : '';
+    return '<div class="' + cls + '">' +
+      '<div class="cmd-stat-label">' + escapeHtml(label) + '</div>' +
+      '<div class="cmd-stat-val">' + escapeHtml(String(val)) + '</div>' + sub +
+      '</div>';
+  }
+  function switchCard(label, oldVal, newVal, changed, iconLetter) {
+    var icon = iconLetter || (label.charAt(0).toUpperCase());
+    var flow;
+    if (changed && oldVal && newVal && oldVal !== newVal) {
+      flow = '<span class="cmd-pill muted">' + escapeHtml(String(oldVal)) + '</span>' +
+             '<span class="cmd-arrow">→</span>' +
+             '<span class="cmd-pill">' + escapeHtml(String(newVal)) + '</span>';
+    } else {
+      var cur = newVal || oldVal || '—';
+      flow = '<span class="cmd-pill">' + escapeHtml(String(cur)) + '</span>' +
+             (changed ? '' : '<span class="cmd-current">no change</span>');
+    }
+    return '<div class="cmd-switch' + (changed ? '' : ' no-change') + '">' +
+      '<div class="cmd-switch-icon">' + escapeHtml(icon) + '</div>' +
+      '<div class="cmd-switch-body">' +
+        '<div class="cmd-switch-label">' + escapeHtml(label) + '</div>' +
+        '<div class="cmd-switch-flow">' + flow + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  function toast(msg, isErr) {
+    return '<div class="cmd-toast' + (isErr ? ' err' : '') + '">' +
+      '<span class="cmd-toast-icon">' + (isErr ? '!' : '✓') + '</span>' +
+      '<span>' + escapeHtml(String(msg)) + '</span>' +
+    '</div>';
+  }
+  function emptyState(msg) {
+    return '<div class="cmd-empty">' + escapeHtml(msg) + '</div>';
+  }
+
+  var CMD_RENDERERS = {
+    model: function(o) {
+      return switchCard('Model', o.old_model, o.new_model, !!o.changed, 'M');
+    },
+    role: function(o) {
+      var html = switchCard('Role', o.old_role, o.new_role || o.current_role, !!o.changed, 'R');
+      if (Array.isArray(o.available_roles) && o.available_roles.length) {
+        html += '<div class="cmd-section-title">Available roles</div>';
+        html += '<div class="cmd-chips">';
+        for (var i = 0; i < o.available_roles.length; i++) {
+          var r = o.available_roles[i];
+          var active = (r === (o.current_role || o.new_role));
+          html += '<span class="cmd-chip' + (active ? ' active' : '') + '">' + escapeHtml(r) + '</span>';
+        }
+        html += '</div>';
+      }
+      return html;
+    },
+    effort: function(o) {
+      return switchCard('Effort', o.old_effort, o.new_effort, !!o.changed, 'E');
+    },
+    loglevel: function(o) {
+      var html = switchCard('Log level', o.old_level, o.new_level || o.current_level, !!o.changed, 'L');
+      if (Array.isArray(o.available_levels) && o.available_levels.length) {
+        html += '<div class="cmd-section-title">Available levels</div>';
+        html += '<div class="cmd-chips">';
+        for (var i = 0; i < o.available_levels.length; i++) {
+          var lv = o.available_levels[i];
+          var active = (lv === (o.current_level || o.new_level));
+          html += '<span class="cmd-chip' + (active ? ' active' : '') + '">' + escapeHtml(lv) + '</span>';
+        }
+        html += '</div>';
+      }
+      return html;
+    },
+    info: function(o) {
+      var stats = '<div class="cmd-stats">';
+      stats += statTile('Model', o.model || '—', { cls: 'accent' });
+      stats += statTile('Role', o.role || '—');
+      stats += statTile('Total tokens', fmtTokens(o.tokens_used), { cls: 'accent' });
+      stats += statTile('Cost', fmtCost(o.total_cost), { cls: 'success' });
+      stats += statTile('Input', fmtTokens(o.tokens_input));
+      stats += statTile('Output', fmtTokens(o.tokens_output));
+      stats += statTile('Cached', fmtTokens(o.tokens_cached));
+      stats += statTile('Cache write', fmtTokens(o.tokens_cache_write));
+      if (o.tokens_reasoning) stats += statTile('Reasoning', fmtTokens(o.tokens_reasoning));
+      if (o.tokens_per_second) stats += statTile('Tokens/sec', Number(o.tokens_per_second).toFixed(1));
+      if (o.cache_savings) stats += statTile('Cache savings', fmtCost(o.cache_savings));
+      stats += '</div>';
+      var meta = '<div class="cmd-section-title">Session</div>';
+      meta += '<div class="cmd-stats">';
+      meta += statTile('Name', o.session_name || '—');
+      if (o.cache_markers_system != null) meta += statTile('Sys markers', String(o.cache_markers_system));
+      if (o.cache_markers_tool != null) meta += statTile('Tool markers', String(o.cache_markers_tool));
+      if (o.cache_markers_content != null) meta += statTile('Content markers', String(o.cache_markers_content));
+      meta += '</div>';
+      return stats + meta;
+    },
+    copy: function(o) {
+      if (!o.copied) return toast('Nothing to copy', true);
+      return toast('Copied ' + (o.length || 0) + ' chars to clipboard');
+    },
+    schedule: function(o) {
+      var d = o.data || {};
+      var msg = String(d.message || '');
+      if (d.is_error) return toast(msg, true);
+      // Markdown-friendly multi-line message — render as text with linebreaks
+      var lines = msg.split('\n').map(escapeHtml).join('<br>');
+      return '<div class="cmd-toast"><span class="cmd-toast-icon">⏰</span><span>' + lines + '</span></div>';
+    },
+    help: function(o) {
+      var arr = Array.isArray(o.commands) ? o.commands : [];
+      if (!arr.length) return emptyState('No commands available');
+      var html = '<div class="cmd-section-title">' + arr.length + ' commands</div>';
+      html += '<div class="cmd-chips">';
+      for (var i = 0; i < arr.length; i++) {
+        html += '<span class="cmd-chip">' + escapeHtml(arr[i]) + '</span>';
+      }
+      html += '</div>';
+      return html;
+    },
+    list: function(o) {
+      // Sessions list — server already gives us markdown.
+      var md = String(o.plain_text || '');
+      var html = '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(md) : escapeHtml(md)) + '</div>';
+      if (o.page) html += '<div class="cmd-stat-sub" style="margin-top:6px">Page ' + escapeHtml(String(o.page)) + '</div>';
+      return html;
+    },
+    run: function(o) {
+      var d = o.data || {};
+      if (o.command_executed) {
+        return toast('Ran command: ' + o.command_executed);
+      }
+      var cmds = Array.isArray(d.commands) ? d.commands : [];
+      var html = '<div class="cmd-section-title">' + escapeHtml(d.message || 'Available') + '</div>';
+      if (!cmds.length) return html + emptyState('No commands defined');
+      html += '<div class="cmd-chips">';
+      for (var i = 0; i < cmds.length; i++) {
+        html += '<span class="cmd-chip">' + escapeHtml(cmds[i]) + '</span>';
+      }
+      html += '</div>';
+      return html;
+    },
+    workflow: function(o) {
+      var d = o.data || {};
+      if (o.workflow_executed) return toast('Ran workflow: ' + o.workflow_executed);
+      var wfs = Array.isArray(d.workflows) ? d.workflows : [];
+      var html = '<div class="cmd-section-title">' + escapeHtml(d.message || 'Workflows') + '</div>';
+      if (!wfs.length) return html + emptyState('No workflows defined');
+      html += '<div class="cmd-items">';
+      for (var i = 0; i < wfs.length; i++) {
+        var w = wfs[i];
+        var name = Array.isArray(w) ? w[0] : (w.name || '');
+        var desc = Array.isArray(w) ? (w[1] || '') : (w.description || '');
+        html += '<div class="cmd-item-row">' +
+          '<span class="cmd-item-name">' + escapeHtml(name) + '</span>' +
+          '<span class="cmd-item-desc">' + escapeHtml(desc) + '</span>' +
+        '</div>';
+      }
+      html += '</div>';
+      return html;
+    },
+    mcp: function(o) {
+      var d = o.data || {};
+      var srv = Array.isArray(d.servers) ? d.servers : [];
+      if (!srv.length) return emptyState('No MCP servers configured');
+      var html = '<div class="cmd-section-title">' + srv.length + ' MCP servers</div>';
+      html += '<div class="cmd-items">';
+      for (var i = 0; i < srv.length; i++) {
+        var s = srv[i];
+        var hKind = (s.health === 'running' ? 'ok' : (s.health === 'failed' || s.health === 'error' ? 'err' : 'warn'));
+        var tools = Array.isArray(s.tools) ? s.tools : [];
+        var meta = (s.connection_type ? s.connection_type : '') +
+                   (s.restart_count ? ' · ' + s.restart_count + ' restarts' : '') +
+                   (s.consecutive_failures ? ' · ' + s.consecutive_failures + ' failures' : '');
+        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span class="cmd-item-name" style="min-width:0">' + escapeHtml(s.name || '?') + '</span>' +
+            '<span class="cmd-badge ' + hKind + '">' + escapeHtml(s.health || 'unknown') + '</span>' +
+            '<span class="cmd-item-meta" style="margin:0">' + escapeHtml(meta) + '</span>' +
+          '</div>';
+        if (tools.length) {
+          html += '<div class="cmd-tools-inline">';
+          for (var j = 0; j < tools.length; j++) {
+            html += '<span class="cmd-tool-tag">' + escapeHtml(String(tools[j])) + '</span>';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+      return html;
+    },
+    plan: function(o) {
+      if (!o.has_plan) {
+        return '<div class="cmd-empty">' + escapeHtml(o.display || 'No active plan') + '</div>';
+      }
+      var planText = '';
+      if (typeof o.plan === 'string') planText = o.plan;
+      else if (o.plan) planText = JSON.stringify(o.plan, null, 2);
+      return '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(planText) : escapeHtml(planText)) + '</div>';
+    },
+    prompt: function(o) {
+      var d = o.data || {};
+      var prompts = Array.isArray(d.prompts) ? d.prompts : [];
+      if (!prompts.length) return emptyState('No prompts available');
+      var html = '<div class="cmd-section-title">' + prompts.length + ' prompt templates</div>';
+      html += '<div class="cmd-items">';
+      for (var i = 0; i < prompts.length; i++) {
+        var p = prompts[i];
+        html += '<div class="cmd-item-row">' +
+          '<span class="cmd-item-name">' + escapeHtml(p.name || '') + '</span>' +
+          '<span class="cmd-item-desc">' + escapeHtml(p.description || '') + '</span>' +
+        '</div>';
+      }
+      html += '</div>';
+      return html;
+    },
+    skill: function(o) {
+      var d = o.data || {};
+      var skills = Array.isArray(d.skills) ? d.skills : [];
+      var html = '<div class="cmd-stats" style="margin-bottom:8px">';
+      html += statTile('Total', skills.length, { cls: 'accent' });
+      if (d.active_count != null) html += statTile('Active', d.active_count, { cls: 'success' });
+      if (d.page) html += statTile('Page', d.page);
+      if (d.pattern) html += statTile('Filter', d.pattern);
+      html += '</div>';
+      if (!skills.length) return html + emptyState('No skills');
+      html += '<div class="cmd-items">';
+      for (var i = 0; i < skills.length; i++) {
+        var s = skills[i];
+        var doms = Array.isArray(s.domains) && s.domains.length ? s.domains.join(', ') : '';
+        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<span class="cmd-item-name" style="min-width:0">' + escapeHtml(s.name || '') + '</span>' +
+            '<span class="cmd-badge ' + (s.active ? 'ok' : 'muted') + '">' + (s.active ? 'active' : 'off') + '</span>' +
+            (doms ? '<span class="cmd-item-meta" style="margin:0">' + escapeHtml(doms) + '</span>' : '') +
+          '</div>' +
+          '<div class="cmd-item-desc">' + escapeHtml(s.description || '') + '</div>' +
+        '</div>';
+      }
+      html += '</div>';
+      return html;
+    },
+    report: function(o) {
+      var t = o.totals || {};
+      var html = '<div class="cmd-stats">';
+      html += statTile('Tool calls', t.total_tool_calls != null ? t.total_tool_calls : 0, { cls: 'accent' });
+      html += statTile('Total cost', fmtCost(t.total_cost), { cls: 'success' });
+      html += statTile('AI time', fmtMs(t.total_ai_time_ms));
+      html += statTile('Processing', fmtMs(t.total_processing_time_ms));
+      html += statTile('Task time', fmtMs(t.total_task_time_ms));
+      html += '</div>';
+      var entries = Array.isArray(o.entries) ? o.entries : [];
+      if (entries.length) {
+        html += '<div class="cmd-section-title">' + entries.length + ' entries</div>';
+        html += '<div class="cmd-items">';
+        for (var i = 0; i < entries.length; i++) {
+          var e = entries[i];
+          var name = e.tool || e.name || e.command || ('entry ' + (i + 1));
+          var meta = [];
+          if (e.calls != null) meta.push(e.calls + ' calls');
+          if (e.cost != null) meta.push(fmtCost(e.cost));
+          if (e.ai_time_ms != null) meta.push(fmtMs(e.ai_time_ms));
+          html += '<div class="cmd-item-row">' +
+            '<span class="cmd-item-name">' + escapeHtml(String(name)) + '</span>' +
+            '<span class="cmd-item-desc">' + escapeHtml(meta.join(' · ')) + '</span>' +
+          '</div>';
+        }
+        html += '</div>';
+      }
+      return html;
+    },
+    context: function(o) {
+      var msgs = Array.isArray(o.filtered_messages) ? o.filtered_messages : [];
+      var html = '<div class="cmd-stats" style="margin-bottom:8px">';
+      html += statTile('Messages', msgs.length, { cls: 'accent' });
+      if (o.filter) html += statTile('Filter', o.filter);
+      html += '</div>';
+      if (!msgs.length) return html + emptyState('No messages in context');
+      html += '<div class="cmd-items">';
+      for (var i = 0; i < Math.min(msgs.length, 50); i++) {
+        var m = msgs[i];
+        var role = m.role || 'message';
+        var content = String(m.content || '');
+        var preview = content.length > 240 ? content.slice(0, 240) + '…' : content;
+        html += '<div class="cmd-item-row" style="flex-direction:column;align-items:stretch;gap:4px">' +
+          '<span class="cmd-badge info">' + escapeHtml(role) + '</span>' +
+          '<div class="cmd-item-desc" style="white-space:pre-wrap">' + escapeHtml(preview) + '</div>' +
+        '</div>';
+      }
+      if (msgs.length > 50) {
+        html += '<div class="cmd-stat-sub">… and ' + (msgs.length - 50) + ' more</div>';
+      }
+      html += '</div>';
+      return html;
+    },
+  };
+
   function renderCommandOutput(obj) {
     var cmdType = obj.command_type;
+    var header = '<div class="cmd-output-header">/' + escapeHtml(cmdType) + '</div>';
+    var renderer = CMD_RENDERERS[cmdType];
+    if (renderer) {
+      try {
+        return '<div class="cmd-output">' + header + renderer(obj) + '</div>';
+      } catch (e) {
+        // Fall through to generic on renderer error.
+      }
+    }
     var rest = {};
     for (var key in obj) {
       if (key === 'command_type') continue;
@@ -2778,10 +3382,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     } else {
       body = renderCommandTable(rest);
     }
-    return '<div class="cmd-output">' +
-      '<div class="cmd-output-header">/' + escapeHtml(cmdType) + '</div>' +
-      body +
-      '</div>';
+    return '<div class="cmd-output">' + header + body + '</div>';
   }
 
   // Called once Done arrives — stores raw, appends copy btn, collapses if tall
