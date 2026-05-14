@@ -61,9 +61,11 @@ enum AppEvent {
     NavigateTo(String),
     SwitchTab(usize),
     CloseTab(usize),
-    PrevTab,       // Ctrl+P — switch to previous tab in MRU order
-    NextTab,       // Ctrl+N — switch to next tab in MRU order
-    ToggleSidebar, // Cmd+Shift+A — toggle AI assistant sidebar
+    PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
+    NextTab,                 // Ctrl+N — switch to next tab in MRU order
+    ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
+    ToggleFullscreen,        // ⌘Return — toggle native macOS fullscreen on the chrome window
+    ToggleSidebarFullscreen, // ⌘⇧Return / icon — sidebar expands to full window width inside chrome
     AcpPrompt(u64, String, Vec<(String, String)>), // (session_id, text, images) — user prompt + optional images
     AcpCancel(u64),                                // (session_id) — user clicked stop button
     AcpSetAgent(u64, String), // (session_id, tag) — change agent tag and restart that session
@@ -272,6 +274,18 @@ fn main() {
     let browser_win = Arc::new(browser_win);
     let browser_win_id = browser_win.id();
 
+    // Allow native macOS fullscreen on the browser window (⌘Return).
+    // NSWindowCollectionBehaviorFullScreenPrimary = 1 << 7 = 128.
+    // chrome_win (created below) gets FullScreenAuxiliary so it follows into
+    // the fullscreen space — without these bits, child windows stay on the
+    // original desktop and the sidebar drifts out of sync.
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ns_win: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
+        let _: () = msg_send![ns_win, setCollectionBehavior: 128u64];
+    }
+
     // First tao window has been built — its `TaoView` ObjC class is now
     // registered with the runtime, so we can install our keyDown fix that
     // prevents duplicate insertText: into WKWebViews under Lexical (x.com
@@ -323,9 +337,12 @@ fn main() {
             let ns_win: *mut AnyObject = w.ns_window() as *mut AnyObject;
             // setHasShadow:NO — chrome layer shouldn't cast its own shadow
             let _: () = msg_send![ns_win, setHasShadow: false];
-            // NSWindowCollectionBehaviorTransient — don't show in Mission Control / Exposé
-            let _: () = msg_send![ns_win, setCollectionBehavior: 8u64]; // 1 << 3
-                                                                        // Make chrome_win a child of browser_win — it moves/minimizes/closes with parent.
+            // Transient (8 = 1<<3) → not in Mission Control.
+            // FullScreenAuxiliary (256 = 1<<8) → follows parent into native
+            // fullscreen instead of staying on the original desktop, which
+            // would leave the sidebar/footer out of sync after ⌘Return.
+            let _: () = msg_send![ns_win, setCollectionBehavior: 264u64];
+            // Make chrome_win a child of browser_win — it moves/minimizes/closes with parent.
             let parent_ns: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
             // NSWindowAbove = 1
             let _: () = msg_send![parent_ns, addChildWindow: ns_win, ordered: 1i64];
@@ -947,6 +964,9 @@ fn main() {
                         }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
+                        }
+                        Some("sidebar_fullscreen_toggle") => {
+                            let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
                         }
                         Some("acp_set_agent") => {
                             let sid = v["session_id"].as_u64().unwrap_or(0);
@@ -1577,6 +1597,7 @@ fn main() {
                 const EQUAL_KEYCODE: i64 = 24; // =/+ (⌘= = zoom in)
                 const MINUS_KEYCODE: i64 = 27; // -/_ (⌘- = zoom out)
                 const ESC_KEYCODE: i64 = 53; // Escape
+                const RETURN_KEYCODE: i64 = 36; // Return (⌘Return = browser fullscreen, ⌘⇧Return = sidebar fullscreen)
                 // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
                 const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
@@ -1590,6 +1611,12 @@ fn main() {
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == A_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleSidebar);
+                    CallbackResult::Drop
+                } else if cmd && shift && keycode == RETURN_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
+                    CallbackResult::Drop
+                } else if cmd && !shift && !ctrl && keycode == RETURN_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !find_bar_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::ToggleFullscreen);
                     CallbackResult::Drop
                 } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::InlineEditRequest);
@@ -1710,6 +1737,7 @@ fn main() {
     let mut modifiers = ModifiersState::default();
     let mut overlay_visible = false;
     let mut sidebar_visible = false;
+    let mut sidebar_fullscreen = false; // sidebar takes the full chrome window width when true
     let mut shortcuts_visible = false;
     let mut icon_set = false;
     let mut zoom_level: f64 = 1.0;
@@ -3648,19 +3676,18 @@ fn main() {
                 if sidebar_visible {
                     let _ = sidebar_wv.set_visible(false);
                     sidebar_visible = false;
+                    sidebar_fullscreen = false; // reset on hide so next open is normal-width
                     sidebar_hotkey_visible.store(false, Ordering::Relaxed);
                     sidebar_owns_key.store(false, Ordering::Relaxed);
                     // Return key window status to browser_win so the page
                     // WebView receives keyboard input again.
                     browser_win.set_focus();
                 } else {
-                    // Reposition sidebar to right edge (window may have been resized)
+                    let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
+                    let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
                     let _ = sidebar_wv.set_bounds(wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(
-                            sz.width.saturating_sub(sidebar_w),
-                            0u32,
-                        ).into(),
-                        size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
+                        position: tao::dpi::PhysicalPosition::new(x, 0u32).into(),
+                        size: tao::dpi::PhysicalSize::new(w, sz.height).into(),
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
@@ -3717,6 +3744,44 @@ fn main() {
                             ));
                         }
                     }
+                }
+            }
+
+            // ── Toggle native macOS fullscreen on the browser window (⌘Return) ─
+            // chrome_win is a borderless child — fullscreen-primary lives on
+            // browser_win, fullscreen-auxiliary on chrome_win (set at creation).
+            Event::UserEvent(AppEvent::ToggleFullscreen) => {
+                unsafe {
+                    use objc2::msg_send;
+                    use objc2::runtime::AnyObject;
+                    let ns_win: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
+                    let _: () = msg_send![ns_win, toggleFullScreen: std::ptr::null_mut::<AnyObject>()];
+                }
+            }
+
+            // ── Toggle assistant fullscreen — sidebar fills the chrome window
+            //     (⌘⇧Return or click the icon in the sidebar header). Bounded
+            //     by chrome window, NOT a native macOS fullscreen — orthogonal
+            //     to ToggleFullscreen so the two can be combined.
+            Event::UserEvent(AppEvent::ToggleSidebarFullscreen) => {
+                if !sidebar_visible {
+                    // No sense expanding a hidden sidebar; surface it first then expand.
+                    let _ = proxy.send_event(AppEvent::ToggleSidebar);
+                    sidebar_fullscreen = true;
+                } else {
+                    sidebar_fullscreen = !sidebar_fullscreen;
+                    let sz = browser_win.inner_size();
+                    let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
+                    let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
+                    let _ = sidebar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(x, 0u32).into(),
+                        size: tao::dpi::PhysicalSize::new(w, sz.height).into(),
+                    });
+                    // Inform the sidebar JS so the toggle icon can flip its state.
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setSidebarFullscreen && window.__setSidebarFullscreen({})",
+                        sidebar_fullscreen
+                    ));
                 }
             }
 
@@ -4944,8 +5009,15 @@ fn main() {
                 }
 
                 WindowEvent::Resized(sz) if window_id == browser_win_id => {
-                    // Keep chrome overlay window in sync with browser window size
+                    // Keep chrome overlay window in sync — both size AND position.
+                    // During native-fullscreen transitions browser_win moves to a
+                    // new screen origin, and the addChildWindow: relationship
+                    // doesn't always follow cleanly for borderless transparent
+                    // children, so we re-anchor explicitly.
                     chrome_win.set_inner_size(*sz);
+                    if let Ok(pos) = browser_win.outer_position() {
+                        chrome_win.set_outer_position(pos);
+                    }
                     if overlay_visible {
                         overlay_win.set_inner_size(*sz);
                     }
@@ -4956,13 +5028,13 @@ fn main() {
                         settings_win.set_inner_size(*sz);
                     }
                     // Resize sidebar to track window height and stay at right edge
+                    // (or full-width when sidebar_fullscreen is set).
                     if sidebar_visible {
+                        let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
+                        let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
                         let _ = sidebar_wv.set_bounds(wry::Rect {
-                            position: tao::dpi::PhysicalPosition::new(
-                                sz.width.saturating_sub(sidebar_w),
-                                0u32,
-                            ).into(),
-                            size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
+                            position: tao::dpi::PhysicalPosition::new(x, 0u32).into(),
+                            size: tao::dpi::PhysicalSize::new(w, sz.height).into(),
                         });
                     }
                     // Resize progress bar width (sits at bottom edge of address bar)
@@ -5009,6 +5081,13 @@ fn main() {
                         ).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, footer_h).into(),
                     });
+                }
+
+                // Browser window moved (drag, fullscreen enter/exit, screen
+                // change). Re-anchor the chrome overlay so its sidebar/footer
+                // stay glued to the parent window's content area.
+                WindowEvent::Moved(pos) if window_id == browser_win_id => {
+                    chrome_win.set_outer_position(*pos);
                 }
 
                 WindowEvent::ModifiersChanged(mods) => {
