@@ -379,11 +379,14 @@ async fn init_session(
     )
     .await?;
 
+    // Workspace cwd for the session — octomind uses this to discover local
+    // tools at `<cwd>/.agents/tools/*`. When octoweb is launched as a .app
+    // bundle via launchd, `std::env::current_dir()` is `/` (not the user's
+    // home), which breaks local-tool discovery. Pin to the user's home dir
+    // so it matches where we install `render_ui`.
     let resp = conn
         .new_session(acp::NewSessionRequest::new(
-            std::env::current_dir()
-                .or_else(|_| dirs::home_dir().ok_or(std::io::Error::other("no home")))
-                .unwrap_or_else(|_| "/".into()),
+            dirs::home_dir().unwrap_or_else(|| "/".into()),
         ))
         .await?;
 

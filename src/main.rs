@@ -1,3 +1,5 @@
+mod a2ui_render_ui;
+mod a2ui_watcher;
 mod acp;
 mod address_bar_html;
 mod browser;
@@ -124,6 +126,10 @@ enum AppEvent {
     LearningWake,                    // background learning agent pokes event loop
     LearningReady(String),           // active tab content extracted — build prompt and send
     JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
+    /// A2UI surface envelope (from the `render_ui` tool) changed on disk —
+    /// watcher saw a new or status-flipped file. Forwarded to the sidebar's
+    /// currently-active session as a `.msg.ui` bubble.
+    A2uiUpdate(a2ui_watcher::A2uiSnapshot),
     Quit,
 }
 
@@ -975,6 +981,21 @@ fn main() {
                         Some("sidebar_ready") => {
                             let _ = p.send_event(AppEvent::SidebarReady);
                         }
+                        Some("a2ui_resolve") => {
+                            let file_id = v["file_id"].as_str().unwrap_or("").to_string();
+                            let action = v["action"].clone();
+                            if !file_id.is_empty() {
+                                if let Err(e) = a2ui_render_ui::resolve(&file_id, action) {
+                                    tracing::warn!(file_id = %file_id, error = %e, "failed to resolve A2UI envelope");
+                                }
+                            }
+                        }
+                        Some("a2ui_open_url") => {
+                            // A2UI `Button.action.openUrl` — open in a new browser tab.
+                            if let Some(url) = v["url"].as_str() {
+                                let _ = p.send_event(AppEvent::OpenInNewTab(url.to_string()));
+                            }
+                        }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
                                 unsafe {
@@ -1370,6 +1391,25 @@ fn main() {
             let _ = proxy.send_event(AppEvent::AcpWake);
         }
     };
+
+    // ── A2UI ────────────────────────────────────────────────────────────────
+    // Ship the `render_ui` tool into `~/.agents/tools/` so any octomind
+    // subprocess we spawn (CWD = home) auto-discovers it. Then start a
+    // background watcher on the envelope queue dir; every status transition
+    // becomes an `A2uiUpdate` event the active session renders inline.
+    match a2ui_render_ui::install() {
+        Ok(p) => tracing::info!(path = %p.display(), "installed render_ui tool"),
+        Err(e) => tracing::warn!(error = %e, "render_ui install failed — A2UI surfaces disabled"),
+    }
+    {
+        let proxy = acp_proxy.clone();
+        a2ui_watcher::start(a2ui_render_ui::queue_dir(), move |snap| {
+            let _ = proxy.send_event(AppEvent::A2uiUpdate(snap));
+        });
+        std::thread::spawn(|| {
+            a2ui_render_ui::prune_old(&a2ui_render_ui::queue_dir(), 86_400);
+        });
+    }
     // Restore persisted ACP history (sessions + per-session message log) if
     // present, else start with a fresh default Assistant session. `--resume`
     // is passed when an `acp_session_id` was captured before — the agent then
@@ -4125,6 +4165,26 @@ fn main() {
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
+
+            // ── A2UI envelope changed on disk → render in the active session ─
+            // We don't try to bind surfaces to a specific octomind subprocess.
+            // The agent only renders during its own turn, so the foreground
+            // session is the right place for the surface to appear.
+            Event::UserEvent(AppEvent::A2uiUpdate(snap)) => {
+                let sid = active_session_id;
+                let body_json = serde_json::to_string(&snap.body).unwrap_or_else(|_| "{}".into());
+                let escaped_id = webview_utils::escape_js_template(&snap.id);
+                let escaped_body = webview_utils::escape_js_template(&body_json);
+                if snap.status == "pending" {
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`))"
+                    ));
+                } else {
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__a2uiResolved && window.__a2uiResolved({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`))"
+                    ));
+                }
+            }
             // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
             Event::UserEvent(AppEvent::LearningWake) => {}
 
