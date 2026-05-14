@@ -3501,6 +3501,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (Array.isArray(v)) return v.map(x => a2uiResolveValue(x, scope));
     if (typeof v.path === 'string') {
       const p = v.path;
+      // Inside a List iteration scope, treat "/", "." and "" as "the current
+      // item" — that's the natural way to bind a scalar item (e.g. a string
+      // in a string[]) into a Text/Image. Without this, agents that write
+      // `{path: "/"}` on a list template end up dumping the whole root model
+      // into every row.
+      if (scope.local != null && (p === '' || p === '/' || p === '.')) {
+        return scope.local;
+      }
       if (p.charAt(0) === '/') return a2uiPtrGet(scope.root, p);
       if (scope.local != null) return a2uiPtrGet(scope.local, '/' + p);
       return undefined;
