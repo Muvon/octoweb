@@ -853,9 +853,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .msg.agent .msg-bubble em     { font-style: italic; }
 
   /* ── A2UI surface bubble ──────────────────────────────────────────────── */
-  /* Inline UI surfaces rendered from `render_ui` envelopes. Same Tahoe glass
-     vocabulary as agent bubbles but a denser, full-width form layout, with a
-     resolved-state affordance. */
+  /* Inline UI surfaces rendered from `render_ui` envelopes. Per A2UI v0.9 the
+     surface persists across events — a button click only unblocks the agent's
+     current `render_ui` call; the bubble stays alive until the agent emits
+     `deleteSurface`. While the agent is processing the event we briefly lock
+     interaction and show a "processing" overlay; the next envelope clears it. */
   .msg.ui .msg-bubble {
     background: var(--agent-bg);
     border: 1px solid var(--agent-border);
@@ -866,7 +868,41 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     max-width: 100%;
     transition: opacity 0.2s, filter 0.2s;
   }
-  .msg.ui.resolved .msg-bubble { opacity: 0.78; filter: saturate(0.85); }
+  /* In-flight: agent has the event, hasn't pushed an update yet. Dim slightly,
+     suspend pointer events, show a non-modal "Processing…" pill. Lifts as soon
+     as the next envelope for this surface arrives. */
+  .msg.ui.resolved .msg-bubble { opacity: 0.96; }
+  .msg.ui.resolved .a2ui-body { pointer-events: none; position: relative; }
+  .msg.ui.resolved .a2ui-body::after {
+    content: "Processing…";
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    padding: 3px 10px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    pointer-events: none;
+    z-index: 5;
+    animation: a2ui-pulse 1.4s ease-in-out infinite;
+  }
+  @media (prefers-color-scheme: light) {
+    .msg.ui.resolved .a2ui-body::after { background: rgba(0, 0, 0, 0.7); }
+  }
+  @keyframes a2ui-pulse {
+    0%, 100% { opacity: 0.85; }
+    50% { opacity: 0.55; }
+  }
+  .msg.ui.resolved .a2ui-btn,
+  .msg.ui.resolved .a2ui-chip,
+  .msg.ui.resolved .a2ui-tab,
+  .msg.ui.resolved .a2ui-modal-close { opacity: 0.7; }
+  .msg.ui.resolved .a2ui-field input,
+  .msg.ui.resolved .a2ui-field textarea,
+  .msg.ui.resolved .a2ui-field select { opacity: 0.85; }
   .a2ui-head {
     display: flex;
     align-items: center;
@@ -4165,8 +4201,27 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Each envelope file (`~/.local/share/a2ui/<id>.json`) becomes one
   // `.msg.ui` bubble. Button clicks IPC `a2ui_resolve` back to Rust, which
   // writes the resolution into the file and unblocks the tool's bash poll.
-  const a2uiBlocks = new Map();        // fileId -> block state
-  const a2uiBubbleByFile = new Map();  // fileId -> wrapper element
+  const a2uiBlocks = new Map();           // fileId  -> block state
+  const a2uiBubbleByFile = new Map();     // fileId  -> wrapper element
+  const a2uiSurfaceIndex = new Map();     // "sid:surfaceId" -> fileId of live block
+  function a2uiSurfaceKey(sid, surfaceId) { return sid + ':' + surfaceId; }
+  // Peek the surfaceId from any message in the envelope — A2UI v0.9 stamps
+  // `surfaceId` on every message kind (createSurface, updateComponents,
+  // updateDataModel, deleteSurface). Used to honor "same surfaceId = update
+  // existing surface" even when a follow-up envelope only carries components
+  // or data updates (no createSurface).
+  function a2uiSniffSurfaceId(payload) {
+    const msgs = payload && payload.messages;
+    if (!Array.isArray(msgs)) return null;
+    for (const m of msgs) {
+      if (!m || typeof m !== 'object') continue;
+      for (const k of ['createSurface', 'updateComponents', 'updateDataModel', 'deleteSurface']) {
+        const inner = m[k];
+        if (inner && typeof inner.surfaceId === 'string') return inner.surfaceId;
+      }
+    }
+    return null;
+  }
 
   // JSON-Pointer (RFC 6901)
   function a2uiPtrParts(path) {
@@ -4301,6 +4356,26 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return null;
   }
 
+  // Stringify a resolved value for display in a text/input slot. Avoids the
+  // `String({...})` → "[object Object]" trap when the agent points a text
+  // binding at an object subtree: we drill into common content fields, fall
+  // back to compact JSON, and only ever pass scalars through unchanged.
+  function a2uiToStr(v) {
+    if (v == null) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (Array.isArray(v)) return v.map(a2uiToStr).join(', ');
+    if (typeof v === 'object') {
+      // Try common text-bearing keys before serializing.
+      const keys = ['text', 'label', 'title', 'name', 'value', 'content'];
+      for (const k of keys) {
+        if (typeof v[k] === 'string') return v[k];
+      }
+      try { return JSON.stringify(v); } catch (e) { return ''; }
+    }
+    return String(v);
+  }
+
   // Minimal safe Markdown — escape-then-allow-list. Sufficient for Markdown
   // component content; we don't want to expose unrestricted innerHTML here.
   function a2uiEscapeHtml(s) {
@@ -4380,8 +4455,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           a2uiPtrSet(block.dataModel, u.path, u.value);
         }
       } else if (msg.deleteSurface) {
-        block.componentsMap.clear();
-        block.dataModel = {};
+        // Per A2UI v0.9: deleteSurface tears the surface down. Bubble is
+        // removed from DOM in a2uiRerender (flag here, act there).
+        const targetSid = msg.deleteSurface.surfaceId;
+        if (targetSid == null || targetSid === block.surfaceId) {
+          block.componentsMap.clear();
+          block.dataModel = {};
+          block.deleted = true;
+        }
       }
     }
     block.version++;
@@ -4486,7 +4567,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       else if (variant === 'h4') el = document.createElement('h4');
       else el = document.createElement('div');
       el.className = 'a2ui-text a2ui-text-' + variant + (def.muted ? ' muted' : '');
-      el.textContent = text == null ? '' : (typeof text === 'object' ? JSON.stringify(text) : String(text));
+      el.textContent = a2uiToStr(text);
       return el;
     }
     if (type === 'Heading') {
@@ -4494,14 +4575,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const lvl = Math.min(Math.max(1, Number(def.level == null ? 2 : def.level)), 4);
       const el = document.createElement('h' + lvl);
       el.className = 'a2ui-heading';
-      el.textContent = String(text == null ? '' : text);
+      el.textContent = a2uiToStr(text);
       return el;
     }
     if (type === 'Markdown') {
       // render_ui extension — official v0.9 puts simple Markdown directly in Text.
       const el = document.createElement('div');
       el.className = 'a2ui-md';
-      el.innerHTML = a2uiRenderMarkdown(String(text == null ? '' : text));
+      el.innerHTML = a2uiRenderMarkdown(a2uiToStr(text));
       return el;
     }
     if (type === 'Image') {
@@ -4576,7 +4657,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (inner) btn.appendChild(a2uiRenderNode(block, inner, scope));
         else btn.textContent = '';
       } else {
-        btn.textContent = String(text == null ? (def.label == null ? 'Button' : def.label) : text);
+        btn.textContent = a2uiToStr(text != null ? text : (def.label != null ? def.label : 'Button'));
       }
       btn.addEventListener('click', () => {
         if (block.resolved) return;
@@ -4598,19 +4679,40 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (!ev || !ev.name) return;
         const context = {};
         for (const k in (ev.context || {})) context[k] = r(ev.context[k]);
-        window.ipc.postMessage(JSON.stringify({
-          type: 'a2ui_resolve',
-          file_id: block.fileId,
-          action: {
-            name: ev.name,
-            sourceComponentId: typeof def.id === 'string' ? def.id : undefined,
-            context,
-            dataModel: block.dataModel,
-          },
-        }));
-        block.resolved = true;
-        block.resolutionLabel = ev.name;
-        a2uiRerender(block);
+        const actionPayload = {
+          name: ev.name,
+          sourceComponentId: typeof def.id === 'string' ? def.id : undefined,
+          surfaceId: block.surfaceId,
+          context,
+          dataModel: block.dataModel,
+        };
+        if (block.live) {
+          // Live surface: bash poll loop is still blocking. Flip the queue
+          // file's status to resolved; bash returns the event payload to the
+          // agent's render_ui tool call.
+          window.ipc.postMessage(JSON.stringify({
+            type: 'a2ui_resolve',
+            file_id: block.fileId,
+            action: actionPayload,
+          }));
+          // In-flight: agent owns the event; lock until the next envelope
+          // for this surfaceId arrives (lifts) or deleteSurface (removes).
+          block.resolved = true;
+          a2uiRerender(block);
+        } else {
+          // Ghost surface (rendered from history or a prior session): the
+          // bash poll is dead so there's no tool call to return into. Deliver
+          // the same event payload to the agent as a synthetic prompt in
+          // this session — the agent has the surface in chat history and
+          // can resume in a fresh turn.
+          window.ipc.postMessage(JSON.stringify({
+            type: 'a2ui_replay_event',
+            sid: block.sid,
+            file_id: block.fileId,
+            action: actionPayload,
+          }));
+          a2uiToast('Click sent — Octopus will continue in a new message.');
+        }
       });
       return btn;
     }
@@ -4631,14 +4733,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
-        lbl.textContent = String(label);
+        lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
       }
       if (isMultiline) {
         const ta = document.createElement('textarea');
         if (def.rows != null) ta.rows = Number(def.rows);
         if (placeholder != null) ta.placeholder = String(placeholder);
-        ta.value = valueRaw == null ? '' : String(valueRaw);
+        ta.value = a2uiToStr(valueRaw);
         if (typeof def.validationRegexp === 'string') ta.pattern = def.validationRegexp;
         ta.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
         wrap.appendChild(ta);
@@ -4646,7 +4748,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         const inp = document.createElement('input');
         inp.type = inputType;
         if (placeholder != null) inp.placeholder = String(placeholder);
-        inp.value = valueRaw == null ? '' : String(valueRaw);
+        inp.value = a2uiToStr(valueRaw);
         if (typeof def.validationRegexp === 'string') inp.pattern = def.validationRegexp;
         inp.addEventListener('input', e => {
           if (!path) return;
@@ -4666,7 +4768,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       inp.checked = !!valueRaw;
       inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.checked));
       const sp = document.createElement('span');
-      sp.textContent = String(label == null ? '' : label);
+      sp.textContent = a2uiToStr(label);
       wrap.appendChild(inp);
       wrap.appendChild(sp);
       return wrap;
@@ -4677,7 +4779,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
-        lbl.textContent = String(label);
+        lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
       }
       const row = document.createElement('div');
@@ -4719,7 +4821,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
-        lbl.textContent = String(label);
+        lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
       }
       const selected = (() => {
@@ -4735,8 +4837,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         const sel = document.createElement('select');
         for (const o of opts) {
           const opt = document.createElement('option');
-          opt.value = String(o.value == null ? '' : o.value);
-          opt.textContent = String(o.label == null ? (o.value == null ? '' : o.value) : o.label);
+          opt.value = a2uiToStr(o.value);
+          opt.textContent = a2uiToStr(o.label != null ? o.label : o.value);
           if (selected != null && String(selected) === opt.value) opt.selected = true;
           sel.appendChild(opt);
         }
@@ -4748,8 +4850,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const list = document.createElement('div');
       list.className = useChips ? 'a2ui-chip-row' : 'a2ui-check-list';
       for (const o of opts) {
-        const v = String(o.value == null ? '' : o.value);
-        const lblTxt = String(o.label == null ? v : o.label);
+        const v = a2uiToStr(o.value);
+        const lblTxt = a2uiToStr(o.label != null ? o.label : o.value);
         const isOn = isMulti
           ? selected.has(v)
           : (selected != null && selected === v);
@@ -4809,12 +4911,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
-        lbl.textContent = String(label);
+        lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
       }
       const inp = document.createElement('input');
       inp.type = inputType;
-      inp.value = valueRaw != null ? String(valueRaw) : '';
+      inp.value = a2uiToStr(valueRaw);
       if (def.min != null) inp.min = String(def.min);
       if (def.max != null) inp.max = String(def.max);
       inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
@@ -4862,7 +4964,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'a2ui-tab' + (i === active ? ' active' : '');
-        btn.textContent = String(titleResolved == null ? ('Tab ' + (i + 1)) : titleResolved);
+        btn.textContent = a2uiToStr(titleResolved != null ? titleResolved : ('Tab ' + (i + 1)));
         btn.addEventListener('click', () => {
           block.tabState[key] = i;
           a2uiRerender(block);
@@ -4933,6 +5035,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   function a2uiRerender(block) {
     const wrap = a2uiBubbleByFile.get(block.fileId);
     if (!wrap) return;
+    // deleteSurface → remove the bubble entirely and drop from all indices.
+    if (block.deleted) {
+      wrap.remove();
+      a2uiBubbleByFile.delete(block.fileId);
+      a2uiBlocks.delete(block.fileId);
+      if (block.surfaceId != null && block.sid != null) {
+        a2uiSurfaceIndex.delete(a2uiSurfaceKey(block.sid, block.surfaceId));
+      }
+      const s = sessions.get(block.sid);
+      if (s && s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
+      return;
+    }
     wrap.classList.toggle('resolved', !!block.resolved);
     if (block.theme && typeof block.theme === 'object' && typeof block.theme.primaryColor === 'string') {
       wrap.style.setProperty('--a2ui-primary', block.theme.primaryColor);
@@ -4959,28 +5073,27 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
     const body = wrap.querySelector('.a2ui-body');
     if (body) {
-      body.innerHTML = '';
       const rootDef = block.componentsMap.get('root');
       if (rootDef) {
+        body.innerHTML = '';
         body.appendChild(a2uiRenderNode(block, rootDef, { root: block.dataModel, local: null }));
-      } else {
+      } else if (body.childNodes.length === 0) {
+        // Only render the empty placeholder if this bubble has never had a
+        // root. Once we've shown something useful we KEEP it on screen even
+        // if a later envelope wipes components without replacing them —
+        // otherwise the surface looks "stuck" between updates.
         const empty = document.createElement('div');
         empty.className = 'a2ui-text muted';
-        empty.textContent = '(no root component yet)';
+        empty.textContent = 'Loading…';
         body.appendChild(empty);
       }
+      // else: keep last good render visible.
     }
-    let note = wrap.querySelector('.a2ui-resolved-note');
-    if (block.resolved && block.resolutionLabel) {
-      if (!note) {
-        note = document.createElement('div');
-        note.className = 'a2ui-resolved-note';
-        wrap.querySelector('.msg-bubble').appendChild(note);
-      }
-      note.textContent = '→ ' + block.resolutionLabel;
-    } else if (note) {
-      note.remove();
-    }
+    // No resolved-state DOM mutation: the surface is only transiently locked
+    // ("Processing…" overlay via CSS, pointer-events suppressed). The next
+    // envelope from the agent lifts the lock; deleteSurface tears it down.
+    const stale = wrap.querySelector('.a2ui-resolved-note');
+    if (stale) stale.remove();
   }
 
   function a2uiEnsureBlock(sid, fileId) {
@@ -4998,6 +5111,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       dataModel: {},
       awaitEvents: [],
       resolved: false,
+      // `live` flips to true the moment an envelope arrives via the live
+      // watcher path with a parent_pid matching this session. Replay-only
+      // surfaces keep live=false and their clicks become synthetic prompts.
+      live: false,
       resolutionLabel: null,
       version: 0,
     };
@@ -5031,27 +5148,93 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return block;
   }
 
-  window.__a2uiUpdate = function(sid, fileId, payload) {
-    const block = a2uiEnsureBlock(sid, fileId);
-    if (!block) return;
+  window.__a2uiUpdate = function(sid, fileId, payload, live) {
+    // A2UI v0.9 surface lifecycle:
+    //   - Each render_ui call writes a new envelope (new fileId) but may carry
+    //     the same `surfaceId`. We key the DOM bubble by surfaceId so updates
+    //     and re-renders land on the same bubble.
+    //   - A button click resolves THIS envelope's poll; the surface stays alive.
+    //   - The next envelope for the same surfaceId clears the in-flight lock.
+    //   - deleteSurface tears the bubble down.
+    //
+    // `live` is the 4th arg: true only when the envelope's parent octomind
+    // subprocess is still running this session. Replayed / cross-session /
+    // post-restart surfaces are NOT live — their bash poll loop is dead so
+    // clicks have nowhere to land. We render them anyway (history is useful)
+    // but suppress clicks with a toast.
+    const isLive = live === true;
+    const newSurfaceId = a2uiSniffSurfaceId(payload);
+    // Guard: vacuous envelopes (no surfaceId, no messages, no live block for
+    // this fileId) would create an orphan "Loading…" bubble. The agent emits
+    // these by mistake (empty probe calls). Drop them on the floor.
+    const hasMessages = Array.isArray(payload && payload.messages) && payload.messages.length > 0;
+    if (!a2uiBlocks.has(fileId) && newSurfaceId == null && !hasMessages) {
+      return;
+    }
+    let block = a2uiBlocks.get(fileId);
+    if (!block && newSurfaceId != null) {
+      const key = a2uiSurfaceKey(sid, newSurfaceId);
+      const existingFile = a2uiSurfaceIndex.get(key);
+      if (existingFile && a2uiBlocks.has(existingFile)) {
+        block = a2uiBlocks.get(existingFile);
+        // Rebind: same DOM bubble, new envelope identity.
+        a2uiBlocks.delete(existingFile);
+        a2uiBlocks.set(fileId, block);
+        const wrap = a2uiBubbleByFile.get(existingFile);
+        if (wrap) {
+          a2uiBubbleByFile.delete(existingFile);
+          a2uiBubbleByFile.set(fileId, wrap);
+        }
+        block.fileId = fileId;
+      }
+    }
+    if (!block) {
+      block = a2uiEnsureBlock(sid, fileId);
+      if (!block) return;
+    }
     if (Array.isArray(payload.await_events)) block.awaitEvents = payload.await_events;
+    // `live` is sticky-on: once we've seen a live envelope for this block
+    // (or a same-surfaceId block we just rebound from), the surface is
+    // wired into a running agent and clicks can resolve normally. Replays
+    // and ghosts never flip it on.
+    if (isLive) block.live = true;
+    // Pin surfaceId on the block BEFORE applying messages — a deleteSurface
+    // that lands on a fresh (never-seen-createSurface) block must still match
+    // its target by surfaceId. Same goes for updateComponents/DataModel that
+    // arrive in isolated envelopes.
+    if (newSurfaceId != null) {
+      block.surfaceId = newSurfaceId;
+      a2uiSurfaceIndex.set(a2uiSurfaceKey(sid, newSurfaceId), fileId);
+    }
+    // Resolved-state logic differs for live vs ghost:
+    //   LIVE: "resolved" means the bash poll is mid-flight after a click;
+    //         we lock the bubble into "Processing…" until the next envelope.
+    //   GHOST: "resolved" is the frozen end-state of a prior session — there
+    //          IS no next envelope coming. Locking ghosts blocks the
+    //          replay-event click path. So we never lock ghosts.
+    const incomingStatus = payload && payload.status;
+    const isTerminal = incomingStatus === 'resolved'
+                    || incomingStatus === 'expired'
+                    || incomingStatus === 'cancelled';
+    if (!isTerminal) {
+      block.resolved = false;
+    }
     a2uiApplyMessages(block, payload.messages || []);
-    if (payload.status === 'resolved' || payload.status === 'expired' || payload.status === 'cancelled') {
+    if (isTerminal && block.live) {
       block.resolved = true;
-      const resName = payload.resolution && typeof payload.resolution === 'object' ? payload.resolution.name : payload.status;
-      block.resolutionLabel = resName || payload.status;
+    } else if (isTerminal) {
+      // Ghost surface arriving with terminal status — keep clickable.
+      block.resolved = false;
     }
     a2uiRerender(block);
   };
 
+  // Legacy hook — kept for any callers still posting a separate "resolved"
+  // event. Equivalent to flipping the in-flight lock on.
   window.__a2uiResolved = function(sid, fileId, payload) {
     const block = a2uiBlocks.get(fileId);
     if (!block) return;
     block.resolved = true;
-    const resName = payload && typeof payload === 'object' && payload.resolution && typeof payload.resolution === 'object'
-      ? payload.resolution.name
-      : (payload && payload.status) || 'resolved';
-    block.resolutionLabel = resName;
     a2uiRerender(block);
   };
 
