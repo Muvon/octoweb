@@ -414,7 +414,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     50%       { opacity: 0.25; }
   }
 
-  #close-btn {
+  #close-btn, #fullscreen-btn {
     width: 24px; height: 24px;
     border-radius: 50%;
     border: 1px solid var(--agent-border);
@@ -425,18 +425,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: background 0.15s, color 0.15s, border-color 0.15s;
     flex-shrink: 0;
   }
-  #close-btn:hover {
+  #close-btn:hover, #fullscreen-btn:hover {
     background: rgba(0,0,0,0.07);
     color: var(--text-primary);
     border-color: rgba(0,0,0,0.13);
   }
   @media (prefers-color-scheme: dark) {
-    #close-btn:hover {
+    #close-btn:hover, #fullscreen-btn:hover {
       background: rgba(255,255,255,0.10);
       border-color: rgba(255,255,255,0.16);
     }
   }
-  #close-btn:active { transform: scale(0.92); }
+  #close-btn:active, #fullscreen-btn:active { transform: scale(0.92); }
+  #fullscreen-btn.active {
+    color: var(--accent);
+    border-color: rgba(0, 122, 255, 0.30);
+    background: rgba(0, 122, 255, 0.10);
+  }
 
   /* ── Copy button — macOS frosted pill, top-right of bubble ───────────────── */
   .msg-bubble { position: relative; }
@@ -2217,6 +2222,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
     </button>
+    <button id="fullscreen-btn" title="Toggle fullscreen (⌘⇧Return)" aria-label="Toggle assistant fullscreen">
+      <svg class="ic-enter" width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <path d="M1 4V1h3M9 4V1H6M1 6v3h3M9 6v3H6"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <svg class="ic-exit" width="10" height="10" viewBox="0 0 10 10" fill="none" style="display:none">
+        <path d="M4 1v3H1M6 1v3h3M4 9V6H1M6 9V6h3"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
     <button id="close-btn" title="Close (⌘⇧A)" aria-label="Close sidebar">
       <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
         <path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -2253,6 +2268,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     </div>
     <div id="welcome-shortcuts">
       <div class="shortcut-row"><kbd>⌘⇧A</kbd> <span>Toggle this panel</span></div>
+      <div class="shortcut-row"><kbd>⌘⇧↩</kbd> <span>Fullscreen assistant</span></div>
       <div class="shortcut-row"><kbd>⌘T</kbd> <span>New session</span></div>
       <div class="shortcut-row"><kbd>⌘W</kbd> <span>Close session</span></div>
       <div class="shortcut-row"><kbd>Tab</kbd> <span>Switch session</span></div>
@@ -4037,6 +4053,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   document.getElementById('close-btn').addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'sidebar_close' }));
   });
+
+  // ── Toggle assistant fullscreen ───────────────────────────────────────
+  // Rust owns the actual bounds; this just round-trips the request and
+  // swaps the icon glyph when the IPC echoes back via window.__setSidebarFullscreen.
+  const fsBtn = document.getElementById('fullscreen-btn');
+  const fsEnter = fsBtn.querySelector('.ic-enter');
+  const fsExit  = fsBtn.querySelector('.ic-exit');
+  fsBtn.addEventListener('click', () => {
+    window.ipc.postMessage(JSON.stringify({ type: 'sidebar_fullscreen_toggle' }));
+  });
+  window.__setSidebarFullscreen = function(on) {
+    fsBtn.classList.toggle('active', !!on);
+    fsEnter.style.display = on ? 'none' : '';
+    fsExit.style.display  = on ? '' : 'none';
+    fsBtn.title = on ? 'Exit fullscreen (⌘⇧Return)' : 'Toggle fullscreen (⌘⇧Return)';
+  };
 
   // ── Tool Details Modal ───────────────────────────────────────────────────
   const toolModal = document.getElementById('tool-modal');
