@@ -410,7 +410,9 @@ pub struct WaitRequest {
         description = "\"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves to \"ready\"/\"live\"/\"partial\") | a CSS selector to wait for."
     )]
     pub event: Option<String>,
-    #[schemars(description = "Timeout in ms. Default 10000, max 30000. Ignored for event=\"ready\" (the probe has its own 8 s ceiling).")]
+    #[schemars(
+        description = "Timeout in ms. Default 10000, max 30000. Ignored for event=\"ready\" (the probe has its own 8 s ceiling)."
+    )]
     pub timeout_ms: Option<u64>,
 }
 

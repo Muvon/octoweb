@@ -3710,11 +3710,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
         finishAgentBubble(s, bubble, text, 0, []);
       } else if (role === 'ui' && m && m.a2ui) {
-        // Rebuild the A2UI bubble from the persisted envelope body. Buttons
-        // are inert if the surface was already resolved — the bash poll's
-        // long gone — but pending-status surfaces can still resolve if the
-        // user clicks (the queue file is still on disk).
-        window.__a2uiUpdate(sid, text, m.a2ui);
+        // Rebuild the A2UI bubble from the persisted envelope body. Replays
+        // are ghosts (no live poll) and anchor on the persisted creation ts
+        // so the bubble lands in its original chronological spot and shows
+        // its original time, not "now".
+        window.__a2uiUpdate(sid, text, m.a2ui, false, typeof m.ts === 'number' ? m.ts : 0);
       }
     }
     if (sid === activeSid) { updateWelcome(); scrollToBottom(); }
@@ -5138,11 +5138,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (stale) stale.remove();
   }
 
-  function a2uiEnsureBlock(sid, fileId) {
+  function a2uiEnsureBlock(sid, fileId, ts) {
     let block = a2uiBlocks.get(fileId);
     if (block) return block;
     const s = sessions.get(sid);
     if (!s) return null;
+    // ts (ms since epoch) is the bubble's chronological anchor — used for
+    // the time label. Caller passes the persisted creation time on replay;
+    // live emissions pass null/undefined and we use current time.
+    const displayDate = (typeof ts === 'number' && ts > 0) ? new Date(ts) : new Date();
     block = {
       fileId,
       sid,
@@ -5177,7 +5181,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     who.textContent = 'UI';
     const time = document.createElement('span');
     time.className = 'msg-time';
-    time.textContent = fmtTime(new Date());
+    time.textContent = fmtTime(displayDate);
     label.appendChild(who);
     label.appendChild(time);
     const bubble = document.createElement('div');
@@ -5196,7 +5200,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return block;
   }
 
-  window.__a2uiUpdate = function(sid, fileId, payload, live) {
+  window.__a2uiUpdate = function(sid, fileId, payload, live, ts) {
     // A2UI v0.9 surface lifecycle:
     //   - Each render_ui call writes a new envelope (new fileId) but may carry
     //     the same `surfaceId`. We key the DOM bubble by surfaceId so updates
@@ -5237,7 +5241,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       }
     }
     if (!block) {
-      block = a2uiEnsureBlock(sid, fileId);
+      block = a2uiEnsureBlock(sid, fileId, ts);
       if (!block) return;
     }
     if (Array.isArray(payload.await_events)) block.awaitEvents = payload.await_events;
