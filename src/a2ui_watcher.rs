@@ -47,6 +47,16 @@ where
 }
 
 fn warm(dir: &PathBuf, seen: &Arc<Mutex<HashMap<String, String>>>) {
+    // Seed EVERY envelope already on disk into the seen map (regardless of
+    // status). The previous behavior — leaving pending files un-seeded so
+    // they'd re-emit on first scan — was meant to "restore live forms after
+    // restart", but in our subprocess model that's impossible: when octoweb
+    // restarts, the octomind subprocess dies, the render_ui bash poll dies,
+    // and the agent loop's in-memory state is gone. Re-emitting a pending
+    // file produces a ghost bubble at the bottom of the chat that duplicates
+    // whatever the history replay path already painted at the correct spot.
+    // Replay owns historical surfaces; the watcher only handles envelopes
+    // written AFTER startup by a live agent.
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -67,9 +77,7 @@ fn warm(dir: &PathBuf, seen: &Arc<Mutex<HashMap<String, String>>>) {
         if id.is_empty() || status.is_empty() {
             continue;
         }
-        if status != "pending" {
-            map.insert(id.to_string(), status.to_string());
-        }
+        map.insert(id.to_string(), status.to_string());
     }
 }
 

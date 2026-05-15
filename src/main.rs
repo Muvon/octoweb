@@ -5701,7 +5701,9 @@ fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, m
         .find(|m| m.role == "ui" && m.text == file_id)
     {
         m.a2ui = Some(body);
-        m.ts = ts;
+        // Keep original `ts` — the bubble's chronological spot AND its time
+        // label both anchor on first creation. Mutations land in place; they
+        // don't shuffle the bubble or reset its clock.
         return;
     }
     s.messages.push(config::AcpMessage {
