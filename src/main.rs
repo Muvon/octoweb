@@ -22,6 +22,7 @@ mod progress_bar_html;
 mod prompt_history_js;
 mod quickslots;
 mod quickslots_html;
+mod readiness_js;
 mod sanitize;
 mod settings_html;
 mod shortcuts_html;
@@ -3212,6 +3213,10 @@ fn main() {
                                 "domcontentloaded" => format!(
                                     "new Promise(r => {{ if (document.readyState !== 'loading') r('ready'); else {{ const t = setTimeout(() => r('timeout'), {timeout_ms}); document.addEventListener('DOMContentLoaded', () => {{ clearTimeout(t); r('ready'); }}, {{once: true}}); }} }})"
                                 ),
+                                // Full SPA readiness — same probe browser_navigate uses.
+                                // Has its own 8 s internal cap; the `timeout_ms` argument
+                                // is intentionally ignored here.
+                                "ready" => readiness_js::READINESS_JS.to_string(),
                                 // Treat anything else as a CSS selector
                                 selector => {
                                     let sel_json = serde_json::to_string(selector).unwrap_or_default();
@@ -4664,21 +4669,15 @@ fn main() {
                         let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                         let response_cb = response.clone();
                         let result_id = tab_id;
-                        // Wait for DOM stability + network idle (like Playwright's networkidle).
-                        // 2 rAF cycles flush SPA render queues, then 500ms of no DOM mutations
-                        // and no resource loads means the page has settled.  Max 10s cap.
-                        let js = concat!(
-                            "new Promise(r=>{let t,s=false;",
-                            "const m=new MutationObserver(()=>b());",
-                            "m.observe(document.documentElement,{childList:true,subtree:true,attributes:true});",
-                            "let p;try{p=new PerformanceObserver(()=>b());p.observe({type:'resource',buffered:false})}catch(e){}",
-                            "function b(){clearTimeout(t);t=setTimeout(f,500)}",
-                            "function f(){if(s)return;s=true;m.disconnect();if(p)p.disconnect();r('ready')}",
-                            "setTimeout(f,10000);",
-                            "requestAnimationFrame(()=>requestAnimationFrame(()=>b()))})"
-                        );
-                        match wv.evaluate_script_with_callback(js, move |_val| {
+                        // Wait for the page to *actually* render — see readiness_js.rs.
+                        // Resolves to "ready" | "live" | "partial"; we surface the reason
+                        // via tracing so debugging flaky sites is easier without changing
+                        // the Navigate response shape.
+                        match wv.evaluate_script_with_callback(readiness_js::READINESS_JS, move |val| {
                             if let Some(tx) = response_cb.lock().unwrap().take() {
+                                let reason = serde_json::from_str::<String>(&val)
+                                    .unwrap_or_else(|_| val.trim().trim_matches('"').to_string());
+                                tracing::debug!(tab_id = result_id, %reason, "MCP nav readiness");
                                 let _ = tx.send(Ok(result_id));
                             }
                         }) {
