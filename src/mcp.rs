@@ -407,10 +407,10 @@ pub struct WaitRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "\"load\" (default), \"domcontentloaded\", or a CSS selector to wait for."
+        description = "\"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves to \"ready\"/\"live\"/\"partial\") | a CSS selector to wait for."
     )]
     pub event: Option<String>,
-    #[schemars(description = "Timeout in ms. Default 10000, max 30000.")]
+    #[schemars(description = "Timeout in ms. Default 10000, max 30000. Ignored for event=\"ready\" (the probe has its own 8 s ceiling).")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -556,7 +556,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Wait for a condition. NOT needed after browser_navigate (already waits). Use after a click that triggers an SPA route change, or for lazily-loaded content. event: \"load\" (default) | \"domcontentloaded\" | a CSS selector to wait for. Returns \"ready\" or \"timeout\"."
+        description = "Wait for a condition. NOT needed after browser_navigate (already waits). Use after a click that triggers an SPA route change, or for lazily-loaded content. event: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — main content rendered + DOM/JS quiet, with a steady-state fallback for live feeds; returns \"ready\" | \"live\" | \"partial\") | a CSS selector to wait for. Other events return \"ready\" or \"timeout\"."
     )]
     async fn browser_wait(
         &self,
