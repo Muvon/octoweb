@@ -1032,7 +1032,7 @@ fn main() {
                             let data_model_json = serde_json::to_string(&action["dataModel"])
                                 .unwrap_or_else(|_| "{}".into());
                             let prompt = format!(
-                                "[A2UI event — prior surface]\nThe `render_ui` tool call that rendered this surface has already exited (this surface comes from earlier in our chat). Treat the click below as the user's choice and continue the flow — re-render with `render_ui` if you need a fresh interactive surface.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
+                                "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface whose `render_ui` poll has already exited (fire-and-forget update, replay, or prior session). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
                             );
                             if sid != 0 {
                                 let _ = p.send_event(AppEvent::AcpPrompt(sid, prompt, vec![]));
