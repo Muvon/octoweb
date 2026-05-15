@@ -27,9 +27,9 @@
 //!
 //! - `"ready"`   — fully settled.
 //! - `"live"`    — steady-state mutation rate; treat as ready (this *is* the
-//!                 rendered shape, waiting longer won't help).
+//!   rendered shape, waiting longer won't help).
 //! - `"partial"` — 8 s ceiling reached. Returns *something* on pathological
-//!                 sites instead of hanging the navigate.
+//!   sites instead of hanging the navigate.
 
 pub const READINESS_JS: &str = r#"
 new Promise(function(r){
