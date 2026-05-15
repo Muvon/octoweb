@@ -957,7 +957,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .a2ui-row { display: flex; flex-direction: row; flex-wrap: wrap; }
   .a2ui-spacer { display: block; min-height: 6px; }
   .a2ui-divider { border: none; border-top: 1px solid var(--divider); margin: 4px 0; }
-  .a2ui-text { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
+  .a2ui-text { font-size: 13px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; }
   .a2ui-text.muted { color: var(--text-secondary); font-size: 12px; }
   .a2ui-heading { font-weight: 600; line-height: 1.3; margin: 0; color: var(--text-primary); }
   h1.a2ui-heading { font-size: 15px; }
@@ -4362,7 +4362,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // back to compact JSON, and only ever pass scalars through unchanged.
   function a2uiToStr(v) {
     if (v == null) return '';
-    if (typeof v === 'string') return v;
+    if (typeof v === 'string') {
+      // Defensive: some models over-escape and put the literal 2-char "\n"
+      // (backslash + n) instead of a real newline. Same for \r\n and \t.
+      // Idempotent — if the string already has real newlines, no-op.
+      if (v.indexOf('\\') !== -1) {
+        return v.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+      }
+      return v;
+    }
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
     if (Array.isArray(v)) return v.map(a2uiToStr).join(', ');
     if (typeof v === 'object') {
@@ -4386,6 +4394,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       c === '"' ? '&quot;' : '&#39;');
   }
   function a2uiRenderMarkdown(src) {
+    // Some models over-escape newlines/tabs when writing JSON, sending the
+    // literal 2-char sequence "\n" (backslash + n) where they meant a real
+    // newline. JSON.parse decodes those to literal backslash-n in the JS
+    // string, which leaks into rendered prose / code blocks / blockquotes.
+    // Convert defensively before markdown parsing.
+    if (typeof src === 'string' && src.indexOf('\\') !== -1) {
+      src = src.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    }
     let s = a2uiEscapeHtml(src);
     // Use a placeholder that can't collide with prose ("CB0" did, as you
     // saw at end-of-input where the space-bounded marker matcher failed).
@@ -4672,7 +4688,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         }
         const action = def.action || {};
         if (action.openUrl) {
-          a2uiResolveValue({ call: 'openUrl', args: { url: action.openUrl } }, scope);
+          // A2UI v0.9: Button.action.openUrl is `{ url: string }` (an object,
+          // not a bare string). Older renderer assumed a string and lost the
+          // URL. Accept both shapes defensively.
+          const urlValue = typeof action.openUrl === 'string'
+            ? action.openUrl
+            : (action.openUrl && typeof action.openUrl.url === 'string' ? action.openUrl.url : '');
+          if (/^(https?:|mailto:)/i.test(urlValue)) {
+            window.ipc.postMessage(JSON.stringify({ type: 'a2ui_open_url', url: urlValue }));
+          }
           return;
         }
         const ev = action.event;
@@ -4686,32 +4710,50 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           context,
           dataModel: block.dataModel,
         };
-        if (block.live) {
-          // Live surface: bash poll loop is still blocking. Flip the queue
-          // file's status to resolved; bash returns the event payload to the
-          // agent's render_ui tool call.
+        if (block.pollFileId) {
+          // An envelope's bash poll is still waiting for a click. Send the
+          // resolution to THAT file (not necessarily the latest envelope we
+          // received — fire-and-forget updates don't carry a poll).
           window.ipc.postMessage(JSON.stringify({
             type: 'a2ui_resolve',
-            file_id: block.fileId,
+            file_id: block.pollFileId,
             action: actionPayload,
           }));
-          // In-flight: agent owns the event; lock until the next envelope
-          // for this surfaceId arrives (lifts) or deleteSurface (removes).
+          // Optimistic lock on the bubble.
           block.resolved = true;
           a2uiRerender(block);
+          // Mark the SESSION busy too — the agent is about to process this
+          // click and may take time. Without this, the input box stays
+          // enabled, no thinking indicator shows, and the stop button is
+          // missing. Same UX as a typed prompt.
+          const liveSession = sessions.get(block.sid);
+          if (liveSession) {
+            liveSession.busy = true;
+            window.__setThinking(liveSession.sid, true);
+          }
         } else {
-          // Ghost surface (rendered from history or a prior session): the
-          // bash poll is dead so there's no tool call to return into. Deliver
-          // the same event payload to the agent as a synthetic prompt in
-          // this session — the agent has the surface in chat history and
-          // can resume in a fresh turn.
-          window.ipc.postMessage(JSON.stringify({
-            type: 'a2ui_replay_event',
-            sid: block.sid,
-            file_id: block.fileId,
-            action: actionPayload,
-          }));
-          a2uiToast('Click sent — Octopus will continue in a new message.');
+          // No active poll — either the surface is replayed from history,
+          // OR the agent sent a fire-and-forget update without a new
+          // await_events envelope. Deliver the event by simulating a user
+          // prompt through the normal dispatch path so the user sees a
+          // user bubble + thinking indicator (same as typing a message).
+          const s = sessions.get(block.sid);
+          if (s) {
+            const author = (context && (context.author || context.handle)) || '';
+            const surfaceLabel = block.surfaceId || '(unknown)';
+            const headline = author
+              ? `Clicked ${ev.name} on ${author}`
+              : `Clicked ${ev.name}`;
+            const promptText =
+              headline + '\n\n' +
+              '[A2UI event — out-of-band click on prior surface]\n' +
+              'surfaceId: ' + surfaceLabel + '\n' +
+              'event: ' + ev.name + '\n' +
+              'sourceComponentId: ' + (typeof def.id === 'string' ? def.id : '?') + '\n' +
+              'context: ' + JSON.stringify(context) + '\n\n' +
+              'Do the work this event implies right now (post the tweet, save the draft, advance the wizard…). Then call render_ui again with the SAME surfaceId AND await_events so the next click resolves normally.';
+            dispatchPromptForSession(s, promptText, [], []);
+          }
         }
       });
       return btn;
@@ -5111,9 +5153,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       dataModel: {},
       awaitEvents: [],
       resolved: false,
-      // `live` flips to true the moment an envelope arrives via the live
-      // watcher path with a parent_pid matching this session. Replay-only
-      // surfaces keep live=false and their clicks become synthetic prompts.
+      // The fileId of the envelope whose bash poll loop is currently waiting
+      // for a click. `null` if no such envelope (after-restart replay, after
+      // the agent sent a fire-and-forget update without a new poll, or after
+      // the prior poll exhausted). Clicks go via the live `a2ui_resolve` path
+      // when this is set; otherwise they go via the ghost `a2ui_replay_event`
+      // path (synthetic prompt to the agent).
+      pollFileId: null,
+      // True if the most-recent envelope came from a running agent in this
+      // session. Affects only toast text; click routing uses pollFileId.
       live: false,
       resolutionLabel: null,
       version: 0,
@@ -5198,6 +5246,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     // wired into a running agent and clicks can resolve normally. Replays
     // and ghosts never flip it on.
     if (isLive) block.live = true;
+    // pollFileId tracks which envelope's bash is currently waiting for a
+    // click. Set when an envelope arrives with non-empty await_events and
+    // pending status. Cleared below if THIS envelope is the active poll AND
+    // it just transitioned to a terminal status.
+    const awaiting = Array.isArray(payload.await_events) && payload.await_events.length > 0;
+    const incomingStatusEarly = payload && payload.status;
+    const isPendingEarly = !incomingStatusEarly || incomingStatusEarly === 'pending';
+    if (awaiting && isPendingEarly && isLive) {
+      block.pollFileId = fileId;
+    }
     // Pin surfaceId on the block BEFORE applying messages — a deleteSurface
     // that lands on a fresh (never-seen-createSurface) block must still match
     // its target by surfaceId. Same goes for updateComponents/DataModel that
@@ -5226,15 +5284,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // Ghost surface arriving with terminal status — keep clickable.
       block.resolved = false;
     }
+    // If THIS envelope's poll just exhausted (transitioned to terminal),
+    // clear it so subsequent clicks fall through to the ghost path until
+    // the agent emits a new envelope with await_events.
+    if (isTerminal && block.pollFileId === fileId) {
+      block.pollFileId = null;
+    }
     a2uiRerender(block);
   };
 
   // Legacy hook — kept for any callers still posting a separate "resolved"
-  // event. Equivalent to flipping the in-flight lock on.
+  // event. Equivalent to flipping the in-flight lock on and clearing the
+  // active poll for this fileId.
   window.__a2uiResolved = function(sid, fileId, payload) {
     const block = a2uiBlocks.get(fileId);
     if (!block) return;
-    block.resolved = true;
+    if (block.live) block.resolved = true;
+    if (block.pollFileId === fileId) block.pollFileId = null;
     a2uiRerender(block);
   };
 
