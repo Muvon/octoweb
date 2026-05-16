@@ -55,6 +55,12 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>Octoweb needs microphone access for websites that request it (e.g. voice/video calls).</string>
 
+    <!-- Speech recognition for websites using Web Speech API (SpeechRecognition).
+         Without this key WKWebView fails immediately with `service-not-allowed`,
+         because the system has no copy to show in the permission prompt. -->
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Octoweb needs speech recognition for websites that use the Web Speech API (e.g. dictation, voice input).</string>
+
     <!-- Location access for websites using HTML5 geolocation -->
     <key>NSLocationUsageDescription</key>
     <string>Octoweb needs location access for websites that request it (e.g. maps, local search).</string>

@@ -26,6 +26,12 @@
     <key>com.apple.security.device.audio-input</key>
     <true/>
 
+    <!-- Speech recognition (SFSpeechRecognizer / Web Speech API). Required under
+         hardened runtime for WKWebView's SpeechRecognition to reach the system
+         service; without it the API fails with `service-not-allowed`. -->
+    <key>com.apple.security.personal-information.speech-recognition</key>
+    <true/>
+
     <!-- Location access for HTML5 navigator.geolocation -->
     <key>com.apple.security.personal-information.location</key>
     <true/>
