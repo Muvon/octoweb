@@ -466,7 +466,27 @@ impl McpServer {
             .map_err(|_| {
                 McpError::internal_error("browser did not respond within 30 s".to_string(), None)
             })?
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            // Inner `RecvError` means the response sender in the main loop was
+            // dropped without sending — almost always because a wry/WKWebView
+            // `evaluateJavaScript:completionHandler:` block was discarded
+            // before firing (JS context torn down by an SPA navigation or
+            // re-render that the action itself triggered, or parallel evals
+            // racing). The tab is still alive; the call just got eaten.
+            // Replace the bare `"channel closed"` with something the AI can
+            // act on so it doesn't conclude "tab is dead" and start
+            // navigating new tabs to recreate state it never lost.
+            .map_err(|_| McpError::internal_error(
+                "browser dropped this request without replying — the JS \
+                 callback was discarded (the page likely navigated or \
+                 re-rendered during the call, common on heavy SPAs and when \
+                 firing many interaction calls in parallel). The tab is \
+                 almost certainly still alive: call browser_get_tabs to \
+                 confirm, then browser_snapshot to refresh @refs before \
+                 retrying. Do NOT navigate to recreate the page — that \
+                 destroys SPA state. Prefer sequential calls over parallel \
+                 ones for clicks/types on SPAs.".to_string(),
+                None,
+            ))?
             .map_err(|e| McpError::internal_error(e, None))
     }
 }
