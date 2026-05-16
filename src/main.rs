@@ -587,6 +587,15 @@ fn main() {
                     if !prefs.is_null() {
                         let _: () = msg_send![prefs, setFraudulentWebsiteWarningEnabled: false];
                         let _: () = msg_send![prefs, _setUsesPageCache: true];
+                        // Enable Web Speech API recognition. WKWebView keeps this
+                        // off by default (unlike Safari) — without it the page
+                        // gets `service-not-allowed`.
+                        let _: () = msg_send![prefs, _setSpeechRecognitionEnabled: true];
+                        // getUserMedia (mic/camera) is also gated behind a
+                        // private flag in WKWebView; flip it on so dictation
+                        // sites that combine getUserMedia + SpeechRecognition
+                        // (Vext, etc.) can capture audio.
+                        let _: () = msg_send![prefs, _setMediaDevicesEnabled: true];
                     }
                 }
             }
