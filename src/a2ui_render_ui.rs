@@ -169,8 +169,13 @@ pub fn install() -> std::io::Result<PathBuf> {
 }
 
 /// Flip a pending envelope's status to `resolved` and stamp the resolution
-/// body the bash poll loop will print back to the agent. No-op if the file
-/// is already past `pending` or if the `name` isn't in `await_events`.
+/// body the bash poll loop will print back to the agent. No-op only if the
+/// file is already past `pending`. A click whose name isn't in
+/// `await_events` still resolves the file — silently bailing would leave
+/// the bash poll spinning forever, freezing the session in "thinking…"
+/// (the JS optimistically locks the bubble + sets busy on click). Letting
+/// the agent see the unexpected event name is strictly better than a
+/// permanent hang: the agent can adapt or apologize.
 pub fn resolve(file_id: &str, action: serde_json::Value) -> std::io::Result<()> {
     let path = queue_dir().join(format!("{file_id}.json"));
     let raw = fs::read_to_string(&path)?;
@@ -186,7 +191,12 @@ pub fn resolve(file_id: &str, action: serde_json::Value) -> std::io::Result<()> 
         .unwrap_or_default();
     let action_name = action.get("name").and_then(|n| n.as_str()).unwrap_or("");
     if !await_events.is_empty() && !await_events.iter().any(|e| e.as_str() == Some(action_name)) {
-        return Ok(());
+        tracing::warn!(
+            file_id = %file_id,
+            action_name = %action_name,
+            await_events = ?await_events,
+            "A2UI button event not in await_events — resolving anyway to unblock the bash poll",
+        );
     }
     let mut resolution = action;
     if let Some(obj) = resolution.as_object_mut() {

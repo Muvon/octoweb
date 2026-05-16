@@ -81,6 +81,8 @@ pub enum McpCommand {
     GetPageInfo {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<PageInfo, String>>,
+        /// Internal: see `GetPageContent::is_retry`.
+        is_retry: bool,
     },
     /// Execute JavaScript in page — returns the JS result as a JSON string
     ExecuteJs {
@@ -135,6 +137,9 @@ pub enum McpCommand {
     GetPageContent {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<String, String>>,
+        /// Internal: true when re-issued by a watchdog after the first eval's
+        /// callback was discarded. Suppresses a second retry so we don't loop.
+        is_retry: bool,
     },
     /// Take a screenshot of a tab (viewport or full page).
     /// Ok variant carries base64-encoded PNG data.
@@ -176,6 +181,8 @@ pub enum McpCommand {
     Snapshot {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<String, String>>,
+        /// Internal: see `GetPageContent::is_retry`.
+        is_retry: bool,
     },
 }
 
@@ -466,27 +473,22 @@ impl McpServer {
             .map_err(|_| {
                 McpError::internal_error("browser did not respond within 30 s".to_string(), None)
             })?
-            // Inner `RecvError` means the response sender in the main loop was
-            // dropped without sending — almost always because a wry/WKWebView
-            // `evaluateJavaScript:completionHandler:` block was discarded
-            // before firing (JS context torn down by an SPA navigation or
-            // re-render that the action itself triggered, or parallel evals
-            // racing). The tab is still alive; the call just got eaten.
-            // Replace the bare `"channel closed"` with something the AI can
-            // act on so it doesn't conclude "tab is dead" and start
-            // navigating new tabs to recreate state it never lost.
-            .map_err(|_| McpError::internal_error(
-                "browser dropped this request without replying — the JS \
-                 callback was discarded (the page likely navigated or \
-                 re-rendered during the call, common on heavy SPAs and when \
-                 firing many interaction calls in parallel). The tab is \
-                 almost certainly still alive: call browser_get_tabs to \
-                 confirm, then browser_snapshot to refresh @refs before \
-                 retrying. Do NOT navigate to recreate the page — that \
-                 destroys SPA state. Prefer sequential calls over parallel \
-                 ones for clicks/types on SPAs.".to_string(),
-                None,
-            ))?
+            // Inner `RecvError` means the main-loop sender was dropped
+            // without sending. With the per-handler watchdogs in main.rs,
+            // every JS-callback path now claims its Sender on timeout and
+            // sends a structured error or retries, so this branch should
+            // only fire on catastrophic main-loop drops (panic, shutdown).
+            // Keep the message defensive — actionable rather than the bare
+            // tokio "channel closed" that misleads the AI into thinking
+            // the tab is dead.
+            .map_err(|_| {
+                McpError::internal_error(
+                    "browser dropped this request without replying (main loop \
+                 unavailable). Tab state is unchanged; retry the call."
+                        .to_string(),
+                    None,
+                )
+            })?
             .map_err(|e| McpError::internal_error(e, None))
     }
 }
@@ -670,6 +672,7 @@ impl McpServer {
             .send_command(|tx| McpCommand::GetPageInfo {
                 tab_id: req.tab_id,
                 response: tx,
+                is_retry: false,
             })
             .await?;
         let json = serde_json::to_string(&info)
@@ -688,6 +691,7 @@ impl McpServer {
             .send_command(|tx| McpCommand::GetPageContent {
                 tab_id: req.tab_id,
                 response: tx,
+                is_retry: false,
             })
             .await?;
         Ok(CallToolResult::success(vec![Content::text(content)]))
@@ -704,6 +708,7 @@ impl McpServer {
             .send_command(|tx| McpCommand::Snapshot {
                 tab_id: req.tab_id,
                 response: tx,
+                is_retry: false,
             })
             .await?;
         Ok(CallToolResult::success(vec![Content::text(snapshot)]))
@@ -986,12 +991,16 @@ impl ServerHandler for McpServer {
 pub struct McpHandle {
     /// Receiver for commands from MCP tools
     pub command_rx: mpsc::UnboundedReceiver<McpCommand>,
+    /// Sender used by the main loop to re-issue read commands from a
+    /// watchdog when the first eval's callback was discarded.
+    pub command_tx: mpsc::UnboundedSender<McpCommand>,
 }
 
 pub fn spawn_mcp_server() -> McpHandle {
     let (command_tx, command_rx) = mpsc::unbounded_channel::<McpCommand>();
 
     let command_tx_clone = command_tx.clone();
+    let command_tx_for_handle = command_tx.clone();
     // Spawn tokio runtime in a separate thread
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
@@ -1032,7 +1041,10 @@ pub fn spawn_mcp_server() -> McpHandle {
         });
     });
 
-    McpHandle { command_rx }
+    McpHandle {
+        command_rx,
+        command_tx: command_tx_for_handle,
+    }
 }
 
 impl McpHandle {
