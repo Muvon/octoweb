@@ -1556,6 +1556,15 @@ fn main() {
 
     // ── MCP server — exposes browser control tools on localhost:3434 ───────
     let mut mcp_handle = Some(mcp::spawn_mcp_server());
+    // Cloned sender used by JS-callback watchdogs to re-issue read commands
+    // (Snapshot/GetPageContent/GetPageInfo) when wry's
+    // `evaluateJavaScript:completionHandler:` block is discarded by WKWebView
+    // mid-eval (SPA navigation, JS-context teardown, parallel evals racing).
+    let mcp_cmd_tx = mcp_handle
+        .as_ref()
+        .expect("mcp_handle just initialized")
+        .command_tx
+        .clone();
 
     // ── Global hotkey via CGEventTap ─────────────────────────────────────
     // rdev crashes on macOS 15+ because TSMGetInputSourceProperty (called in
@@ -1853,6 +1862,34 @@ fn main() {
                     tab_webviews.insert(target, wv);
                 }
             }
+        }};
+    }
+
+    /// Watchdog for JS-callback handlers that can't safely retry (writes:
+    /// Click/Hover/Type/PressKey/SelectOption/ExecuteJs/Wait).
+    ///
+    /// wry's `evaluate_script_with_callback` registers a
+    /// `WKWebView.evaluateJavaScript:completionHandler:` block. WKWebView
+    /// discards the block (without firing it) if the JS context tears down
+    /// mid-eval — SPA navigation, parallel evals racing against an SPA
+    /// re-render, or WebContent process recycling. The closure capturing
+    /// the response Sender is then dropped, the Sender drops without
+    /// sending, and the MCP receiver gets `RecvError` ("channel closed").
+    ///
+    /// This macro spawns a short-lived thread that, after `delay_ms`,
+    /// claims the Sender (if still un-fired) and emits a structured error
+    /// the AI can act on. If the callback already fired, `take()` returns
+    /// None and the thread is a no-op.
+    macro_rules! mcp_eval_err_watchdog {
+        ($arc:expr, $delay_ms:expr, $err_msg:expr) => {{
+            let arc_wd = $arc.clone();
+            let msg: String = $err_msg;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis($delay_ms));
+                if let Some(tx) = arc_wd.lock().unwrap().take() {
+                    let _ = tx.send(Err(msg));
+                }
+            });
         }};
     }
 
@@ -2724,7 +2761,7 @@ fn main() {
                         let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
                         let _ = response.send(Ok(()));
                     }
-                    McpCommand::GetPageInfo { tab_id, response } => {
+                    McpCommand::GetPageInfo { tab_id, response, is_retry } => {
                         let tm = tabs.lock().unwrap();
                         let target_id = tab_id.or(tm.active_id());
                         let base_info = target_id.and_then(|id| {
@@ -2750,7 +2787,36 @@ fn main() {
                                             }
                                         },
                                     ) {
-                                        Ok(()) => {}
+                                        Ok(()) => {
+                                            if !is_retry {
+                                                // Idempotent read — auto-retry once on watchdog.
+                                                let arc_wd = response.clone();
+                                                let tx_for_retry = mcp_cmd_tx.clone();
+                                                std::thread::spawn(move || {
+                                                    std::thread::sleep(std::time::Duration::from_millis(3000));
+                                                    if let Some(tx) = arc_wd.lock().unwrap().take() {
+                                                        let _ = tx_for_retry.send(mcp::McpCommand::GetPageInfo {
+                                                            tab_id: Some(id),
+                                                            response: tx,
+                                                            is_retry: true,
+                                                        });
+                                                    }
+                                                });
+                                            } else {
+                                                // Retry already attempted — degrade to title+url
+                                                // without description. The AI still gets something
+                                                // useful instead of an error.
+                                                let arc_wd = response.clone();
+                                                let fallback_title = title.clone();
+                                                let fallback_url = url.clone();
+                                                std::thread::spawn(move || {
+                                                    std::thread::sleep(std::time::Duration::from_millis(5000));
+                                                    if let Some(tx) = arc_wd.lock().unwrap().take() {
+                                                        let _ = tx.send(Ok(PageInfo::new(fallback_title, fallback_url, None)));
+                                                    }
+                                                });
+                                            }
+                                        }
                                         Err(_) => {
                                             // JS failed — return info without description
                                             if let Some(tx) = response.lock().unwrap().take() {
@@ -2784,7 +2850,14 @@ fn main() {
                                         let _ = tx.send(Ok(val));
                                     }
                                 }) {
-                                    Ok(()) => {}
+                                    Ok(()) => {
+                                        mcp_eval_err_watchdog!(response, 10_000, format!(
+                                            "browser_execute_js callback was discarded — the page navigated or \
+                                             the JS context tore down during the call. The script may or may not \
+                                             have run. Verify with browser_get_tabs / browser_snapshot and retry. \
+                                             Not auto-retried because the script's intent is unknown."
+                                        ));
+                                    }
                                     Err(e) => {
                                         // callback won't fire — send error via the Arc
                                         if let Some(tx) = response.lock().unwrap().take() {
@@ -2824,7 +2897,16 @@ fn main() {
                                         let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
-                                    Ok(()) => {}
+                                    Ok(()) => {
+                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                            "Click on '{selector}' was dropped — the JS callback never fired, almost \
+                                             always because the page navigated or re-rendered during the click \
+                                             (common on heavy SPAs and with parallel clicks). The tab is still \
+                                             alive; whether the click happened is unknown. Call browser_get_tabs \
+                                             to confirm state, browser_snapshot to refresh @refs, then retry \
+                                             sequentially."
+                                        ));
+                                    }
                                     Err(e) => {
                                         if let Some(tx) = response.lock().unwrap().take() {
                                             let _ = tx.send(Err(format!("Click failed: {e}")));
@@ -2859,7 +2941,12 @@ fn main() {
                                         let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
-                                    Ok(()) => {}
+                                    Ok(()) => {
+                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                            "Hover on '{selector}' was dropped (JS callback discarded by page \
+                                             navigation/re-render). Re-snapshot and retry."
+                                        ));
+                                    }
                                     Err(e) => {
                                         if let Some(tx) = response.lock().unwrap().take() {
                                             let _ = tx.send(Err(format!("Hover failed: {e}")));
@@ -2895,7 +2982,13 @@ fn main() {
                                         let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                     }
                                 }) {
-                                    Ok(()) => {}
+                                    Ok(()) => {
+                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                            "Type into '{selector}' was dropped (JS callback discarded by page \
+                                             navigation/re-render). Whether the text was set is unknown — \
+                                             re-snapshot, verify field state, and retry."
+                                        ));
+                                    }
                                     Err(e) => {
                                         if let Some(tx) = response.lock().unwrap().take() {
                                             let _ = tx.send(Err(format!("Type failed: {e}")));
@@ -3084,7 +3177,7 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::GetPageContent { tab_id, response } => {
+                    McpCommand::GetPageContent { tab_id, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
@@ -3100,7 +3193,28 @@ fn main() {
                                     }
                                 },
                             ) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    if !is_retry {
+                                        let arc_wd = response.clone();
+                                        let tx_for_retry = mcp_cmd_tx.clone();
+                                        std::thread::spawn(move || {
+                                            std::thread::sleep(std::time::Duration::from_millis(3000));
+                                            if let Some(tx) = arc_wd.lock().unwrap().take() {
+                                                let _ = tx_for_retry.send(mcp::McpCommand::GetPageContent {
+                                                    tab_id: Some(target_id),
+                                                    response: tx,
+                                                    is_retry: true,
+                                                });
+                                            }
+                                        });
+                                    } else {
+                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                            "browser_get_page_content callback was discarded twice — the page \
+                                             keeps tearing down its JS context. Verify with browser_get_tabs \
+                                             once the page is settled, then retry."
+                                        ));
+                                    }
+                                }
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("JS error: {e}")));
@@ -3186,12 +3300,18 @@ fn main() {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone().unwrap_or_else(|| "(focused element)".into());
+                            let sel_for_msg = sel_for_err.clone();
                             match wv.evaluate_script_with_callback(&script, move |val| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
                                     let _ = tx.send(interpret_dom_result(&val, &sel_for_err));
                                 }
                             }) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    mcp_eval_err_watchdog!(response, 5000, format!(
+                                        "PressKey on '{sel_for_msg}' was dropped (JS callback discarded by page \
+                                         navigation/re-render). Re-snapshot and retry."
+                                    ));
+                                }
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("PressKey failed: {e}")));
@@ -3227,13 +3347,23 @@ fn main() {
                             };
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
+                            // The wait script itself can legitimately run up to `timeout_ms`
+                            // before resolving with 'timeout'. The watchdog only fires if
+                            // the callback was discarded — give the script timeout_ms + 5s.
+                            let wd_ms = timeout_ms.saturating_add(5000);
                             match wv.evaluate_script_with_callback(&script, move |val| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
                                     let text = serde_json::from_str::<String>(&val).unwrap_or(val);
                                     let _ = tx.send(Ok(text));
                                 }
                             }) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    mcp_eval_err_watchdog!(response, wd_ms, format!(
+                                        "browser_wait callback was discarded — the page navigated mid-wait. \
+                                         If the navigation is what you wanted, call browser_get_tabs to verify \
+                                         and continue; otherwise retry."
+                                    ));
+                                }
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("Wait failed: {e}")));
@@ -3261,6 +3391,7 @@ fn main() {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone();
+                            let sel_for_msg = sel_for_err.clone();
                             let val_for_err = value.clone();
                             match wv.evaluate_script_with_callback(&script, move |val| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
@@ -3273,7 +3404,12 @@ fn main() {
                                     let _ = tx.send(result);
                                 }
                             }) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    mcp_eval_err_watchdog!(response, 5000, format!(
+                                        "SelectOption on '{sel_for_msg}' was dropped (JS callback discarded by \
+                                         page navigation/re-render). Re-snapshot and retry."
+                                    ));
+                                }
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("SelectOption failed: {e}")));
@@ -3284,7 +3420,7 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::Snapshot { tab_id, response } => {
+                    McpCommand::Snapshot { tab_id, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
@@ -3299,7 +3435,34 @@ fn main() {
                                     }
                                 },
                             ) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    if !is_retry {
+                                        // Idempotent read — auto-retry once via the MCP channel
+                                        // if the callback is discarded. The retry is dispatched
+                                        // by the watchdog thread; the retry itself runs with
+                                        // is_retry=true so a second failure produces a clean
+                                        // error instead of looping.
+                                        let arc_wd = response.clone();
+                                        let tx_for_retry = mcp_cmd_tx.clone();
+                                        std::thread::spawn(move || {
+                                            std::thread::sleep(std::time::Duration::from_millis(3000));
+                                            if let Some(tx) = arc_wd.lock().unwrap().take() {
+                                                let _ = tx_for_retry.send(mcp::McpCommand::Snapshot {
+                                                    tab_id: Some(target_id),
+                                                    response: tx,
+                                                    is_retry: true,
+                                                });
+                                            }
+                                        });
+                                    } else {
+                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                            "browser_snapshot callback was discarded twice — the page keeps \
+                                             tearing down its JS context (heavy SPA re-renders, navigation \
+                                             loop). Call browser_get_tabs to confirm the tab is settled, then \
+                                             retry once the page is quiet."
+                                        ));
+                                    }
+                                }
                                 Err(e) => {
                                     if let Some(tx) = response.lock().unwrap().take() {
                                         let _ = tx.send(Err(format!("Snapshot failed: {e}")));
