@@ -332,6 +332,14 @@ pub struct Config {
     /// How often to run the learning agent, in minutes
     #[serde(default = "default_learning_interval")]
     pub learning_interval_min: u64,
+    /// Use the legacy aggressive hibernation curve (sqrt scaling). When false
+    /// (default) the modern-laptop friendly curve is used — tabs survive longer
+    /// on 16 GB+ machines. Turn on for tight-RAM setups or eager reclamation.
+    #[serde(default)]
+    pub aggressive_hibernation: bool,
+    /// Whether the first-run welcome toast has been shown. Internal flag.
+    #[serde(default)]
+    pub first_run_completed: bool,
 }
 
 fn default_max_prompt_history() -> usize {
@@ -368,6 +376,8 @@ impl Default for Config {
             max_acp_session_messages: 500,
             proactive_learning: true,
             learning_interval_min: 30,
+            aggressive_hibernation: false,
+            first_run_completed: false,
         }
     }
 }

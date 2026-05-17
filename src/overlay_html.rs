@@ -216,6 +216,21 @@ pub fn html() -> &'static str {
     background: var(--glass-bg);
   }
 
+  /* Hibernated-tab indicator — small dim dot on the favicon corner */
+  .icon-slot { position: relative; width: 18px; height: 18px; flex-shrink: 0; display: inline-block; }
+  .icon-slot .item-favicon, .icon-slot > svg { display: block; }
+  .icon-slot.hibernated::after {
+    content: '';
+    position: absolute;
+    right: -1px;
+    bottom: -1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 159, 10, 0.85);
+    box-shadow: 0 0 0 1.5px var(--glass-solid, rgba(245, 245, 247, 0.95));
+  }
+
   .item-text {
     flex: 1;
     min-width: 0;
@@ -802,16 +817,19 @@ pub fn html() -> &'static str {
   }
 
   function iconHtml(item) {
+    var inner;
     if (item.favicon && (item.kind === 'tab' || item.kind === 'history')) {
       const fallback = item.kind === 'tab' ? ICONS.tab : ICONS.history;
-      return '<img class="item-favicon" src="' + esc(item.favicon) + '" onerror="this.outerHTML=\'' + fallback.replace(/"/g, "'") + '\'" />';
+      inner = '<img class="item-favicon" src="' + esc(item.favicon) + '" onerror="this.outerHTML=\'' + fallback.replace(/"/g, "'") + '\'" />';
+    } else {
+      inner = item.kind === 'tab' ? ICONS.tab
+            : item.kind === 'history' ? ICONS.history
+            : item.kind === 'url' ? ICONS.globe
+            : item.kind === 'ask' ? ICONS.ai
+            : ICONS.search;
     }
-    const html = item.kind === 'tab' ? ICONS.tab
-               : item.kind === 'history' ? ICONS.history
-               : item.kind === 'url' ? ICONS.globe
-               : item.kind === 'ask' ? ICONS.ai
-               : ICONS.search;
-    return html;
+    var cls = 'icon-slot' + (item.hibernated ? ' hibernated' : '');
+    return '<span class="' + cls + '" title="' + (item.hibernated ? 'Hibernated · click to wake' : '') + '">' + inner + '</span>';
   }
 
   function kindLabelFor(item) {

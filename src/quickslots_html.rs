@@ -10,8 +10,8 @@
 ///
 /// JS API called from Rust:
 ///   window.__updateSlots(jsonArray)  — refresh slot data
-pub fn html() -> &'static str {
-    r#"<!DOCTYPE html>
+pub fn html() -> String {
+    let template = r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -157,6 +157,30 @@ pub fn html() -> &'static str {
     font-weight: 400;
   }
 
+  /* Empty-state plus glyph — quiet at rest, surfaces on hover */
+  .slot.empty .plus {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 10px; height: 10px;
+    opacity: 0.35;
+    transition: opacity 0.12s ease;
+    color: var(--text-dim);
+  }
+  .slot.empty .plus svg { width: 100%; height: 100%; }
+  .slot.empty .hint {
+    font-size: 10px;
+    color: var(--text-dim);
+    opacity: 0;
+    max-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    transition: opacity 0.12s ease, max-width 0.16s ease;
+    letter-spacing: 0.01em;
+  }
+  .slot.empty:hover .plus { opacity: 0; max-width: 0; width: 0; }
+  .slot.empty:hover .hint { opacity: 1; max-width: 60px; }
+
   /* Close button — appears on hover, right side */
   .slot .close {
     position: absolute;
@@ -249,10 +273,17 @@ pub fn html() -> &'static str {
           window.ipc.postMessage(JSON.stringify({ type: 'quickslot_open', slot: i }));
         });
       } else {
-        const lbl = document.createElement('span');
-        lbl.className = 'label';
-        lbl.textContent = '⌘⇧' + ((i + 1) % 10);
-        el.appendChild(lbl);
+        const plus = document.createElement('span');
+        plus.className = 'plus';
+        plus.innerHTML = '@@ICON_PLUS@@';
+        el.appendChild(plus);
+
+        const hint = document.createElement('span');
+        hint.className = 'hint';
+        hint.textContent = '⌘⇧' + ((i + 1) % 10);
+        el.appendChild(hint);
+
+        el.title = 'Save current page to slot ' + ((i + 1) % 10) + '  (⌘⇧' + ((i + 1) % 10) + ')';
 
         el.addEventListener('click', function() {
           window.ipc.postMessage(JSON.stringify({ type: 'quickslot_save', slot: i }));
@@ -273,5 +304,6 @@ pub fn html() -> &'static str {
 })();
 </script>
 </body>
-</html>"#
+</html>"#;
+    template.replace("@@ICON_PLUS@@", crate::icons::PLUS)
 }

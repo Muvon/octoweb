@@ -197,11 +197,64 @@ pub fn total_system_memory() -> u64 {
 
 // ── Proactive thresholds (adaptive to system RAM) ───────────────────────────
 
-// Base thresholds — calibrated for 8 GB machines. Scaled up via sqrt(ram_gb/8).
-const BASE_FROZEN_IDLE_SECS: f64 = 600.0; // 10 minutes
-const BASE_COLD_IDLE_SECS: f64 = 180.0; // 3 minutes
-const BASE_COLD_TAB_THRESHOLD: f64 = 6.0;
-const BASE_COLD_RSS_BYTES: f64 = 250.0 * 1024.0 * 1024.0; // 250 MB
+/// Single point on the RAM/threshold curve. Interpolated between in
+/// `ProactiveConfig::modern`.
+#[derive(Debug, Clone, Copy)]
+struct ThresholdPoint {
+    ram_gb: f64,
+    frozen_idle_secs: f64,
+    cold_idle_secs: f64,
+    cold_tab_threshold: f64,
+    cold_rss_mb: f64,
+}
+
+// Modern-laptop friendly curve. 8 GB matches the historical "tight" baseline;
+// 16 GB and up are deliberately looser so users with modern Macs don't see
+// tabs reloading after a coffee break. Interpolated linearly between points.
+const MODERN_CURVE: &[ThresholdPoint] = &[
+    ThresholdPoint {
+        ram_gb: 8.0,
+        frozen_idle_secs: 600.0,
+        cold_idle_secs: 180.0,
+        cold_tab_threshold: 6.0,
+        cold_rss_mb: 250.0,
+    },
+    ThresholdPoint {
+        ram_gb: 16.0,
+        frozen_idle_secs: 1200.0,
+        cold_idle_secs: 480.0,
+        cold_tab_threshold: 12.0,
+        cold_rss_mb: 500.0,
+    },
+    ThresholdPoint {
+        ram_gb: 32.0,
+        frozen_idle_secs: 1800.0,
+        cold_idle_secs: 720.0,
+        cold_tab_threshold: 18.0,
+        cold_rss_mb: 800.0,
+    },
+    ThresholdPoint {
+        ram_gb: 64.0,
+        frozen_idle_secs: 2700.0,
+        cold_idle_secs: 1200.0,
+        cold_tab_threshold: 30.0,
+        cold_rss_mb: 1500.0,
+    },
+];
+
+// Legacy aggressive curve — original sqrt(ram_gb/8) scaling. Kept verbatim so
+// users on tight machines (or anyone who wants the old behavior) can opt in
+// via Config::aggressive_hibernation.
+const AGG_BASE_FROZEN_IDLE_SECS: f64 = 600.0;
+const AGG_BASE_COLD_IDLE_SECS: f64 = 180.0;
+const AGG_BASE_COLD_TAB_THRESHOLD: f64 = 6.0;
+const AGG_BASE_COLD_RSS_BYTES: f64 = 250.0 * 1024.0 * 1024.0;
+
+// Runaway guard: any tab whose WebContent process exceeds this RSS while idle
+// for at least `RUNAWAY_IDLE_SECS` gets hibernated regardless of pressure or
+// thresholds. Catches single misbehaving pages eating the whole machine.
+const RUNAWAY_RSS_BYTES: u64 = 1_500 * 1024 * 1024;
+const RUNAWAY_IDLE_SECS: u64 = 60;
 
 /// Pre-computed proactive hibernation thresholds scaled to system RAM.
 /// Created once at startup and reused every 60-second cycle.
@@ -215,27 +268,88 @@ pub struct ProactiveConfig {
     pub cold_tab_threshold: usize,
     /// RSS in bytes above which a cold tab is hibernated regardless of tab count.
     pub cold_rss_bytes: u64,
+    /// RSS in bytes above which a single tab is hibernated unconditionally
+    /// after being idle for `RUNAWAY_IDLE_SECS`. Acts as an emergency brake
+    /// on runaway WebContent processes.
+    pub runaway_rss_bytes: u64,
+    /// Idle threshold (seconds) for the runaway guard.
+    pub runaway_idle_secs: u64,
 }
 
 impl ProactiveConfig {
-    /// Build config scaled to the machine's total RAM.
-    ///
-    /// Uses `sqrt(ram_gb / 8)` scaling — sublinear so thresholds grow gently:
-    ///   8 GB → factor 1.0 (baseline)
-    ///  16 GB → factor 1.41
-    ///  32 GB → factor 2.0
-    ///  64 GB → factor 2.83
-    pub fn from_total_memory(total_bytes: u64) -> Self {
+    /// Modern-laptop friendly: linear interpolation across MODERN_CURVE.
+    /// Tabs survive longer on 16 GB+ machines than the old sqrt scaling.
+    pub fn modern(total_bytes: u64) -> Self {
         let ram_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        let factor = (ram_gb / 8.0).max(1.0).sqrt();
-
+        let (frozen, cold, tabs, rss_mb) = interpolate_curve(ram_gb, MODERN_CURVE);
         Self {
-            frozen_idle_secs: (BASE_FROZEN_IDLE_SECS * factor).min(1800.0) as u64, // cap 30 min
-            cold_idle_secs: (BASE_COLD_IDLE_SECS * factor).min(900.0) as u64,      // cap 15 min
-            cold_tab_threshold: (BASE_COLD_TAB_THRESHOLD * factor).min(24.0) as usize,
-            cold_rss_bytes: (BASE_COLD_RSS_BYTES * factor).min(1024.0 * 1024.0 * 1024.0) as u64, // cap 1 GB
+            frozen_idle_secs: frozen as u64,
+            cold_idle_secs: cold as u64,
+            cold_tab_threshold: tabs as usize,
+            cold_rss_bytes: (rss_mb * 1024.0 * 1024.0) as u64,
+            runaway_rss_bytes: RUNAWAY_RSS_BYTES,
+            runaway_idle_secs: RUNAWAY_IDLE_SECS,
         }
     }
+
+    /// Aggressive (legacy): sqrt(ram_gb/8) scaling. For users on tight RAM or
+    /// who want quicker reclamation.
+    pub fn aggressive(total_bytes: u64) -> Self {
+        let ram_gb = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let factor = (ram_gb / 8.0).max(1.0).sqrt();
+        Self {
+            frozen_idle_secs: (AGG_BASE_FROZEN_IDLE_SECS * factor).min(1800.0) as u64,
+            cold_idle_secs: (AGG_BASE_COLD_IDLE_SECS * factor).min(900.0) as u64,
+            cold_tab_threshold: (AGG_BASE_COLD_TAB_THRESHOLD * factor).min(24.0) as usize,
+            cold_rss_bytes: (AGG_BASE_COLD_RSS_BYTES * factor).min(1024.0 * 1024.0 * 1024.0) as u64,
+            runaway_rss_bytes: RUNAWAY_RSS_BYTES,
+            runaway_idle_secs: RUNAWAY_IDLE_SECS,
+        }
+    }
+
+    /// Pick the right curve based on the user's `aggressive_hibernation` setting.
+    pub fn from_total_memory(total_bytes: u64, aggressive: bool) -> Self {
+        if aggressive {
+            Self::aggressive(total_bytes)
+        } else {
+            Self::modern(total_bytes)
+        }
+    }
+}
+
+/// Linear interpolation across the RAM/threshold curve. Clamps below the
+/// first point and above the last point (no extrapolation).
+fn interpolate_curve(ram_gb: f64, curve: &[ThresholdPoint]) -> (f64, f64, f64, f64) {
+    debug_assert!(!curve.is_empty());
+    if ram_gb <= curve[0].ram_gb {
+        let p = curve[0];
+        return (
+            p.frozen_idle_secs,
+            p.cold_idle_secs,
+            p.cold_tab_threshold,
+            p.cold_rss_mb,
+        );
+    }
+    for window in curve.windows(2) {
+        let lo = window[0];
+        let hi = window[1];
+        if ram_gb <= hi.ram_gb {
+            let t = (ram_gb - lo.ram_gb) / (hi.ram_gb - lo.ram_gb);
+            return (
+                lo.frozen_idle_secs + t * (hi.frozen_idle_secs - lo.frozen_idle_secs),
+                lo.cold_idle_secs + t * (hi.cold_idle_secs - lo.cold_idle_secs),
+                lo.cold_tab_threshold + t * (hi.cold_tab_threshold - lo.cold_tab_threshold),
+                lo.cold_rss_mb + t * (hi.cold_rss_mb - lo.cold_rss_mb),
+            );
+        }
+    }
+    let p = curve[curve.len() - 1];
+    (
+        p.frozen_idle_secs,
+        p.cold_idle_secs,
+        p.cold_tab_threshold,
+        p.cold_rss_mb,
+    )
 }
 
 /// Proactive hibernation — runs on a 60 s timer regardless of memory pressure.
@@ -280,6 +394,16 @@ pub fn pick_proactive_victims(
 
             let idle = now.duration_since(t.last_active_at).as_secs();
 
+            // Runaway guard: a single tab eating an absurd amount of RAM gets
+            // hibernated as soon as it's been idle for a minute, regardless
+            // of pressure or thresholds.
+            if idle > config.runaway_idle_secs {
+                let rss = sample_tab_rss(t.id, tab_webviews);
+                if rss > config.runaway_rss_bytes {
+                    return true;
+                }
+            }
+
             // Frozen: idle > threshold — always hibernate.
             if idle > config.frozen_idle_secs {
                 return true;
@@ -291,15 +415,7 @@ pub fn pick_proactive_victims(
                     return true;
                 }
                 // Sample this tab's RSS; hibernate if heavy.
-                let rss = tab_webviews
-                    .get(&t.id)
-                    .and_then(|wv| {
-                        let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-                        let pid = tab_stats::webview_pid(ptr)?;
-                        let (rss, _) = tab_stats::sample_pid(pid)?;
-                        Some(rss)
-                    })
-                    .unwrap_or(0);
+                let rss = sample_tab_rss(t.id, tab_webviews);
                 if rss > config.cold_rss_bytes {
                     return true;
                 }
@@ -309,6 +425,19 @@ pub fn pick_proactive_victims(
         })
         .map(|t| t.id)
         .collect()
+}
+
+/// Shared RSS sampling — used by both proactive and reactive paths.
+fn sample_tab_rss(tab_id: usize, tab_webviews: &HashMap<usize, WebView>) -> u64 {
+    tab_webviews
+        .get(&tab_id)
+        .and_then(|wv| {
+            let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+            let pid = tab_stats::webview_pid(ptr)?;
+            let (rss, _) = tab_stats::sample_pid(pid)?;
+            Some(rss)
+        })
+        .unwrap_or(0)
 }
 
 // ── Victim selection ─────────────────────────────────────────────────────────
@@ -359,18 +488,7 @@ pub fn pick_victims(
         })
         .filter_map(|t| {
             let mru_pos = mru.iter().position(|&id| id == t.id).unwrap_or(mru_len);
-
-            // Get RSS from the WebContent process; skip if we can't read it
-            let rss = tab_webviews
-                .get(&t.id)
-                .and_then(|wv| {
-                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-                    let pid = tab_stats::webview_pid(wv_ptr)?;
-                    let (rss, _cpu_ns) = tab_stats::sample_pid(pid)?;
-                    Some(rss)
-                })
-                .unwrap_or(0);
-
+            let rss = sample_tab_rss(t.id, tab_webviews);
             let score = hibernation_score(t, rss, mru_pos, mru_len, active_id, media_playing, now)?;
             Some((t.id, score))
         })

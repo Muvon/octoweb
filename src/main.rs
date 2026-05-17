@@ -11,6 +11,7 @@ mod dialog_patch;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
+mod icons;
 mod inline_edit_html;
 mod macos;
 mod mcp;
@@ -1344,15 +1345,29 @@ fn main() {
 
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
     // Complementary to the reactive hibernation (which only fires under pressure).
-    // Thresholds scale with system RAM (sqrt scaling: 8 GB = baseline, 64 GB ≈ 2.8×).
-    let proactive_config =
-        hibernation::ProactiveConfig::from_total_memory(hibernation::total_system_memory());
+    // Default is the modern-laptop friendly curve (8 / 16 / 32 / 64 GB anchors
+    // with linear interpolation); cfg.aggressive_hibernation flips to the legacy
+    // sqrt scaling for tight-RAM setups or eager reclamation.
+    let mut proactive_config = hibernation::ProactiveConfig::from_total_memory(
+        hibernation::total_system_memory(),
+        cfg.aggressive_hibernation,
+    );
     tracing::info!(
         ?proactive_config,
+        aggressive = cfg.aggressive_hibernation,
         "Proactive hibernation config (RAM-scaled)"
     );
     let mut proactive_hiber_next_at =
         std::time::Instant::now() + std::time::Duration::from_secs(60);
+
+    // First-run welcome toast: fires once 1.5 s after launch (gives the notif
+    // webview time to load), then flips first_run_completed so it never shows
+    // again on this profile.
+    let mut welcome_toast_at: Option<std::time::Instant> = if !cfg.first_run_completed {
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(1500))
+    } else {
+        None
+    };
 
     // ── Notification toast WebView (Tahoe-style banner at top-center) ─────
     const NOTIF_W_LOGICAL: f64 = 360.0;
@@ -1975,7 +1990,9 @@ fn main() {
                 let json = {
                     let mut tm = tabs.lock().unwrap();
                     tm.ensure_contiguous();
-                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache)
+                    let hib: std::collections::HashSet<usize> =
+                        pending_tabs.keys().copied().collect();
+                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
                     "window.__refreshItems && window.__refreshItems({json})"
@@ -2204,6 +2221,26 @@ fn main() {
                         "hibernated tab under memory pressure",
                     );
                 }
+            }
+        }
+
+        // ── First-run welcome toast: one-shot ─────────────────────────────
+        if let Some(at) = welcome_toast_at {
+            if now >= at {
+                welcome_toast_at = None;
+                let _ = notification_wv.set_visible(true);
+                notification_visible = true;
+                // text, icon, title, autoDismissMs — reuse the existing toast API
+                let _ = notification_wv.evaluate_script(
+                    r#"window.__show && window.__show(
+                        'Press ⌘K to search, ⌘/ for shortcuts.',
+                        '🐙',
+                        'Welcome to Octoweb',
+                        6000
+                    )"#,
+                );
+                cfg.first_run_completed = true;
+                cfg.save();
             }
         }
 
@@ -3574,6 +3611,18 @@ fn main() {
                             }
                         }
                     }
+                    "aggressive_hibernation" => {
+                        cfg.aggressive_hibernation = val == "true";
+                        proactive_config = hibernation::ProactiveConfig::from_total_memory(
+                            hibernation::total_system_memory(),
+                            cfg.aggressive_hibernation,
+                        );
+                        tracing::info!(
+                            ?proactive_config,
+                            aggressive = cfg.aggressive_hibernation,
+                            "Proactive hibernation config updated"
+                        );
+                    }
                     _ => {}
                 }
                 cfg.save();
@@ -3611,7 +3660,8 @@ fn main() {
                     let json = {
                         let mut tm = tabs.lock().unwrap();
                         tm.ensure_contiguous();
-                        webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache)
+                        let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
+                        webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
                     };
                     let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setItems && window.__setItems({json})"

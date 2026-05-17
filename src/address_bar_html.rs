@@ -16,8 +16,8 @@
 /// IPC messages sent to Rust:
 ///   { type: "toggle_sidebar" }       — 🐙 button clicked
 ///   { type: "copy_text", text: "…" } — copy title or URL to clipboard
-pub fn html() -> &'static str {
-    r#"<!DOCTYPE html>
+pub fn html() -> String {
+    let template = r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -158,12 +158,52 @@ pub fn html() -> &'static str {
   #url-row.copied { background: var(--copied-bg); }
 
   #lock {
-    font-size: 9px;
     flex-shrink: 0;
-    line-height: 1;
+    width: 10px;
+    height: 10px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
   }
+  #lock.visible { display: inline-flex; }
+  #lock svg { width: 100%; height: 100%; }
   #lock.secure   { color: var(--lock-secure); }
   #lock.insecure { color: var(--lock-insecure); }
+
+  /* ── Rich tooltip for icon buttons (label + shortcut) ─────────────── */
+  .bar-btn[data-tip] { position: relative; }
+  .bar-btn[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translate(-50%, -2px);
+    background: rgba(20, 20, 22, 0.92);
+    color: rgba(255, 255, 255, 0.92);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    padding: 4px 7px;
+    border-radius: 5px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(255,255,255,0.08) inset;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease 0.25s, transform 0.12s ease 0.25s;
+    z-index: 100;
+  }
+  .bar-btn[data-tip]:hover::after {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  @media (prefers-color-scheme: dark) {
+    .bar-btn[data-tip]::after {
+      background: rgba(240, 240, 242, 0.95);
+      color: rgba(0, 0, 0, 0.88);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.32), 0 0 0 0.5px rgba(0,0,0,0.08) inset;
+    }
+  }
 
   #url {
     font-size: 10px;
@@ -232,10 +272,16 @@ pub fn html() -> &'static str {
     white-space: nowrap;
   }
   .sys-icon {
-    font-size: 9px;
-    line-height: 1;
+    width: 10px;
+    height: 10px;
+    line-height: 0;
     opacity: 0.7;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
   }
+  .sys-icon svg { width: 100%; height: 100%; }
 
   /* ── 🐙 AI toggle button + utility buttons (spotlight, close tab) ── */
   .bar-btn {
@@ -258,15 +304,16 @@ pub fn html() -> &'static str {
 
   #ai-btn {
     background: transparent;
-    color: inherit;
+    color: var(--text-dim);
     width: 28px;
     height: 28px;
     border-radius: 50%;
     border: none;
   }
-  #ai-btn:hover { transform: scale(1.15); }
+  #ai-btn:hover  { color: var(--text-title); transform: scale(1.12); }
   #ai-btn:active { transform: scale(0.92); }
-  .ai-icon { font-size: 15px; line-height: 1; user-select: none; }
+  .ai-icon { display: inline-flex; width: 16px; height: 16px; line-height: 0; }
+  .ai-icon svg { width: 100%; height: 100%; }
 
   /* ── Unread badge dot ────────────────────────────────────────────── */
   .badge {
@@ -306,39 +353,39 @@ pub fn html() -> &'static str {
     </div>
   </div>
   <div id="stats">
-    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">⬇</span><span class="stat-val" id="size">&mdash;</span></span>
-    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">⏱</span><span class="stat-val" id="time">&mdash;</span></span>
+    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">@@ICON_DOWNLOAD@@</span><span class="stat-val" id="size">&mdash;</span></span>
+    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">@@ICON_CLOCK@@</span><span class="stat-val" id="time">&mdash;</span></span>
   </div>
   <div id="sys-stats">
-    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">⚡</span><span class="stat-val" id="cpu-stat"></span></span>
-    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">◉</span><span class="stat-val" id="mem-stat"></span></span>
+    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
+    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
-  <button id="settings-btn" class="bar-btn" title="Settings (⌘,)">
+  <button id="settings-btn" class="bar-btn" data-tip="Settings  ⌘," title="Settings (⌘,)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.6 1.2h2.8l.4 1.9.5.2 1.7-.9 2 2-.9 1.7.2.5 1.9.4v2.8l-1.9.4-.2.5.9 1.7-2 2-1.7-.9-.5.2-.4 1.9H6.6l-.4-1.9-.5-.2-1.7.9-2-2 .9-1.7-.2-.5L.8 9.2V6.4l1.9-.4.2-.5-.9-1.7 2-2 1.7.9.5-.2.4-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
       <circle cx="8" cy="7.8" r="2" stroke="currentColor" stroke-width="1.2" fill="none"/>
     </svg>
   </button>
-  <button id="shortcuts-btn" class="bar-btn" title="Keyboard shortcuts (⌘/)">
+  <button id="shortcuts-btn" class="bar-btn" data-tip="Shortcuts  ⌘/" title="Keyboard shortcuts (⌘/)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.2 5.6c0-.9.7-1.6 1.8-1.6 1 0 1.8.7 1.8 1.6 0 .7-.4 1.1-1.1 1.6-.6.4-.9.7-.9 1.3v.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       <circle cx="8" cy="11.5" r="0.9" fill="currentColor"/>
     </svg>
   </button>
-  <button id="spotlight-btn" class="bar-btn" title="Command palette (⌘K)">
+  <button id="spotlight-btn" class="bar-btn" data-tip="Search  ⌘K" title="Command palette (⌘K)">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
       <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.6"/>
       <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
     </svg>
   </button>
-  <button id="close-tab-btn" class="bar-btn" title="Close tab (⌘W)">
+  <button id="close-tab-btn" class="bar-btn" data-tip="Close tab  ⌘W" title="Close tab (⌘W)">
     <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
       <line x1="1.5" y1="1.5" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       <line x1="10.5" y1="1.5" x2="1.5" y2="10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
     </svg>
   </button>
-  <button id="ai-btn" title="Toggle AI sidebar (⌘⇧A)">
-    <span class="ai-icon">🐙</span>
+  <button id="ai-btn" class="bar-btn" data-tip="AI sidebar  ⌘⇧A" title="Toggle AI sidebar (⌘⇧A)">
+    <span class="ai-icon">@@ICON_SPARKLES@@</span>
     <span id="badge" class="badge"></span>
   </button>
 </div>
@@ -420,12 +467,15 @@ pub fn html() -> &'static str {
     }
   }
 
+  var ICON_LOCK   = '@@ICON_LOCK@@';
+  var ICON_SHIELD = '@@ICON_SHIELD_ALERT@@';
+
   function updateLock(url, secure) {
     if (url && url !== 'about:blank') {
-      lockEl.textContent = secure ? '🔒' : '⚠️';
-      lockEl.className = secure ? 'secure' : 'insecure';
+      lockEl.innerHTML = secure ? ICON_LOCK : ICON_SHIELD;
+      lockEl.className = (secure ? 'secure' : 'insecure') + ' visible';
     } else {
-      lockEl.textContent = '';
+      lockEl.innerHTML = '';
       lockEl.className = '';
     }
   }
@@ -558,5 +608,13 @@ pub fn html() -> &'static str {
 })();
 </script>
 </body>
-</html>"#
+</html>"#;
+    template
+        .replace("@@ICON_DOWNLOAD@@", crate::icons::DOWNLOAD)
+        .replace("@@ICON_CLOCK@@", crate::icons::CLOCK)
+        .replace("@@ICON_ACTIVITY@@", crate::icons::ACTIVITY)
+        .replace("@@ICON_CPU@@", crate::icons::CPU)
+        .replace("@@ICON_SPARKLES@@", crate::icons::SPARKLES)
+        .replace("@@ICON_LOCK@@", crate::icons::LOCK)
+        .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
 }
