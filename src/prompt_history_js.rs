@@ -257,7 +257,15 @@ function createPromptHistory(inputEl, ghostEl, defaultPlaceholder, onResize) {
       searchIdx = -1;
       searchMatch = '';
       inputEl.placeholder = defaultPlaceholder;
-      clearGhost();
+      // If the user has already typed before history finished loading
+      // (common race when Rust pushes setHistory after focus), recompute
+      // the ghost immediately so autocomplete becomes visible without
+      // waiting for another keystroke.
+      if (inputEl.value) {
+        updateGhost();
+      } else {
+        clearGhost();
+      }
     },
     getHistory: function() {
       return history.slice();

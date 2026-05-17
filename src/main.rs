@@ -61,6 +61,10 @@ enum AppEvent {
     BrowserUrlChanged(usize, String), // (tab_id, url)
     FaviconFetched(String, String),   // (domain, data_uri)
     NavigateTo(String),
+    PushAddressHistory, // address bar requested history snapshot for URL autocomplete
+    UrlEditExpand(bool), // address bar entered/left edit mode — grow the bar webview so the
+    // suggestion dropdown isn't clipped by the 32 px titlebar height.
+    UrlEditRequest, // Cmd+E — trigger URL edit on the address bar (no shift)
     SwitchTab(usize),
     CloseTab(usize),
     PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
@@ -1160,6 +1164,22 @@ fn main() {
                         Some("toggle_shortcuts") => {
                             let _ = p.send_event(AppEvent::ToggleShortcuts);
                         }
+                        Some("url_edit_open") => {
+                            // Address bar opened edit mode — push history snapshot for autocomplete.
+                            let _ = p.send_event(AppEvent::PushAddressHistory);
+                        }
+                        Some("url_edit_expand") => {
+                            // Grow / shrink the address bar webview so the suggestion dropdown
+                            // can paint below the 32 px titlebar without being clipped.
+                            let expanded = v["expanded"].as_bool().unwrap_or(false);
+                            let _ = p.send_event(AppEvent::UrlEditExpand(expanded));
+                        }
+                        Some("navigate") => {
+                            // Submitted URL/query from the address bar edit field.
+                            if let Some(url) = v["url"].as_str() {
+                                let _ = p.send_event(AppEvent::NavigateTo(url.to_string()));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1315,6 +1335,13 @@ fn main() {
         .expect("Failed to create inline edit WebView");
     let _ = inline_edit_wv.set_visible(false);
     let mut inline_edit_visible = false;
+    // True from the moment a ⌘⇧E request is issued until the modal is shown
+    // (or the request is abandoned). Guards against a double-press toggle race
+    // where the second press arrives before `InlineEditReady` flips
+    // `inline_edit_visible = true`, which previously caused the modal to
+    // either capture twice or — worse — immediately close itself when the
+    // user only meant to open it once.
+    let mut inline_edit_pending = false;
     let mut inline_edit_selected_text = String::new();
     let mut inline_edit_tab_id: usize = 0;
     let mut inline_edit_acp: Option<acp::AcpHandle> = None;
@@ -1685,6 +1712,15 @@ fn main() {
                 } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
                     let _ = p.send_event(AppEvent::InlineEditRequest);
                     CallbackResult::Drop
+                } else if cmd && !shift && !ctrl && keycode == E_KEYCODE
+                    && !overlay_state.load(Ordering::Relaxed)
+                    && !inline_edit_state.load(Ordering::Relaxed)
+                    && !find_bar_state.load(Ordering::Relaxed)
+                    && !sidebar_state.load(Ordering::Relaxed)
+                {
+                    // ⌘E = edit current URL in the address bar (same as the pencil icon).
+                    let _ = p.send_event(AppEvent::UrlEditRequest);
+                    CallbackResult::Drop
                 } else if cmd && shift && keycode == I_KEYCODE {
                     let _ = p.send_event(AppEvent::ToggleDevTools);
                     CallbackResult::Drop
@@ -1803,6 +1839,10 @@ fn main() {
     let mut sidebar_visible = false;
     let mut sidebar_fullscreen = false; // sidebar takes the full chrome window width when true
     let mut shortcuts_visible = false;
+    // Address bar URL edit mode — when true, the address bar webview is grown
+    // to full window height so the autocomplete dropdown and backdrop can
+    // paint outside the 32 px titlebar strip without being clipped.
+    let mut address_bar_editing = false;
     let mut icon_set = false;
     let mut zoom_level: f64 = 1.0;
 
@@ -2007,6 +2047,12 @@ fn main() {
             let u = &$url;
             let secure = u.starts_with("https://");
             let escaped_url = webview_utils::escape_js_template(u);
+            let suggest_json = {
+                let mut tm = tabs.lock().unwrap();
+                tm.ensure_contiguous();
+                let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
+                webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
+            };
             let tm = tabs.lock().unwrap();
             let tab = tm.tabs().iter().find(|t| t.url == *u || t.id == active_wv_id);
             let raw_title = tab.map(|t| t.title.clone()).unwrap_or_default();
@@ -2015,6 +2061,12 @@ fn main() {
             let escaped_title = webview_utils::escape_js_template(&raw_title);
             let _ = address_bar_wv.evaluate_script(&format!(
                 "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, {pb}, {pt})"
+            ));
+            // Push the full history+tabs snapshot now too so the URL-edit
+            // autocomplete is always primed — no IPC round-trip needed when the
+            // user clicks the pencil / hits ⌘E.
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__setSuggestions && window.__setSuggestions({suggest_json})"
             ));
             // Push cached favicon for this URL's domain
             if let Some(fav) = webview_utils::cached_favicon(u, &favicon_cache) {
@@ -2580,6 +2632,8 @@ fn main() {
                     let _ = inline_edit_wv.set_visible(false);
                     let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                     inline_edit_visible = false;
+                    inline_edit_pending = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     inline_edit_acp = None;
                     inline_edit_response.clear();
                 }
@@ -3538,6 +3592,50 @@ fn main() {
                 shortcuts_visible = false;
             }
 
+            // ── Address bar URL edit: grow just enough for the dropdown ───────
+            // While expanded, the address bar webview adds room for ~8 suggestion
+            // rows below the 32 px titlebar strip so the dropdown is visible.
+            Event::UserEvent(AppEvent::UrlEditExpand(expanded)) => {
+                address_bar_editing = expanded;
+                let sz = browser_win.inner_size();
+                let scale = browser_win.scale_factor();
+                let expanded_extra: u32 = if expanded {
+                    (340.0 * scale) as u32
+                } else {
+                    0
+                };
+                let _ = address_bar_wv.set_bounds(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                    size: tao::dpi::PhysicalSize::new(sz.width, address_bar_h + expanded_extra).into(),
+                });
+            }
+
+            // ── Cmd+E: trigger URL edit (same as clicking the pencil) ─────────
+            // Move keyboard first-responder to the address bar webview FIRST so
+            // ⌃A / ⌃E / typing reach the URL input. Without this, the input is
+            // focused at the DOM level but the underlying NSView isn't first
+            // responder (it was on the content webview or wherever the user
+            // pressed ⌘E from), and keystrokes are routed to that other view.
+            Event::UserEvent(AppEvent::UrlEditRequest) => {
+                let _ = address_bar_wv.focus();
+                let _ = address_bar_wv.evaluate_script(
+                    "window.__urlEditOpen && window.__urlEditOpen()"
+                );
+            }
+
+            // ── Address bar URL edit: push history+tabs snapshot for autocomplete ─
+            Event::UserEvent(AppEvent::PushAddressHistory) => {
+                let json = {
+                    let mut tm = tabs.lock().unwrap();
+                    tm.ensure_contiguous();
+                    let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
+                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
+                };
+                let _ = address_bar_wv.evaluate_script(&format!(
+                    "window.__setSuggestions && window.__setSuggestions({json})"
+                ));
+            }
+
             // ── Toggle shortcuts overlay ──────────────────────────────────
             // ── Settings modal (⌘,) ──────────────────────────────────────
             Event::UserEvent(AppEvent::ToggleSettings) => {
@@ -3805,10 +3903,12 @@ fn main() {
                     }
                 }
                 // Hide inline edit modal on tab switch — selection is per-tab
-                if inline_edit_visible {
+                if inline_edit_visible || inline_edit_pending {
                     let _ = inline_edit_wv.set_visible(false);
                     let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                     inline_edit_visible = false;
+                    inline_edit_pending = false;
+                    inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(ref h) = inline_edit_acp { h.cancel(); }
                     inline_edit_acp = None;
                     inline_edit_response.clear();
@@ -4833,15 +4933,16 @@ fn main() {
                         find_bar_visible = false;
                         find_bar_hotkey_visible.store(false, Ordering::Relaxed);
                     }
-                    // Dismiss inline edit — selection becomes stale on navigation
-                    if inline_edit_visible {
-                        let _ = inline_edit_wv.set_visible(false);
-                        let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
-                        inline_edit_visible = false;
-                        if let Some(ref h) = inline_edit_acp { h.cancel(); }
-                        inline_edit_acp = None;
-                        inline_edit_response.clear();
-                    }
+                    // NOTE: we intentionally do NOT dismiss the inline edit modal on
+                    // PageLoadStarted. Many sites trigger main-frame navigations as a
+                    // side-effect of in-page activity (SPA route changes, ad redirects,
+                    // tracker handoffs, meta-refresh, late `location.replace`). Closing
+                    // the modal here surfaced as a flaky "⌘⇧E auto-cancels until I
+                    // click the page first" bug. The captured selection range may go
+                    // stale on actual navigation — the replace will gracefully no-op
+                    // when `window.__octoweb_edit` is gone — but the user's prompt
+                    // input is preserved. Real dismissal still happens on user-driven
+                    // close (Esc/✕), tab switch, and `NavigateTo` from the address bar.
                     // Check if this is about:blank — skip progress bar for instant pages
                     let url = tabs.lock().unwrap().tabs().iter()
                         .find(|t| t.id == tab_id)
@@ -5046,16 +5147,41 @@ fn main() {
                     let _ = inline_edit_wv.set_visible(false);
                     let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                     inline_edit_visible = false;
+                    inline_edit_pending = false;
                     inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(ref h) = inline_edit_acp { h.cancel(); }
                     inline_edit_acp = None;
                     inline_edit_response.clear();
                     browser_win.set_focus();
+                } else if inline_edit_pending {
+                    // A previous ⌘⇧E is still in-flight (capture round-trip to the
+                    // tab's WebView hasn't completed). Ignore the duplicate so the
+                    // soon-to-arrive `InlineEditReady` doesn't get toggled-closed
+                    // by what the user perceives as a single keypress.
+                    tracing::debug!("InlineEditRequest ignored: capture already pending");
                 } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    inline_edit_pending = true;
+                    // Lock the keyboard guard now, not after the async capture
+                    // returns — this prevents any racing Ctrl+P/N/etc. shortcuts
+                    // from being interpreted as tab navigation between the
+                    // request and the modal becoming visible.
+                    inline_edit_hotkey_visible.store(true, Ordering::Relaxed);
                     let _ = wv.evaluate_script("window.__inlineEditCapture && window.__inlineEditCapture()");
                 }
             }
             Event::UserEvent(AppEvent::InlineEditReady(text, x, y)) => {
+                // Drop late/duplicate ready events (e.g. second capture that
+                // sneaked through before the pending flag was set, or a stale
+                // ready from before the modal was closed).
+                if inline_edit_visible || !inline_edit_pending {
+                    tracing::debug!(
+                        visible = inline_edit_visible,
+                        pending = inline_edit_pending,
+                        "InlineEditReady dropped (already visible or no pending request)"
+                    );
+                    return;
+                }
+                inline_edit_pending = false;
                 inline_edit_selected_text = text;
                 inline_edit_tab_id = active_wv_id;
                 // Position at cursor — coordinates are CSS pixels from tab viewport
@@ -5077,6 +5203,14 @@ fn main() {
                 let _ = inline_edit_wv.set_visible(true);
                 inline_edit_visible = true;
                 inline_edit_hotkey_visible.store(true, Ordering::Relaxed);
+                // Push history FIRST so ghost autocomplete is armed by the time
+                // the user starts typing — `__focus()` resets internal state
+                // (which `setHistory` then re-seeds), and `evaluate_script` is
+                // FIFO within a single WKWebView, so the order matters.
+                let hist_json = serde_json::to_string(&prompt_history).unwrap_or_else(|_| "[]".into());
+                let _ = inline_edit_wv.evaluate_script(&format!(
+                    "window.__setHistory && window.__setHistory({hist_json})"
+                ));
                 unsafe {
                     use objc2::msg_send;
                     use objc2::runtime::AnyObject;
@@ -5085,11 +5219,6 @@ fn main() {
                 }
                 let _ = inline_edit_wv.focus();
                 let _ = inline_edit_wv.evaluate_script("window.__focus && window.__focus()");
-                // Inject prompt history into the modal JS
-                let hist_json = serde_json::to_string(&prompt_history).unwrap_or_else(|_| "[]".into());
-                let _ = inline_edit_wv.evaluate_script(&format!(
-                    "window.__setHistory && window.__setHistory({hist_json})"
-                ));
             }
             Event::UserEvent(AppEvent::InlineEditSubmit(prompt)) => {
                 // Record in prompt history (MRU dedup)
@@ -5120,6 +5249,7 @@ fn main() {
                 if cfg.ai_edit_auto_hide {
                     let _ = inline_edit_wv.set_visible(false);
                     inline_edit_visible = false;
+                    inline_edit_pending = false;
                     inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                     if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
                         let _ = wv.evaluate_script(
@@ -5132,6 +5262,7 @@ fn main() {
             Event::UserEvent(AppEvent::InlineEditHide) if inline_edit_visible => {
                 let _ = inline_edit_wv.set_visible(false);
                 inline_edit_visible = false;
+                inline_edit_pending = false;
                 inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                 // Set loading cursor on the target tab while processing continues
                 if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
@@ -5155,10 +5286,11 @@ fn main() {
                     size: tao::dpi::PhysicalSize::new(inline_edit_w, new_h).into(),
                 });
             }
-            Event::UserEvent(AppEvent::InlineEditClose) if inline_edit_visible => {
+            Event::UserEvent(AppEvent::InlineEditClose) if inline_edit_visible || inline_edit_pending => {
                 let _ = inline_edit_wv.set_visible(false);
                 let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
                 inline_edit_visible = false;
+                inline_edit_pending = false;
                 inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                 if let Some(ref h) = inline_edit_acp { h.cancel(); }
                 inline_edit_acp = None;
@@ -5330,10 +5462,18 @@ fn main() {
                             size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
                         });
                     }
-                    // Resize address bar to full width
+                    // Resize address bar to full width. While the user is in URL
+                    // edit mode the bar is grown by ~340 px so the autocomplete
+                    // dropdown stays visible below the 32 px titlebar strip.
+                    let bar_h = if address_bar_editing {
+                        let scale = browser_win.scale_factor();
+                        address_bar_h + (340.0 * scale) as u32
+                    } else {
+                        address_bar_h
+                    };
                     let _ = address_bar_wv.set_bounds(wry::Rect {
                         position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, address_bar_h).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, bar_h).into(),
                     });
                     // Reposition notification toast at top-right
                     let _ = notification_wv.set_bounds(wry::Rect {
