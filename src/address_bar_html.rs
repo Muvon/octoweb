@@ -65,7 +65,7 @@ pub fn html() -> String {
   #bar {
     position: fixed;
     top: 0; left: 0; right: 0;
-    height: 100%;
+    height: 32px; /* matches address_bar_h logical px — webview may grow taller during URL edit */
     display: flex;
     align-items: center;
     /* 80px left padding clears macOS traffic light buttons (zoom right edge 69pt + 8pt gap) */
@@ -106,7 +106,7 @@ pub fn html() -> String {
     overflow: hidden;
   }
 
-  /* Title — clickable to copy, fixed 50% of text-stack */
+  /* Title — clickable to copy, fixed 38% of text-stack (URL gets more room) */
   #title-row {
     display: flex;
     align-items: center;
@@ -114,7 +114,7 @@ pub fn html() -> String {
     cursor: pointer;
     border-radius: 3px;
     padding: 2px 5px;
-    flex: 0 0 50%;
+    flex: 0 0 38%;
     min-width: 0;
     overflow: hidden;
     transition: background 0.12s ease;
@@ -141,21 +141,173 @@ pub fn html() -> String {
     opacity: 0.5;
   }
 
-  /* URL — clickable to copy, fixed 50% of text-stack */
+  /* URL — text click copies; pencil click enters edit mode. Fixed 62% width. */
   #url-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 3px;
-    cursor: pointer;
     border-radius: 3px;
     padding: 2px 5px;
-    flex: 0 0 calc(50% - 14px); /* subtract sep width so total stays 100% */
+    flex: 0 0 calc(62% - 14px); /* subtract sep width so total stays 100% */
     min-width: 0;
-    overflow: hidden;
+    overflow: visible; /* let the suggestion dropdown escape this row */
     transition: background 0.12s ease;
   }
-  #url-row:hover  { background: var(--hover-bg); }
   #url-row.copied { background: var(--copied-bg); }
+
+  /* The copyable text portion is its own hover target so the pencil doesn't
+     paint the whole row on hover. */
+  #url-copy {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 0 2px;
+    transition: background 0.12s ease;
+  }
+  #url-copy:hover { background: var(--hover-bg); }
+
+  /* Pencil edit button — small, dim at rest, brightens on hover. */
+  #url-edit-btn {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    border-radius: 3px;
+    cursor: pointer;
+    color: var(--text-dim);
+    opacity: 0.55;
+    line-height: 0;
+    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+    padding: 0;
+  }
+  #url-edit-btn:hover  { opacity: 1; background: var(--hover-bg); color: var(--text-title); }
+  #url-edit-btn:active { transform: scale(0.9); }
+  #url-edit-btn svg { width: 10px; height: 10px; }
+
+  /* URL input — shown only while editing; replaces the copyable URL display. */
+  #url-input {
+    flex: 1;
+    min-width: 0;
+    height: 18px;
+    padding: 0 4px;
+    font: inherit;
+    font-size: 10.5px;
+    color: var(--text-title);
+    background: rgba(0, 0, 0, 0.04);
+    border: 0.5px solid rgba(0, 122, 255, 0.55);
+    border-radius: 4px;
+    outline: none;
+    display: none;
+    letter-spacing: -0.1px;
+  }
+  @media (prefers-color-scheme: dark) {
+    #url-input {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(10, 132, 255, 0.6);
+    }
+  }
+  #url-row.editing #url-input { display: block; }
+  #url-row.editing #url-copy  { display: none; }
+  #url-row.editing #lock      { display: none; }
+
+  /* Suggestion dropdown — paints into the expanded address-bar webview.
+     Positioned absolute against the document body (the titlebar #bar element
+     is the 32px-tall strip at the top; the dropdown floats just below it). */
+  #url-suggest {
+    position: absolute;
+    z-index: 200;
+    background: rgba(245, 245, 247, 0.96);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    backdrop-filter: blur(28px) saturate(180%);
+    border: 0.5px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.14), 0 1px 4px rgba(0, 0, 0, 0.06);
+    overflow: hidden;
+    display: none;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+  @media (prefers-color-scheme: dark) {
+    #url-suggest {
+      background: rgba(40, 40, 44, 0.96);
+      border-color: rgba(255, 255, 255, 0.10);
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.30);
+    }
+  }
+  #url-suggest.show { display: block; }
+
+  .sg-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .sg-item.active { background: rgba(0, 122, 255, 0.14); }
+  .sg-item:hover  { background: rgba(0, 0, 0, 0.05); }
+  @media (prefers-color-scheme: dark) {
+    .sg-item.active { background: rgba(10, 132, 255, 0.22); }
+    .sg-item:hover  { background: rgba(255, 255, 255, 0.06); }
+  }
+  .sg-fav {
+    flex-shrink: 0;
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    object-fit: contain;
+    background: rgba(0, 0, 0, 0.04);
+  }
+  .sg-fav-fallback {
+    flex-shrink: 0;
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.06);
+  }
+  .sg-text { flex: 1; min-width: 0; overflow: hidden; }
+  .sg-title {
+    font-size: 11px;
+    color: var(--text-title);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: -0.1px;
+  }
+  .sg-url {
+    font-size: 10px;
+    color: var(--text-url);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
+    letter-spacing: -0.1px;
+  }
+  .sg-kind {
+    flex-shrink: 0;
+    font-size: 9px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    .sg-kind { background: rgba(255, 255, 255, 0.06); }
+  }
 
   #lock {
     flex-shrink: 0;
@@ -346,9 +498,13 @@ pub fn html() -> String {
       </div>
       <span id="sep">·</span>
       <div id="url-row">
-        <span id="lock"></span>
-        <span id="url"></span>
-        <span class="copied-label" id="url-copied">Copied</span>
+        <div id="url-copy">
+          <span id="lock"></span>
+          <span id="url"></span>
+          <span class="copied-label" id="url-copied">Copied</span>
+        </div>
+        <input id="url-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
+        <button id="url-edit-btn" type="button" title="Edit URL">@@ICON_PENCIL@@</button>
       </div>
     </div>
   </div>
@@ -389,6 +545,7 @@ pub fn html() -> String {
     <span id="badge" class="badge"></span>
   </button>
 </div>
+<div id="url-suggest"></div>
 <script>
 (function() {
   const titleEl      = document.getElementById('page-title');
@@ -404,6 +561,10 @@ pub fn html() -> String {
   const memStatEl    = document.getElementById('mem-stat');
   const titleRow     = document.getElementById('title-row');
   const urlRow       = document.getElementById('url-row');
+  const urlCopy      = document.getElementById('url-copy');
+  const urlInput     = document.getElementById('url-input');
+  const urlEditBtn   = document.getElementById('url-edit-btn');
+  const urlSuggest   = document.getElementById('url-suggest');
   const titleCopied  = document.getElementById('title-copied');
   const urlCopied    = document.getElementById('url-copied');
 
@@ -556,12 +717,273 @@ pub fn html() -> String {
     flashCopied(titleRow, titleCopied);
   });
 
-  // Copy URL on click
-  urlRow.addEventListener('click', function() {
+  // Copy URL when the text portion is clicked (not the pencil).
+  urlCopy.addEventListener('click', function() {
     if (!currentUrl) return;
     copyViaIpc(currentUrl);
     flashCopied(urlRow, urlCopied);
   });
+
+  // ── URL edit mode ───────────────────────────────────────────────────────
+  // Pencil click → swap URL display for an input + suggestions dropdown.
+  // Submit on Enter; cancel on Esc or click outside.
+
+  var suggestions = [];       // history+tabs snapshot pushed from Rust
+  var filtered    = [];       // current filtered list
+  var activeIdx   = 0;
+  var editing     = false;
+  var focusPoll   = null;     // interval that exits edit mode when the
+                              // address bar webview loses keyboard focus
+                              // (clicks into sibling webviews don't fire
+                              // window.blur reliably under WKWebView).
+
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // Match the query against title and URL substrings (case-insensitive).
+  // Score: prefix match on URL > prefix match on host/title > substring match.
+  function rankItem(item, q) {
+    if (!q) return 1;
+    var url = (item.url || '').toLowerCase();
+    var title = (item.title || '').toLowerCase();
+    var host = url.replace(/^https?:\/\//, '').split('/')[0];
+    var ql = q.toLowerCase();
+    if (url.startsWith(ql) || ('https://' + ql) === url) return 100;
+    if (host.startsWith(ql)) return 80;
+    if (title.startsWith(ql)) return 60;
+    if (url.indexOf(ql) >= 0) return 40;
+    if (title.indexOf(ql) >= 0) return 30;
+    return 0;
+  }
+
+  function filterSuggestions(q) {
+    if (!suggestions.length) return [];
+    var seen = Object.create(null);
+    var out = [];
+    for (var i = 0; i < suggestions.length; i++) {
+      var it = suggestions[i];
+      if (!it.url || seen[it.url]) continue;
+      var score = rankItem(it, q);
+      if (score > 0) {
+        seen[it.url] = 1;
+        out.push({ item: it, score: score, order: i });
+      }
+    }
+    out.sort(function(a, b) { return b.score - a.score || a.order - b.order; });
+    return out.slice(0, 8).map(function(x) { return x.item; });
+  }
+
+  function renderSuggestions() {
+    if (!filtered.length) {
+      urlSuggest.classList.remove('show');
+      urlSuggest.innerHTML = '';
+      return;
+    }
+    if (activeIdx >= filtered.length) activeIdx = 0;
+    var html = '';
+    for (var i = 0; i < filtered.length; i++) {
+      var it = filtered[i];
+      var fav = it.favicon
+        ? '<img class="sg-fav" src="' + escHtml(it.favicon) + '" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{className:\'sg-fav-fallback\'}))" />'
+        : '<span class="sg-fav-fallback"></span>';
+      var kind = it.kind === 'tab' ? 'Tab' : 'History';
+      var titleText = it.title && it.title.length ? it.title : it.url;
+      html += '<div class="sg-item' + (i === activeIdx ? ' active' : '') + '" data-idx="' + i + '">'
+            + fav
+            + '<div class="sg-text">'
+            + '<div class="sg-title">' + escHtml(titleText) + '</div>'
+            + '<div class="sg-url">' + escHtml(it.url) + '</div>'
+            + '</div>'
+            + '<span class="sg-kind">' + kind + '</span>'
+            + '</div>';
+    }
+    urlSuggest.innerHTML = html;
+    positionSuggest();
+    urlSuggest.classList.add('show');
+  }
+
+  function positionSuggest() {
+    var r = urlRow.getBoundingClientRect();
+    urlSuggest.style.left = Math.round(r.left) + 'px';
+    urlSuggest.style.top = Math.round(r.bottom + 4) + 'px';
+    urlSuggest.style.width = Math.round(r.width) + 'px';
+  }
+
+  function enterEdit() {
+    if (editing) return;
+    editing = true;
+    urlRow.classList.add('editing');
+    urlInput.value = currentUrl || '';
+    activeIdx = 0;
+    // Grow the address bar webview so the dropdown isn't clipped by the 32 px
+    // titlebar, then ask Rust for a fresh history snapshot for autocomplete.
+    window.ipc.postMessage(JSON.stringify({ type: 'url_edit_expand', expanded: true }));
+    window.ipc.postMessage(JSON.stringify({ type: 'url_edit_open' }));
+    // Focus + initial render on the next animation frame so the resize has
+    // been applied by macOS before the dropdown paints. This is the fix for
+    // "autocomplete stops working after the first use" — without it the second
+    // entry would render the dropdown into a still-32 px-tall webview.
+    requestAnimationFrame(function() {
+      urlInput.focus();
+      urlInput.select();
+      filtered = filterSuggestions(urlInput.value);
+      renderSuggestions();
+    });
+    // Poll keyboard focus so that clicking into a sibling webview (browser
+    // content, sidebar, etc.) cancels the edit. WKWebView doesn't fire
+    // `window.blur` reliably for cross-webview focus changes.
+    //
+    // We require TWO consecutive "lost focus" readings (≈300 ms) before exit:
+    // single readings can be false negatives during focus transitions (e.g.
+    // right after enterEdit before rAF moves focus to the input, or while the
+    // user clicks the pencil / a dropdown row). Without the debounce, the
+    // dropdown would flash away mid-edit.
+    if (focusPoll) clearInterval(focusPoll);
+    var lostFocusTicks = 0;
+    focusPoll = setInterval(function() {
+      if (!editing) return;
+      var ok = document.hasFocus() && document.activeElement === urlInput;
+      if (ok) {
+        lostFocusTicks = 0;
+      } else {
+        lostFocusTicks++;
+        if (lostFocusTicks >= 2) exitEdit();
+      }
+    }, 150);
+  }
+
+  function exitEdit() {
+    if (!editing) return;
+    editing = false;
+    urlRow.classList.remove('editing');
+    urlSuggest.classList.remove('show');
+    urlSuggest.innerHTML = '';
+    urlInput.value = '';
+    urlInput.blur();
+    if (focusPoll) { clearInterval(focusPoll); focusPoll = null; }
+    // Tell Rust to shrink the webview back to its 32px titlebar height.
+    window.ipc.postMessage(JSON.stringify({ type: 'url_edit_expand', expanded: false }));
+  }
+
+  // Exposed for ⌘E hotkey from Rust (CGEventTap → AppEvent::UrlEditRequest).
+  window.__urlEditOpen = function() {
+    if (editing) { exitEdit(); } else { enterEdit(); }
+  };
+
+  function submit(rawUrl) {
+    var u = (rawUrl == null ? urlInput.value : rawUrl).trim();
+    if (!u) return;
+    exitEdit();
+    window.ipc.postMessage(JSON.stringify({ type: 'navigate', url: u }));
+  }
+
+  urlEditBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    enterEdit();
+  });
+
+  urlInput.addEventListener('input', function() {
+    activeIdx = 0;
+    filtered = filterSuggestions(urlInput.value);
+    renderSuggestions();
+  });
+
+  urlInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filtered.length && activeIdx >= 0 && activeIdx < filtered.length
+          && filtered[activeIdx].url
+          && urlInput.value.trim() !== ''
+          && filtered[activeIdx].score >= 60) {
+        submit(filtered[activeIdx].url);
+      } else {
+        submit();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      exitEdit();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (filtered.length) {
+        activeIdx = (activeIdx + 1) % filtered.length;
+        renderSuggestions();
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (filtered.length) {
+        activeIdx = (activeIdx - 1 + filtered.length) % filtered.length;
+        renderSuggestions();
+      }
+    } else if (e.key === 'Tab' && filtered.length) {
+      e.preventDefault();
+      urlInput.value = filtered[activeIdx].url;
+      activeIdx = 0;
+      filtered = filterSuggestions(urlInput.value);
+      renderSuggestions();
+    }
+  });
+
+  urlSuggest.addEventListener('mousedown', function(e) {
+    // mousedown not click — fires before the input blur kicks in.
+    var item = e.target.closest('.sg-item');
+    if (!item) return;
+    e.preventDefault();
+    var idx = parseInt(item.getAttribute('data-idx'), 10);
+    if (!isNaN(idx) && filtered[idx]) submit(filtered[idx].url);
+  });
+
+  urlSuggest.addEventListener('mousemove', function(e) {
+    var item = e.target.closest('.sg-item');
+    if (!item) return;
+    var idx = parseInt(item.getAttribute('data-idx'), 10);
+    if (!isNaN(idx) && idx !== activeIdx) {
+      activeIdx = idx;
+      var nodes = urlSuggest.querySelectorAll('.sg-item');
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].classList.toggle('active', i === activeIdx);
+      }
+    }
+  });
+
+  // Click outside the URL row / dropdown inside the address bar exits edit.
+  document.addEventListener('mousedown', function(e) {
+    if (!editing) return;
+    if (urlRow.contains(e.target) || urlSuggest.contains(e.target)) return;
+    exitEdit();
+  });
+
+  // If focus leaves the input (e.g. user clicks the page below the bar), exit
+  // after a short delay so the suggestion mousedown can still register first.
+  // The activeElement check is intentionally omitted: when the entire webview
+  // loses focus, document.activeElement can stay on the input even though the
+  // user has clicked elsewhere — checking it would skip the cancel.
+  urlInput.addEventListener('blur', function() {
+    setTimeout(function() { if (editing) exitEdit(); }, 80);
+  });
+
+  // Window-level blur — fires when the user clicks into another webview
+  // (e.g. the browser content area). DOM blur on the input may not fire in
+  // that case because focus moves out of this webview entirely.
+  window.addEventListener('blur', function() {
+    if (editing) exitEdit();
+  });
+
+  // Reposition dropdown when window resizes (titlebar width changes).
+  window.addEventListener('resize', function() { if (editing) positionSuggest(); });
+
+  // Receive history+tabs snapshot from Rust for autocomplete.
+  window.__setSuggestions = function(items) {
+    suggestions = Array.isArray(items) ? items.filter(function(it) {
+      return it && it.url && it.kind !== 'ask' && it.kind !== 'url' && it.url.indexOf('about:') !== 0;
+    }) : [];
+    if (editing) {
+      filtered = filterSuggestions(urlInput.value);
+      renderSuggestions();
+    }
+  };
 
   // 🐙 AI toggle button
   document.getElementById('ai-btn').addEventListener('click', function() {
@@ -602,7 +1024,8 @@ pub fn html() -> String {
   // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
-    if (e.target.closest('#ai-btn, .bar-btn, #page-title, #url')) return;
+    if (e.target.closest('#ai-btn, .bar-btn, #page-title, #url, #url-edit-btn, #url-input, #url-suggest')) return;
+    if (editing) return;
     window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });
 })();
@@ -617,4 +1040,5 @@ pub fn html() -> String {
         .replace("@@ICON_SPARKLES@@", crate::icons::SPARKLES)
         .replace("@@ICON_LOCK@@", crate::icons::LOCK)
         .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
+        .replace("@@ICON_PENCIL@@", crate::icons::PENCIL)
 }
