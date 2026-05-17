@@ -19,7 +19,7 @@ pub fn html(slots_json: &str) -> String {
 </head>
 <body>
 <div class="container">
-  <div class="octopus">🐙</div>
+  <div class="octopus">@@OCTOPUS_BRAND@@</div>
   <h1>Octoweb</h1>
   <p class="subtitle">Press <kbd>⌘K</kbd> to navigate anywhere</p>
   <div class="slots" id="slots"></div>
@@ -79,11 +79,16 @@ pub fn html(slots_json: &str) -> String {
 
       card.appendChild(info);
     }} else {{
+      const plus = document.createElement('span');
+      plus.className = 'card-plus';
+      plus.innerHTML = '@@ICON_PLUS@@';
+      card.appendChild(plus);
+
       const hint = document.createElement('div');
       hint.className = 'card-info';
       const title = document.createElement('div');
       title.className = 'card-title empty-hint';
-      title.textContent = 'Save page here';
+      title.textContent = 'Save current page';
       hint.appendChild(title);
       const shortcut = document.createElement('div');
       shortcut.className = 'card-url';
@@ -100,6 +105,8 @@ pub fn html(slots_json: &str) -> String {
         css = NEWTAB_CSS,
         slots_json = slots_json,
     )
+    .replace("@@OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
+    .replace("@@ICON_PLUS@@", crate::icons::PLUS)
 }
 
 const NEWTAB_CSS: &str = r#"
@@ -157,10 +164,18 @@ const NEWTAB_CSS: &str = r#"
   }
 
   .octopus {
-    font-size: 56px;
-    line-height: 1;
-    margin-bottom: 12px;
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 12px;
     animation: float 3s ease-in-out infinite;
+    color: rgba(255, 99, 71, 0.82);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .octopus svg { width: 100%; height: 100%; }
+  @media (prefers-color-scheme: dark) {
+    .octopus { color: rgba(255, 122, 99, 0.78); }
   }
 
   @keyframes float {
@@ -237,8 +252,26 @@ const NEWTAB_CSS: &str = r#"
 
   .empty-hint {
     color: var(--text-dim) !important;
-    font-style: italic;
+    font-style: normal;
+    font-weight: 500;
   }
+
+  .slot-card.slot-empty .card-info { opacity: 0; transition: opacity 0.14s ease; max-width: 0; overflow: hidden; }
+  .slot-card.slot-empty:hover .card-info { opacity: 1; max-width: 240px; }
+  .slot-card.slot-empty:hover .card-plus { opacity: 0; max-width: 0; }
+
+  .card-plus {
+    flex-shrink: 0;
+    width: 16px; height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    opacity: 0.7;
+    transition: opacity 0.12s ease, max-width 0.14s ease;
+    overflow: hidden;
+  }
+  .card-plus svg { width: 100%; height: 100%; }
 
   .card-badge {
     flex-shrink: 0;

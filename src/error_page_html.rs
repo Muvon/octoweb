@@ -54,7 +54,7 @@ pub fn html(url: &str, error_code: &str) -> String {
 </head>
 <body>
 <div class="card">
-  <div class="octopus">🐙</div>
+  <div class="octopus">@@OCTOPUS_BRAND@@</div>
   <h1>Oops! Tentacles got tangled</h1>
   <p class="message">{safe_msg}</p>
   <div class="error-code">{safe_url}</div>
@@ -81,6 +81,7 @@ document.getElementById('retryBtn').addEventListener('click', function() {{
         safe_code = safe_code,
         json_url = json_url,
     )
+    .replace("@@OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
 }
 
 // Static CSS kept separate to avoid escaping all braces in format!
@@ -138,10 +139,15 @@ const ERROR_PAGE_CSS: &str = r#"
   }
 
   .octopus {
-    font-size: 64px;
-    line-height: 1;
-    margin-bottom: 16px;
+    width: 72px;
+    height: 72px;
+    margin: 0 auto 16px;
+    color: rgba(255, 99, 71, 0.78);
     animation: float 3s ease-in-out infinite;
+  }
+  .octopus svg { width: 100%; height: 100%; }
+  @media (prefers-color-scheme: dark) {
+    .octopus { color: rgba(255, 122, 99, 0.78); }
   }
 
   @keyframes float {

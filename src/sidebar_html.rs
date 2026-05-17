@@ -1342,18 +1342,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-tertiary);
     font-size: 10px;
   }
-  .tool-check {
+  .tool-check, .tool-fail {
     flex-shrink: 0;
-    color: #34c759;
-    font-size: 10px;
-    line-height: 1;
+    width: 11px; height: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
   }
-  .tool-fail {
-    flex-shrink: 0;
-    color: #ff3b30;
-    font-size: 10px;
-    line-height: 1;
-  }
+  .tool-check svg, .tool-fail svg { width: 100%; height: 100%; }
+  .tool-check { color: #34c759; }
+  .tool-fail  { color: #ff3b30; }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
   #input-area {
@@ -1681,10 +1680,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .cmd-toast-icon {
     color: #34c759;
-    font-weight: 700;
-    font-size: 13px;
-    line-height: 1;
+    width: 13px; height: 13px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    flex-shrink: 0;
   }
+  .cmd-toast-icon svg { width: 100%; height: 100%; }
   .cmd-toast.err .cmd-toast-icon { color: #ff3b30; }
 
   /* Empty state — quiet hairline note */
@@ -2395,6 +2398,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
 <script src="octoweb-lib://localhost/marked.min.js"></script>
 <script>
+  // Inline icon strings injected from src/icons.rs (Lucide stroke icons).
+  const ICON_CHECK        = '/* ICON_CHECK */';
+  const ICON_CHECK_CIRCLE = '/* ICON_CHECK_CIRCLE */';
+  const ICON_X_CIRCLE     = '/* ICON_X_CIRCLE */';
+
   // Configure marked: safe defaults, no mangling
   if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
@@ -3131,7 +3139,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   function toast(msg, isErr) {
     return '<div class="cmd-toast' + (isErr ? ' err' : '') + '">' +
-      '<span class="cmd-toast-icon">' + (isErr ? '✕' : '✓') + '</span>' +
+      '<span class="cmd-toast-icon">' + (isErr ? ICON_X_CIRCLE : ICON_CHECK_CIRCLE) + '</span>' +
       '<span>' + escapeHtml(String(msg)) + '</span>' +
     '</div>';
   }
@@ -3624,7 +3632,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.toolDetails[t.idx].duration = duration;
       const check = document.createElement('span');
       check.className = 'tool-check';
-      check.textContent = '✓';
+      check.innerHTML = ICON_CHECK;
       t.timerEl.replaceWith(check);
     } else if (status === 'failed') {
       t.finished = true;
@@ -3633,7 +3641,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.toolDetails[t.idx].duration = Date.now() - t.startTime;
       const fail = document.createElement('span');
       fail.className = 'tool-fail';
-      fail.textContent = '✗';
+      fail.innerHTML = ICON_X_CIRCLE;
       t.timerEl.replaceWith(fail);
     }
   };
@@ -5324,4 +5332,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
             "/* MAX_PROMPT_HISTORY */",
             &max_ai_prompt_history.to_string(),
         )
+        .replace("/* ICON_CHECK */", crate::icons::CHECK)
+        .replace("/* ICON_CHECK_CIRCLE */", crate::icons::CHECK_CIRCLE)
+        .replace("/* ICON_X_CIRCLE */", crate::icons::X_CIRCLE)
 }

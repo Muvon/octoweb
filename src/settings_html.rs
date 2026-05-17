@@ -124,6 +124,15 @@ pub fn html() -> &'static str {
     padding: 10px 12px 6px;
   }
 
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 10.5px;
+    background: var(--input-bg);
+    border: 0.5px solid var(--input-border);
+    border-radius: 3px;
+    padding: 0 4px;
+  }
+
   .row {
     display: flex;
     align-items: center;
@@ -142,6 +151,17 @@ pub fn html() -> &'static str {
     color: var(--text);
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  /* Stacked label + dim hint, used when a setting needs explanation */
+  .row.with-hint { align-items: flex-start; padding-top: 9px; padding-bottom: 9px; }
+  .row.with-hint .row-label-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; white-space: normal; }
+  .row.with-hint .row-label { white-space: normal; }
+  .row-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.35;
+    max-width: 240px;
   }
 
   .row input[type="text"],
@@ -207,52 +227,93 @@ pub fn html() -> &'static str {
 
     <div class="section">
       <div class="section-title">General</div>
-      <div class="row">
-        <span class="row-label">Home page</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Home page</span>
+          <span class="row-hint">Opens on launch and in every new tab.</span>
+        </div>
         <input type="text" id="home_page" data-key="home_page">
       </div>
-      <div class="row">
-        <span class="row-label">Search engine</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Search engine</span>
+          <span class="row-hint">URL with <code>{}</code> as the query placeholder.</span>
+        </div>
         <input type="text" id="search_engine" data-key="search_engine">
       </div>
-      <div class="row">
-        <span class="row-label">Max history</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Max history</span>
+          <span class="row-hint">Total entries kept across sessions.</span>
+        </div>
         <input type="number" id="max_history" data-key="max_history" min="100" step="100">
       </div>
     </div>
 
     <div class="section">
       <div class="section-title">Window</div>
-      <div class="row">
-        <span class="row-label">Default width</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Default width</span>
+          <span class="row-hint">Initial window width in pixels.</span>
+        </div>
         <input type="number" id="window_width" data-key="window_width" min="400" step="10">
       </div>
-      <div class="row">
-        <span class="row-label">Default height</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Default height</span>
+          <span class="row-hint">Initial window height in pixels.</span>
+        </div>
         <input type="number" id="window_height" data-key="window_height" min="300" step="10">
       </div>
     </div>
 
     <div class="section">
+      <div class="section-title">Memory</div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Aggressive hibernation</span>
+          <span class="row-hint">Reclaim tab memory sooner. Leave off on modern Macs — tabs survive longer.</span>
+        </div>
+        <button class="toggle" id="aggressive_hibernation" data-key="aggressive_hibernation"></button>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-title">AI</div>
-      <div class="row">
-        <span class="row-label">Auto-hide edit modal</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Auto-hide edit modal</span>
+          <span class="row-hint">Hide the ⌘⇧E modal after submit; show a loading cursor instead.</span>
+        </div>
         <button class="toggle" id="ai_edit_auto_hide" data-key="ai_edit_auto_hide"></button>
       </div>
-      <div class="row">
-        <span class="row-label">Editor prompt history size</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Editor prompt history size</span>
+          <span class="row-hint">Recall via ⌃P / ⌃N inside the ⌘⇧E modal.</span>
+        </div>
         <input type="number" id="max_prompt_history" data-key="max_prompt_history" min="10" step="10">
       </div>
-      <div class="row">
-        <span class="row-label">Assistant prompt history size</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Assistant prompt history size</span>
+          <span class="row-hint">Sidebar (⌘⇧A) prompt recall depth.</span>
+        </div>
         <input type="number" id="max_ai_prompt_history" data-key="max_ai_prompt_history" min="10" step="10">
       </div>
-      <div class="row">
-        <span class="row-label">Proactive learning</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Proactive learning</span>
+          <span class="row-hint">Background agent reads recent browsing and memorizes patterns.</span>
+        </div>
         <button class="toggle" id="proactive_learning" data-key="proactive_learning"></button>
       </div>
-      <div class="row">
-        <span class="row-label">Learning interval (min)</span>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Learning interval (min)</span>
+          <span class="row-hint">How often the learning agent runs.</span>
+        </div>
         <input type="number" id="learning_interval_min" data-key="learning_interval_min" min="5" step="5">
       </div>
     </div>

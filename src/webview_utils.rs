@@ -464,6 +464,7 @@ pub fn build_items_json(
     tabs: &[browser::Tab],
     history: &[browser::HistoryEntry],
     favicons: &HashMap<String, String>,
+    hibernated: &std::collections::HashSet<usize>,
 ) -> String {
     let mut items: Vec<serde_json::Value> = Vec::new();
 
@@ -486,6 +487,7 @@ pub fn build_items_json(
             "favicon": cached_favicon(&tab.url, favicons),
             "visit_count": visits,
             "visited_at": 0u64,  // tabs are live — recency handled in JS as "now"
+            "hibernated": hibernated.contains(&tab.id),
         }));
     }
 
