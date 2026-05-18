@@ -2167,13 +2167,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
   }
 
-  #hint {
-    font-size: 10.5px;
-    color: var(--text-tertiary);
-    text-align: center;
-    letter-spacing: 0.01em;
-  }
-
   /* ── Message queue ───────────────────────────────────────────────────────── */
   #queue-list {
     display: flex;
@@ -2330,7 +2323,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         <textarea
           id="prompt-input"
           rows="1"
-          placeholder="Ask Octopus…"
+          placeholder="Ask Octopus…   ↵ send · ⇧↵ newline"
           autocomplete="off"
           spellcheck="false"
         ></textarea>
@@ -2376,7 +2369,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     </div>
     <div id="image-preview"></div>
     <div id="queue-list"></div>
-    <div id="hint">Return to send · Shift+Return for newline</div>
   </div>
 
 </div>
@@ -2729,7 +2721,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // MUST be initialized before bootstrap — switchTo() references _ph.
   /* PROMPT_HISTORY_JS */
   const ghostEl = document.getElementById('prompt-ghost');
-  const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus\u2026', function() {
+  const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline', function() {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
@@ -3962,7 +3954,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     const docs = pendingDocs.slice();
     if (!text && !images.length && !docs.length) return;
     input.value = '';
-    input.placeholder = 'Ask Octopus\u2026';
+    input.placeholder = 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline';
     input.style.height = 'auto';
     pendingImages = [];
     pendingDocs = [];
@@ -4070,7 +4062,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
     var val = input.value;
-    if (!val) { input.placeholder = 'Ask Octopus\u2026'; }
+    if (!val) { input.placeholder = 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline'; }
     if (val.charAt(0) === '/' && active && active.availableCommands.length > 0) {
       var spaceIdx = val.indexOf(' ');
       if (spaceIdx === -1) {
