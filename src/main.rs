@@ -123,16 +123,16 @@ enum AppEvent {
     SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
     FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
     InlineEditRequest,               // ⌘⇧E — capture selection, show modal
-    InlineEditReady(String, f64, f64), // (text, x, y) — selected text + cursor position
-    InlineEditSubmit(String),        // user submitted prompt in modal
-    InlineEditClose,                 // user closed modal (Esc / close btn)
-    InlineEditHide,                  // hide modal but keep processing
-    InlineEditResize(f64),           // modal content height changed
-    ZoomIn,                          // ⌘= — increase page zoom
-    ZoomOut,                         // ⌘- — decrease page zoom
-    ZoomReset,                       // ⌘0 — reset page zoom to 100%
-    LearningWake,                    // background learning agent pokes event loop
-    LearningReady(String),           // active tab content extracted — build prompt and send
+    InlineEditReady(String, Option<(f64, f64)>), // (text, optional (x, y) — None = no anchor, host picks default)
+    InlineEditSubmit(String),                    // user submitted prompt in modal
+    InlineEditClose,                             // user closed modal (Esc / close btn)
+    InlineEditHide,                              // hide modal but keep processing
+    InlineEditResize(f64),                       // modal content height changed
+    ZoomIn,                                      // ⌘= — increase page zoom
+    ZoomOut,                                     // ⌘- — decrease page zoom
+    ZoomReset,                                   // ⌘0 — reset page zoom to 100%
+    LearningWake,                                // background learning agent pokes event loop
+    LearningReady(String), // active tab content extracted — build prompt and send
     JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
     /// A2UI surface envelope (from the `render_ui` tool) changed on disk —
     /// watcher saw a new or status-flipped file. Forwarded to the sidebar's
@@ -485,9 +485,14 @@ fn main() {
                             }
                             Some("inline_edit_ready") => {
                                 let text = v["text"].as_str().unwrap_or("").to_string();
-                                let x = v["x"].as_f64().unwrap_or(0.0);
-                                let y = v["y"].as_f64().unwrap_or(0.0);
-                                let _ = p3.send_event(AppEvent::InlineEditReady(text, x, y));
+                                // x/y may be null when the page had no real
+                                // selection / no focused editable — host then
+                                // picks a sensible default anchor.
+                                let pos = match (v["x"].as_f64(), v["y"].as_f64()) {
+                                    (Some(x), Some(y)) => Some((x, y)),
+                                    _ => None,
+                                };
+                                let _ = p3.send_event(AppEvent::InlineEditReady(text, pos));
                             }
                             // Same-document navigation (SPA pushState/replaceState/popstate).
                             // Reuses BrowserUrlChanged so the address bar + tab history update
@@ -602,6 +607,32 @@ fn main() {
                         // (Vext, etc.) can capture audio.
                         let _: () = msg_send![prefs, _setMediaDevicesEnabled: true];
                     }
+                }
+            }
+            // Send the tab WKWebView to the back of browser_win.contentView's
+            // subviews. All chrome overlays (address bar, progress, inline
+            // edit, notification, footer) are siblings of tab webviews; the
+            // default NSView z-order is creation order, so a tab opened AFTER
+            // those overlays would paint on top of them. That hides the
+            // address bar's autocomplete dropdown (which lives inside the bar
+            // webview's grown 340 px region) behind whichever tab the user
+            // opened most recently. Pinning each tab below its siblings keeps
+            // the overlays permanently on top.
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let view: *mut AnyObject =
+                    objc2::rc::Retained::as_ptr(&wv.webview()) as *mut AnyObject;
+                let superview: *mut AnyObject = msg_send![view, superview];
+                if !superview.is_null() {
+                    // NSWindowBelow = -1: place `view` behind all existing siblings.
+                    let nil_view: *mut AnyObject = std::ptr::null_mut();
+                    let _: () = msg_send![
+                        superview,
+                        addSubview: view,
+                        positioned: -1i64,
+                        relativeTo: nil_view
+                    ];
                 }
             }
             wv
@@ -5169,7 +5200,7 @@ fn main() {
                     let _ = wv.evaluate_script("window.__inlineEditCapture && window.__inlineEditCapture()");
                 }
             }
-            Event::UserEvent(AppEvent::InlineEditReady(text, x, y)) => {
+            Event::UserEvent(AppEvent::InlineEditReady(text, pos)) => {
                 // Drop late/duplicate ready events (e.g. second capture that
                 // sneaked through before the pending flag was set, or a stale
                 // ready from before the modal was closed).
@@ -5184,11 +5215,23 @@ fn main() {
                 inline_edit_pending = false;
                 inline_edit_selected_text = text;
                 inline_edit_tab_id = active_wv_id;
-                // Position at cursor — coordinates are CSS pixels from tab viewport
                 let scale = browser_win.scale_factor();
                 let sz = browser_win.inner_size();
-                let mut px = (x * scale) as u32;
-                let mut py = (y * scale) as u32 + address_bar_h;
+                // Position from JS anchor when available, otherwise default to
+                // top-center under the address bar (e.g. user pressed ⌘⇧E on a
+                // freshly loaded tab with no focused input and no selection —
+                // common right after ⌘K navigation, which is exactly when the
+                // modal previously appeared way down at <body>'s bottom edge).
+                let (mut px, mut py) = match pos {
+                    Some((x, y)) => (
+                        (x * scale) as u32,
+                        (y * scale) as u32 + address_bar_h,
+                    ),
+                    None => (
+                        sz.width.saturating_sub(inline_edit_w) / 2,
+                        address_bar_h + 8,
+                    ),
+                };
                 // Clamp so modal stays within window bounds
                 if px + inline_edit_w > sz.width {
                     px = sz.width.saturating_sub(inline_edit_w + 8);
@@ -5218,7 +5261,17 @@ fn main() {
                     let _: () = msg_send![ns_win, makeKeyWindow];
                 }
                 let _ = inline_edit_wv.focus();
-                let _ = inline_edit_wv.evaluate_script("window.__focus && window.__focus()");
+                // Focus-retry loop: WKWebView focus can be stolen by a tab that
+                // is still loading/auto-focusing (very common right after a
+                // ⌘K-driven NavigateTo — the new page hasn't fully committed
+                // yet, then steals first-responder back from us). Mirrors the
+                // pattern used by the sidebar's prompt-input focus handshake.
+                let _ = inline_edit_wv.evaluate_script(
+                    "(function(){var el=document.getElementById('input');if(!el)return;\
+                     window.__focus && window.__focus();\
+                     var n=0;(function f(){if(n++>20)return;el.focus();\
+                     if(document.activeElement===el)return;setTimeout(f,30)})()})()"
+                );
             }
             Event::UserEvent(AppEvent::InlineEditSubmit(prompt)) => {
                 // Record in prompt history (MRU dedup)

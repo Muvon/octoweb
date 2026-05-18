@@ -395,21 +395,28 @@ pub const COMBINED_SCRIPT: &str = r#"
       text = el.value.substring(el.selectionStart, el.selectionEnd);
       window.__octoweb_edit = { type: 'input', element: el, start: el.selectionStart, end: el.selectionEnd };
       rect = el.getBoundingClientRect();
-    } else if (sel && sel.rangeCount > 0) {
+    } else if (sel && sel.rangeCount > 0 && sel.toString().length > 0) {
+      // Only treat as a real selection if there's actually selected text.
+      // A collapsed range (caret with no selection) is not useful here — fall
+      // through to the "no context" branch below so the modal opens at a sane
+      // default position rather than at <body>'s bottom edge.
       text = sel.toString();
       var range = sel.getRangeAt(0);
       window.__octoweb_edit = { type: 'range', range: range.cloneRange() };
       rect = range.getBoundingClientRect();
-      // Collapsed range (no selection) returns zero-size rect — use caret parent
-      if (rect.width === 0 && rect.height === 0 && el) {
-        rect = el.getBoundingClientRect();
-      }
     }
 
-    if (!rect && el) { rect = el.getBoundingClientRect(); }
+    // No focused editable + no real selection: clear any stale edit anchor and
+    // signal "no position" to the host so it can pick a default. We send NaN
+    // (serializes as null in JSON) so Rust can detect the missing position.
+    if (!rect || (rect.width === 0 && rect.height === 0)) {
+      window.__octoweb_edit = null;
+      _ipc({ type: 'inline_edit_ready', text: '', x: null, y: null });
+      return;
+    }
 
-    var x = rect ? rect.left : 0;
-    var y = rect ? rect.bottom + 4 : 0;
+    var x = rect.left;
+    var y = rect.bottom + 4;
     _ipc({ type: 'inline_edit_ready', text: text, x: x, y: y });
   };
 
