@@ -1926,7 +1926,6 @@ dependencies = [
  "axum",
  "base64",
  "block2",
- "core-foundation",
  "core-graphics",
  "dirs",
  "foreign-types",
