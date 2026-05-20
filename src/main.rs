@@ -1648,221 +1648,258 @@ fn main() {
         .command_tx
         .clone();
 
-    // ── Global hotkey via CGEventTap ─────────────────────────────────────
-    // rdev crashes on macOS 15+ because TSMGetInputSourceProperty (called in
-    // rdev's raw_callback) asserts it must run on the main thread. We use
-    // CGEventTap directly — it runs on the main CFRunLoop, no extra thread.
-    let _tap = {
-        use core_foundation::base::TCFType;
-        use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-        use core_graphics::event::{
-            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-            CallbackResult,
-        };
+    // ── In-app shortcuts via NSEvent local monitor ───────────────────────
+    // Local monitors observe key events delivered to *our* app's run loop
+    // before they reach the responder chain (WKWebView, text fields, etc.).
+    // Returning `nil` consumes the event, returning the event passes it on.
+    //
+    // Why not CGEventTap: it requires Accessibility permission, which macOS
+    // ties to the binary's code-signature hash. Every rebuild invalidates
+    // the grant silently and the tap goes dead with no error. Local monitors
+    // are AppKit-level, need zero permissions, survive rebuilds, and macOS
+    // only routes key events here when octoweb is the frontmost app — so we
+    // no longer need an `is_app_active()` guard inside the handler either.
+    let _key_monitor: *mut objc2::runtime::AnyObject = {
+        use block2::RcBlock;
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+
+        // NSEventMaskKeyDown = 1 << NSEventTypeKeyDown(10)
+        const MASK_KEYDOWN: u64 = 1 << 10;
+        // NSEventModifierFlags bits (see NSEvent.h)
+        const FLAG_SHIFT: u64 = 1 << 17;
+        const FLAG_CONTROL: u64 = 1 << 18;
+        const FLAG_COMMAND: u64 = 1 << 20;
+
+        // Virtual keycodes (kVK_ANSI_* from HIToolbox/Events.h)
+        const K_KEYCODE: u16 = 40;
+        const W_KEYCODE: u16 = 13;
+        const Q_KEYCODE: u16 = 12;
+        const P_KEYCODE: u16 = 35;
+        const N_KEYCODE: u16 = 45;
+        const A_KEYCODE: u16 = 0; // ⌘⇧A = toggle sidebar
+        const I_KEYCODE: u16 = 34; // ⌘⇧I = toggle devtools
+        const COMMA_KEYCODE: u16 = 43; // ⌘,   = settings
+        const SLASH_KEYCODE: u16 = 44; // ⌘/   = toggle shortcuts
+        const R_KEYCODE: u16 = 15; // ⌘R   = reload
+        const F_KEYCODE: u16 = 3; // ⌘F   = find in page
+        const S_KEYCODE: u16 = 1; // ⌘S   = screenshot, ⌘⇧S = full page
+        const D_KEYCODE: u16 = 2; // ⌃D   = scroll half down
+        const U_KEYCODE: u16 = 32; // ⌃U   = scroll half up
+        const T_KEYCODE: u16 = 17; // ⌃T   = scroll to top
+        const B_KEYCODE: u16 = 11; // ⌃B   = scroll to bottom
+        const E_KEYCODE: u16 = 14; // ⌘⇧E = inline AI edit, ⌘E = edit URL
+        const EQUAL_KEYCODE: u16 = 24; // ⌘=   = zoom in
+        const MINUS_KEYCODE: u16 = 27; // ⌘-   = zoom out
+        const ESC_KEYCODE: u16 = 53;
+        const RETURN_KEYCODE: u16 = 36; // ⌘↩ = fullscreen, ⌘⇧↩ = sidebar fullscreen
+        const ZERO_KEYCODE: u16 = 29; // ⌘0   = reset zoom (overrides QuickSlot 0)
+                                      // Digit keycodes 1..9 then 0
+        const DIGIT_KEYCODES: [u16; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
 
         let p = proxy.clone();
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
         let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
-        // Stores the raw CFMachPortRef so the callback can re-enable the tap
-        // if macOS disables it due to timeout (see TapDisabledByTimeout below).
-        let tap_port = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let tap_port_cb = Arc::clone(&tap_port);
-        // keyCode 40 = k, flagsChanged catches modifier-only events separately.
-        // We check the CGEventFlags for Command inside the callback.
-        let tap = CGEventTap::new(
-            CGEventTapLocation::HID,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default, // active tap — lets us consume specific keys
-            vec![CGEventType::KeyDown],
-            move |_proxy, _etype, event| {
-                // macOS disables active event taps that take too long to respond.
-                // When that happens, it sends TapDisabledByTimeout — re-enable immediately.
-                // CGEventType doesn't impl PartialEq, so compare raw discriminants.
-                let etype_raw = _etype as u32;
-                if etype_raw == CGEventType::TapDisabledByTimeout as u32
-                    || etype_raw == CGEventType::TapDisabledByUserInput as u32
-                {
-                    let port = tap_port_cb.load(Ordering::Relaxed);
-                    if port != 0 {
-                        extern "C" {
-                            fn CGEventTapEnable(tap: *mut std::ffi::c_void, enable: bool);
-                        }
-                        unsafe { CGEventTapEnable(port as *mut std::ffi::c_void, true) };
-                        tracing::warn!("CGEventTap was disabled by macOS — re-enabled");
-                    }
-                    return CallbackResult::Keep;
-                }
-                // Only act when octoweb is the frontmost application.
-                if !is_app_active() {
-                    return CallbackResult::Keep;
-                }
-                use core_graphics::event::{CGEventFlags, EventField};
-                const K_KEYCODE: i64 = 40; // k
-                const W_KEYCODE: i64 = 13; // w
-                const Q_KEYCODE: i64 = 12; // q
-                const P_KEYCODE: i64 = 35; // p
-                const N_KEYCODE: i64 = 45; // n
-                const A_KEYCODE: i64 = 0;  // a (Cmd+Shift+A = toggle sidebar)
-                const I_KEYCODE: i64 = 34; // i (Cmd+Shift+I = toggle devtools)
-                const COMMA_KEYCODE: i64 = 43; // , (Cmd+, = settings)
-                const SLASH_KEYCODE: i64 = 44; // / (Cmd+/ = toggle shortcuts)
-                const R_KEYCODE: i64 = 15; // r (Cmd+R = reload)
-                const F_KEYCODE: i64 = 3;  // f (Cmd+F = find in page)
-                const S_KEYCODE: i64 = 1;  // s (Cmd+S = screenshot, Cmd+Shift+S = full page screenshot)
-                const D_KEYCODE: i64 = 2;  // d (Ctrl+D = scroll half down)
-                const U_KEYCODE: i64 = 32; // u (Ctrl+U = scroll half up)
-                const T_KEYCODE: i64 = 17; // t (Ctrl+T = scroll to top)
-                const B_KEYCODE: i64 = 11; // b (Ctrl+B = scroll to bottom)
-                const E_KEYCODE: i64 = 14; // e (⌘⇧E = inline AI edit)
-                const EQUAL_KEYCODE: i64 = 24; // =/+ (⌘= = zoom in)
-                const MINUS_KEYCODE: i64 = 27; // -/_ (⌘- = zoom out)
-                const ESC_KEYCODE: i64 = 53; // Escape
-                const RETURN_KEYCODE: i64 = 36; // Return (⌘Return = browser fullscreen, ⌘⇧Return = sidebar fullscreen)
-                // Digit keycodes: 1–9 = keycodes 18,19,20,21,23,22,26,28,25; 0 = 29
-                const DIGIT_KEYCODES: [i64; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
-                let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                let flags = event.get_flags();
-                let cmd   = flags.contains(CGEventFlags::CGEventFlagCommand);
-                let ctrl  = flags.contains(CGEventFlags::CGEventFlagControl);
-                let shift = flags.contains(CGEventFlags::CGEventFlagShift);
-                // Return Drop to consume (suppress) the event, Keep to pass it through.
-                if cmd && keycode == K_KEYCODE {
-                    let _ = p.send_event(AppEvent::ToggleOverlay);
-                    CallbackResult::Drop
-                } else if cmd && shift && keycode == A_KEYCODE {
-                    let _ = p.send_event(AppEvent::ToggleSidebar);
-                    CallbackResult::Drop
-                } else if cmd && shift && keycode == RETURN_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
-                    CallbackResult::Drop
-                } else if cmd && !shift && !ctrl && keycode == RETURN_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !find_bar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ToggleFullscreen);
-                    CallbackResult::Drop
-                } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::InlineEditRequest);
-                    CallbackResult::Drop
-                } else if cmd && !shift && !ctrl && keycode == E_KEYCODE
-                    && !overlay_state.load(Ordering::Relaxed)
-                    && !inline_edit_state.load(Ordering::Relaxed)
-                    && !find_bar_state.load(Ordering::Relaxed)
-                    && !sidebar_state.load(Ordering::Relaxed)
-                {
-                    // ⌘E = edit current URL in the address bar (same as the pencil icon).
-                    let _ = p.send_event(AppEvent::UrlEditRequest);
-                    CallbackResult::Drop
-                } else if cmd && shift && keycode == I_KEYCODE {
-                    let _ = p.send_event(AppEvent::ToggleDevTools);
-                    CallbackResult::Drop
-                } else if cmd && keycode == COMMA_KEYCODE {
-                    let _ = p.send_event(AppEvent::ToggleSettings);
-                    CallbackResult::Drop
-                } else if cmd && keycode == SLASH_KEYCODE {
-                    let _ = p.send_event(AppEvent::ToggleShortcuts);
-                    CallbackResult::Drop
-                } else if cmd && !shift && !ctrl && keycode == T_KEYCODE && sidebar_state.load(Ordering::Relaxed) && !overlay_state.load(Ordering::Relaxed) {
-                    // ⌘T while the sidebar is focused opens the new-session panel
-                    // (mirrors the browser's "new tab" gesture inside the assistant).
-                    let _ = p.send_event(AppEvent::AcpSessionCreatePanel);
-                    CallbackResult::Drop
-                } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    // When the sidebar is focused, ⌘W closes the active ACP session
-                    // instead of the browser tab — mirrors browser behavior in the panel.
-                    if sidebar_state.load(Ordering::Relaxed) {
-                        let _ = p.send_event(AppEvent::AcpSessionCloseActive);
-                    } else {
-                        let _ = p.send_event(AppEvent::CloseTab(0));
-                    }
-                    CallbackResult::Drop
-                } else if cmd && !ctrl && !shift && keycode == Q_KEYCODE {
-                    let _ = p.send_event(AppEvent::Quit);
-                    CallbackResult::Drop
-                } else if ctrl && keycode == P_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    if find_bar_state.load(Ordering::Relaxed) {
-                        let _ = p.send_event(AppEvent::FindPrev);
-                    } else {
-                        let _ = p.send_event(AppEvent::PrevTab);
-                    }
-                    CallbackResult::Drop
-                } else if ctrl && keycode == N_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    if find_bar_state.load(Ordering::Relaxed) {
-                        let _ = p.send_event(AppEvent::FindNext);
-                    } else {
-                        let _ = p.send_event(AppEvent::NextTab);
-                    }
-                    CallbackResult::Drop
-                } else if ctrl && keycode == D_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ScrollDown);
-                    CallbackResult::Drop
-                } else if ctrl && keycode == U_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ScrollUp);
-                    CallbackResult::Drop
-                } else if ctrl && keycode == T_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ScrollTop);
-                    CallbackResult::Drop
-                } else if ctrl && keycode == B_KEYCODE && !overlay_state.load(Ordering::Relaxed) && !inline_edit_state.load(Ordering::Relaxed) && !sidebar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ScrollBottom);
-                    CallbackResult::Drop
-                } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::Reload);
-                    CallbackResult::Drop
-                } else if cmd && shift && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ScreenshotFullPage);
-                    CallbackResult::Drop
-                } else if cmd && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::Screenshot);
-                    CallbackResult::Drop
-                } else if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
-                    // Esc closes find bar regardless of which WebView has focus
-                    let _ = p.send_event(AppEvent::HideFindBar);
-                    CallbackResult::Drop
-                } else if cmd && keycode == EQUAL_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ZoomIn);
-                    CallbackResult::Drop
-                } else if cmd && keycode == MINUS_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ZoomOut);
-                    CallbackResult::Drop
-                } else if cmd && !shift && keycode == 29 && !overlay_state.load(Ordering::Relaxed) {
-                    // ⌘0 = reset zoom (overrides QuickSlotOpen for digit 0)
-                    let _ = p.send_event(AppEvent::ZoomReset);
-                    CallbackResult::Drop
-                } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::ToggleFindBar);
-                    CallbackResult::Drop
-                } else if cmd && !overlay_state.load(Ordering::Relaxed) {
-                    // ⌘+digit → QuickSlotOpen, ⌘⇧+digit → QuickSlotSave
-                    if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
-                        if shift {
-                            let _ = p.send_event(AppEvent::QuickSlotSave(slot));
-                        } else {
-                            let _ = p.send_event(AppEvent::QuickSlotOpen(slot));
-                        }
-                        return CallbackResult::Drop;
-                    }
-                    CallbackResult::Keep
+
+        let handler = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+            if event.is_null() {
+                return event;
+            }
+            // SAFETY: KeyDown mask guarantees `event` is an NSEvent of that type.
+            let keycode: u16 = unsafe { msg_send![event, keyCode] };
+            let flags: u64 = unsafe { msg_send![event, modifierFlags] };
+            let cmd = flags & FLAG_COMMAND != 0;
+            let ctrl = flags & FLAG_CONTROL != 0;
+            let shift = flags & FLAG_SHIFT != 0;
+
+            let consume = std::ptr::null_mut::<AnyObject>();
+            let pass = event;
+
+            if cmd && keycode == K_KEYCODE {
+                let _ = p.send_event(AppEvent::ToggleOverlay);
+                consume
+            } else if cmd && shift && keycode == A_KEYCODE {
+                let _ = p.send_event(AppEvent::ToggleSidebar);
+                consume
+            } else if cmd
+                && shift
+                && keycode == RETURN_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
+                consume
+            } else if cmd
+                && !shift
+                && !ctrl
+                && keycode == RETURN_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !find_bar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ToggleFullscreen);
+                consume
+            } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::InlineEditRequest);
+                consume
+            } else if cmd
+                && !shift
+                && !ctrl
+                && keycode == E_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !find_bar_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::UrlEditRequest);
+                consume
+            } else if cmd && shift && keycode == I_KEYCODE {
+                let _ = p.send_event(AppEvent::ToggleDevTools);
+                consume
+            } else if cmd && keycode == COMMA_KEYCODE {
+                let _ = p.send_event(AppEvent::ToggleSettings);
+                consume
+            } else if cmd && keycode == SLASH_KEYCODE {
+                let _ = p.send_event(AppEvent::ToggleShortcuts);
+                consume
+            } else if cmd
+                && !shift
+                && !ctrl
+                && keycode == T_KEYCODE
+                && sidebar_state.load(Ordering::Relaxed)
+                && !overlay_state.load(Ordering::Relaxed)
+            {
+                // ⌘T inside the sidebar opens the new-session panel
+                let _ = p.send_event(AppEvent::AcpSessionCreatePanel);
+                consume
+            } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                // ⌘W closes the active ACP session when sidebar is focused, else the tab
+                if sidebar_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::AcpSessionCloseActive);
                 } else {
-                    CallbackResult::Keep
+                    let _ = p.send_event(AppEvent::CloseTab(0));
                 }
-            },
-        )
-            .expect("CGEventTap::new failed — go to System Settings → Privacy & Security → Accessibility and enable your terminal app");
+                consume
+            } else if cmd && !ctrl && !shift && keycode == Q_KEYCODE {
+                let _ = p.send_event(AppEvent::Quit);
+                consume
+            } else if ctrl
+                && keycode == P_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                if find_bar_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::FindPrev);
+                } else {
+                    let _ = p.send_event(AppEvent::PrevTab);
+                }
+                consume
+            } else if ctrl
+                && keycode == N_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                if find_bar_state.load(Ordering::Relaxed) {
+                    let _ = p.send_event(AppEvent::FindNext);
+                } else {
+                    let _ = p.send_event(AppEvent::NextTab);
+                }
+                consume
+            } else if ctrl
+                && keycode == D_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ScrollDown);
+                consume
+            } else if ctrl
+                && keycode == U_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ScrollUp);
+                consume
+            } else if ctrl
+                && keycode == T_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ScrollTop);
+                consume
+            } else if ctrl
+                && keycode == B_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+                && !inline_edit_state.load(Ordering::Relaxed)
+                && !sidebar_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ScrollBottom);
+                consume
+            } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::Reload);
+                consume
+            } else if cmd && shift && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed)
+            {
+                let _ = p.send_event(AppEvent::ScreenshotFullPage);
+                consume
+            } else if cmd && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::Screenshot);
+                consume
+            } else if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::HideFindBar);
+                consume
+            } else if cmd && keycode == EQUAL_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::ZoomIn);
+                consume
+            } else if cmd && keycode == MINUS_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::ZoomOut);
+                consume
+            } else if cmd
+                && !shift
+                && keycode == ZERO_KEYCODE
+                && !overlay_state.load(Ordering::Relaxed)
+            {
+                // ⌘0 = reset zoom (overrides QuickSlotOpen for digit 0)
+                let _ = p.send_event(AppEvent::ZoomReset);
+                consume
+            } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::ToggleFindBar);
+                consume
+            } else if cmd && !overlay_state.load(Ordering::Relaxed) {
+                // ⌘+digit → QuickSlotOpen, ⌘⇧+digit → QuickSlotSave
+                if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
+                    if shift {
+                        let _ = p.send_event(AppEvent::QuickSlotSave(slot));
+                    } else {
+                        let _ = p.send_event(AppEvent::QuickSlotOpen(slot));
+                    }
+                    return consume;
+                }
+                pass
+            } else {
+                pass
+            }
+        });
 
-        // Store the raw mach port ref so the callback can re-enable the tap.
-        tap_port.store(
-            tap.mach_port().as_concrete_TypeRef() as usize,
-            Ordering::Relaxed,
-        );
-        tap.enable();
-        // Schedule the tap's mach port on the main run loop so it fires
-        // on the same thread as AppKit (no TSM thread-assertion crash).
-        let loop_src = tap
-            .mach_port()
-            .create_runloop_source(0)
-            .expect("CFRunLoopSource creation failed");
-        CFRunLoop::get_current().add_source(&loop_src, unsafe { kCFRunLoopCommonModes });
-
-        tap // keep alive for the duration of the program
+        // AppKit copies the block when registering the monitor, so forgetting
+        // the RcBlock keeps the underlying allocation alive for the app's
+        // lifetime without leaking a strong ref the wrong way.
+        let monitor: *mut AnyObject = unsafe {
+            msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: MASK_KEYDOWN,
+                handler: &*handler,
+            ]
+        };
+        std::mem::forget(handler);
+        monitor
     };
 
     let mut modifiers = ModifiersState::default();
