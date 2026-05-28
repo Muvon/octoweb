@@ -1294,6 +1294,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-secondary);
     animation: tool-in 0.25s ease-out;
     overflow: hidden;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.12s;
+  }
+  .tool-row:hover {
+    background: var(--hover-bg);
   }
   @keyframes tool-in {
     from { opacity: 0; transform: translateY(4px); }
@@ -1301,7 +1307,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .tool-row.done {
     opacity: 0.45;
-    transition: opacity 0.3s ease;
+    transition: opacity 0.3s ease, background 0.12s;
   }
   .tool-row.failed {
     color: var(--error-text);
@@ -3597,6 +3603,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     row.appendChild(icon);
     row.appendChild(ttl);
     row.appendChild(tm);
+    row.addEventListener('click', () => {
+      const detail = s.toolDetails[s.toolRows[id].idx];
+      if (detail) showSingleToolModal(sid, detail);
+    });
     s.thinking.appendChild(row);
     s.toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
     if (sid === activeSid) scrollToBottom();
@@ -3636,6 +3646,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       fail.innerHTML = ICON_X_CIRCLE;
       t.timerEl.replaceWith(fail);
     }
+    // If modal is open watching this specific tool live, refresh it.
+    refreshLiveModalRow(sid, s.toolDetails[t.idx]);
   };
 
   window.__setThinking = function(sid, on) {
@@ -4111,31 +4123,68 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const toolModalBody = toolModal.querySelector('.modal-body');
   const toolModalClose = toolModal.querySelector('.modal-close');
 
+  // When modal shows a single live tool, track its id so __toolUpdate can refresh it.
+  let liveModalSid = null;
+  let liveModalToolId = null;
+
+  function buildModalRow(t, autoExpand) {
+    const row = document.createElement('div');
+    row.className = 'modal-tool-row';
+    if (autoExpand) row.classList.add('expanded');
+    row.dataset.id = t.id;
+    row.innerHTML = `
+      <div class="modal-tool-header">
+        <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
+        <span class="modal-tool-title">${escapeHtml(t.title)}</span>
+        <span class="modal-tool-status ${t.status}">${t.status}</span>
+        <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
+        <span class="modal-tool-chevron">▶</span>
+      </div>
+      <div class="modal-tool-details">
+        ${buildToolDetails(t)}
+      </div>
+    `;
+    row.querySelector('.modal-tool-header').addEventListener('click', () => {
+      row.classList.toggle('expanded');
+    });
+    return row;
+  }
+
   function showToolModal(details) {
+    liveModalSid = null;
+    liveModalToolId = null;
     const list = toolModal.querySelector('.modal-tools-list');
     list.innerHTML = '';
     for (const t of details) {
-      const row = document.createElement('div');
-      row.className = 'modal-tool-row';
-      row.dataset.id = t.id;
-      row.innerHTML = `
-        <div class="modal-tool-header">
-          <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
-          <span class="modal-tool-title">${escapeHtml(t.title)}</span>
-          <span class="modal-tool-status ${t.status}">${t.status}</span>
-          <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
-          <span class="modal-tool-chevron">▶</span>
-        </div>
-        <div class="modal-tool-details">
-          ${buildToolDetails(t)}
-        </div>
-      `;
-      row.querySelector('.modal-tool-header').addEventListener('click', () => {
-        row.classList.toggle('expanded');
-      });
-      list.appendChild(row);
+      list.appendChild(buildModalRow(t, false));
     }
     toolModal.classList.add('show');
+  }
+
+  // Open modal focused on one specific tool (live or finished).
+  function showSingleToolModal(sid, toolDetail) {
+    liveModalSid = toolDetail.status === 'running' ? sid : null;
+    liveModalToolId = toolDetail.status === 'running' ? toolDetail.id : null;
+    const list = toolModal.querySelector('.modal-tools-list');
+    list.innerHTML = '';
+    list.appendChild(buildModalRow(toolDetail, true));
+    toolModal.classList.add('show');
+  }
+
+  // Refresh the modal row when a live tool updates.
+  function refreshLiveModalRow(sid, toolDetail) {
+    if (liveModalSid !== sid || liveModalToolId !== toolDetail.id) return;
+    const list = toolModal.querySelector('.modal-tools-list');
+    const existing = list.querySelector('.modal-tool-row');
+    if (!existing) return;
+    const wasExpanded = existing.classList.contains('expanded');
+    const fresh = buildModalRow(toolDetail, wasExpanded);
+    list.replaceChild(fresh, existing);
+    // Once the tool finishes, stop tracking live updates.
+    if (toolDetail.status !== 'running') {
+      liveModalSid = null;
+      liveModalToolId = null;
+    }
   }
 
   function formatJson(val) {
