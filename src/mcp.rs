@@ -308,7 +308,7 @@ pub struct NavigateRequest {
     )]
     pub new_tab: Option<bool>,
     #[schemars(
-        description = "Don't move focus to the navigated tab. Honored when opening a new tab; implicit (already non-disruptive) when navigating an existing non-active tab via tab_id. Default false."
+        description = "Keep a newly opened tab in the background instead of switching to it. Defaults to TRUE, so AI-opened tabs never steal the user's focus — pass background=false ONLY when the user explicitly asks to open/see the tab. No effect on in-place navigation (tab_id, or the visible tab)."
     )]
     pub background: Option<bool>,
 }
@@ -418,7 +418,7 @@ pub struct WaitRequest {
     )]
     pub event: Option<String>,
     #[schemars(
-        description = "Timeout in ms. Default 10000, max 30000. Ignored for event=\"ready\" (the probe has its own 8 s ceiling)."
+        description = "Timeout in ms. Default 10000, max 25000. Ignored for event=\"ready\" (the probe has its own 8 s ceiling)."
     )]
     pub timeout_ms: Option<u64>,
 }
@@ -504,14 +504,16 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nFlags can be combined freely; the first matching rule wins:\n  • tab_id given AND that tab still exists → navigate it in-place (focus unchanged). Other flags are advisory.\n  • tab_id given but the tab is gone → if new_tab=true, open a fresh tab; otherwise error.\n  • no tab_id, new_tab=true → open a new tab (background=true keeps it hidden).\n  • no tab_id, new_tab=false → navigate the user's visible tab in-place.\n\nUse tab_id to reuse a tab you opened earlier (e.g. background research tabs)."
+        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nFlags can be combined freely; the first matching rule wins:\n  • tab_id given AND that tab still exists → navigate it in-place (focus unchanged). Other flags are advisory.\n  • tab_id given but the tab is gone → if new_tab=true, open a fresh tab; otherwise error.\n  • no tab_id, new_tab=true → open a new tab. New tabs open in the BACKGROUND by default (hidden, the user's focus stays put); pass background=false ONLY when the user explicitly wants to see the new tab.\n  • no tab_id, new_tab=false → navigate the user's visible tab in-place.\n\nUse tab_id to reuse a tab you opened earlier (e.g. background research tabs)."
     )]
     async fn browser_navigate(
         &self,
         Parameters(req): Parameters<NavigateRequest>,
     ) -> Result<CallToolResult, McpError> {
         let new_tab = req.new_tab.unwrap_or(false);
-        let background = req.background.unwrap_or(false);
+        // Default true: AI-opened tabs stay hidden so they never yank the user's
+        // focus. Foreground happens only on an explicit background=false.
+        let background = req.background.unwrap_or(true);
         tracing::debug!(url = %req.url, ?req.tab_id, new_tab, background, "MCP browser_navigate");
 
         let tab_id = self
@@ -524,10 +526,15 @@ impl McpServer {
             })
             .await?;
 
-        let msg = if background {
-            format!("Opened background tab {tab_id}")
+        // Report what actually happened. `background` only matters when a new
+        // tab is opened — for in-place navigation it's ignored by the main loop,
+        // so don't let the default leak into the message as "background".
+        let msg = if new_tab && background {
+            format!(
+                "Opened background tab {tab_id} (call browser_switch_tab to show it to the user)"
+            )
         } else if new_tab {
-            format!("Opened new tab {tab_id}")
+            format!("Opened tab {tab_id} and switched to it")
         } else {
             format!("Navigated tab {tab_id}")
         };
@@ -587,7 +594,9 @@ impl McpServer {
         Parameters(req): Parameters<WaitRequest>,
     ) -> Result<CallToolResult, McpError> {
         let event = req.event.unwrap_or_else(|| "load".to_string());
-        let timeout_ms = req.timeout_ms.unwrap_or(10_000).min(30_000);
+        // Cap below send_command's 30 s ceiling so a maxed-out wait returns a
+        // clean "timeout" instead of racing the generic MCP-timeout error.
+        let timeout_ms = req.timeout_ms.unwrap_or(10_000).min(25_000);
         let result = self
             .send_command(|tx| McpCommand::Wait {
                 tab_id: req.tab_id,
@@ -961,8 +970,10 @@ impl ServerHandler for McpServer {
                 on navigation or full re-render; re-snapshot when interactions start failing with `stale`.\n\
                 \n\
                 Tabs: tab_id is optional everywhere — when omitted, tools target the user's visible tab. \
-                For research, open hidden tabs with browser_navigate(new_tab=true, background=true) and \
-                always pass that tab_id to subsequent reads/clicks. Close background tabs when done.\n\
+                For research, open hidden tabs with browser_navigate(new_tab=true) — new tabs stay in the \
+                background by default — and always pass that tab_id to subsequent reads/clicks. Pass \
+                background=false only when the user explicitly wants the new tab brought to the front. \
+                Close background tabs when done.\n\
                 \n\
                 Reading pages: prefer browser_get_page_content for text and browser_snapshot for \
                 actionable elements. Use browser_execute_js only when those don't fit (return value is \
