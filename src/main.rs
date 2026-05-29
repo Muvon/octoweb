@@ -2920,14 +2920,28 @@ fn main() {
                     McpCommand::SwitchTab { tab_id, response } => {
                         tracing::debug!(tab_id, "MCP switch_tab");
 
-                        let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
-                        let _ = response.send(Ok(()));
+                        // Validate before firing — the event handler silently no-ops
+                        // on an unknown id, which would otherwise report a bogus success.
+                        let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        if exists {
+                            let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                            let _ = response.send(Ok(()));
+                        } else {
+                            let _ = response.send(Err(format!("Tab {tab_id} not found")));
+                        }
                     }
                     McpCommand::CloseTab { tab_id, response } => {
                         tracing::debug!(tab_id, "MCP close_tab");
 
-                        let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
-                        let _ = response.send(Ok(()));
+                        // Validate before firing. Also guards against tab_id=0, which the
+                        // internal event treats as "close the active tab" — never an MCP intent.
+                        let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        if exists {
+                            let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
+                            let _ = response.send(Ok(()));
+                        } else {
+                            let _ = response.send(Err(format!("Tab {tab_id} not found")));
+                        }
                     }
                     McpCommand::GetPageInfo { tab_id, response, is_retry } => {
                         let tm = tabs.lock().unwrap();
