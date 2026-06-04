@@ -2069,6 +2069,20 @@ fn main() {
                 let _ = wv.set_visible(false);
             }
             if let Some(wv) = tab_webviews.get(&target) {
+                // Re-apply bounds on every show: a tab created/sized for a
+                // previous window size keeps stale bounds, which would leave a
+                // gap above — or let the footer paint over — the page. Pin it
+                // to the content area [address bar .. footer] so the quick-slots
+                // bar never covers the viewport.
+                let sz = browser_win.inner_size();
+                let _ = wv.set_bounds(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                    size: tao::dpi::PhysicalSize::new(
+                        sz.width,
+                        sz.height.saturating_sub(address_bar_h + footer_h),
+                    )
+                    .into(),
+                });
                 let _ = wv.set_visible(true);
             }
             // Hide progress bar when switching away from a loading tab
