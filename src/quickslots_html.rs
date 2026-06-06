@@ -67,7 +67,7 @@ pub fn html() -> String {
   #bar {
     position: fixed;
     bottom: 0; left: 0; right: 0;
-    height: 100%;
+    height: 36px;
     display: flex;
     align-items: center;
     justify-content: center;
