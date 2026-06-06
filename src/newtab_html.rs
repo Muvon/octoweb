@@ -21,7 +21,7 @@ pub fn html(slots_json: &str) -> String {
 <div class="container">
   <div class="octopus">@@OCTOPUS_BRAND@@</div>
   <h1>Octoweb</h1>
-  <p class="subtitle">Press <kbd>⌘K</kbd> to navigate anywhere</p>
+  <p class="subtitle">Press <kbd>⌘⇧P</kbd> to navigate anywhere</p>
   <div class="slots" id="slots"></div>
   <p class="hint">
     <kbd>⌘1</kbd>–<kbd>⌘0</kbd> open slots &nbsp;·&nbsp;

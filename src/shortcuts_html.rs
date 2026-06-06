@@ -258,7 +258,7 @@ pub fn html() -> &'static str {
         </div>
         <!-- Middle column: Command Palette — shared-key rows aligned to left column -->
         <div class="shortcuts-col">
-          <div class="col-title">Command Palette <span style="opacity:0.5">⌘K</span></div>
+          <div class="col-title">Command Palette <span style="opacity:0.5">⌘⇧P</span></div>
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
           <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>

@@ -15,7 +15,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 
 **Three things it does differently:**
 
-1. **Keyboard-first navigation** — Every action has a shortcut. Nothing requires a click. The command palette (`⌘K`) fuzzy-searches tabs and history. Pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere.
+1. **Keyboard-first navigation** — Every action has a shortcut. Nothing requires a click. The command palette (`⌘⇧P`) fuzzy-searches tabs and history. Pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere.
 
 2. **AI assistant built in** — Not an extension, not a tab. A sidebar overlay powered by a local [octomind](https://github.com/muvon/octomind) agent via [ACP](https://github.com/muvon/agent-client-protocol). Ask questions about the current page, get code explanations, summarize content — all without leaving the browser.
 
@@ -25,7 +25,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 
 ## Features
 
-- **Command palette** (`⌘K`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
+- **Command palette** (`⌘⇧P`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
 - **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access. Footer bar shows all slots.
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
@@ -174,7 +174,7 @@ The agent can now navigate pages, extract content, and interact with the browser
 
 | Shortcut | Action |
 |---|---|
-| `⌘K` | Open command palette |
+| `⌘⇧P` | Open command palette |
 | `⌘W` | Close current tab |
 | `⌘R` | Reload current page |
 | `⌘S` | Screenshot (viewport) — copy to clipboard |
@@ -202,7 +202,7 @@ Pin any page to a numbered slot and jump back to it instantly — one keystroke 
 
 Slots persist across restarts. An empty slot does nothing.
 
-### Command palette (`⌘K`)
+### Command palette (`⌘⇧P`)
 
 The main interface. Type a URL, a search query, or any fragment of a page title or URL you've visited — it fuzzy-matches across open tabs and history instantly, ranked by match quality and visit frequency.
 
