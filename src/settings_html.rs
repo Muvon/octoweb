@@ -210,6 +210,107 @@ pub fn html() -> &'static str {
     transition: transform 0.2s;
   }
   .toggle.on::after { transform: translateX(14px); }
+
+  /* Tab bar */
+  .tabs {
+    display: flex;
+    gap: 3px;
+    margin-bottom: 14px;
+    background: var(--section-bg);
+    border: 0.5px solid var(--divider);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .tab {
+    flex: 1;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    padding: 5px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+  .tab.active {
+    background: var(--input-bg);
+    color: var(--heading);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Keybindings */
+  .keys { display: inline-flex; align-items: center; gap: 2px; }
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px; height: 16px;
+    padding: 0 3px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--input-bg);
+    border: 0.5px solid var(--input-border);
+    border-radius: 4px;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .kb-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .kb-bind {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 2px 6px;
+    background: transparent;
+    border: 0.5px solid var(--input-border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+  .kb-bind:hover { border-color: rgba(52, 120, 247, 0.6); }
+  .kb-bind.recording {
+    border-color: rgba(52, 120, 247, 0.9);
+    box-shadow: 0 0 0 2px rgba(52, 120, 247, 0.18);
+  }
+  .rec-hint { font-size: 11px; color: var(--toggle-on); }
+  .kb-reset {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px; height: 20px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1;
+  }
+  .kb-reset:hover { background: var(--close-hover); color: var(--heading); }
+  .kb-error {
+    display: none;
+    font-size: 11px;
+    color: #e5484d;
+    padding: 8px 2px 0;
+  }
+  .kb-error.show { display: block; }
+  .kb-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; }
+  .kb-note { font-size: 11px; color: var(--text-dim); }
+  .kb-reset-all {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 0.5px solid var(--input-border);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+  .kb-reset-all:hover { color: var(--heading); border-color: var(--text-dim); }
 </style>
 </head>
 <body>
@@ -225,6 +326,12 @@ pub fn html() -> &'static str {
       </button>
     </div>
 
+    <div class="tabs">
+      <button class="tab active" data-pane="tab-general">General</button>
+      <button class="tab" data-pane="tab-keybindings">Keybindings</button>
+    </div>
+
+    <div id="tab-general" class="tab-pane active">
     <div class="section">
       <div class="section-title">General</div>
       <div class="row with-hint">
@@ -317,6 +424,16 @@ pub fn html() -> &'static str {
         <input type="number" id="learning_interval_min" data-key="learning_interval_min" min="5" step="5">
       </div>
     </div>
+    </div><!-- /tab-general -->
+
+    <div id="tab-keybindings" class="tab-pane">
+      <div id="kb-groups"></div>
+      <div id="kb-error" class="kb-error"></div>
+      <div class="kb-footer">
+        <span class="kb-note">Click a shortcut, then press the new combination.</span>
+        <button class="kb-reset-all" id="kb-reset-all">Reset all</button>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -326,6 +443,7 @@ pub fn html() -> &'static str {
   }
 
   function close() {
+    cancelRecord();
     ipc({ type: 'settings_close' });
   }
 
@@ -365,6 +483,142 @@ pub fn html() -> &'static str {
       }
     }
   };
+
+  // ── Tabs ──────────────────────────────────────────────────────────────
+  document.querySelectorAll('.tab').forEach(function(t) {
+    t.addEventListener('click', function() {
+      document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
+      document.querySelectorAll('.tab-pane').forEach(function(x) { x.classList.remove('active'); });
+      t.classList.add('active');
+      document.getElementById(t.dataset.pane).classList.add('active');
+      cancelRecord();
+    });
+  });
+
+  // ── Keybindings ───────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  // JS KeyboardEvent.code → the physical key token the Rust keymap understands.
+  function codeToToken(code) {
+    if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+    if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+    var m = {
+      Minus: 'minus', Equal: 'equal', BracketLeft: 'bracketleft', BracketRight: 'bracketright',
+      Backslash: 'backslash', Semicolon: 'semicolon', Quote: 'quote', Comma: 'comma',
+      Period: 'period', Slash: 'slash', Backquote: 'backquote', Enter: 'return',
+      Space: 'space', Tab: 'tab', Escape: 'escape',
+      ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down'
+    };
+    return m[code] || null;
+  }
+
+  var lastData = null;     // most recent bindings snapshot, for cancel re-render
+  var recordingId = null;  // action id currently capturing a chord
+  var recordingBtn = null;
+
+  function cancelRecord() {
+    if (recordingId) {
+      ipc({ type: 'keybind_capture', on: false });
+      if (lastData) render(lastData);
+    }
+  }
+
+  function startRecord(id, btn) {
+    if (recordingBtn && recordingBtn !== btn) recordingBtn.classList.remove('recording');
+    recordingId = id;
+    recordingBtn = btn;
+    btn.classList.add('recording');
+    btn.querySelector('.keys').innerHTML = '<span class="rec-hint">Press keys…</span>';
+    // Tell the host to stop firing global shortcuts so we can capture the chord.
+    ipc({ type: 'keybind_capture', on: true });
+  }
+
+  function kbRow(a) {
+    var keys = a.keys.map(function(k) { return '<kbd>' + esc(k) + '</kbd>'; }).join('');
+    var reset = a.is_default ? '' :
+      '<button class="kb-reset" data-reset="' + esc(a.id) + '" title="Reset to default">↺</button>';
+    return '<div class="row">' +
+      '<span class="row-label">' + esc(a.label) + '</span>' +
+      '<span class="kb-right">' + reset +
+        '<button class="kb-bind" data-bind="' + esc(a.id) + '"><span class="keys">' + keys + '</span></button>' +
+      '</span></div>';
+  }
+
+  function render(data) {
+    lastData = data;
+    recordingId = null;
+    recordingBtn = null;
+    var groups = {}, order = [];
+    data.actions.forEach(function(a) {
+      if (!groups[a.group]) { groups[a.group] = []; order.push(a.group); }
+      groups[a.group].push(a);
+    });
+    document.getElementById('kb-groups').innerHTML = order.map(function(g) {
+      return '<div class="section"><div class="section-title">' + esc(g) + '</div>' +
+        groups[g].map(kbRow).join('') + '</div>';
+    }).join('');
+    var err = document.getElementById('kb-error');
+    if (data.error) { err.textContent = data.error; err.classList.add('show'); }
+    else { err.textContent = ''; err.classList.remove('show'); }
+  }
+
+  // Rust pushes the full binding set on open and after every edit.
+  window.__setKeybindings = function(data) {
+    if (!data || !data.actions) return;
+    render(data);
+  };
+
+  // Delegate clicks: start recording on a binding, reset on the ↺ button.
+  document.getElementById('kb-groups').addEventListener('click', function(e) {
+    var reset = e.target.closest('[data-reset]');
+    if (reset) {
+      cancelRecord();
+      ipc({ type: 'keybind_reset', action: reset.dataset.reset });
+      return;
+    }
+    var bind = e.target.closest('[data-bind]');
+    if (bind) {
+      var id = bind.dataset.bind;
+      if (recordingId) cancelRecord(); // restores the previously recording row
+      var fresh = document.querySelector('.kb-bind[data-bind="' + id + '"]');
+      startRecord(id, fresh || bind);
+    }
+  });
+
+  document.getElementById('kb-reset-all').addEventListener('click', function() {
+    ipc({ type: 'keybind_reset_all' });
+  });
+
+  // Capture phase so a recording keystroke is intercepted before the modal's
+  // Esc-to-close handler (which lives on the bubble phase) ever sees it.
+  document.addEventListener('keydown', function(e) {
+    if (!recordingId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Wait through bare modifier presses for the real key.
+    if (['Meta', 'Shift', 'Control', 'Alt'].indexOf(e.key) >= 0) return;
+    // Esc with no modifiers cancels the capture.
+    if (e.code === 'Escape' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      cancelRecord();
+      return;
+    }
+    var token = codeToToken(e.code);
+    if (!token) return; // unsupported physical key — keep waiting
+    var mods = [];
+    if (e.metaKey) mods.push('cmd');
+    if (e.ctrlKey) mods.push('ctrl');
+    if (e.altKey) mods.push('opt');
+    if (e.shiftKey) mods.push('shift');
+    var id = recordingId;
+    recordingId = null;
+    recordingBtn = null;
+    ipc({ type: 'keybind_record', action: id, chord: mods.concat([token]).join('+') });
+    ipc({ type: 'keybind_capture', on: false });
+  }, true);
 })();
 </script>
 </body>

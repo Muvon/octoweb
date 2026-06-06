@@ -94,6 +94,8 @@ pub fn html() -> &'static str {
     border-radius: 12px;
     box-shadow: 0 24px 80px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08);
     padding: 16px 20px;
+    max-height: 88vh;
+    overflow-y: auto;
     animation: scaleIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
@@ -170,9 +172,9 @@ pub fn html() -> &'static str {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 5px 10px;
+    padding: 4px 10px;
     gap: 12px;
-    min-height: 28px;
+    min-height: 26px;
   }
 
   .row + .row {
@@ -232,33 +234,14 @@ pub fn html() -> &'static str {
     </div>
     <div id="columns">
       <div class="shortcuts">
-        <!-- Left column: Global -->
+        <!-- Left column: Global — populated live from the keymap via __setShortcuts -->
         <div class="shortcuts-col">
           <div class="col-title">Global</div>
-          <div class="row"><span class="row-label">Close tab</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
-          <div class="row"><span class="row-label">Next / prev tab</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
-          <div class="row"><span class="row-label">Open slot 1–9</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
-          <div class="row"><span class="row-label">Command palette</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
-          <div class="row"><span class="row-label">Save to slot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
-          <div class="row"><span class="row-label">Scroll down / up</span><span class="keys"><kbd>⌃</kbd><kbd>D</kbd>/<kbd>U</kbd></span></div>
-          <div class="row"><span class="row-label">Page top / bottom</span><span class="keys"><kbd>⌃</kbd><kbd>T</kbd>/<kbd>B</kbd></span></div>
-          <div class="row"><span class="row-label">Reload</span><span class="keys"><kbd>⌘</kbd><kbd>R</kbd></span></div>
-          <div class="row"><span class="row-label">Find in page</span><span class="keys"><kbd>⌘</kbd><kbd>F</kbd></span></div>
-          <div class="row"><span class="row-label">Screenshot</span><span class="keys"><kbd>⌘</kbd><kbd>S</kbd></span></div>
-          <div class="row"><span class="row-label">Full page shot</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>S</kbd></span></div>
-          <div class="row"><span class="row-label">Zoom in / out / reset</span><span class="keys"><kbd>⌘</kbd><kbd>+</kbd>/<kbd>-</kbd>/<kbd>0</kbd></span></div>
-          <div class="row"><span class="row-label">AI edit selection</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>E</kbd></span></div>
-          <div class="row"><span class="row-label">AI sidebar</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>A</kbd></span></div>
-          <div class="row"><span class="row-label">Fullscreen window</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Fullscreen assistant</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">DevTools</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>I</kbd></span></div>
-          <div class="row"><span class="row-label">Shortcuts</span><span class="keys"><kbd>⌘</kbd><kbd>/</kbd></span></div>
-          <div class="row"><span class="row-label">Settings</span><span class="keys"><kbd>⌘</kbd><kbd>,</kbd></span></div>
-          <div class="row"><span class="row-label">Quit</span><span class="keys"><kbd>⌘</kbd><kbd>Q</kbd></span></div>
+          <div id="global-list"></div>
         </div>
         <!-- Middle column: Command Palette — shared-key rows aligned to left column -->
         <div class="shortcuts-col">
-          <div class="col-title">Command Palette <span style="opacity:0.5">⌘⇧P</span></div>
+          <div class="col-title">Command Palette <span id="cp-trigger" style="opacity:0.5">⌘⇧P</span></div>
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
           <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
           <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
@@ -271,7 +254,7 @@ pub fn html() -> &'static str {
         </div>
         <!-- Right column: AI Editor — shared-key rows aligned -->
         <div class="shortcuts-col">
-          <div class="col-title">AI Editor <span style="opacity:0.5">⌘⇧E</span></div>
+          <div class="col-title">AI Editor <span id="ie-trigger" style="opacity:0.5">⌘⇧E</span></div>
           <div class="row"><span class="row-label dim">&nbsp;</span></div>
           <div class="row"><span class="row-label">History older / newer</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd>/<kbd>N</kbd></span></div>
           <div class="row"><span class="row-label dim">&nbsp;</span></div>
@@ -298,6 +281,38 @@ pub fn html() -> &'static str {
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') { e.preventDefault(); close(); }
   });
+
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+    });
+  }
+  function row(label, keys) {
+    var kbds = keys.map(function(k) { return '<kbd>' + esc(k) + '</kbd>'; }).join('');
+    return '<div class="row"><span class="row-label">' + esc(label) +
+           '</span><span class="keys">' + kbds + '</span></div>';
+  }
+
+  // Render the Global column from live keybindings. The quickslot digit family
+  // is fixed (not remappable) so it's appended as a static pair.
+  window.__setShortcuts = function(data) {
+    var list = document.getElementById('global-list');
+    if (!list || !data || !data.actions) return;
+    var html = data.actions.map(function(a) { return row(a.label, a.keys); }).join('');
+    html += '<div class="row"><span class="row-label">Open slot 1–9</span>' +
+            '<span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>';
+    html += '<div class="row"><span class="row-label">Save to slot 1–9</span>' +
+            '<span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>';
+    list.innerHTML = html;
+    // Keep the context-column trigger badges in sync with their global chords.
+    var find = function(id) {
+      var a = data.actions.filter(function(x) { return x.id === id; })[0];
+      return a ? a.keys.join('') : null;
+    };
+    var cp = find('command_palette'), ie = find('inline_edit');
+    if (cp) { document.getElementById('cp-trigger').textContent = cp; }
+    if (ie) { document.getElementById('ie-trigger').textContent = ie; }
+  };
 })();
 </script>
 </body>
