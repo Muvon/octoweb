@@ -234,7 +234,7 @@ fn main() {
     // Restore browsing history in a background thread so startup isn't blocked
     // by JSON deserialization of up to 1000 history entries. The thread finishes
     // in <50ms on typical hardware; history is available well before the user
-    // can open the overlay (Cmd+K) for the first time.
+    // can open the overlay (Cmd+Shift+P) for the first time.
     {
         let tabs_for_history = Arc::clone(&tabs);
         std::thread::spawn(move || {
@@ -1672,10 +1672,9 @@ fn main() {
         const FLAG_COMMAND: u64 = 1 << 20;
 
         // Virtual keycodes (kVK_ANSI_* from HIToolbox/Events.h)
-        const K_KEYCODE: u16 = 40;
         const W_KEYCODE: u16 = 13;
         const Q_KEYCODE: u16 = 12;
-        const P_KEYCODE: u16 = 35;
+        const P_KEYCODE: u16 = 35; // ⌃P = prev tab, ⌘⇧P = command palette
         const N_KEYCODE: u16 = 45;
         const A_KEYCODE: u16 = 0; // ⌘⇧A = toggle sidebar
         const I_KEYCODE: u16 = 34; // ⌘⇧I = toggle devtools
@@ -1717,7 +1716,7 @@ fn main() {
             let consume = std::ptr::null_mut::<AnyObject>();
             let pass = event;
 
-            if cmd && keycode == K_KEYCODE {
+            if cmd && shift && keycode == P_KEYCODE {
                 let _ = p.send_event(AppEvent::ToggleOverlay);
                 consume
             } else if cmd && shift && keycode == A_KEYCODE {
@@ -2367,7 +2366,7 @@ fn main() {
                 // text, icon, title, autoDismissMs — reuse the existing toast API
                 let _ = notification_wv.evaluate_script(
                     r#"window.__show && window.__show(
-                        'Press ⌘K to search, ⌘/ for shortcuts.',
+                        'Press ⌘⇧P to search, ⌘/ for shortcuts.',
                         '🐙',
                         'Welcome to Octoweb',
                         6000
@@ -5285,7 +5284,7 @@ fn main() {
                 // Position from JS anchor when available, otherwise default to
                 // top-center under the address bar (e.g. user pressed ⌘⇧E on a
                 // freshly loaded tab with no focused input and no selection —
-                // common right after ⌘K navigation, which is exactly when the
+                // common right after ⌘⇧P navigation, which is exactly when the
                 // modal previously appeared way down at <body>'s bottom edge).
                 let (mut px, mut py) = match pos {
                     Some((x, y)) => (
@@ -5328,7 +5327,7 @@ fn main() {
                 let _ = inline_edit_wv.focus();
                 // Focus-retry loop: WKWebView focus can be stolen by a tab that
                 // is still loading/auto-focusing (very common right after a
-                // ⌘K-driven NavigateTo — the new page hasn't fully committed
+                // ⌘⇧P-driven NavigateTo — the new page hasn't fully committed
                 // yet, then steals first-responder back from us). Mirrors the
                 // pattern used by the sidebar's prompt-input focus handshake.
                 let _ = inline_edit_wv.evaluate_script(

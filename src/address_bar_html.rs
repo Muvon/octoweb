@@ -528,7 +528,7 @@ pub fn html() -> String {
       <circle cx="8" cy="11.5" r="0.9" fill="currentColor"/>
     </svg>
   </button>
-  <button id="spotlight-btn" class="bar-btn" data-tip="Search  ⌘K" title="Command palette (⌘K)">
+  <button id="spotlight-btn" class="bar-btn" data-tip="Search  ⌘⇧P" title="Command palette (⌘⇧P)">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
       <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.6"/>
       <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>

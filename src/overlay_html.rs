@@ -1,4 +1,4 @@
-/// Returns the full HTML for the CMD+K overlay window.
+/// Returns the full HTML for the CMD+SHIFT+P overlay window.
 /// The page is injected with `window.__items` (JSON array) before being shown.
 /// Each item: { title, url, kind } where kind = "tab" | "history"
 ///

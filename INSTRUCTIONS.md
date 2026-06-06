@@ -24,7 +24,7 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── quickslots.rs         ← Fast-access slot logic (⌘⇧1–0 save, ⌘1–0 open)
    ├── prompt_history_js.rs  ← Shared JS module: prompt history nav, Ctrl+R search, ghost text
    │
-   ├── overlay_html.rs       ← Command palette (⌘K) — fuzzy search tabs/history
+   ├── overlay_html.rs       ← Command palette (⌘⇧P) — fuzzy search tabs/history
    ├── sidebar_html.rs       ← AI assistant sidebar (⌘⇧A) — chat UI
    ├── address_bar_html.rs   ← Address bar with URL display + AI button
    ├── inline_edit_html.rs   ← Inline AI edit modal (⌘⇧E) — text transformation
