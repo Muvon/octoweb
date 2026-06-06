@@ -13,6 +13,7 @@ mod find_bar_html;
 mod hibernation;
 mod icons;
 mod inline_edit_html;
+mod keybindings;
 mod macos;
 mod mcp;
 mod nav_error_patch;
@@ -138,7 +139,71 @@ enum AppEvent {
     /// watcher saw a new or status-flipped file. Forwarded to the sidebar's
     /// currently-active session as a `.msg.ui` bubble.
     A2uiUpdate(a2ui_watcher::A2uiSnapshot),
+    KeybindRecord(String, String), // (action_id, chord) — remap a global shortcut
+    KeybindReset(String),          // (action_id) — restore one action to its default
+    KeybindResetAll,               // restore every keybinding to default
+    KeybindCapture(bool),          // settings panel started/stopped recording a chord
     Quit,
+}
+
+/// Map a remappable [`keybindings::Action`] to the concrete [`AppEvent`] for the
+/// current UI context. Returns `None` when the action is suppressed in this
+/// context (e.g. scrolling while the command palette is open) — the caller then
+/// passes the key through to the focused WebView, matching prior behavior.
+fn keybind_to_event(
+    action: keybindings::Action,
+    overlay: bool,
+    find: bool,
+    inline: bool,
+    sidebar: bool,
+) -> Option<AppEvent> {
+    use keybindings::Action as A;
+    Some(match action {
+        A::CommandPalette => AppEvent::ToggleOverlay,
+        A::Sidebar => AppEvent::ToggleSidebar,
+        A::DevTools => AppEvent::ToggleDevTools,
+        A::Settings => AppEvent::ToggleSettings,
+        A::Shortcuts => AppEvent::ToggleShortcuts,
+        A::Quit => AppEvent::Quit,
+        A::SidebarFullscreen if !overlay && !inline => AppEvent::ToggleSidebarFullscreen,
+        A::Fullscreen if !overlay && !inline && !find => AppEvent::ToggleFullscreen,
+        A::InlineEdit if !overlay => AppEvent::InlineEditRequest,
+        A::UrlEdit if !overlay && !inline && !find && !sidebar => AppEvent::UrlEditRequest,
+        A::NewSession if sidebar && !overlay => AppEvent::AcpSessionCreatePanel,
+        A::CloseTab if !overlay => {
+            if sidebar {
+                AppEvent::AcpSessionCloseActive
+            } else {
+                AppEvent::CloseTab(0)
+            }
+        }
+        A::PrevTab if !overlay && !inline && !sidebar => {
+            if find {
+                AppEvent::FindPrev
+            } else {
+                AppEvent::PrevTab
+            }
+        }
+        A::NextTab if !overlay && !inline && !sidebar => {
+            if find {
+                AppEvent::FindNext
+            } else {
+                AppEvent::NextTab
+            }
+        }
+        A::ScrollDown if !overlay && !inline && !sidebar => AppEvent::ScrollDown,
+        A::ScrollUp if !overlay && !inline && !sidebar => AppEvent::ScrollUp,
+        A::ScrollTop if !overlay && !inline && !sidebar => AppEvent::ScrollTop,
+        A::ScrollBottom if !overlay && !inline && !sidebar => AppEvent::ScrollBottom,
+        A::Reload if !overlay => AppEvent::Reload,
+        A::Screenshot if !overlay => AppEvent::Screenshot,
+        A::ScreenshotFull if !overlay => AppEvent::ScreenshotFullPage,
+        A::ZoomIn if !overlay => AppEvent::ZoomIn,
+        A::ZoomOut if !overlay => AppEvent::ZoomOut,
+        A::ZoomReset if !overlay => AppEvent::ZoomReset,
+        A::Find if !overlay => AppEvent::ToggleFindBar,
+        _ => return None,
+    })
 }
 
 /// Per-ACP-session live state.
@@ -253,6 +318,11 @@ fn main() {
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
     let inline_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     let sidebar_hotkey_visible = Arc::new(AtomicBool::new(false));
+    // True while the settings panel is recording a new keybinding: the monitor
+    // passes every key through untouched so the settings WebView can capture the
+    // chord (otherwise a bound combo like ⌘⇧P would be swallowed before the UI
+    // sees it). Cleared on capture end or when the panel closes.
+    let keybind_capturing = Arc::new(AtomicBool::new(false));
     // Tracks whether chrome_win (sidebar host) currently owns logical input
     // focus. Read by the NSApplicationDidBecomeActive observer to decide
     // whether to restore key status + textarea focus after a transient
@@ -853,7 +923,7 @@ fn main() {
     }
 
     let shortcuts_win = Arc::new(shortcuts_win);
-    let _shortcuts_wv = WebViewBuilder::new()
+    let shortcuts_wv = WebViewBuilder::new()
         .with_html(shortcuts_html::html())
         .with_transparent(true)
         .with_ipc_handler({
@@ -908,6 +978,28 @@ fn main() {
                                     key.to_string(),
                                     val.to_string(),
                                 ));
+                            }
+                        }
+                        Some("keybind_record") => {
+                            if let (Some(a), Some(c)) = (v["action"].as_str(), v["chord"].as_str())
+                            {
+                                let _ = p.send_event(AppEvent::KeybindRecord(
+                                    a.to_string(),
+                                    c.to_string(),
+                                ));
+                            }
+                        }
+                        Some("keybind_reset") => {
+                            if let Some(a) = v["action"].as_str() {
+                                let _ = p.send_event(AppEvent::KeybindReset(a.to_string()));
+                            }
+                        }
+                        Some("keybind_reset_all") => {
+                            let _ = p.send_event(AppEvent::KeybindResetAll);
+                        }
+                        Some("keybind_capture") => {
+                            if let Some(on) = v["on"].as_bool() {
+                                let _ = p.send_event(AppEvent::KeybindCapture(on));
                             }
                         }
                         _ => {}
@@ -1659,6 +1751,11 @@ fn main() {
     // are AppKit-level, need zero permissions, survive rebuilds, and macOS
     // only routes key events here when octoweb is the frontmost app — so we
     // no longer need an `is_app_active()` guard inside the handler either.
+    //
+    // Configurable bindings: the monitor reads this shared keymap on every
+    // keystroke; remapping from the settings panel takes a write lock and
+    // rebuilds it, so changes apply on the next keypress without a restart.
+    let keymap = Arc::new(std::sync::RwLock::new(keybindings::Keymap::load()));
     let _key_monitor: *mut objc2::runtime::AnyObject = {
         use block2::RcBlock;
         use objc2::runtime::AnyObject;
@@ -1669,34 +1766,18 @@ fn main() {
         // NSEventModifierFlags bits (see NSEvent.h)
         const FLAG_SHIFT: u64 = 1 << 17;
         const FLAG_CONTROL: u64 = 1 << 18;
+        const FLAG_OPTION: u64 = 1 << 19;
         const FLAG_COMMAND: u64 = 1 << 20;
 
-        // Virtual keycodes (kVK_ANSI_* from HIToolbox/Events.h)
-        const W_KEYCODE: u16 = 13;
-        const Q_KEYCODE: u16 = 12;
-        const P_KEYCODE: u16 = 35; // ⌃P = prev tab, ⌘⇧P = command palette
-        const N_KEYCODE: u16 = 45;
-        const A_KEYCODE: u16 = 0; // ⌘⇧A = toggle sidebar
-        const I_KEYCODE: u16 = 34; // ⌘⇧I = toggle devtools
-        const COMMA_KEYCODE: u16 = 43; // ⌘,   = settings
-        const SLASH_KEYCODE: u16 = 44; // ⌘/   = toggle shortcuts
-        const R_KEYCODE: u16 = 15; // ⌘R   = reload
-        const F_KEYCODE: u16 = 3; // ⌘F   = find in page
-        const S_KEYCODE: u16 = 1; // ⌘S   = screenshot, ⌘⇧S = full page
-        const D_KEYCODE: u16 = 2; // ⌃D   = scroll half down
-        const U_KEYCODE: u16 = 32; // ⌃U   = scroll half up
-        const T_KEYCODE: u16 = 17; // ⌃T   = scroll to top
-        const B_KEYCODE: u16 = 11; // ⌃B   = scroll to bottom
-        const E_KEYCODE: u16 = 14; // ⌘⇧E = inline AI edit, ⌘E = edit URL
-        const EQUAL_KEYCODE: u16 = 24; // ⌘=   = zoom in
-        const MINUS_KEYCODE: u16 = 27; // ⌘-   = zoom out
+        // Esc and the digit row are handled as a fixed fallback below; every
+        // other global shortcut is data-driven via the configurable Keymap.
         const ESC_KEYCODE: u16 = 53;
-        const RETURN_KEYCODE: u16 = 36; // ⌘↩ = fullscreen, ⌘⇧↩ = sidebar fullscreen
-        const ZERO_KEYCODE: u16 = 29; // ⌘0   = reset zoom (overrides QuickSlot 0)
-                                      // Digit keycodes 1..9 then 0
+        // ⌘1–⌘9 then ⌘0 → quickslots (⌘⇧+digit saves). Positional, not remappable.
         const DIGIT_KEYCODES: [u16; 10] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29];
 
         let p = proxy.clone();
+        let km = Arc::clone(&keymap);
+        let capturing = Arc::clone(&keybind_capturing);
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
@@ -1712,179 +1793,68 @@ fn main() {
             let cmd = flags & FLAG_COMMAND != 0;
             let ctrl = flags & FLAG_CONTROL != 0;
             let shift = flags & FLAG_SHIFT != 0;
+            let opt = flags & FLAG_OPTION != 0;
 
             let consume = std::ptr::null_mut::<AnyObject>();
             let pass = event;
 
-            if cmd && shift && keycode == P_KEYCODE {
-                let _ = p.send_event(AppEvent::ToggleOverlay);
-                consume
-            } else if cmd && shift && keycode == A_KEYCODE {
-                let _ = p.send_event(AppEvent::ToggleSidebar);
-                consume
-            } else if cmd
-                && shift
-                && keycode == RETURN_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
-                consume
-            } else if cmd
-                && !shift
-                && !ctrl
-                && keycode == RETURN_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !find_bar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ToggleFullscreen);
-                consume
-            } else if cmd && shift && keycode == E_KEYCODE && !overlay_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::InlineEditRequest);
-                consume
-            } else if cmd
-                && !shift
-                && !ctrl
-                && keycode == E_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !find_bar_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::UrlEditRequest);
-                consume
-            } else if cmd && shift && keycode == I_KEYCODE {
-                let _ = p.send_event(AppEvent::ToggleDevTools);
-                consume
-            } else if cmd && keycode == COMMA_KEYCODE {
-                let _ = p.send_event(AppEvent::ToggleSettings);
-                consume
-            } else if cmd && keycode == SLASH_KEYCODE {
-                let _ = p.send_event(AppEvent::ToggleShortcuts);
-                consume
-            } else if cmd
-                && !shift
-                && !ctrl
-                && keycode == T_KEYCODE
-                && sidebar_state.load(Ordering::Relaxed)
-                && !overlay_state.load(Ordering::Relaxed)
-            {
-                // ⌘T inside the sidebar opens the new-session panel
-                let _ = p.send_event(AppEvent::AcpSessionCreatePanel);
-                consume
-            } else if cmd && keycode == W_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                // ⌘W closes the active ACP session when sidebar is focused, else the tab
-                if sidebar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::AcpSessionCloseActive);
-                } else {
-                    let _ = p.send_event(AppEvent::CloseTab(0));
-                }
-                consume
-            } else if cmd && !ctrl && !shift && keycode == Q_KEYCODE {
-                let _ = p.send_event(AppEvent::Quit);
-                consume
-            } else if ctrl
-                && keycode == P_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                if find_bar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::FindPrev);
-                } else {
-                    let _ = p.send_event(AppEvent::PrevTab);
-                }
-                consume
-            } else if ctrl
-                && keycode == N_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                if find_bar_state.load(Ordering::Relaxed) {
-                    let _ = p.send_event(AppEvent::FindNext);
-                } else {
-                    let _ = p.send_event(AppEvent::NextTab);
-                }
-                consume
-            } else if ctrl
-                && keycode == D_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ScrollDown);
-                consume
-            } else if ctrl
-                && keycode == U_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ScrollUp);
-                consume
-            } else if ctrl
-                && keycode == T_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ScrollTop);
-                consume
-            } else if ctrl
-                && keycode == B_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-                && !inline_edit_state.load(Ordering::Relaxed)
-                && !sidebar_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ScrollBottom);
-                consume
-            } else if cmd && keycode == R_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::Reload);
-                consume
-            } else if cmd && shift && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed)
-            {
-                let _ = p.send_event(AppEvent::ScreenshotFullPage);
-                consume
-            } else if cmd && keycode == S_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::Screenshot);
-                consume
-            } else if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::HideFindBar);
-                consume
-            } else if cmd && keycode == EQUAL_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::ZoomIn);
-                consume
-            } else if cmd && keycode == MINUS_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::ZoomOut);
-                consume
-            } else if cmd
-                && !shift
-                && keycode == ZERO_KEYCODE
-                && !overlay_state.load(Ordering::Relaxed)
-            {
-                // ⌘0 = reset zoom (overrides QuickSlotOpen for digit 0)
-                let _ = p.send_event(AppEvent::ZoomReset);
-                consume
-            } else if cmd && keycode == F_KEYCODE && !overlay_state.load(Ordering::Relaxed) {
-                let _ = p.send_event(AppEvent::ToggleFindBar);
-                consume
-            } else if cmd && !overlay_state.load(Ordering::Relaxed) {
-                // ⌘+digit → QuickSlotOpen, ⌘⇧+digit → QuickSlotSave
-                if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
-                    if shift {
-                        let _ = p.send_event(AppEvent::QuickSlotSave(slot));
-                    } else {
-                        let _ = p.send_event(AppEvent::QuickSlotOpen(slot));
-                    }
+            // While the settings panel is recording a chord, let every key reach
+            // the focused WebView so it can be captured (don't fire shortcuts).
+            if capturing.load(Ordering::Relaxed) {
+                return pass;
+            }
+
+            let mut mods = 0u8;
+            if cmd {
+                mods |= keybindings::MOD_CMD;
+            }
+            if ctrl {
+                mods |= keybindings::MOD_CTRL;
+            }
+            if opt {
+                mods |= keybindings::MOD_OPT;
+            }
+            if shift {
+                mods |= keybindings::MOD_SHIFT;
+            }
+
+            // Configurable bindings take priority. A chord matched to an action
+            // that's context-guarded in this UI state (e.g. scrolling while the
+            // command palette is open) falls through so the key still reaches
+            // the focused WebView — mirroring the previous hardcoded behavior.
+            let action = km.read().ok().and_then(|k| k.lookup(mods, keycode));
+            if let Some(action) = action {
+                if let Some(ev) = keybind_to_event(
+                    action,
+                    overlay_state.load(Ordering::Relaxed),
+                    find_bar_state.load(Ordering::Relaxed),
+                    inline_edit_state.load(Ordering::Relaxed),
+                    sidebar_state.load(Ordering::Relaxed),
+                ) {
+                    let _ = p.send_event(ev);
                     return consume;
                 }
-                pass
-            } else {
-                pass
             }
+
+            // Fixed fallback: ⌘ + digit opens a quickslot, ⌘⇧ + digit saves one.
+            if cmd && !overlay_state.load(Ordering::Relaxed) {
+                if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
+                    let _ = p.send_event(if shift {
+                        AppEvent::QuickSlotSave(slot)
+                    } else {
+                        AppEvent::QuickSlotOpen(slot)
+                    });
+                    return consume;
+                }
+            }
+
+            // Esc closes the find bar when it owns focus (contextual, not remappable).
+            if keycode == ESC_KEYCODE && find_bar_state.load(Ordering::Relaxed) {
+                let _ = p.send_event(AppEvent::HideFindBar);
+                return consume;
+            }
+
+            pass
         });
 
         // AppKit copies the block when registering the monitor, so forgetting
@@ -1914,6 +1884,30 @@ fn main() {
     let mut zoom_level: f64 = 1.0;
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
+
+    /// Push the current keybindings into both the settings panel (so the
+    /// Keybindings tab re-renders) and the shortcuts overlay (so the help
+    /// reflects live mappings). `$err` is an `Option<String>` surfaced as an
+    /// inline error in the settings UI (e.g. a rejected conflicting chord).
+    macro_rules! sync_keybindings {
+        ($err:expr) => {{
+            if let Ok(k) = keymap.read() {
+                let mut v = k.ui_json();
+                if let Some(msg) = $err {
+                    v["error"] = serde_json::Value::String(msg);
+                }
+                let json = v.to_string();
+                let _ = settings_wv.evaluate_script(&format!(
+                    "window.__setKeybindings && window.__setKeybindings({})",
+                    json
+                ));
+                let _ = shortcuts_wv.evaluate_script(&format!(
+                    "window.__setShortcuts && window.__setShortcuts({})",
+                    json
+                ));
+            }
+        }};
+    }
 
     /// Create a WebView for a new tab, register nav-error callback, insert into map.
     /// Returns the tab_id. The WebView starts hidden (shown on PageLoadFinished).
@@ -3737,6 +3731,7 @@ fn main() {
                 if settings_visible {
                     settings_win.set_visible(false);
                     settings_visible = false;
+                    keybind_capturing.store(false, Ordering::Relaxed);
                 } else {
                     let sz = browser_win.inner_size();
                     settings_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
@@ -3748,6 +3743,13 @@ fn main() {
                     let _ = settings_wv.evaluate_script(&format!(
                         "window.__setConfig && window.__setConfig({})", config_json
                     ));
+                    // Inject current keybindings into the Keybindings tab
+                    if let Ok(k) = keymap.read() {
+                        let _ = settings_wv.evaluate_script(&format!(
+                            "window.__setKeybindings && window.__setKeybindings({})",
+                            k.ui_json()
+                        ));
+                    }
                     settings_win.set_visible(true);
                     settings_win.set_focus();
                     settings_visible = true;
@@ -3756,6 +3758,7 @@ fn main() {
             Event::UserEvent(AppEvent::HideSettings) => {
                 settings_win.set_visible(false);
                 settings_visible = false;
+                keybind_capturing.store(false, Ordering::Relaxed);
             }
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
@@ -3821,6 +3824,30 @@ fn main() {
                 cfg.save();
             }
 
+            Event::UserEvent(AppEvent::KeybindRecord(action, chord)) => {
+                let err = match keymap.write() {
+                    Ok(mut k) => k.rebind(&action, &chord).err(),
+                    Err(_) => Some("Internal error".to_string()),
+                };
+                sync_keybindings!(err);
+            }
+            Event::UserEvent(AppEvent::KeybindReset(action)) => {
+                let err = match keymap.write() {
+                    Ok(mut k) => k.reset(&action).err(),
+                    Err(_) => Some("Internal error".to_string()),
+                };
+                sync_keybindings!(err);
+            }
+            Event::UserEvent(AppEvent::KeybindResetAll) => {
+                if let Ok(mut k) = keymap.write() {
+                    k.reset_all();
+                }
+                sync_keybindings!(None::<String>);
+            }
+            Event::UserEvent(AppEvent::KeybindCapture(on)) => {
+                keybind_capturing.store(on, Ordering::Relaxed);
+            }
+
             Event::UserEvent(AppEvent::ToggleShortcuts) => {
                 if shortcuts_visible {
                     shortcuts_win.set_visible(false);
@@ -3830,6 +3857,13 @@ fn main() {
                     shortcuts_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
                     if let Ok(pos) = browser_win.outer_position() {
                         shortcuts_win.set_outer_position(pos);
+                    }
+                    // Reflect live keybindings in the Global column.
+                    if let Ok(k) = keymap.read() {
+                        let _ = shortcuts_wv.evaluate_script(&format!(
+                            "window.__setShortcuts && window.__setShortcuts({})",
+                            k.ui_json()
+                        ));
                     }
                     shortcuts_win.set_visible(true);
                     shortcuts_win.set_focus();
