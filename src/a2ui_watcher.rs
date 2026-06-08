@@ -1,4 +1,4 @@
-/// Polls `~/.local/share/a2ui/` for envelope files written by the
+/// Polls `~/.local/share/octoweb/a2ui/` for envelope files written by the
 /// `render_ui` tool. Emits one snapshot per unique (id, status) transition
 /// onto the tao event-loop proxy as `AppEvent::A2uiUpdate`.
 ///

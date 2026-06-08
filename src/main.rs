@@ -1616,8 +1616,8 @@ fn main() {
     };
 
     // ── A2UI ────────────────────────────────────────────────────────────────
-    // Ship the `render_ui` tool into `~/.agents/tools/` so any octomind
-    // subprocess we spawn (CWD = home) auto-discovers it. Then start a
+    // Ship the `render_ui` tool into `<workspace>/.agents/tools/` so any
+    // octomind subprocess we spawn (CWD = workspace) auto-discovers it. Then start a
     // background watcher on the envelope queue dir; every status transition
     // becomes an `A2uiUpdate` event the active session renders inline.
     match a2ui_render_ui::install() {

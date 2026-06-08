@@ -269,7 +269,11 @@ impl AcpHandle {
             .next()
             .ok_or_else(|| anyhow::anyhow!("empty agent command"))?
             .to_string();
-        let args: Vec<String> = parts.map(str::to_string).collect();
+        let mut args: Vec<String> = parts.map(str::to_string).collect();
+        // Sandbox every agent to its workspace cwd (set in init_session) so its
+        // filesystem writes can't escape octoweb's internal dir. Injected here,
+        // centrally, instead of at each `octomind acp …` call site.
+        args.push("--sandbox".to_string());
 
         // Spawn a dedicated OS thread with a current_thread runtime + LocalSet.
         // ClientSideConnection is !Send, so it must live entirely on one thread.
@@ -336,11 +340,17 @@ async fn init_session(
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
+    // Run the agent inside octoweb's internal workspace dir (not the user's
+    // home). Combined with `--sandbox` (injected in `connect`), this confines
+    // all of the agent's filesystem writes to this dir.
+    let workspace = crate::a2ui_render_ui::workspace_dir();
+    let _ = std::fs::create_dir_all(&workspace);
+
     let mut child = tokio::process::Command::new(&program)
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .current_dir(dirs::home_dir().unwrap_or_else(|| "/".into()))
+        .current_dir(&workspace)
         .kill_on_drop(true)
         .spawn()?;
 
@@ -392,14 +402,11 @@ async fn init_session(
     .await?;
 
     // Workspace cwd for the session — octomind uses this to discover local
-    // tools at `<cwd>/.agents/tools/*`. When octoweb is launched as a .app
-    // bundle via launchd, `std::env::current_dir()` is `/` (not the user's
-    // home), which breaks local-tool discovery. Pin to the user's home dir
-    // so it matches where we install `render_ui`.
+    // tools at `<cwd>/.agents/tools/*` and as the `--sandbox` root. Must match
+    // the process cwd set above so tool discovery and the sandbox agree, and so
+    // it survives launchd launches where `current_dir()` would be `/`.
     let resp = conn
-        .new_session(acp::NewSessionRequest::new(
-            dirs::home_dir().unwrap_or_else(|| "/".into()),
-        ))
+        .new_session(acp::NewSessionRequest::new(workspace.clone()))
         .await?;
 
     let session_id = resp.session_id;
