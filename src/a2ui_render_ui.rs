@@ -75,7 +75,7 @@ if [[ "$msg_count" == "0" ]]; then
   exit 1
 fi
 
-queue="${HOME}/.local/share/a2ui"
+queue="${HOME}/.local/share/octoweb/a2ui"
 mkdir -p "$queue"
 
 rand_hex=$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
@@ -122,23 +122,32 @@ while :; do
 done
 "####;
 
-/// Where the script lives. Octomind is spawned with CWD = `dirs::home_dir()`
-/// (acp.rs), so `<home>/.agents/tools/` is where it'll be discovered.
-pub fn tool_path() -> PathBuf {
+/// Octoweb's internal data root, and the cwd + `--sandbox` root the agent
+/// runs inside (set in acp.rs). Everything the agent can touch lives under
+/// here, so its writes can't escape into the user's home. Derived from
+/// `~/.local/share` to match the project's existing XDG-style layout.
+pub fn workspace_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".local")
+        .join("share")
+        .join("octoweb")
+}
+
+/// Where the script lives. Octomind discovers local tools at
+/// `<cwd>/.agents/tools/*`, and cwd is `workspace_dir()`.
+pub fn tool_path() -> PathBuf {
+    workspace_dir()
         .join(".agents")
         .join("tools")
         .join("render_ui")
 }
 
 /// Queue directory the script writes envelopes into. Watcher polls this.
+/// Lives inside `workspace_dir()` so `--sandbox` doesn't block the script's
+/// writes.
 pub fn queue_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".local")
-        .join("share")
-        .join("a2ui")
+    workspace_dir().join("a2ui")
 }
 
 /// Idempotent install — writes the script if absent or content drifted, sets
