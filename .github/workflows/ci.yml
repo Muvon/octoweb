@@ -6,48 +6,19 @@ on:
   pull_request:
     branches: [master]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  check:
-    name: Check & Format
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Check dependencies
-        run: cargo check --locked --all-targets
-
-  test:
-    name: Test
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Run tests
-        run: cargo test --locked --all
-        env:
-          RUST_LOG: trace
+  rust:
+    name: Rust CI
+    uses: muvon/ci-workflow/.github/workflows/rust-ci.yml@master
+    with:
+      # macOS-only app: jobs that compile the crate must run on macOS
+      runner: macos-15
+      feature-flags: '--all-features'
+      test-os: '["macos-15"]'
+      test-includes: '[]'
+      test-script: 'RUST_LOG=trace cargo test --locked --all'
+      doc: false
+      coverage: false
 
   build:
     name: Build (debug)
