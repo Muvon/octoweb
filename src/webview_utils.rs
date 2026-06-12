@@ -437,6 +437,86 @@ pub const COMBINED_SCRIPT: &str = r#"
     window.__octoweb_edit = null;
   };
 
+  // ── MCP observability: console + network ring buffers, listener tagging ──
+  // Read by browser_console_messages / browser_network_requests and by the
+  // snapshot script. All globals are non-enumerable so pages iterating
+  // `window` don't trip over them. Buffers cap at 200 entries (FIFO).
+  (function () {
+    function ring() {
+      var b = [];
+      b.push2 = function (e) { b.push(e); if (b.length > 200) b.shift(); };
+      return b;
+    }
+    var con = ring(), net = ring();
+    Object.defineProperty(window, '__octoweb_console', { value: con, configurable: true });
+    Object.defineProperty(window, '__octoweb_net', { value: net, configurable: true });
+
+    // Console wrap — keeps original behavior, mirrors a truncated text line.
+    ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
+      var orig = console[level];
+      console[level] = function () {
+        try {
+          var parts = [];
+          for (var i = 0; i < arguments.length; i++) {
+            var a = arguments[i];
+            if (typeof a === 'string') { parts.push(a); }
+            else { try { parts.push(JSON.stringify(a)); } catch (e) { parts.push(String(a)); } }
+          }
+          con.push2({ level: level, text: parts.join(' ').substring(0, 500), ts: Date.now() });
+        } catch (e) {}
+        return orig.apply(console, arguments);
+      };
+    });
+    window.addEventListener('error', function (e) {
+      con.push2({ level: 'error', text: ('Uncaught: ' + e.message + ' @' + (e.filename || '') + ':' + (e.lineno || 0)).substring(0, 500), ts: Date.now() });
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var r; try { r = String((e.reason && e.reason.message) || e.reason); } catch (err) { r = '?'; }
+      con.push2({ level: 'error', text: ('Unhandled rejection: ' + r).substring(0, 500), ts: Date.now() });
+    });
+
+    // fetch wrap
+    var origFetch = window.fetch;
+    if (origFetch) window.fetch = function (input, init) {
+      var url = ''; try { url = (typeof input === 'string') ? input : ((input && input.url) || String(input)); } catch (e) {}
+      var method = (init && init.method) || (input && input.method) || 'GET';
+      var t0 = performance.now();
+      function rec(status, error) {
+        net.push2({ method: method, url: String(url).substring(0, 300), status: status, type: 'fetch',
+                    ms: Math.round(performance.now() - t0), ts: Date.now(), error: error });
+      }
+      return origFetch.apply(this, arguments).then(
+        function (res) { rec(res.status); return res; },
+        function (err) { rec(0, String(err).substring(0, 200)); throw err; }
+      );
+    };
+
+    // XHR wrap
+    var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { this.__ow_req = [String(m), String(u)]; return XO.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function () {
+      var x = this, t0 = performance.now();
+      x.addEventListener('loadend', function () {
+        var i = x.__ow_req || ['?', '?'];
+        net.push2({ method: i[0], url: i[1].substring(0, 300), status: x.status, type: 'xhr',
+                    ms: Math.round(performance.now() - t0), ts: Date.now() });
+      });
+      return XS.apply(this, arguments);
+    };
+
+    // Click-listener tagging: lets browser_snapshot surface <div>-buttons whose
+    // only interactivity is an addEventListener — invisible to role/tag scans.
+    var tagged = new WeakSet();
+    Object.defineProperty(window, '__octoweb_listeners', { value: tagged, configurable: true });
+    var origAdd = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type) {
+      try {
+        if ((type === 'click' || type === 'pointerdown' || type === 'mousedown') && this && this.nodeType === 1) tagged.add(this);
+      } catch (e) {}
+      return origAdd.apply(this, arguments);
+    };
+  }());
+
   // ── target=_blank link interceptor ────────────────────────────────────────
   // Clicks on <a target="_blank"> are caught here and routed through IPC to
   // open in a new browser tab. This prevents them from reaching the native

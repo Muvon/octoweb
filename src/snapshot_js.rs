@@ -134,21 +134,41 @@ pub const SNAPSHOT_JS: &str = r#"
         if (iframes[j].contentDocument) scan(iframes[j].contentDocument);
       } catch(e) {}
     }
-    // Pierce open shadow roots — web-component UIs (Lit, Polymer, LWC, Stencil)
-    // render everything inside shadowRoot, invisible to querySelectorAll above.
+    // Single full walk doing two jobs:
+    //  1. Pierce open shadow roots — web-component UIs (Lit, Polymer, LWC)
+    //     render everything inside shadowRoot, invisible to querySelectorAll.
+    //  2. Surface listener-only clickables — <div>s whose sole interactivity
+    //     is an addEventListener('click'), tagged at document-start by
+    //     COMBINED_SCRIPT. Skipped when they contain a real interactive
+    //     element (event-delegation roots like React containers).
+    var tagged = window.__octoweb_listeners;
     var all = doc.querySelectorAll('*');
     for (var k = 0; k < all.length; k++) {
-      if (all[k].shadowRoot) scan(all[k].shadowRoot);
+      var node = all[k];
+      if (node.shadowRoot) scan(node.shadowRoot);
+      if (tagged && tagged.has(node) && !seen.has(node) && isVisible(node) && !node.querySelector(selector)) {
+        seen.add(node);
+        var cRef = '@' + counter++;
+        refs.set(cRef, node);
+        var cText = getText(node);
+        lines.push(cRef + ' clickable' + (cText ? ' "' + cText.replace(/"/g, '\\"') + '"' : ''));
+      }
     }
   }
 
   scan(document);
-  window.__octoweb_refs = refs;
-  // Header tells the AI how many refs were captured and that they expire on
-  // navigation — saves a follow-up clarification round-trip.
+  // Non-enumerable so pages iterating `window` can't fingerprint it.
+  Object.defineProperty(window, '__octoweb_refs', { value: refs, configurable: true });
+  // Header tells the AI how many refs were captured, that they expire on
+  // navigation, and how much of the page is below the fold — saves
+  // follow-up clarification round-trips.
+  var se = document.scrollingElement || document.documentElement;
+  var meta = 'page: ' + location.href.substring(0, 150)
+    + ' | viewport ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + window.innerHeight)
+    + ' of ' + Math.round(se.scrollHeight) + 'px';
   var header = lines.length === 0
     ? '(no interactive elements found)'
     : lines.length + ' elements (refs valid until next navigation):';
-  return header + '\n' + lines.join('\n');
+  return meta + '\n' + header + '\n' + lines.join('\n');
 })()
 "#;

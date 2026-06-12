@@ -8,6 +8,7 @@ mod config;
 mod content_rules;
 mod crash_report;
 mod dialog_patch;
+mod dom_actions;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
@@ -3107,14 +3108,7 @@ fn main() {
                                 //   stale    → @ref but no snapshot taken yet (or refs cleared by navigation)
                                 //   missing  → selector matched no element
                                 //   detached → element existed but is no longer in the DOM
-                                // Full pointer+mouse sequence: modern frameworks (React 18+,
-                                // MUI, Radix) listen on pointerdown/pointerup, not mousedown.
-                                // focus() between down and up mirrors the native default
-                                // action — widgets that open on focus need it.
-                                let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}},p=Object.assign({{}},o,{{pointerId:1,pointerType:'mouse',isPrimary:true}});el.dispatchEvent(new PointerEvent('pointerdown',p));el.dispatchEvent(new MouseEvent('mousedown',o));if(el.focus)el.focus();el.dispatchEvent(new PointerEvent('pointerup',p));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return 'true'}})()",
-                                    sel = serde_json::to_string(&selector).unwrap_or_default()
-                                );
+                                let script = dom_actions::click_script(&selector);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
@@ -3124,7 +3118,7 @@ fn main() {
                                     }
                                 }) {
                                     Ok(()) => {
-                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                        mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
                                             "Click on '{selector}' was dropped — the JS callback never fired, almost \
                                              always because the page navigated or re-rendered during the click \
                                              (common on heavy SPAs and with parallel clicks). The tab is still \
@@ -3155,12 +3149,7 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
-                                // Pointer events first — pointer-event-based menus
-                                // (Radix, Headless UI) ignore bare mouse events.
-                                let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}},p=Object.assign({{}},o,{{pointerId:1,pointerType:'mouse',isPrimary:true}});el.dispatchEvent(new PointerEvent('pointerover',p));el.dispatchEvent(new PointerEvent('pointerenter',Object.assign({{}},p,{{bubbles:false}})));el.dispatchEvent(new MouseEvent('mouseenter',Object.assign({{}},o,{{bubbles:false}})));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new PointerEvent('pointermove',p));el.dispatchEvent(new MouseEvent('mousemove',o));return 'true'}})()",
-                                    sel = serde_json::to_string(&selector).unwrap_or_default()
-                                );
+                                let script = dom_actions::hover_script(&selector);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
@@ -3170,7 +3159,7 @@ fn main() {
                                     }
                                 }) {
                                     Ok(()) => {
-                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                        mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
                                             "Hover on '{selector}' was dropped (JS callback discarded by page \
                                              navigation/re-render). Re-snapshot and retry."
                                         ));
@@ -3197,14 +3186,7 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
-                                // Value setter must come from the element's own interface:
-                                // WebKit brand-checks prototype setters, so calling
-                                // HTMLInputElement's setter on a <textarea> throws.
-                                let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.focus();if(el.isContentEditable){{var s=window.getSelection(),r2=document.createRange();r2.selectNodeContents(el);s.removeAllRanges();s.addRange(r2);document.execCommand('insertText',false,{txt});return 'true'}}var setter;if(el instanceof HTMLTextAreaElement)setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;else if(el instanceof HTMLInputElement)setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;if(setter)setter.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true'}})()",
-                                    sel = serde_json::to_string(&selector).unwrap_or_default(),
-                                    txt = serde_json::to_string(&text).unwrap_or_default()
-                                );
+                                let script = dom_actions::type_script(&selector, &text);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
@@ -3214,7 +3196,7 @@ fn main() {
                                     }
                                 }) {
                                     Ok(()) => {
-                                        mcp_eval_err_watchdog!(response, 5000, format!(
+                                        mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
                                             "Type into '{selector}' was dropped (JS callback discarded by page \
                                              navigation/re-render). Whether the text was set is unknown — \
                                              re-snapshot, verify field state, and retry."
@@ -3456,10 +3438,40 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::Scroll { tab_id, direction, pixels, response } => {
+                    McpCommand::Scroll { tab_id, direction, pixels, selector, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
+                            if !matches!(direction.as_str(), "up" | "down" | "top" | "bottom") {
+                                let _ = response.send(Err(format!("Invalid direction: {direction}. Use up, down, top, or bottom.")));
+                                continue;
+                            }
+                            // Element-scoped scroll: scroll the element's nearest
+                            // scrollable container via the actionability harness.
+                            if let Some(sel) = selector.filter(|s| !s.trim().is_empty()) {
+                                let script = dom_actions::scroll_script(&sel, &direction, pixels);
+                                let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                                let response_cb = response.clone();
+                                let sel_for_err = sel.clone();
+                                match wv.evaluate_script_with_callback(&script, move |val| {
+                                    if let Some(tx) = response_cb.lock().unwrap().take() {
+                                        let _ = tx.send(interpret_dom_result(&val, &sel_for_err).map(|_| ()));
+                                    }
+                                }) {
+                                    Ok(()) => {
+                                        mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
+                                            "Scroll at '{sel}' was dropped (JS callback discarded by page \
+                                             navigation/re-render). Re-snapshot and retry."
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        if let Some(tx) = response.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("Scroll failed: {e}")));
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             let script = match direction.as_str() {
                                 "top" => "window.scrollTo(0, 0)".to_string(),
                                 "bottom" => "window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight))".to_string(),
@@ -3498,43 +3510,8 @@ fn main() {
                         }
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
-                            let key_json = serde_json::to_string(&key).unwrap_or_default();
-                            let has_shift = modifiers.iter().any(|m| m == "shift");
-                            let has_ctrl = modifiers.iter().any(|m| m == "ctrl");
-                            let has_alt = modifiers.iter().any(|m| m == "alt");
-                            let has_meta = modifiers.iter().any(|m| m == "meta");
-                            // Resolve the target with the same stale/missing/detached
-                            // diagnostics used by Click/Hover/Type. When no selector
-                            // is provided we target the focused element (or body) and
-                            // treat that as never-stale.
-                            let resolve_expr = if let Some(ref sel) = selector {
-                                let sel_json = serde_json::to_string(sel).unwrap_or_default();
-                                format!(
-                                    "(function(s){{if(s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(s);if(!r)return 'stale';if(!r.isConnected)return 'detached';return r;}}var el;try{{el=document.querySelector(s);}}catch(e){{return 'invalid:'+e.message;}}return el||'missing';}})({sel_json})"
-                                )
-                            } else {
-                                "(document.activeElement || document.body)".to_string()
-                            };
-                            // Synthetic key events never trigger native default actions,
-                            // so Enter on an <input> wouldn't submit its form. Emulate
-                            // that one default (the common "type query, press Enter"
-                            // flow) unless a keydown handler called preventDefault.
-                            let script = format!(
-                                "(function() {{\
-                                    var el = {resolve_expr};\
-                                    if (typeof el === 'string') return el;\
-                                    if (!el) return 'missing';\
-                                    if (el.focus) el.focus();\
-                                    var opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
-                                    var proceed = el.dispatchEvent(new KeyboardEvent('keydown', opts));\
-                                    if ({key_json}.length===1) el.dispatchEvent(new KeyboardEvent('keypress', opts));\
-                                    el.dispatchEvent(new KeyboardEvent('keyup', opts));\
-                                    if ({key_json}==='Enter' && proceed && el.tagName==='INPUT' && el.form) {{\
-                                        if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();\
-                                    }}\
-                                    return 'true';\
-                                }})()"
-                            );
+                            let script =
+                                dom_actions::press_key_script(selector.as_deref(), &key, &modifiers);
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone().unwrap_or_else(|| "(focused element)".into());
@@ -3545,7 +3522,7 @@ fn main() {
                                 }
                             }) {
                                 Ok(()) => {
-                                    mcp_eval_err_watchdog!(response, 5000, format!(
+                                    mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
                                         "PressKey on '{sel_for_msg}' was dropped (JS callback discarded by page \
                                          navigation/re-render). Re-snapshot and retry."
                                     ));
@@ -3621,11 +3598,7 @@ fn main() {
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             // Returns: "true" | "stale" | "missing" | "detached" | "not-select" | "no-such-option"
-                            let script = format!(
-                                "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}if(el.tagName!=='SELECT')return 'not-select';var opt=Array.from(el.options).find(function(o){{return o.value==={val};}});if(!opt)return 'no-such-option';el.value=opt.value;el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true';}})()",
-                                sel = serde_json::to_string(&selector).unwrap_or_default(),
-                                val = serde_json::to_string(&value).unwrap_or_default()
-                            );
+                            let script = dom_actions::select_option_script(&selector, &value);
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone();
@@ -3643,7 +3616,7 @@ fn main() {
                                 }
                             }) {
                                 Ok(()) => {
-                                    mcp_eval_err_watchdog!(response, 5000, format!(
+                                    mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
                                         "SelectOption on '{sel_for_msg}' was dropped (JS callback discarded by \
                                          page navigation/re-render). Re-snapshot and retry."
                                     ));
