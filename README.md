@@ -132,7 +132,7 @@ Claude Desktop / octomind / any MCP client
 
 | Tool | What it does |
 |------|--------------|
-| `browser_navigate` | Navigate to a URL (`new_tab: true` opens in background) |
+| `browser_navigate` | Navigate to a URL — always in the background (new tab, or in-place via `tab_id`) |
 | `browser_go_back` | Go back in history |
 | `browser_go_forward` | Go forward in history |
 | `browser_reload` | Reload current page |
