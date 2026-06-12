@@ -69,14 +69,22 @@ pub fn html() -> &'static str {
 
   #panel {
     background: var(--panel-bg);
-    border: 0.5px solid var(--panel-border);
-    border-radius: 12px;
-    box-shadow: 0 24px 80px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08);
+    border-radius: 16px;
+    box-shadow: 0 0 0 0.5px var(--panel-border),
+                0 24px 80px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08),
+                inset 0 1px 0 rgba(255,255,255,0.5);
     padding: 16px 20px;
     width: 420px;
     max-height: 80vh;
     overflow-y: auto;
-    animation: scaleIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: scaleIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @media (prefers-color-scheme: dark) {
+    #panel {
+      box-shadow: 0 0 0 0.5px var(--panel-border),
+                  0 24px 80px rgba(0,0,0,0.4), 0 2px 12px rgba(0,0,0,0.2),
+                  inset 0 1px 0 rgba(255,255,255,0.07);
+    }
   }
 
   #header {
@@ -109,17 +117,15 @@ pub fn html() -> &'static str {
 
   .section {
     background: var(--section-bg);
-    border: 0.5px solid var(--divider);
-    border-radius: 8px;
+    box-shadow: 0 0 0 0.5px var(--divider);
+    border-radius: 10px;
     overflow: hidden;
     margin-bottom: 10px;
   }
 
   .section-title {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
     color: var(--text-dim);
     padding: 10px 12px 6px;
   }
@@ -174,15 +180,16 @@ pub fn html() -> &'static str {
     font-family: inherit;
     color: var(--text);
     background: var(--input-bg);
-    border: 0.5px solid var(--input-border);
-    border-radius: 5px;
+    border: none;
+    border-radius: 7px;
+    box-shadow: 0 0 0 0.5px var(--input-border);
     outline: none;
     text-align: right;
+    transition: box-shadow 0.12s ease;
   }
   .row input[type="text"]:focus,
   .row input[type="number"]:focus {
-    border-color: rgba(52, 120, 247, 0.6);
-    box-shadow: 0 0 0 2px rgba(52, 120, 247, 0.15);
+    box-shadow: 0 0 0 0.5px rgba(52, 120, 247, 0.6), 0 0 0 2.5px rgba(52, 120, 247, 0.18);
   }
   .row input[type="number"] { width: 70px; flex: none; }
 
@@ -217,8 +224,8 @@ pub fn html() -> &'static str {
     gap: 3px;
     margin-bottom: 14px;
     background: var(--section-bg);
-    border: 0.5px solid var(--divider);
-    border-radius: 8px;
+    box-shadow: inset 0 0 0 0.5px var(--divider);
+    border-radius: 10px;
     padding: 3px;
   }
   .tab {
@@ -229,7 +236,7 @@ pub fn html() -> &'static str {
     color: var(--text-dim);
     padding: 5px 8px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     background: transparent;
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
@@ -237,7 +244,7 @@ pub fn html() -> &'static str {
   .tab.active {
     background: var(--input-bg);
     color: var(--heading);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 0 0 0.5px var(--divider), 0 1px 3px rgba(0, 0, 0, 0.08);
   }
   .tab-pane { display: none; }
   .tab-pane.active { display: block; }

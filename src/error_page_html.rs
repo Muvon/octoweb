@@ -130,12 +130,18 @@ const ERROR_PAGE_CSS: &str = r#"
     background: var(--card-bg);
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border: 1px solid var(--card-border);
-    border-radius: 16px;
-    box-shadow: var(--card-shadow);
+    border-radius: 20px;
+    box-shadow: 0 0 0 0.5px var(--card-border), var(--card-shadow),
+                inset 0 1px 0 rgba(255, 255, 255, 0.5);
     padding: 40px 48px;
     max-width: 420px;
     text-align: center;
+  }
+  @media (prefers-color-scheme: dark) {
+    .card {
+      box-shadow: 0 0 0 0.5px var(--card-border), var(--card-shadow),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    }
   }
 
   .octopus {
@@ -194,19 +200,26 @@ const ERROR_PAGE_CSS: &str = r#"
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    background: var(--accent);
+    background: linear-gradient(180deg, #2e9bff 0%, var(--accent) 55%, #0070e8 100%);
     color: white;
     border: none;
-    border-radius: 10px;
+    border-radius: 14px;
     padding: 12px 24px;
     font-size: 15px;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.15s ease, transform 0.1s ease;
+    box-shadow: 0 2px 10px rgba(0, 122, 255, 0.35),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    transition: box-shadow 0.15s ease,
+                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
-  .retry-btn:hover { background: var(--accent-hover); }
-  .retry-btn:active { transform: scale(0.97); }
+  .retry-btn:hover {
+    box-shadow: 0 4px 16px rgba(0, 122, 255, 0.45),
+                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    transform: translateY(-1px);
+  }
+  .retry-btn:active { transform: scale(0.97); transition-duration: 0.08s; }
   .retry-btn svg { width: 16px; height: 16px; }
 "#;
 

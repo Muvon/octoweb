@@ -99,13 +99,13 @@ pub fn html() -> &'static str {
     background: var(--glass-bg);
     backdrop-filter: blur(48px) saturate(200%);
     -webkit-backdrop-filter: blur(48px) saturate(200%);
-    border: 1px solid var(--glass-border);
-    border-radius: 14px;
-    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-inner);
+    border-radius: 18px;
+    box-shadow: 0 0 0 0.5px var(--glass-border), var(--glass-shadow),
+                inset 0 1px 0 var(--glass-inner);
     overflow: hidden;
     transform: translateY(-12px) scale(0.97);
     opacity: 0;
-    animation: reveal 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation: reveal 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
   }
 
   @keyframes reveal {
@@ -149,8 +149,8 @@ pub fn html() -> &'static str {
   #action-badge {
     padding: 5px 11px;
     border-radius: 999px;
-    border: 1px solid var(--input-border);
     background: var(--input-bg);
+    box-shadow: 0 0 0 0.5px var(--input-border);
     font-size: 11px;
     font-weight: 500;
     color: var(--text-secondary);
@@ -175,15 +175,6 @@ pub fn html() -> &'static str {
   #results::-webkit-scrollbar-thumb {
     background: var(--scrollbar);
     border-radius: 3px;
-  }
-
-  .section-header {
-    padding: 8px 10px 4px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--section-text);
   }
 
   .item {
@@ -270,10 +261,9 @@ pub fn html() -> &'static str {
   .kind-pill {
     font-size: 10px;
     font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
     color: var(--text-secondary);
-    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    box-shadow: 0 0 0 0.5px var(--input-border);
     border-radius: 999px;
     padding: 2px 7px;
   }
@@ -306,8 +296,8 @@ pub fn html() -> &'static str {
     font-weight: 500;
     font-family: inherit;
     color: var(--text-tertiary);
-    border: 1px solid var(--input-border);
-    border-radius: 4px;
+    box-shadow: 0 0 0 0.5px var(--input-border);
+    border-radius: 5px;
     padding: 1px 5px;
     letter-spacing: 0.02em;
   }
@@ -328,8 +318,8 @@ pub fn html() -> &'static str {
     font-family: inherit;
     font-size: 10px;
     background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    border-radius: 4px;
+    box-shadow: 0 0 0 0.5px var(--input-border);
+    border-radius: 5px;
   }
 </style>
 </head>

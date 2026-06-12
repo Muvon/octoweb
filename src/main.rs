@@ -235,14 +235,23 @@ struct AcpSession {
     /// the agent restores its in-memory conversation context. Cleared on
     /// AcpSetAgent / AcpClearSession (which want a fresh chat).
     acp_session_id: Option<String>,
-    /// Persisted message log — user prompts, finalized agent responses,
-    /// errors. Survives app restarts via `acp_history.json`. Excludes tool
-    /// runs and inline images (live-only). Capped at `max_acp_session_messages`.
+    /// Persisted message log — user prompts, finalized agent responses with
+    /// their tool runs, errors. Survives app restarts via `acp_history.json`.
+    /// Inline images stay live-only. Capped at `max_acp_session_messages`.
     messages: Vec<config::AcpMessage>,
     /// Accumulator for the in-flight agent response. Filled on every
     /// `AgentEvent::Chunk` and flushed into `messages` on Done / Cancelled /
     /// Error so the persisted log only contains finalized turns.
     agent_buf: String,
+    /// Tool runs of the in-flight turn. Mirrors what the live feed shows;
+    /// flushed into the agent message alongside `agent_buf` so the steps
+    /// group survives restarts.
+    tool_buf: Vec<config::AcpToolRecord>,
+    /// In-flight tool lookup: tool-call id → (tool_buf index, start time).
+    tool_starts: HashMap<String, (usize, std::time::Instant)>,
+    /// Wall-clock start of the in-flight turn — set on prompt dispatch,
+    /// consumed by the flush into `turn_ms`.
+    turn_started: Option<std::time::Instant>,
     /// Cached `AvailableCommands` payload (already JSON-serialized for direct
     /// re-injection into JS). Set when the agent emits commands; re-pushed on
     /// `sidebar_ready` so slash-command auto-complete survives sidebar opens
@@ -1679,6 +1688,9 @@ fn main() {
                     acp_session_id: snap.acp_session_id,
                     messages: snap.messages,
                     agent_buf: String::new(),
+                    tool_buf: Vec::new(),
+                    tool_starts: HashMap::new(),
+                    turn_started: None,
                     available_commands_json: None,
                     octomind_pid: None,
                 });
@@ -1706,6 +1718,9 @@ fn main() {
                 acp_session_id: None,
                 messages: Vec::new(),
                 agent_buf: String::new(),
+                tool_buf: Vec::new(),
+                tool_starts: HashMap::new(),
+                turn_started: None,
                 available_commands_json: None,
                 octomind_pid: None,
             };
@@ -2434,19 +2449,35 @@ fn main() {
                 match ev {
                     acp::AgentEvent::Connected(acp_sid) => {
                         let mut should_persist = false;
+                        let mut resume_failed = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.retry_count = 0;
-                            // Persist the new acp_session_id so a future cold-
-                            // start can pass `--resume <id>` and recover the
-                            // agent's own conversation context.
-                            if s.acp_session_id.as_deref() != Some(&acp_sid) {
-                                s.acp_session_id = Some(acp_sid);
+                            if let Some(old) = s.acp_session_id.as_deref() {
+                                if old != acp_sid.as_str() {
+                                    // Resume failed: the agent minted a fresh session
+                                    // instead of restoring the saved one. Keep the saved
+                                    // id — the old session still exists on disk and the
+                                    // next (re)connect retries it. Adopting the fresh id
+                                    // would permanently orphan the real context.
+                                    tracing::warn!(session_id = sid, saved = %old, fresh = %acp_sid, "ACP resume failed — agent started a fresh session; keeping saved id");
+                                    resume_failed = true;
+                                }
+                            } else {
+                                // No saved id (new/cleared session) — adopt so a future
+                                // cold start can pass `--resume <id>` and recover the
+                                // agent's own conversation context.
+                                s.acp_session_id = Some(acp_sid.clone());
                                 should_persist = true;
                             }
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setSessionStatus && window.__setSessionStatus({sid},'ready')"
                         ));
+                        if resume_failed {
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__appendError && window.__appendError({sid},`previous agent context wasn't restored (fresh session) — restart octoweb to retry it`)"
+                            ));
+                        }
                         if should_persist {
                             persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                         }
@@ -2489,6 +2520,24 @@ fn main() {
                         }
                     }
                     acp::AgentEvent::ToolStart { id, title, kind, raw_input, locations } => {
+                        // Record for persistence so the steps group survives a
+                        // restart. `render_ui` is skipped: it renders as an A2UI
+                        // bubble (persisted separately) and the sidebar suppresses
+                        // its tool row — a record here would replay as a phantom step.
+                        if !title.starts_with("render_ui") {
+                            if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                                s.tool_starts.insert(id.clone(), (s.tool_buf.len(), std::time::Instant::now()));
+                                s.tool_buf.push(config::AcpToolRecord {
+                                    kind: kind.clone(),
+                                    title: title.clone(),
+                                    status: "running".to_string(),
+                                    duration_ms: 0,
+                                    raw_input: raw_input.as_ref().map(cap_tool_json),
+                                    locations: locations.clone(),
+                                    raw_output: None,
+                                });
+                            }
+                        }
                         let eid = webview_utils::escape_js_template(&id);
                         let etitle = webview_utils::escape_js_template(&title);
                         let ekind = webview_utils::escape_js_template(&kind);
@@ -2502,6 +2551,24 @@ fn main() {
                         ));
                     }
                     acp::AgentEvent::ToolUpdate { id, title, status, raw_output } => {
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            if let Some(&(idx, started)) = s.tool_starts.get(&id) {
+                                if let Some(rec) = s.tool_buf.get_mut(idx) {
+                                    if let Some(t) = title.as_deref() {
+                                        if !t.is_empty() {
+                                            rec.title = t.to_string();
+                                        }
+                                    }
+                                    if let Some(o) = raw_output.as_ref() {
+                                        rec.raw_output = Some(cap_tool_json(o));
+                                    }
+                                    if (status == "completed" || status == "failed") && rec.status == "running" {
+                                        rec.status = status.clone();
+                                        rec.duration_ms = started.elapsed().as_millis() as u64;
+                                    }
+                                }
+                            }
+                        }
                         let eid = webview_utils::escape_js_template(&id);
                         let etitle = webview_utils::escape_js_template(title.as_deref().unwrap_or(""));
                         let estatus = webview_utils::escape_js_template(&status);
@@ -2533,13 +2600,10 @@ fn main() {
                         let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
-                            // Flush the streamed response into the persisted
-                            // log as a single "agent" message. Tool runs and
-                            // images stay live-only — they're rebuilt fresh
-                            // on each turn and don't survive replay anyway.
-                            if !s.agent_buf.is_empty() {
-                                let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
+                            // Flush the streamed response + tool runs into the
+                            // persisted log as a single "agent" message so the
+                            // steps group survives restarts.
+                            if flush_agent_turn(s, cfg.max_acp_session_messages) {
                                 should_persist = true;
                             }
                         }
@@ -2559,11 +2623,9 @@ fn main() {
                         let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
-                            // Save partial response (cancelled mid-stream) so
+                            // Save the partial turn (cancelled mid-stream) so
                             // the user sees the same thing they had on screen.
-                            if !s.agent_buf.is_empty() {
-                                let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
+                            if flush_agent_turn(s, cfg.max_acp_session_messages) {
                                 should_persist = true;
                             }
                         }
@@ -2589,11 +2651,9 @@ fn main() {
                             s.handle = None;
                             s.octomind_pid = None; // pid is now stale — next spawn fills it
                             s.last_cancel_at = None;
-                            // Save partial in-flight response so the persisted log
+                            // Save the partial in-flight turn so the persisted log
                             // mirrors what the user saw before the disconnect.
-                            if !s.agent_buf.is_empty() {
-                                let buf = std::mem::take(&mut s.agent_buf);
-                                push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
+                            if flush_agent_turn(s, cfg.max_acp_session_messages) {
                                 should_persist = true;
                             }
                             if s.retry_count < ACP_MAX_RETRIES {
@@ -4225,8 +4285,16 @@ fn main() {
                         if s.handle.is_none() {
                             s.retry_count = 0;
                             s.reconnect_gen += 1; // invalidate any pending backoff timers
+                            // Must carry --resume: this loop also hits lazily
+                            // unconnected persisted sessions — a bare spawn would
+                            // mint a fresh octomind session and the Connected
+                            // handler would overwrite (lose) the saved resume id.
+                            let cmd = match &s.acp_session_id {
+                                Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
+                                None => format!("octomind acp {}", s.tag),
+                            };
                             s.handle = acp::AcpHandle::connect(
-                                &format!("octomind acp {}", s.tag),
+                                &cmd,
                                 make_wake(acp_proxy.clone()),
                             )
                             .ok();
@@ -4303,6 +4371,8 @@ fn main() {
                 }
                 let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    // New turn starts now — anchors `turn_ms` on the flush.
+                    s.turn_started = Some(std::time::Instant::now());
                     if !text.is_empty() {
                         push_acp_msg(s, "user", text.clone(), cfg.max_acp_session_messages);
                         should_persist = true;
@@ -4367,13 +4437,10 @@ fn main() {
                         )
                         .ok();
                         s.last_cancel_at = None;
-                        // Save partial agent text (the user just force-killed
+                        // Save the partial turn (the user just force-killed
                         // mid-stream — keep what they already saw) and the
                         // synthetic error so a restart shows the same trail.
-                        if !s.agent_buf.is_empty() {
-                            let buf = std::mem::take(&mut s.agent_buf);
-                            push_acp_msg(s, "agent", buf, cfg.max_acp_session_messages);
-                        }
+                        flush_agent_turn(s, cfg.max_acp_session_messages);
                         push_acp_msg(s, "error", "agent force-stopped and reconnected".to_string(), cfg.max_acp_session_messages);
                         should_persist = true;
                         let _ = sidebar_wv.evaluate_script(&format!(
@@ -4412,6 +4479,9 @@ fn main() {
                     // Switching agents discards the prior conversation context.
                     s.messages.clear();
                     s.agent_buf.clear();
+                    s.tool_buf.clear();
+                    s.tool_starts.clear();
+                    s.turn_started = None;
                     s.available_commands_json = None;
                     should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -4443,6 +4513,9 @@ fn main() {
                     // User asked for a fresh chat — drop the persisted log too.
                     s.messages.clear();
                     s.agent_buf.clear();
+                    s.tool_buf.clear();
+                    s.tool_starts.clear();
+                    s.turn_started = None;
                     should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
@@ -4483,6 +4556,9 @@ fn main() {
                         acp_session_id: None,
                         messages: Vec::new(),
                         agent_buf: String::new(),
+                        tool_buf: Vec::new(),
+                        tool_starts: HashMap::new(),
+                        turn_started: None,
                         available_commands_json: None,
                         octomind_pid: None,
                     });
@@ -6173,19 +6249,72 @@ fn build_learning_prompt(
 /// Caller is expected to dispatch `persist_acp_history` afterwards
 /// (fire-and-forget on a worker thread).
 fn push_acp_msg(s: &mut AcpSession, role: &str, text: String, max_msgs: usize) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    s.messages.push(config::AcpMessage {
+    let msg = config::AcpMessage {
         role: role.to_string(),
         text,
-        ts,
+        ts: epoch_ms(),
         a2ui: None,
-    });
+        tools: Vec::new(),
+        turn_ms: 0,
+    };
+    push_acp_message(s, msg, max_msgs);
+}
+
+fn push_acp_message(s: &mut AcpSession, msg: config::AcpMessage, max_msgs: usize) {
+    s.messages.push(msg);
     if s.messages.len() > max_msgs {
         let drop = s.messages.len() - max_msgs;
         s.messages.drain(..drop);
+    }
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Flush the in-flight agent turn (streamed text + tool runs) into the
+/// persisted log as one "agent" message. Returns true if anything was
+/// committed. Tool-only turns (no text) are kept — the sidebar renders
+/// their steps group as the record of the work.
+fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
+    let text = std::mem::take(&mut s.agent_buf);
+    let tools = std::mem::take(&mut s.tool_buf);
+    s.tool_starts.clear();
+    let turn_ms = s
+        .turn_started
+        .take()
+        .map(|t| t.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    if text.is_empty() && tools.is_empty() {
+        return false;
+    }
+    let msg = config::AcpMessage {
+        role: "agent".to_string(),
+        text,
+        ts: epoch_ms(),
+        a2ui: None,
+        tools,
+        turn_ms,
+    };
+    push_acp_message(s, msg, max_msgs);
+    true
+}
+
+/// Cap a tool's raw input/output JSON for persistence — page dumps and MCP
+/// fetches can be megabytes and would bloat every acp_history.json save.
+const ACP_TOOL_JSON_CAP: usize = 8 * 1024;
+
+fn cap_tool_json(v: &serde_json::Value) -> serde_json::Value {
+    match serde_json::to_string(v) {
+        Ok(s) if s.len() > ACP_TOOL_JSON_CAP => {
+            let mut t: String = s.chars().take(ACP_TOOL_JSON_CAP).collect();
+            t.push_str(" … (truncated)");
+            serde_json::Value::String(t)
+        }
+        _ => v.clone(),
     }
 }
 
@@ -6224,6 +6353,8 @@ fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, m
         text: file_id.into(),
         ts,
         a2ui: Some(body),
+        tools: Vec::new(),
+        turn_ms: 0,
     });
     if s.messages.len() > max_msgs {
         let drop = s.messages.len() - max_msgs;
@@ -6308,6 +6439,29 @@ fn save_and_exit(
     };
     config::save_acp_history(&acp_history);
     drop(tm);
+    // Terminate agent subprocesses before exiting. ControlFlow::Exit ends the
+    // process via std::process::exit — destructors (and tokio's kill_on_drop)
+    // never run, so octomind children would outlive us as orphans. An orphan
+    // still flushing its session file makes the next launch's `--resume` race
+    // it and silently mint a fresh session — that's how agent context got
+    // lost across restarts. SIGTERM lets octomind save; bounded wait, then
+    // SIGKILL stragglers.
+    let pids: Vec<u32> = acp_sessions.iter().filter_map(|s| s.octomind_pid).collect();
+    for &pid in &pids {
+        unsafe { libc::kill(pid as libc::c_int, libc::SIGTERM) };
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    for &pid in &pids {
+        while unsafe { libc::kill(pid as libc::c_int, 0) } == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if unsafe { libc::kill(pid as libc::c_int, 0) } == 0 {
+            tracing::warn!(pid, "octomind did not exit on SIGTERM — killing");
+            unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+        }
+    }
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
 }

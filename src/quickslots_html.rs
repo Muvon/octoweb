@@ -89,11 +89,12 @@ pub fn html() -> String {
     gap: 5px;
     height: 24px;
     padding: 0 8px 0 6px;
-    border-radius: 6px;
+    border-radius: 12px;
     background: var(--pill-bg);
-    border: 0.5px solid var(--pill-border);
+    box-shadow: 0 0 0 0.5px var(--pill-border), 0 1px 3px rgba(0, 0, 0, 0.04);
     cursor: pointer;
-    transition: background 0.12s ease, transform 0.1s ease;
+    transition: background 0.12s ease, box-shadow 0.15s ease,
+                transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
     max-width: 140px;
     flex-shrink: 1;
     min-width: 0;
@@ -101,21 +102,25 @@ pub fn html() -> String {
     -webkit-user-select: none;
   }
 
-  .slot:hover { background: var(--pill-hover); }
-  .slot:active { transform: scale(0.97); }
+  .slot:hover {
+    background: var(--pill-hover);
+    box-shadow: 0 0 0 0.5px var(--pill-border), 0 2px 8px rgba(0, 0, 0, 0.08);
+  }
+  .slot:active { transform: scale(0.97); transition-duration: 0.06s; }
 
   .slot.empty {
     background: var(--empty-bg);
-    border-color: var(--empty-border);
+    box-shadow: none;
+    border: 1px dashed var(--empty-border);
     cursor: pointer;
-    border-style: dashed;
-    transition: background 0.12s ease, transform 0.1s ease, border-color 0.12s ease;
+    transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.15s ease,
+                transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   .slot.empty:hover {
     background: var(--pill-hover);
-    border-color: var(--pill-border);
-    border-style: solid;
+    border-color: transparent;
+    box-shadow: 0 0 0 0.5px var(--pill-border), 0 2px 8px rgba(0, 0, 0, 0.08);
   }
 
   .slot.empty:active { transform: scale(0.97); }
@@ -123,7 +128,7 @@ pub fn html() -> String {
   .slot .badge {
     flex-shrink: 0;
     width: 15px; height: 15px;
-    border-radius: 3px;
+    border-radius: 5px;
     background: var(--badge-bg);
     display: flex;
     align-items: center;
@@ -188,7 +193,7 @@ pub fn html() -> String {
     top: 50%;
     transform: translateY(-50%);
     width: 14px; height: 14px;
-    border-radius: 3px;
+    border-radius: 50%;
     background: var(--close-bg);
     display: flex;
     align-items: center;

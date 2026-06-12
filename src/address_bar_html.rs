@@ -112,7 +112,7 @@ pub fn html() -> String {
     align-items: center;
     gap: 3px;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 6px;
     padding: 2px 5px;
     flex: 0 0 38%;
     min-width: 0;
@@ -147,7 +147,7 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     gap: 3px;
-    border-radius: 3px;
+    border-radius: 6px;
     padding: 2px 5px;
     flex: 0 0 calc(62% - 14px); /* subtract sep width so total stays 100% */
     min-width: 0;
@@ -166,7 +166,7 @@ pub fn html() -> String {
     min-width: 0;
     overflow: hidden;
     cursor: pointer;
-    border-radius: 3px;
+    border-radius: 5px;
     padding: 0 2px;
     transition: background 0.12s ease;
   }
@@ -198,14 +198,15 @@ pub fn html() -> String {
   #url-input {
     flex: 1;
     min-width: 0;
-    height: 18px;
-    padding: 0 4px;
+    height: 19px;
+    padding: 0 6px;
     font: inherit;
     font-size: 10.5px;
     color: var(--text-title);
     background: rgba(0, 0, 0, 0.04);
-    border: 0.5px solid rgba(0, 122, 255, 0.55);
-    border-radius: 4px;
+    border: none;
+    border-radius: 7px;
+    box-shadow: 0 0 0 1.5px rgba(0, 122, 255, 0.45);
     outline: none;
     display: none;
     letter-spacing: -0.1px;
@@ -213,7 +214,7 @@ pub fn html() -> String {
   @media (prefers-color-scheme: dark) {
     #url-input {
       background: rgba(255, 255, 255, 0.07);
-      border-color: rgba(10, 132, 255, 0.6);
+      box-shadow: 0 0 0 1.5px rgba(10, 132, 255, 0.5);
     }
   }
   #url-row.editing #url-input { display: block; }
@@ -229,30 +230,39 @@ pub fn html() -> String {
     background: rgba(245, 245, 247, 0.96);
     -webkit-backdrop-filter: blur(28px) saturate(180%);
     backdrop-filter: blur(28px) saturate(180%);
-    border: 0.5px solid rgba(0, 0, 0, 0.08);
-    border-radius: 8px;
-    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.14), 0 1px 4px rgba(0, 0, 0, 0.06);
+    border-radius: 14px;
+    box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08),
+                0 16px 40px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06),
+                inset 0 1px 0 rgba(255, 255, 255, 0.55);
     overflow: hidden;
     display: none;
     max-height: 320px;
     overflow-y: auto;
-    padding: 4px;
+    padding: 5px;
   }
   @media (prefers-color-scheme: dark) {
     #url-suggest {
       background: rgba(40, 40, 44, 0.96);
-      border-color: rgba(255, 255, 255, 0.10);
-      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.30);
+      box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12),
+                  0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.08);
     }
   }
-  #url-suggest.show { display: block; }
+  #url-suggest.show {
+    display: block;
+    animation: suggest-pop 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  @keyframes suggest-pop {
+    from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
 
   .sg-item {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 8px;
-    border-radius: 5px;
+    padding: 5px 9px;
+    border-radius: 9px;
     cursor: pointer;
     min-width: 0;
   }
@@ -297,12 +307,11 @@ pub fn html() -> String {
   }
   .sg-kind {
     flex-shrink: 0;
-    font-size: 9px;
+    font-size: 9.5px;
+    font-weight: 500;
     color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
-    border-radius: 3px;
+    padding: 1px 6px;
+    border-radius: 5px;
     background: rgba(0, 0, 0, 0.04);
   }
   @media (prefers-color-scheme: dark) {
@@ -773,7 +782,11 @@ pub fn html() -> String {
       }
     }
     out.sort(function(a, b) { return b.score - a.score || a.order - b.order; });
-    return out.slice(0, 8).map(function(x) { return x.item; });
+    // Copy with score attached — the Enter handler needs it to decide whether
+    // the active suggestion is a strong enough match to auto-open.
+    return out.slice(0, 8).map(function(x) {
+      return Object.assign({}, x.item, { score: x.score });
+    });
   }
 
   function renderSuggestions() {

@@ -21,7 +21,9 @@ pub fn html() -> &'static str {
     --icon: rgba(0, 0, 0, 0.50);
     --icon-disabled: rgba(0, 0, 0, 0.15);
     --sep: rgba(0, 0, 0, 0.08);
-    --shadow: 0 1px 4px rgba(0, 0, 0, 0.06), 0 0 0 0.5px rgba(0, 0, 0, 0.05);
+    --shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08),
+              0 6px 18px rgba(0, 0, 0, 0.10), 0 1px 4px rgba(0, 0, 0, 0.05),
+              inset 0 1px 0 rgba(255, 255, 255, 0.55);
   }
 
   @media (prefers-color-scheme: dark) {
@@ -37,7 +39,9 @@ pub fn html() -> &'static str {
       --icon: rgba(255, 255, 255, 0.50);
       --icon-disabled: rgba(255, 255, 255, 0.15);
       --sep: rgba(255, 255, 255, 0.08);
-      --shadow: 0 1px 4px rgba(0, 0, 0, 0.2), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+      --shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.10),
+                0 6px 18px rgba(0, 0, 0, 0.32), 0 1px 4px rgba(0, 0, 0, 0.2),
+                inset 0 1px 0 rgba(255, 255, 255, 0.07);
     }
   }
 
@@ -61,8 +65,7 @@ pub fn html() -> &'static str {
     background: var(--bg);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
-    border: 0.5px solid var(--border);
-    border-radius: 10px;
+    border-radius: 15px;
     box-shadow: var(--shadow);
   }
 
