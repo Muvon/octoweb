@@ -8,7 +8,10 @@
 //! Notes:
 //! - `__octoweb_refs` lives on `window` so it survives until the next navigation.
 //!   Refs become invalid after navigation, full reload, or DOM tear-down.
-//! - Cross-origin iframe contents are skipped (security boundary).
+//! - Same-origin iframes and open shadow roots are scanned recursively; the
+//!   resulting @refs hold direct element references, so click/type work inside
+//!   them even though `document.querySelector` can't reach there.
+//! - Cross-origin iframe contents and closed shadow roots are skipped.
 //! - Sensitive input values (passwords, card numbers, etc.) are never returned.
 
 pub const SNAPSHOT_JS: &str = r#"
@@ -130,6 +133,12 @@ pub const SNAPSHOT_JS: &str = r#"
         // Cross-origin frames throw on contentDocument access — caught and skipped.
         if (iframes[j].contentDocument) scan(iframes[j].contentDocument);
       } catch(e) {}
+    }
+    // Pierce open shadow roots — web-component UIs (Lit, Polymer, LWC, Stencil)
+    // render everything inside shadowRoot, invisible to querySelectorAll above.
+    var all = doc.querySelectorAll('*');
+    for (var k = 0; k < all.length; k++) {
+      if (all[k].shadowRoot) scan(all[k].shadowRoot);
     }
   }
 

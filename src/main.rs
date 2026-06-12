@@ -2861,8 +2861,8 @@ fn main() {
                 }
 
                 match cmd {
-                    McpCommand::Navigate { url, tab_id, new_tab, background, response } => {
-                        tracing::debug!(url = %url, ?tab_id, new_tab, background, "MCP navigate");
+                    McpCommand::Navigate { url, tab_id, response } => {
+                        tracing::debug!(url = %url, ?tab_id, "MCP navigate");
 
                         if url.trim().is_empty() {
                             let _ = response.send(Err("url is empty".into()));
@@ -2885,49 +2885,30 @@ fn main() {
 
                         // ── Decide the target tab ─────────────────────────────────
                         //
-                        // The AI passes any combination of {tab_id, new_tab, background}
-                        // to express intent. We reduce that to one of three actions and
-                        // never reject a request just because the flags overlap:
+                        //   tab_id given → navigate that tab in-place; error if it
+                        //                  no longer exists (the AI just retries
+                        //                  without tab_id to get a fresh tab).
+                        //   no tab_id    → open a NEW background tab.
                         //
-                        //   InPlace(id) — navigate an existing tab; never moves focus.
-                        //                 `background` is implicit (we don't switch).
-                        //   OpenNew     — create a new tab; `background` controls focus.
-                        //   Error(msg)  — the request is unsatisfiable (only when
-                        //                 tab_id refers to a vanished tab and the AI
-                        //                 didn't allow new_tab fallback).
-                        //
-                        // Resolution rules (read top to bottom, first match wins):
-                        //   • tab_id given AND that tab exists → InPlace(tab_id).
-                        //         tab_id is the AI's strongest signal — honor it
-                        //         even if new_tab/background were also passed.
-                        //   • tab_id given but the tab is gone:
-                        //       - new_tab=true → OpenNew (graceful fallback, since
-                        //         the AI told us a new tab is acceptable).
-                        //       - new_tab=false → Error("Tab N not found").
-                        //   • no tab_id, new_tab=true → OpenNew.
-                        //   • no tab_id, new_tab=false → InPlace(active tab).
-                        enum Target { InPlace(usize), OpenNew }
-                        let target = if let Some(id) = tab_id {
-                            let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
-                            if exists {
-                                Target::InPlace(id)
-                            } else if new_tab {
-                                Target::OpenNew
-                            } else {
-                                let _ = response.send(Err(format!(
-                                    "Tab {id} not found — pass new_tab=true to open a fresh tab as fallback"
-                                )));
-                                continue;
+                        // MCP navigation NEVER moves focus — the AI must call
+                        // browser_switch_tab to show a tab to the user.
+                        let in_place = match tab_id {
+                            Some(id) => {
+                                let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
+                                if !exists {
+                                    let _ = response.send(Err(format!(
+                                        "Tab {id} not found — omit tab_id to open a new background tab"
+                                    )));
+                                    continue;
+                                }
+                                Some(id)
                             }
-                        } else if new_tab {
-                            Target::OpenNew
-                        } else {
-                            Target::InPlace(active_wv_id)
+                            None => None,
                         };
 
                         // ── Execute ───────────────────────────────────────────────
-                        match target {
-                            Target::InPlace(target_id) => {
+                        match in_place {
+                            Some(target_id) => {
                                 // Auto-restore if the tab was hibernated.
                                 let _ = mcp_ensure_tab!(target_id);
                                 if let Some(wv) = tab_webviews.get(&target_id) {
@@ -2952,18 +2933,10 @@ fn main() {
                                     )));
                                 }
                             }
-                            Target::OpenNew => {
+                            None => {
                                 let new_id = tabs.lock().unwrap().open(resolved.clone());
                                 spawn_tab_webview!(new_id, &resolved);
 
-                                if !background {
-                                    // Switch to the new tab (deferred swap).
-                                    let visible_id = pending_swap.map(|(old, _)| old).unwrap_or(active_wv_id);
-                                    active_wv_id = new_id;
-                                    pending_swap = Some((visible_id, new_id));
-                                    macos::mru_push(&mut mru, new_id);
-                                    if is_app_active() { browser_win.set_focus(); }
-                                }
                                 if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
                                     let _ = old.send(Err("Superseded by new navigation".into()));
                                 }
@@ -3134,8 +3107,12 @@ fn main() {
                                 //   stale    → @ref but no snapshot taken yet (or refs cleared by navigation)
                                 //   missing  → selector matched no element
                                 //   detached → element existed but is no longer in the DOM
+                                // Full pointer+mouse sequence: modern frameworks (React 18+,
+                                // MUI, Radix) listen on pointerdown/pointerup, not mousedown.
+                                // focus() between down and up mirrors the native default
+                                // action — widgets that open on focus need it.
                                 let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mousedown',o));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return 'true'}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}},p=Object.assign({{}},o,{{pointerId:1,pointerType:'mouse',isPrimary:true}});el.dispatchEvent(new PointerEvent('pointerdown',p));el.dispatchEvent(new MouseEvent('mousedown',o));if(el.focus)el.focus();el.dispatchEvent(new PointerEvent('pointerup',p));el.dispatchEvent(new MouseEvent('mouseup',o));el.dispatchEvent(new MouseEvent('click',o));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -3178,8 +3155,10 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
+                                // Pointer events first — pointer-event-based menus
+                                // (Radix, Headless UI) ignore bare mouse events.
                                 let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}};el.dispatchEvent(new MouseEvent('mouseenter',{{...o,bubbles:false}}));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new MouseEvent('mousemove',o));return 'true'}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.scrollIntoView({{block:'center',behavior:'instant'}});var rc=el.getBoundingClientRect(),x=rc.left+rc.width/2,y=rc.top+rc.height/2,o={{bubbles:true,cancelable:true,view:window,clientX:x,clientY:y}},p=Object.assign({{}},o,{{pointerId:1,pointerType:'mouse',isPrimary:true}});el.dispatchEvent(new PointerEvent('pointerover',p));el.dispatchEvent(new PointerEvent('pointerenter',Object.assign({{}},p,{{bubbles:false}})));el.dispatchEvent(new MouseEvent('mouseenter',Object.assign({{}},o,{{bubbles:false}})));el.dispatchEvent(new MouseEvent('mouseover',o));el.dispatchEvent(new PointerEvent('pointermove',p));el.dispatchEvent(new MouseEvent('mousemove',o));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default()
                                 );
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -3218,8 +3197,11 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
+                                // Value setter must come from the element's own interface:
+                                // WebKit brand-checks prototype setters, so calling
+                                // HTMLInputElement's setter on a <textarea> throws.
                                 let script = format!(
-                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.focus();if(el.isContentEditable){{var s=window.getSelection(),r2=document.createRange();r2.selectNodeContents(el);s.removeAllRanges();s.addRange(r2);document.execCommand('insertText',false,{txt});return 'true'}}var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set||Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;if(setter)setter.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true'}})()",
+                                    "(function(){{var _s={sel};if(_s[0]==='@'){{var m=window.__octoweb_refs;if(!m)return 'stale';var r=m.get(_s);if(!r)return 'stale';if(!r.isConnected)return 'detached';var el=r;}}else{{var el;try{{el=document.querySelector(_s);}}catch(e){{return 'invalid:'+e.message;}}if(!el)return 'missing';}}el.focus();if(el.isContentEditable){{var s=window.getSelection(),r2=document.createRange();r2.selectNodeContents(el);s.removeAllRanges();s.addRange(r2);document.execCommand('insertText',false,{txt});return 'true'}}var setter;if(el instanceof HTMLTextAreaElement)setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;else if(el instanceof HTMLInputElement)setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;if(setter)setter.call(el,{txt});else el.value={txt};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return 'true'}})()",
                                     sel = serde_json::to_string(&selector).unwrap_or_default(),
                                     txt = serde_json::to_string(&text).unwrap_or_default()
                                 );
@@ -3533,6 +3515,10 @@ fn main() {
                             } else {
                                 "(document.activeElement || document.body)".to_string()
                             };
+                            // Synthetic key events never trigger native default actions,
+                            // so Enter on an <input> wouldn't submit its form. Emulate
+                            // that one default (the common "type query, press Enter"
+                            // flow) unless a keydown handler called preventDefault.
                             let script = format!(
                                 "(function() {{\
                                     var el = {resolve_expr};\
@@ -3540,9 +3526,12 @@ fn main() {
                                     if (!el) return 'missing';\
                                     if (el.focus) el.focus();\
                                     var opts = {{key: {key_json}, bubbles: true, cancelable: true, shiftKey: {has_shift}, ctrlKey: {has_ctrl}, altKey: {has_alt}, metaKey: {has_meta}}};\
-                                    el.dispatchEvent(new KeyboardEvent('keydown', opts));\
+                                    var proceed = el.dispatchEvent(new KeyboardEvent('keydown', opts));\
                                     if ({key_json}.length===1) el.dispatchEvent(new KeyboardEvent('keypress', opts));\
                                     el.dispatchEvent(new KeyboardEvent('keyup', opts));\
+                                    if ({key_json}==='Enter' && proceed && el.tagName==='INPUT' && el.form) {{\
+                                        if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();\
+                                    }}\
                                     return 'true';\
                                 }})()"
                             );

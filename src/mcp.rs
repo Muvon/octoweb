@@ -10,7 +10,7 @@
 //! - `browser_execute_js`                                — escape hatch for custom DOM queries
 //!
 //! Tabs:
-//! - `browser_navigate` (new_tab/background optional, mutually exclusive with tab_id)
+//! - `browser_navigate` (always background: new tab, or in-place via tab_id; never moves focus)
 //! - `browser_get_tabs` / `browser_get_current_tab` / `browser_switch_tab` / `browser_close_tab`
 //! - `browser_get_history` / `browser_get_playing_tabs`
 //! - `browser_go_back` / `browser_go_forward` / `browser_reload`
@@ -51,12 +51,11 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Commands that MCP tools can request from the main event loop.
 pub enum McpCommand {
-    /// Navigate to URL in a specific tab, new tab, or background tab
+    /// Navigate to URL — in a new background tab (no tab_id) or an existing tab.
+    /// Never moves focus; browser_switch_tab is the only way to foreground a tab.
     Navigate {
         url: String,
         tab_id: Option<usize>,
-        new_tab: bool,
-        background: bool,
         response: oneshot::Sender<Result<usize, String>>,
     },
     /// Get list of all tabs
@@ -300,17 +299,9 @@ pub struct NavigateRequest {
     )]
     pub url: String,
     #[schemars(
-        description = "Existing tab to navigate in-place. If the tab still exists, it wins over new_tab — so passing a known tab_id always reuses that tab. Omit for the visible tab."
+        description = "Existing tab to navigate in-place (e.g. a tab you opened earlier). Omit to open a NEW background tab. To drive the tab the user is looking at, pass the id from browser_get_current_tab."
     )]
     pub tab_id: Option<usize>,
-    #[schemars(
-        description = "Open in a new tab instead of navigating in place. Also acts as a fallback when tab_id is set but that tab is gone. Default false."
-    )]
-    pub new_tab: Option<bool>,
-    #[schemars(
-        description = "Keep a newly opened tab in the background instead of switching to it. Defaults to TRUE, so AI-opened tabs never steal the user's focus — pass background=false ONLY when the user explicitly asks to open/see the tab. No effect on in-place navigation (tab_id, or the visible tab)."
-    )]
-    pub background: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -504,39 +495,29 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nFlags can be combined freely; the first matching rule wins:\n  • tab_id given AND that tab still exists → navigate it in-place (focus unchanged). Other flags are advisory.\n  • tab_id given but the tab is gone → if new_tab=true, open a fresh tab; otherwise error.\n  • no tab_id, new_tab=true → open a new tab. New tabs open in the BACKGROUND by default (hidden, the user's focus stays put); pass background=false ONLY when the user explicitly wants to see the new tab.\n  • no tab_id, new_tab=false → navigate the user's visible tab in-place.\n\nUse tab_id to reuse a tab you opened earlier (e.g. background research tabs)."
+        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nDefault (url only): opens a NEW tab in the background. Pass tab_id to navigate an existing tab in-place instead (errors if it no longer exists — omit tab_id to get a fresh one).\n\nNavigation NEVER changes what the user sees. To show a tab to the user, call browser_switch_tab with the returned tab ID. To navigate the tab the user is viewing, pass the id from browser_get_current_tab."
     )]
     async fn browser_navigate(
         &self,
         Parameters(req): Parameters<NavigateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let new_tab = req.new_tab.unwrap_or(false);
-        // Default true: AI-opened tabs stay hidden so they never yank the user's
-        // focus. Foreground happens only on an explicit background=false.
-        let background = req.background.unwrap_or(true);
-        tracing::debug!(url = %req.url, ?req.tab_id, new_tab, background, "MCP browser_navigate");
+        let in_place = req.tab_id.is_some();
+        tracing::debug!(url = %req.url, ?req.tab_id, "MCP browser_navigate");
 
         let tab_id = self
             .send_command(|tx| McpCommand::Navigate {
                 url: req.url,
                 tab_id: req.tab_id,
-                new_tab,
-                background,
                 response: tx,
             })
             .await?;
 
-        // Report what actually happened. `background` only matters when a new
-        // tab is opened — for in-place navigation it's ignored by the main loop,
-        // so don't let the default leak into the message as "background".
-        let msg = if new_tab && background {
-            format!(
-                "Opened background tab {tab_id} (call browser_switch_tab to show it to the user)"
-            )
-        } else if new_tab {
-            format!("Opened tab {tab_id} and switched to it")
-        } else {
+        let msg = if in_place {
             format!("Navigated tab {tab_id}")
+        } else {
+            format!(
+                "Opened background tab {tab_id} — reuse this tab_id for follow-up calls; browser_switch_tab shows it to the user"
+            )
         };
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
@@ -707,7 +688,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Compact map of interactive elements with @ref selectors. Each link/button/input gets a @N ref you can pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Includes same-origin iframes. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Always start here on an unfamiliar page."
+        description = "Compact map of interactive elements with @ref selectors. Each link/button/input gets a @N ref you can pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Includes same-origin iframes and open shadow DOM (web components) — @refs reach elements there that CSS selectors cannot. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Always start here on an unfamiliar page."
     )]
     async fn browser_snapshot(
         &self,
@@ -763,7 +744,7 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, then dispatches mousedown+mouseup+click. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone from DOM. Defaults to the visible tab."
+        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, then dispatches the full pointerdown+mousedown+focus+pointerup+mouseup+click sequence (works with pointer-event UIs like React/MUI/Radix). On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone from DOM. Defaults to the visible tab."
     )]
     async fn browser_click(
         &self,
@@ -789,7 +770,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Hover over an element. Dispatches mouseenter+mouseover+mousemove — works for JS-driven menus (Bootstrap, React, MUI). Pure CSS :hover cannot be activated synthetically (WebKit limitation). Defaults to the visible tab."
+        description = "Hover over an element. Dispatches pointer + mouse enter/over/move events — works for JS-driven menus (Bootstrap, React, MUI, Radix). Pure CSS :hover cannot be activated synthetically (WebKit limitation). Defaults to the visible tab."
     )]
     async fn browser_hover(
         &self,
@@ -862,7 +843,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Press a key, optionally with modifiers. Use for Enter (submit), Escape (close), Tab (focus), arrows, etc. If selector is given, focus that element first; otherwise the currently focused element receives the key. Note: this dispatches synthetic KeyboardEvents — for *typing characters into an input* prefer browser_type. Defaults to the visible tab."
+        description = "Press a key, optionally with modifiers. Use for Enter (submit), Escape (close), Tab (focus), arrows, etc. Enter on an <input> inside a form also submits the form (like a real keypress) unless the page handled the keydown itself. If selector is given, focus that element first; otherwise the currently focused element receives the key. Note: this dispatches synthetic KeyboardEvents — for *typing characters into an input* prefer browser_type. Defaults to the visible tab."
     )]
     async fn browser_press_key(
         &self,
@@ -969,11 +950,13 @@ impl ServerHandler for McpServer {
                 browser_press_key / browser_select_option — much cheaper than guessing CSS. Refs invalidate \
                 on navigation or full re-render; re-snapshot when interactions start failing with `stale`.\n\
                 \n\
-                Tabs: tab_id is optional everywhere — when omitted, tools target the user's visible tab. \
-                For research, open hidden tabs with browser_navigate(new_tab=true) — new tabs stay in the \
-                background by default — and always pass that tab_id to subsequent reads/clicks. Pass \
-                background=false only when the user explicitly wants the new tab brought to the front. \
-                Close background tabs when done.\n\
+                Tabs: browser_navigate ALWAYS works in the background — it opens a new hidden tab \
+                (or navigates an existing one via tab_id) and never changes what the user sees. \
+                Always pass the returned tab_id to subsequent reads/clicks/navigations so you keep \
+                working in your own tab. The ONLY way to show a tab to the user is browser_switch_tab \
+                — call it when the task is done or the user asked to see the page. All other tools \
+                default to the user's visible tab when tab_id is omitted; to drive that tab, pass the \
+                id from browser_get_current_tab. Close background tabs when done.\n\
                 \n\
                 Reading pages: prefer browser_get_page_content for text and browser_snapshot for \
                 actionable elements. Use browser_execute_js only when those don't fit (return value is \
