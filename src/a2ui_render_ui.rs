@@ -174,7 +174,48 @@ pub fn install() -> std::io::Result<PathBuf> {
         fs::set_permissions(&path, perms)?;
     }
     let _ = fs::create_dir_all(queue_dir());
+    link_user_tools();
     Ok(path)
+}
+
+/// Symlink the user's own tools from `~/.agents/tools/*` into the workspace
+/// tools dir so agents spawned with cwd = workspace still discover them.
+/// Skips `render_ui` (we own that) and entries that already exist. Stale
+/// symlinks pointing at removed user tools are cleaned up.
+fn link_user_tools() {
+    let Some(home) = dirs::home_dir() else { return };
+    let user_dir = home.join(".agents").join("tools");
+    let Some(ws_dir) = tool_path().parent().map(Path::to_path_buf) else {
+        return;
+    };
+
+    // Remove dangling symlinks left from previously deleted user tools.
+    if let Ok(entries) = fs::read_dir(&ws_dir) {
+        for ent in entries.flatten() {
+            let p = ent.path();
+            if p.is_symlink() && fs::metadata(&p).is_err() {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+
+    let Ok(entries) = fs::read_dir(&user_dir) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let src = ent.path();
+        let Some(name) = src.file_name() else { continue };
+        if name == "render_ui" {
+            continue;
+        }
+        let dst = ws_dir.join(name);
+        if dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&src, &dst) {
+            tracing::warn!(src = %src.display(), error = %e, "user tool symlink failed");
+        }
+    }
 }
 
 /// Flip a pending envelope's status to `resolved` and stamp the resolution

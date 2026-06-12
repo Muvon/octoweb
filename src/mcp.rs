@@ -8,6 +8,7 @@
 //! - `browser_snapshot`     — compact map of interactive elements with @N refs
 //! - `browser_get_page_info`/`browser_get_page_content` — metadata and readable text
 //! - `browser_execute_js`                                — escape hatch for custom DOM queries
+//! - `browser_console_messages` / `browser_network_requests` — page diagnostics
 //!
 //! Tabs:
 //! - `browser_navigate` (always background: new tab, or in-place via tab_id; never moves focus)
@@ -15,10 +16,13 @@
 //! - `browser_get_history` / `browser_get_playing_tabs`
 //! - `browser_go_back` / `browser_go_forward` / `browser_reload`
 //!
-//! Interaction (selector accepts a CSS selector or a `@N` ref from snapshot):
+//! Interaction (selector accepts a CSS selector or a `@N` ref from snapshot;
+//! actions auto-retry until actionable — see dom_actions.rs):
 //! - `browser_click` / `browser_hover` / `browser_type`
 //! - `browser_press_key` / `browser_select_option`
 //! - `browser_scroll` / `browser_wait` / `browser_screenshot`
+//! - `browser_handle_dialog` / `browser_upload_file` — arm answers for native
+//!   dialogs and file choosers before the click that triggers them
 //!
 //! # Selector resolution
 //!
@@ -147,11 +151,12 @@ pub enum McpCommand {
         full_page: bool,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Scroll the page
+    /// Scroll the page, or the scrollable container of `selector`
     Scroll {
         tab_id: Option<usize>,
         direction: String,
         pixels: Option<i32>,
+        selector: Option<String>,
         response: oneshot::Sender<Result<(), String>>,
     },
     /// Press a keyboard key
@@ -197,9 +202,12 @@ pub enum McpCommand {
 /// - `"stale"`        — `@ref` selector but `window.__octoweb_refs` is missing
 ///   or the ref was never registered. Most often: navigation cleared refs.
 ///   Fix: call `browser_snapshot` again.
-/// - `"missing"`      — CSS selector matched no element on the current page.
+/// - `"missing"`      — CSS selector matched no element (after the retry window).
 /// - `"detached"`     — `@ref` resolved but the element is no longer in the DOM.
 /// - `"invalid:<msg>"`— `document.querySelector` threw on a malformed selector.
+/// - `"disabled"`     — element stayed disabled/readonly through the retry window.
+/// - `"occluded:<el>"`— another element kept covering the click point; `<el>`
+///   describes the cover (tag#id.class) so the AI knows what to dismiss.
 ///
 /// `val` is the JSON-encoded return value from `evaluate_script_with_callback`,
 /// so it usually arrives as a quoted string (`"\"true\""`); the trim handles
@@ -212,10 +220,18 @@ pub fn interpret_dom_result(val: &str, selector: &str) -> Result<bool, String> {
             "@ref '{selector}' is stale — call browser_snapshot first to refresh refs (they invalidate on navigation)"
         )),
         "missing" => Err(format!(
-            "No element matched selector: {selector}"
+            "No element matched selector: {selector} (retried for {}s)",
+            crate::dom_actions::RETRY_MS / 1000
         )),
         "detached" => Err(format!(
             "Element for '{selector}' is no longer in the DOM — re-snapshot or wait for the page to settle"
+        )),
+        "disabled" => Err(format!(
+            "Element '{selector}' stayed disabled/readonly — wait for the page to enable it or pick another element"
+        )),
+        s if s.starts_with("occluded:") => Err(format!(
+            "Element '{selector}' is covered by {} — dismiss that overlay (cookie banner, modal, dropdown) first, or scroll it away, then retry",
+            &s[9..]
         )),
         s if s.starts_with("invalid:") => Err(format!(
             "Invalid CSS selector '{selector}': {}",
@@ -382,6 +398,10 @@ pub struct ScrollRequest {
     pub direction: String,
     #[schemars(description = "Distance in px (only with up/down). Default: ~one viewport.")]
     pub pixels: Option<i32>,
+    #[schemars(
+        description = "CSS selector or @ref: scroll the nearest scrollable container of that element instead of the window. Needed for app-style pages (chat lists, virtualized feeds) where the window itself never scrolls."
+    )]
+    pub selector: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -418,6 +438,46 @@ pub struct WaitRequest {
 pub struct SnapshotRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConsoleRequest {
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
+    pub tab_id: Option<usize>,
+    #[schemars(
+        description = "Only entries of this level: \"log\", \"info\", \"warn\", \"error\", \"debug\". Omit for all."
+    )]
+    pub level: Option<String>,
+    #[schemars(description = "Max entries, newest last. Default 50, max 200.")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct NetworkRequest {
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
+    pub tab_id: Option<usize>,
+    #[schemars(description = "Substring filter on the request URL.")]
+    pub filter: Option<String>,
+    #[schemars(description = "Max entries, newest last. Default 50, max 200.")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HandleDialogRequest {
+    #[schemars(description = "\"accept\" (OK) or \"dismiss\" (Cancel).")]
+    pub action: String,
+    #[schemars(
+        description = "Text to enter into a prompt() when accepting. Defaults to the page's default text."
+    )]
+    pub prompt_text: Option<String>,
+    #[schemars(description = "How many upcoming dialogs to auto-answer. Default 1, max 20.")]
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadFileRequest {
+    #[schemars(description = "Absolute paths of existing files to attach.")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -512,14 +572,18 @@ impl McpServer {
             })
             .await?;
 
-        let msg = if in_place {
-            format!("Navigated tab {tab_id}")
-        } else {
-            format!(
-                "Opened background tab {tab_id} — reuse this tab_id for follow-up calls; browser_switch_tab shows it to the user"
-            )
-        };
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        let result = serde_json::json!({
+            "tab_id": tab_id,
+            "mode": if in_place { "in_place" } else { "new_background_tab" },
+            "note": if in_place {
+                "Tab navigated; focus unchanged."
+            } else {
+                "Background tab opened — reuse this tab_id for follow-up calls; browser_switch_tab shows it to the user."
+            },
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     #[tool(description = "Go back in this tab's history. Defaults to the visible tab.")]
@@ -823,7 +887,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Scroll the page. up/down = ~one viewport (or custom pixels), top/bottom = jump to start/end. Defaults to the visible tab."
+        description = "Scroll the page. up/down = ~one viewport (or custom pixels), top/bottom = jump to start/end. Pass selector (CSS or @ref) to scroll that element's scrollable container instead of the window — required for chat lists, sidebars, and virtualized feeds. Defaults to the visible tab."
     )]
     async fn browser_scroll(
         &self,
@@ -833,6 +897,7 @@ impl McpServer {
             tab_id: req.tab_id,
             direction: req.direction.clone(),
             pixels: req.pixels,
+            selector: req.selector,
             response: tx,
         })
         .await?;
@@ -927,11 +992,141 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    // ── Dialogs ───────────────────────────────
-    // (browser_handle_dialog removed: WKWebView's CompletionHandlerCallChecker
-    // requires the completion handler to be invoked synchronously inside the
-    // delegate method — deferring to MCP causes SIGABRT. Dialogs are now
-    // auto-dismissed in dialog_patch.rs and only logged for visibility.)
+    // ── Observability ───────────────────────────────────────────────
+
+    #[tool(
+        description = "Recent console output of the page: console.log/info/warn/error/debug, uncaught errors, unhandled promise rejections. Returns a JSON array [{level,text,ts}], newest last. Use this to debug why a page or an interaction isn't working — failed JS often explains a dead button. Captured from page load (last 200 kept). Defaults to the visible tab."
+    )]
+    async fn browser_console_messages(
+        &self,
+        Parameters(req): Parameters<ConsoleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = req.limit.unwrap_or(50).min(200);
+        let filter = match &req.level {
+            Some(level) => format!(
+                ".filter(function(e){{return e.level==={}}})",
+                serde_json::to_string(level).unwrap_or_default()
+            ),
+            None => String::new(),
+        };
+        let script =
+            format!("JSON.stringify((window.__octoweb_console||[]){filter}.slice(-{limit}))");
+        let value = self
+            .send_command(|tx| McpCommand::ExecuteJs {
+                tab_id: req.tab_id,
+                script,
+                response: tx,
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            sanitize_json_entries(&value, "text", sanitize::sanitize_text),
+        )]))
+    }
+
+    #[tool(
+        description = "Recent network requests made by the page (fetch + XHR). Returns a JSON array [{method,url,status,type,ms,ts,error?}], newest last. status 0 + error = request failed. Use to debug missing data, failed submissions, or to discover the API behind a UI. Captured from page load (last 200 kept). Defaults to the visible tab."
+    )]
+    async fn browser_network_requests(
+        &self,
+        Parameters(req): Parameters<NetworkRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = req.limit.unwrap_or(50).min(200);
+        let filter = match &req.filter {
+            Some(f) => format!(
+                ".filter(function(e){{return e.url.indexOf({})!==-1}})",
+                serde_json::to_string(f).unwrap_or_default()
+            ),
+            None => String::new(),
+        };
+        let script = format!("JSON.stringify((window.__octoweb_net||[]){filter}.slice(-{limit}))");
+        let value = self
+            .send_command(|tx| McpCommand::ExecuteJs {
+                tab_id: req.tab_id,
+                script,
+                response: tx,
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            sanitize_json_entries(&value, "url", sanitize::sanitize_url),
+        )]))
+    }
+
+    // ── Dialogs & uploads ───────────────────────────────────────────
+    // WKWebView's CompletionHandlerCallChecker requires the completion
+    // handler to be invoked before the delegate method returns, so dialogs
+    // can't be deferred to an MCP round-trip. Instead the AI ARMS an answer
+    // up front; the native handler consumes it synchronously when the dialog
+    // fires (dialog_patch.rs).
+
+    #[tool(
+        description = "Arm auto-answering for upcoming JS dialogs (alert/confirm/prompt). Call this BEFORE the click that triggers the dialog. The next `count` (default 1) dialogs are answered instantly with no popup; un-armed dialogs show a native popup to the user that you cannot answer. accept=OK, dismiss=Cancel; prompt_text fills a prompt() when accepting. Applies to all tabs."
+    )]
+    async fn browser_handle_dialog(
+        &self,
+        Parameters(req): Parameters<HandleDialogRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let accept = match req.action.as_str() {
+            "accept" => true,
+            "dismiss" => false,
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("action must be \"accept\" or \"dismiss\", got \"{other}\""),
+                    None,
+                ))
+            }
+        };
+        let count = req.count.unwrap_or(1).clamp(1, 20);
+        crate::dialog_patch::arm_dialogs(accept, req.prompt_text, count);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Armed: next {count} dialog(s) will be {}",
+            if accept { "accepted" } else { "dismissed" }
+        ))]))
+    }
+
+    #[tool(
+        description = "Arm the NEXT file chooser with these absolute file paths — no panel is shown. Flow: call this first, then browser_click the file input or upload button; the chooser opened by that click receives the files automatically. One-shot (arms exactly one chooser)."
+    )]
+    async fn browser_upload_file(
+        &self,
+        Parameters(req): Parameters<UploadFileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if req.paths.is_empty() {
+            return Err(McpError::invalid_params(
+                "paths must contain at least one file",
+                None,
+            ));
+        }
+        for path in &req.paths {
+            if !std::path::Path::new(path).is_file() {
+                return Err(McpError::invalid_params(
+                    format!("File not found: {path}"),
+                    None,
+                ));
+            }
+        }
+        let count = req.paths.len();
+        crate::dialog_patch::arm_upload(req.paths);
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Armed: the next file chooser receives {count} file(s). Now click the file input (browser_click)."
+        ))]))
+    }
+}
+
+/// Decode a wry-JSON-encoded `JSON.stringify` result and scrub one string
+/// field of each entry (PAN/token hygiene, parity with TabInfo/PageInfo).
+fn sanitize_json_entries(raw: &str, field: &str, scrub: fn(&str) -> String) -> String {
+    let inner: String = serde_json::from_str(raw).unwrap_or_else(|_| raw.to_string());
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&inner) else {
+        return "[]".into();
+    };
+    if let Some(entries) = value.as_array_mut() {
+        for entry in entries {
+            if let Some(s) = entry.get(field).and_then(|x| x.as_str()) {
+                entry[field] = serde_json::Value::String(scrub(s));
+            }
+        }
+    }
+    value.to_string()
 }
 
 #[tool_handler]
@@ -967,11 +1162,17 @@ impl ServerHandler for McpServer {
                 key events use browser_press_key, not browser_type.\n\
                 \n\
                 Waiting: browser_navigate already blocks until the page is idle — no follow-up wait needed. \
-                After clicks that trigger SPA route changes, use browser_wait with a CSS selector for the \
-                new content.\n\
+                Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \
+                so you rarely need explicit waits; after clicks that trigger SPA route changes, use \
+                browser_wait with a CSS selector for the new content.\n\
                 \n\
-                Dialogs: JS alert/confirm/prompt are auto-dismissed (the page sees Cancel/nil). They cannot \
-                be answered through MCP."
+                Debugging: when a page misbehaves or an interaction has no effect, check \
+                browser_console_messages (JS errors) and browser_network_requests (failed calls) before \
+                retrying blindly.\n\
+                \n\
+                Dialogs & uploads: arm BEFORE the triggering click — browser_handle_dialog answers the \
+                next alert/confirm/prompt, browser_upload_file feeds the next file chooser. Un-armed \
+                dialogs pop up natively for the user and you cannot answer them."
                     .to_string(),
             )
     }
