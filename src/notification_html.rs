@@ -42,10 +42,11 @@ pub fn html() -> &'static str {
     background: rgba(255, 255, 255, 0.88);
     backdrop-filter: blur(24px) saturate(180%);
     -webkit-backdrop-filter: blur(24px) saturate(180%);
-    border: 0.5px solid rgba(0, 0, 0, 0.06);
     box-shadow:
+      0 0 0 0.5px rgba(0, 0, 0, 0.07),
       0 8px 32px rgba(0, 0, 0, 0.14),
-      0 2px 8px rgba(0, 0, 0, 0.06);
+      0 2px 8px rgba(0, 0, 0, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
 
     opacity: 0;
     transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
@@ -68,10 +69,11 @@ pub fn html() -> &'static str {
   @media (prefers-color-scheme: dark) {
     #toast {
       background: rgba(44, 44, 46, 0.92);
-      border-color: rgba(255, 255, 255, 0.08);
       box-shadow:
+        0 0 0 0.5px rgba(255, 255, 255, 0.10),
         0 8px 32px rgba(0, 0, 0, 0.45),
-        0 2px 8px rgba(0, 0, 0, 0.25);
+        0 2px 8px rgba(0, 0, 0, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.07);
     }
   }
 

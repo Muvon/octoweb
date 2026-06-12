@@ -118,10 +118,12 @@ const NEWTAB_CSS: &str = r#"
     --text-secondary: rgba(0, 0, 0, 0.45);
     --text-dim: rgba(0, 0, 0, 0.30);
     --card-bg: rgba(255, 255, 255, 0.70);
-    --card-border: rgba(0, 0, 0, 0.06);
+    --card-border: rgba(0, 0, 0, 0.10);
     --card-hover: rgba(255, 255, 255, 0.90);
-    --card-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-    --card-hover-shadow: 0 4px 20px rgba(0, 0, 0, 0.10);
+    --card-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 2px 12px rgba(0, 0, 0, 0.06),
+                   inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    --card-hover-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 6px 24px rgba(0, 0, 0, 0.12),
+                         inset 0 1px 0 rgba(255, 255, 255, 0.6);
     --kbd-bg: rgba(0, 0, 0, 0.06);
     --kbd-border: rgba(0, 0, 0, 0.10);
     --badge-bg: rgba(0, 0, 0, 0.06);
@@ -135,10 +137,12 @@ const NEWTAB_CSS: &str = r#"
       --text-secondary: rgba(255, 255, 255, 0.45);
       --text-dim: rgba(255, 255, 255, 0.25);
       --card-bg: rgba(44, 44, 48, 0.70);
-      --card-border: rgba(255, 255, 255, 0.06);
+      --card-border: rgba(255, 255, 255, 0.12);
       --card-hover: rgba(58, 58, 62, 0.90);
-      --card-shadow: 0 2px 12px rgba(0, 0, 0, 0.20);
-      --card-hover-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+      --card-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.08), 0 2px 12px rgba(0, 0, 0, 0.20),
+                     inset 0 1px 0 rgba(255, 255, 255, 0.06);
+      --card-hover-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.08), 0 6px 24px rgba(0, 0, 0, 0.4),
+                           inset 0 1px 0 rgba(255, 255, 255, 0.06);
       --kbd-bg: rgba(255, 255, 255, 0.08);
       --kbd-border: rgba(255, 255, 255, 0.10);
       --badge-bg: rgba(255, 255, 255, 0.08);
@@ -184,6 +188,7 @@ const NEWTAB_CSS: &str = r#"
   }
 
   h1 {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
     font-size: 28px;
     font-weight: 700;
     letter-spacing: -0.03em;
@@ -220,34 +225,40 @@ const NEWTAB_CSS: &str = r#"
     align-items: center;
     gap: 8px;
     padding: 10px 14px;
-    border-radius: 10px;
+    border-radius: 14px;
     background: var(--card-bg);
     backdrop-filter: blur(12px) saturate(160%);
     -webkit-backdrop-filter: blur(12px) saturate(160%);
-    border: 0.5px solid var(--card-border);
     box-shadow: var(--card-shadow);
     text-decoration: none;
     color: inherit;
-    transition: background 0.12s ease, box-shadow 0.15s ease, transform 0.1s ease;
+    transition: background 0.12s ease, box-shadow 0.2s ease,
+                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
     min-width: 0;
   }
 
   .slot-card:hover {
     background: var(--card-hover);
     box-shadow: var(--card-hover-shadow);
+    transform: translateY(-1px);
   }
 
-  .slot-card:active { transform: scale(0.98); }
+  .slot-card:active { transform: scale(0.98); transition-duration: 0.08s; }
 
   .slot-card.slot-empty {
-    border-style: dashed;
+    background: transparent;
+    box-shadow: none;
+    border: 1px dashed var(--card-border);
     opacity: 0.5;
-    transition: opacity 0.15s ease, background 0.12s ease, box-shadow 0.15s ease, transform 0.1s ease, border-color 0.12s ease;
+    transition: opacity 0.15s ease, background 0.12s ease, box-shadow 0.2s ease,
+                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.12s ease;
   }
 
   .slot-card.slot-empty:hover {
-    opacity: 0.8;
-    border-style: solid;
+    opacity: 0.85;
+    background: var(--card-bg);
+    border-color: transparent;
+    box-shadow: var(--card-hover-shadow);
   }
 
   .empty-hint {

@@ -20,7 +20,9 @@ pub fn html() -> String {
     --btn-active: rgba(0, 0, 0, 0.10);
     --icon: rgba(0, 0, 0, 0.50);
     --sep: rgba(0, 0, 0, 0.08);
-    --shadow: 0 2px 12px rgba(0, 0, 0, 0.10), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+    --shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08),
+              0 6px 18px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.05),
+              inset 0 1px 0 rgba(255, 255, 255, 0.55);
     --spinner: rgba(0, 0, 0, 0.35);
     --error: rgba(255, 59, 48, 0.8);
     --ghost: rgba(0, 0, 0, 0.22);
@@ -36,7 +38,9 @@ pub fn html() -> String {
       --btn-active: rgba(255, 255, 255, 0.14);
       --icon: rgba(255, 255, 255, 0.50);
       --sep: rgba(255, 255, 255, 0.08);
-      --shadow: 0 2px 12px rgba(0, 0, 0, 0.25), 0 0 0 0.5px rgba(255, 255, 255, 0.06);
+      --shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.10),
+                0 6px 18px rgba(0, 0, 0, 0.32), 0 1px 4px rgba(0, 0, 0, 0.2),
+                inset 0 1px 0 rgba(255, 255, 255, 0.07);
       --spinner: rgba(255, 255, 255, 0.35);
       --error: rgba(255, 69, 58, 0.85);
       --ghost: rgba(255, 255, 255, 0.18);
@@ -65,8 +69,7 @@ pub fn html() -> String {
     background: var(--bg);
     backdrop-filter: saturate(180%) blur(20px);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
-    border: 0.5px solid var(--border);
-    border-radius: 10px;
+    border-radius: 14px;
     box-shadow: var(--shadow);
   }
 

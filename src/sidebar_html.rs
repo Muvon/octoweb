@@ -77,6 +77,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
     --divider:         rgba(0, 0, 0, 0.07);
     --scrollbar:       rgba(0, 0, 0, 0.13);
+    --hover-bg:        rgba(0, 0, 0, 0.05);
+
+    /* Liquid Glass material: specular rim (light catches the top edge),
+       inner card highlight, floating depth shadow, springy motion. */
+    --rim-hi:          rgba(255, 255, 255, 0.75);
+    --rim-lo:          rgba(255, 255, 255, 0.20);
+    --card-hi:         rgba(255, 255, 255, 0.50);
+    --float-shadow:    0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.05);
+    --spring:          cubic-bezier(0.34, 1.56, 0.64, 1);
 
     /* Markdown content tokens */
     --md-code-bg:      rgba(0, 0, 0, 0.055);
@@ -122,6 +131,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
       --divider:         rgba(255, 255, 255, 0.07);
       --scrollbar:       rgba(255, 255, 255, 0.13);
+      --hover-bg:        rgba(255, 255, 255, 0.07);
+
+      --rim-hi:          rgba(255, 255, 255, 0.28);
+      --rim-lo:          rgba(255, 255, 255, 0.06);
+      --card-hi:         rgba(255, 255, 255, 0.08);
+      --float-shadow:    0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.30);
 
       --md-code-bg:      rgba(255, 255, 255, 0.08);
       --md-code-border:  rgba(255, 255, 255, 0.10);
@@ -183,6 +198,26 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     border-radius: inherit;
   }
   #sidebar > * { position: relative; z-index: 1; }
+
+  /* Specular rim — 1px gradient ring that reads as refracted light on glass.
+     Applied to floating elements; they must be position:relative with a
+     border-radius (the ring inherits it). */
+  #input-row::before,
+  .tool-group.expanded::before,
+  #attach-menu::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(165deg,
+      var(--rim-hi) 0%, var(--rim-lo) 38%, transparent 62%, var(--rim-lo) 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+    z-index: 1;
+  }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
   #header {
@@ -248,12 +283,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .session-tab.active {
     background: var(--accent);
-    border-color: var(--accent);
+    border-color: transparent;
     color: #fff;
+    /* Glass capsule: specular top edge + soft accent glow */
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 1px 6px rgba(0,122,255,0.35);
   }
   .session-tab.active:hover {
     background: var(--accent-hover);
-    border-color: var(--accent-hover);
+    border-color: transparent;
     color: #fff;
   }
 
@@ -467,6 +504,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: opacity 0.15s, background 0.12s, color 0.12s;
     pointer-events: none;
   }
+  .msg-copy:hover { background: rgba(255,255,255,0.92); color: rgba(60,60,67,1); }
   @media (prefers-color-scheme: dark) {
     .msg-copy {
       background: rgba(58,58,60,0.82);
@@ -475,9 +513,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
     .msg-copy:hover { background: rgba(72,72,74,0.92); color: rgba(235,235,245,0.9); }
   }
-  .msg.agent:hover .msg-copy { opacity: 1; pointer-events: auto; }
-  .msg-copy:hover { background: rgba(255,255,255,0.92); color: rgba(60,60,67,1); }
-  .msg-copy.copied { color: #34c759; opacity: 1; }
+  .msg.agent:hover .msg-copy,
+  .msg.user:hover  .msg-copy { opacity: 1; pointer-events: auto; }
+  /* User bubbles can be tiny ("ok") — icon-only circle so the pill never
+     dwarfs the bubble. */
+  .msg.user .msg-copy { padding: 5px; border-radius: 50%; }
+  .msg.user .msg-copy span { display: none; }
+  .msg-copy.copied { color: var(--dot-ok); opacity: 1; }
 
   /* Show more button below collapsed bubbles */
   .msg-bubble.collapsed {
@@ -535,10 +577,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: opacity 0.25s ease;
   }
   #welcome.hidden { opacity: 0; pointer-events: none; position: absolute; }
-  #welcome-icon { margin-bottom: 6px; opacity: 0.6; }
+  #welcome-icon { margin-bottom: 8px; opacity: 0.7; filter: drop-shadow(0 2px 6px rgba(0,122,255,0.25)); }
   #welcome-title {
-    font-size: 17px;
-    font-weight: 600;
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
     color: var(--text-primary);
     margin-bottom: 2px;
   }
@@ -547,36 +591,42 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     line-height: 1.5;
     color: var(--text-secondary);
     max-width: 250px;
-    margin-bottom: 14px;
+    margin-bottom: 16px;
   }
   #welcome-suggestions {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 7px;
     width: 100%;
-    max-width: 260px;
-    margin-bottom: 18px;
+    max-width: 270px;
+    margin-bottom: 20px;
   }
+  /* Glass capsule chips — float on hover with a springy lift */
   .suggestion-btn {
     display: block;
     width: 100%;
-    padding: 8px 12px;
-    border: 1px solid var(--input-border);
-    border-radius: 8px;
+    padding: 9px 14px;
+    border: none;
+    border-radius: 16px;
     background: var(--input-bg);
+    box-shadow: 0 0 0 0.5px var(--input-border), inset 0 1px 0 var(--card-hi),
+                0 1px 4px rgba(0,0,0,0.04);
     color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.4;
     text-align: left;
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
+    transition: transform 0.3s var(--spring), box-shadow 0.2s ease, color 0.15s, background 0.15s;
   }
   .suggestion-btn:hover {
-    border-color: var(--accent);
-    background: rgba(0, 122, 255, 0.06);
+    background: rgba(0, 122, 255, 0.08);
     color: var(--text-primary);
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 0.5px rgba(0,122,255,0.30), inset 0 1px 0 var(--card-hi),
+                0 4px 14px rgba(0,0,0,0.08);
   }
-   #welcome-shortcuts {
+  .suggestion-btn:active { transform: translateY(0) scale(0.98); }
+  #welcome-shortcuts {
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -592,9 +642,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     display: inline-block;
     min-width: 42px;
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: 6px;
     background: var(--md-code-bg);
-    border: 1px solid var(--md-code-border);
+    box-shadow: 0 0 0 0.5px var(--md-code-border), inset 0 1px 0 var(--card-hi);
     font-family: inherit;
     font-size: 10px;
     text-align: center;
@@ -611,47 +661,28 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     padding: 0 4px;
   }
   .msg-label .msg-who {
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-tertiary);
+    letter-spacing: -0.005em;
+    color: var(--text-secondary);
   }
   .msg-label .msg-time {
     font-size: 9.5px;
     font-weight: 400;
     letter-spacing: 0.01em;
-    text-transform: none;
     color: var(--text-tertiary);
     opacity: 0.7;
     font-variant-numeric: tabular-nums;
-  }
-  .msg-label .msg-sep {
-    color: var(--text-tertiary);
-    opacity: 0.5;
-    margin: 0 2px;
-  }
-  .msg-label .msg-tools {
-    font-size: 9.5px;
-    font-weight: 400;
-    letter-spacing: 0.01em;
-    color: var(--text-tertiary);
-    opacity: 0.5;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .msg-label .msg-tools:hover {
-    opacity: 0.8;
-    text-decoration: underline;
   }
   .msg.user  .msg-label { justify-content: flex-end; }
   .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
   .msg.error .msg-label .msg-who { color: var(--dot-err); opacity: 0.85; }
 
-  /* Bubbles — NOT glass (Tahoe: never glass on glass) */
+  /* Bubbles — solid material cards (HIG: no glass stacked on glass), depth
+     comes from a specular inner top edge + soft ambient shadow. */
   .msg-bubble {
-    padding: 9px 12px;
-    border-radius: 16px;
+    padding: 9px 13px;
+    border-radius: 18px;
     line-height: 1.55;
     word-break: break-word;
     font-size: 13px;
@@ -659,33 +690,37 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   .msg.user .msg-bubble {
     background: var(--user-bg);
-    border: 1px solid var(--user-border);
-    border-bottom-right-radius: 5px;
+    border-bottom-right-radius: 6px;
     color: var(--text-primary);
     align-self: flex-end;
     max-width: 90%;
     white-space: pre-wrap;
+    box-shadow: inset 0 0 0 1px var(--user-border), inset 0 1px 0 rgba(255,255,255,0.25);
     transition: box-shadow 0.15s, background 0.15s;
   }
   .msg.user .msg-bubble:hover {
-    box-shadow: 0 2px 8px rgba(0,122,255,0.13);
+    box-shadow: inset 0 0 0 1px var(--user-border), inset 0 1px 0 rgba(255,255,255,0.25),
+                0 2px 8px rgba(0,122,255,0.13);
   }
 
   .msg.agent .msg-bubble {
     background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    border-bottom-left-radius: 5px;
+    border-bottom-left-radius: 6px;
     color: var(--text-primary);
     align-self: flex-start;
     max-width: 100%;
+    box-shadow: inset 0 0 0 1px var(--agent-border), inset 0 1px 0 var(--card-hi),
+                0 1px 4px rgba(0,0,0,0.04);
     transition: box-shadow 0.15s, background 0.15s;
     /* no white-space: pre-wrap — markdown renders HTML */
   }
   .msg.agent .msg-bubble:hover {
-    box-shadow: 0 2px 10px rgba(0,0,0,0.07);
+    box-shadow: inset 0 0 0 1px var(--agent-border), inset 0 1px 0 var(--card-hi),
+                0 3px 12px rgba(0,0,0,0.08);
   }
   @media (prefers-color-scheme: dark) {
-    .msg.agent .msg-bubble:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.30); }
+    .msg.agent .msg-bubble       { box-shadow: inset 0 0 0 1px var(--agent-border), inset 0 1px 0 var(--card-hi), 0 1px 4px rgba(0,0,0,0.20); }
+    .msg.agent .msg-bubble:hover { box-shadow: inset 0 0 0 1px var(--agent-border), inset 0 1px 0 var(--card-hi), 0 3px 12px rgba(0,0,0,0.35); }
   }
 
   .msg.error .msg-bubble {
@@ -716,7 +751,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .msg.agent .msg-bubble h1 { font-size: 15px; }
   .msg.agent .msg-bubble h2 { font-size: 14px; }
   .msg.agent .msg-bubble h3 { font-size: 13px; }
-  .msg.agent .msg-bubble h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .msg.agent .msg-bubble h4 { font-size: 12.5px; }
 
   .msg.agent .msg-bubble ul,
   .msg.agent .msg-bubble ol {
@@ -776,11 +811,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     min-height: 22px;
   }
   .code-lang {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 500;
     color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
   }
   .code-copy {
     display: flex;
@@ -918,13 +952,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .a2ui-head .kind-tag {
     font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    padding: 1px 6px;
-    border-radius: 4px;
+    padding: 1px 7px;
+    border-radius: 6px;
     background: var(--a2ui-primary, var(--accent));
     color: white;
-    font-size: 9px;
+    font-size: 10px;
   }
   .a2ui-head .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1005,11 +1037,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     font-size: 12px;
   }
   .a2ui-label {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-tertiary);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
   }
   .a2ui-field input[type="text"],
   .a2ui-field input[type="email"],
@@ -1075,8 +1105,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-secondary);
     font-size: 10px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
   }
   .a2ui-video, .a2ui-audio audio { max-width: 100%; border-radius: 8px; display: block; }
   .a2ui-audio { display: flex; flex-direction: column; gap: 4px; }
@@ -1085,7 +1113,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .a2ui-text-h2 { font-size: 15px; font-weight: 600; line-height: 1.25; margin: 0; }
   .a2ui-text-h3 { font-size: 14px; font-weight: 600; line-height: 1.3; margin: 0; }
   .a2ui-text-h4 { font-size: 13px; font-weight: 600; line-height: 1.3; margin: 0; }
-  .a2ui-text-h5 { font-size: 12px; font-weight: 600; line-height: 1.35; text-transform: uppercase; letter-spacing: 0.04em; }
+  .a2ui-text-h5 { font-size: 12px; font-weight: 600; line-height: 1.35; }
   .a2ui-text-caption { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
   .a2ui-text-body { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
   /* Image variants */
@@ -1243,21 +1271,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .a2ui-toast.show { opacity: 1; }
 
-  /* ── Activity indicator ─────────────────────────────────────────────────────────────── */
-  #thinking {
+  /* ── Activity feed — live tool stream during a turn ─────────────────────── */
+  .activity-feed {
     display: none;
     flex-direction: column;
-    gap: 0;
-    padding: 4px 0;
+    gap: 1px;
+    padding: 4px 0 6px;
   }
-  #thinking.visible { display: flex; }
+  .activity-feed.visible { display: flex; }
 
-  /* Tahoe-style 3-dot bounce — shown as header while tools stream below */
+  /* Tahoe-style header: 3-dot bounce + shimmer label + turn elapsed */
   .activity-header {
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 2px 4px 4px;
+    gap: 7px;
+    padding: 2px 4px 5px;
   }
   .activity-dots {
     display: flex;
@@ -1276,6 +1304,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     0%, 80%, 100% { transform: translateY(0);    opacity: 0.30; }
     40%           { transform: translateY(-4px); opacity: 0.90; }
   }
+  .activity-label {
+    font-size: 11px;
+    font-weight: 500;
+    background: linear-gradient(90deg,
+      var(--text-tertiary) 30%, var(--text-primary) 50%, var(--text-tertiary) 70%);
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: label-shimmer 2.4s linear infinite;
+  }
+  @keyframes label-shimmer {
+    from { background-position: 200% 0; }
+    to   { background-position: -200% 0; }
+  }
   .activity-elapsed {
     font-size: 10px;
     color: var(--text-tertiary);
@@ -1284,18 +1327,19 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     opacity: 0.7;
   }
 
-  /* Individual tool row */
+  /* Tool item = row + inline expandable detail (live feed and steps group) */
+  .tool-item { display: flex; flex-direction: column; min-width: 0; }
   .tool-row {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 4px;
+    gap: 7px;
+    padding: 3px 5px;
     font-size: 11px;
     color: var(--text-secondary);
     animation: tool-in 0.25s ease-out;
     overflow: hidden;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 6px;
     transition: background 0.12s;
   }
   .tool-row:hover {
@@ -1306,35 +1350,49 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     to   { opacity: 1; transform: translateY(0); }
   }
   .tool-row.done {
-    opacity: 0.45;
+    opacity: 0.55;
     transition: opacity 0.3s ease, background 0.12s;
   }
   .tool-row.failed {
     color: var(--error-text);
-    opacity: 0.7;
+    opacity: 0.8;
   }
 
-  /* Kind icon — tiny circle with letter */
+  /* Kind icon — tinted rounded square with stroke glyph (Tahoe) */
   .tool-kind {
-    width: 14px; height: 14px;
-    border-radius: 4px;
+    width: 16px; height: 16px;
+    border-radius: 5px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 8px;
-    font-weight: 700;
-    letter-spacing: 0;
     flex-shrink: 0;
-    color: #fff;
-    background: var(--text-tertiary);
+    color: #8e8e93;
+    background: rgba(142, 142, 147, 0.14);
   }
-  .tool-kind.read    { background: #34c759; }
-  .tool-kind.edit    { background: #ff9500; }
-  .tool-kind.delete  { background: #ff3b30; }
-  .tool-kind.search  { background: #5856d6; }
-  .tool-kind.execute { background: #007aff; }
-  .tool-kind.think   { background: #af52de; }
-  .tool-kind.fetch   { background: #30b0c7; }
+  .tool-kind svg { width: 10px; height: 10px; display: block; }
+  .tool-kind.read    { color: #34c759; background: rgba(52, 199, 89, 0.14); }
+  .tool-kind.edit    { color: #ff9500; background: rgba(255, 149, 0, 0.14); }
+  .tool-kind.delete  { color: #ff3b30; background: rgba(255, 59, 48, 0.14); }
+  .tool-kind.search  { color: #5856d6; background: rgba(88, 86, 214, 0.14); }
+  .tool-kind.execute { color: #007aff; background: rgba(0, 122, 255, 0.14); }
+  .tool-kind.think   { color: #af52de; background: rgba(175, 82, 222, 0.14); }
+  .tool-kind.fetch   { color: #30b0c7; background: rgba(48, 176, 199, 0.14); }
+  .tool-kind.move    { color: #ff2d55; background: rgba(255, 45, 85, 0.14); }
+  @media (prefers-color-scheme: dark) {
+    .tool-kind.read    { color: #30d158; }
+    .tool-kind.edit    { color: #ff9f0a; }
+    .tool-kind.delete  { color: #ff453a; }
+    .tool-kind.search  { color: #5e5ce6; }
+    .tool-kind.execute { color: #0a84ff; }
+    .tool-kind.think   { color: #bf5af2; }
+    .tool-kind.fetch   { color: #40c8e0; }
+    .tool-kind.move    { color: #ff375f; }
+  }
+  .tool-row.running .tool-kind { animation: kind-pulse 1.4s ease-in-out infinite; }
+  @keyframes kind-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.4; }
+  }
 
   .tool-title {
     flex: 1;
@@ -1357,42 +1415,144 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     line-height: 0;
   }
   .tool-check svg, .tool-fail svg { width: 100%; height: 100%; }
-  .tool-check { color: #34c759; }
-  .tool-fail  { color: #ff3b30; }
+  .tool-check { color: var(--dot-ok); }
+  .tool-fail  { color: var(--dot-err); }
+
+  /* Inline expandable detail under a tool row — inset well, no hairline box */
+  .tool-detail {
+    display: none;
+    margin: 1px 5px 5px 28px;
+    padding: 8px 10px;
+    background: var(--md-pre-bg);
+    border-radius: 10px;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.05);
+    min-width: 0;
+    animation: tool-in 0.25s var(--spring);
+  }
+  .tool-item.expanded .tool-detail { display: block; }
+  .tool-detail-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    margin: 8px 0 3px;
+  }
+  .tool-detail-title:first-child { margin-top: 0; }
+  .tool-detail pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 180px;
+    overflow-y: auto;
+    color: var(--text-primary);
+  }
+  .tool-detail pre::-webkit-scrollbar { width: 3px; }
+  .tool-detail pre::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+  .tool-loc {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+    font-size: 10px;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ── Steps group — quiet inline disclosure while collapsed; becomes a
+     floating glass capsule only when expanded ──────────────────────────── */
+  .tool-group {
+    position: relative;
+    align-self: flex-start;
+    max-width: 100%;
+    min-width: 0;
+    background: transparent;
+    border-radius: 14px;
+    overflow: hidden;
+    transition: background 0.25s ease, box-shadow 0.25s ease;
+  }
+  .tool-group.expanded {
+    background: var(--agent-bg);
+    box-shadow: 0 0 0 0.5px var(--agent-border), 0 3px 12px rgba(0,0,0,0.08);
+  }
+  .tool-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px 3px 6px;
+    border-radius: 11px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.12s, color 0.12s;
+  }
+  .tool-group-header:hover { color: var(--text-secondary); background: var(--hover-bg); }
+  .tool-group.expanded .tool-group-header {
+    border-radius: 0;
+    padding: 5px 11px 5px 9px;
+    color: var(--text-secondary);
+  }
+  .tool-group.expanded .tool-group-header:hover { background: var(--hover-bg); }
+  .tool-group-chevron {
+    display: flex;
+    color: var(--text-tertiary);
+    transition: transform 0.3s var(--spring);
+  }
+  .tool-group.expanded .tool-group-chevron { transform: rotate(90deg); }
+  .tool-group-count { font-weight: 500; }
+  .tool-group-fail { color: var(--dot-err); }
+  .tool-group-time {
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+  }
+  .tool-group-list {
+    display: none;
+    flex-direction: column;
+    gap: 1px;
+    padding: 3px 6px 6px;
+    border-top: 1px solid var(--divider);
+  }
+  .tool-group.expanded .tool-group-list { display: flex; }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
   #input-area {
     flex-shrink: 0;
     padding: 10px 12px 14px;
-    border-top: 1px solid var(--divider);
     display: flex;
     flex-direction: column;
     gap: 6px;
     position: relative;
   }
 
-  /* ── Slash command dropdown ─────────────────────────────────────────── */
+  /* ── Slash command dropdown — floating glass sheet with springy pop ──── */
   #cmd-dropdown {
     display: none;
     position: absolute;
     bottom: 100%;
     left: 4px; right: 4px;
-    margin-bottom: 2px;
+    margin-bottom: 4px;
     max-height: 200px;
     overflow-y: auto;
     background: var(--glass-solid);
-    border: 1px solid var(--glass-border);
-    border-radius: 10px;
-    box-shadow: var(--glass-shadow);
+    border-radius: 14px;
+    /* Inset rim instead of ::before ring — this element scrolls */
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--rim-hi), inset 0 0 0 0.5px var(--rim-lo);
     z-index: 10;
-    padding: 4px 0;
+    padding: 4px;
   }
-  #cmd-dropdown.visible { display: block; }
+  #cmd-dropdown.visible { display: block; animation: menu-pop 0.25s var(--spring); }
+  @keyframes menu-pop {
+    from { opacity: 0; transform: translateY(5px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0)   scale(1); }
+  }
   #cmd-dropdown::-webkit-scrollbar { width: 3px; }
   #cmd-dropdown::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
 
   .cmd-item {
     padding: 6px 10px;
+    border-radius: 9px;
     cursor: pointer;
     display: flex;
     flex-direction: column;
@@ -1444,9 +1604,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-output-key {
     padding: 3px 10px 3px 0;
     color: var(--text-tertiary);
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 11px;
     white-space: nowrap;
     vertical-align: top;
     width: 1%;
@@ -1471,20 +1629,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-output-list li { margin: 1px 0; font-size: 11.5px; }
   .cmd-output-single-list { display: flex; flex-direction: column; gap: 2px; }
   .cmd-output-list-label {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
 
-  /* Section title — small caps hairline label */
+  /* Section title — quiet sentence-case group header */
   .cmd-section-title {
-    font-size: 9.5px;
-    font-weight: 700;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-secondary);
     margin: 10px 0 4px;
   }
   .cmd-section-title:first-child { margin-top: 0; }
@@ -1498,11 +1652,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     font-size: 11.5px;
   }
   .cmd-switch-label {
-    font-size: 9.5px;
-    font-weight: 700;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
     margin-right: 2px;
   }
   .cmd-arrow {
@@ -1557,11 +1709,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .cmd-stat:first-child { padding-left: 0; }
   .cmd-stat:last-child { border-right: none; padding-right: 0; }
   .cmd-stat-label {
-    font-size: 9px;
-    font-weight: 700;
+    font-size: 10.5px;
+    font-weight: 500;
     color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
     line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
@@ -1656,13 +1806,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   /* Badges — small, flat */
   .cmd-badge {
     display: inline-block;
-    padding: 0 5px;
-    border-radius: 3px;
-    font-size: 9.5px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    line-height: 14px;
+    padding: 0 6px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 15px;
     vertical-align: middle;
   }
   .cmd-badge.ok      { background: rgba(52, 199, 89, 0.16);  color: #1f8f3a; }
@@ -1743,23 +1891,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     text-align: left;
   }
   .cmd-md th {
-    color: var(--text-tertiary);
-    font-weight: 700;
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 10.5px;
   }
 
+  /* Floating glass capsule — no border, depth from shadow + specular rim */
   #input-row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 8px;
     background: var(--input-bg);
-    border: 1.5px solid var(--input-border);
-    border-radius: 18px;
-    padding: 8px 8px 8px 10px;
-    box-shadow: var(--input-shadow);
-    transition: border-color 0.18s, box-shadow 0.18s;
+    border-radius: 22px;
+    padding: 9px 9px 9px 11px;
+    box-shadow: 0 0 0 0.5px var(--input-border), var(--float-shadow);
+    transition: box-shadow 0.25s ease, transform 0.3s var(--spring);
   }
 
   #new-session-btn {
@@ -1775,13 +1922,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     padding: 0;
   }
   #new-session-btn:hover {
-    background: var(--input-border);
+    background: var(--hover-bg);
     color: var(--text-primary);
   }
   #new-session-btn:active { transform: scale(0.88); }
   #input-row:focus-within {
-    border-color: var(--input-focus-border);
-    box-shadow: var(--input-shadow), 0 0 0 3px rgba(0, 122, 255, 0.11);
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 1px var(--input-focus-border), var(--float-shadow),
+                0 0 0 4px rgba(0, 122, 255, 0.12);
   }
 
   #prompt-input {
@@ -1849,24 +1997,24 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: background 0.15s, color 0.15s;
     padding: 0;
   }
-  #attach-btn:hover { background: var(--input-border); color: var(--text-primary); }
+  #attach-btn:hover { background: var(--hover-bg); color: var(--text-primary); }
   #attach-btn:active { transform: scale(0.88); }
 
   #attach-menu {
     display: none;
     position: absolute;
-    bottom: calc(100% + 6px);
+    bottom: calc(100% + 8px);
     right: 0;
     background: var(--glass-bg);
     -webkit-backdrop-filter: blur(40px) saturate(1.6);
-    border: 1px solid var(--input-border);
-    border-radius: 10px;
+    backdrop-filter: blur(40px) saturate(1.6);
+    border-radius: 14px;
     padding: 4px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+    box-shadow: 0 0 0 0.5px var(--input-border), var(--float-shadow);
     z-index: 10;
     min-width: 130px;
   }
-  #attach-menu.visible { display: flex; flex-direction: column; }
+  #attach-menu.visible { display: flex; flex-direction: column; animation: menu-pop 0.25s var(--spring); }
   .attach-option {
     display: flex; align-items: center; gap: 8px;
     padding: 7px 10px;
@@ -1878,7 +2026,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     white-space: nowrap;
     transition: background 0.12s;
   }
-  .attach-option:hover { background: var(--input-border); }
+  .attach-option:hover { background: var(--hover-bg); }
   .attach-option svg { color: var(--text-secondary); flex-shrink: 0; }
 
   .doc-chip {
@@ -1930,31 +2078,34 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     display: block;
   }
 
+  /* Gel button: vertical gradient + specular top edge + accent glow */
   #send-btn {
     width: 30px; height: 30px;
     border-radius: 50%;
     border: none;
-    background: var(--accent);
+    background: linear-gradient(180deg, #2e9bff 0%, var(--accent) 55%, #0070e8 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 8px rgba(0,122,255,0.35);
     color: #fff;
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s, opacity 0.15s, transform 0.12s, border-radius 0.2s ease;
+    transition: opacity 0.15s, transform 0.3s var(--spring), box-shadow 0.2s ease, filter 0.15s;
     opacity: 0.28;
     pointer-events: none;
   }
   #send-btn.active              { opacity: 1; pointer-events: auto; }
-  #send-btn.active:hover        { background: var(--accent-hover); }
+  #send-btn.active:hover        { filter: brightness(1.08); box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), 0 3px 12px rgba(0,122,255,0.50); }
   #send-btn.active:active       { transform: scale(0.88); }
-  /* Stop mode — Tahoe-style: same pill shape as input, subtle red */
+  /* Stop mode — red gel, pulsing */
   #send-btn.stop-mode {
-    background: #ff3b30;
+    background: linear-gradient(180deg, #ff6259 0%, #ff3b30 55%, #e02d23 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.40), 0 2px 8px rgba(255,59,48,0.40);
     border-radius: 50%;
     opacity: 1;
     pointer-events: auto;
     animation: stop-pulse 1.2s ease-in-out infinite;
   }
-  #send-btn.stop-mode:hover     { background: #e6352b; }
+  #send-btn.stop-mode:hover     { filter: brightness(1.06); }
   #send-btn.stop-mode:active    { transform: scale(0.88); }
   #send-btn.stop-mode .send-icon { display: none; }
   #send-btn.stop-mode .stop-icon { display: block; }
@@ -1962,215 +2113,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   @keyframes stop-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.7; }
-  }
-
-  /* Tool details modal */
-  #tool-modal {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.5);
-    backdrop-filter: blur(4px);
-    z-index: 1000;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    animation: modal-fade-in 0.15s ease;
-  }
-  #tool-modal.show { display: flex; }
-  @keyframes modal-fade-in {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-  #tool-modal .modal-content {
-    background: var(--glass-solid);
-    border-radius: 12px;
-    width: 90%;
-    max-width: 700px;
-    max-height: 85vh;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-    animation: modal-slide-up 0.2s ease;
-  }
-  @keyframes modal-slide-up {
-    from { transform: translateY(20px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-  }
-  #tool-modal .modal-header {
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-shrink: 0;
-  }
-  #tool-modal .modal-title {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-  #tool-modal .modal-close {
-    width: 28px; height: 28px;
-    border-radius: 50%;
-    border: none;
-    background: transparent;
-    color: var(--text-tertiary);
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    transition: background 0.15s, color 0.15s;
-  }
-  #tool-modal .modal-close:hover {
-    background: var(--hover-bg);
-    color: var(--text-primary);
-  }
-  #tool-modal .modal-body {
-    padding: 12px 20px 20px;
-    overflow-y: auto;
-    flex: 1;
-  }
-  #tool-modal .modal-tools-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  #tool-modal .modal-tool-row {
-    background: var(--hover-bg);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  #tool-modal .modal-tool-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  #tool-modal .modal-tool-header:hover {
-    background: rgba(0,0,0,0.04);
-  }
-  @media (prefers-color-scheme: dark) {
-    #tool-modal .modal-tool-header:hover {
-      background: rgba(255,255,255,0.06);
-    }
-  }
-  #tool-modal .modal-tool-kind {
-    width: 22px; height: 22px;
-    border-radius: 5px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 11px;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-  #tool-modal .modal-tool-kind.read     { background: #34c759; color: #fff; }
-  #tool-modal .modal-tool-kind.edit    { background: #007aff; color: #fff; }
-  #tool-modal .modal-tool-kind.delete  { background: #ff3b30; color: #fff; }
-  #tool-modal .modal-tool-kind.search  { background: #5856d6; color: #fff; }
-  #tool-modal .modal-tool-kind.execute { background: #ff9500; color: #fff; }
-  #tool-modal .modal-tool-kind.think   { background: #af52de; color: #fff; }
-  #tool-modal .modal-tool-kind.fetch   { background: #00c7be; color: #fff; }
-  #tool-modal .modal-tool-kind.move    { background: #ff2d55; color: #fff; }
-  #tool-modal .modal-tool-kind.other   { background: #8e8e93; color: #fff; }
-  #tool-modal .modal-tool-title {
-    flex: 1;
-    font-size: 13px;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  #tool-modal .modal-tool-status {
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    flex-shrink: 0;
-  }
-  #tool-modal .modal-tool-status.completed {
-    background: rgba(52,199,89,0.15);
-    color: #34c759;
-  }
-  #tool-modal .modal-tool-status.failed {
-    background: rgba(255,59,48,0.15);
-    color: #ff3b30;
-  }
-  #tool-modal .modal-tool-status.running {
-    background: rgba(0,122,255,0.15);
-    color: #007aff;
-  }
-  #tool-modal .modal-tool-duration {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    flex-shrink: 0;
-    min-width: 36px;
-    text-align: right;
-  }
-  #tool-modal .modal-tool-chevron {
-    color: var(--text-tertiary);
-    transition: transform 0.2s;
-    flex-shrink: 0;
-  }
-  #tool-modal .modal-tool-row.expanded .modal-tool-chevron {
-    transform: rotate(90deg);
-  }
-  #tool-modal .modal-tool-details {
-    display: none;
-    padding: 0 12px 12px;
-    border-top: 1px solid var(--border);
-    margin-top: 0;
-  }
-  #tool-modal .modal-tool-row.expanded .modal-tool-details {
-    display: block;
-  }
-  #tool-modal .detail-section {
-    margin-top: 10px;
-  }
-  #tool-modal .detail-section-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  #tool-modal .detail-location {
-    font-size: 12px;
-    color: var(--text-primary);
-    font-family: 'SF Mono', Monaco, monospace;
-    background: rgba(0,0,0,0.04);
-    padding: 4px 8px;
-    border-radius: 4px;
-    margin-bottom: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  @media (prefers-color-scheme: dark) {
-    #tool-modal .detail-location {
-      background: rgba(255,255,255,0.06);
-    }
-  }
-  #tool-modal .detail-code {
-    font-size: 11px;
-    font-family: 'SF Mono', Monaco, monospace;
-    background: rgba(0,0,0,0.04);
-    padding: 10px;
-    border-radius: 6px;
-    overflow-x: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--text-primary);
-    max-height: 200px;
-    overflow-y: auto;
-  }
-  @media (prefers-color-scheme: dark) {
-    #tool-modal .detail-code {
-      background: rgba(255,255,255,0.06);
-    }
   }
 
   /* ── Message queue ───────────────────────────────────────────────────────── */
@@ -2379,20 +2321,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
 </div>
 
-<!-- Tool details modal -->
-<div id="tool-modal">
-  <div class="modal-content">
-    <div class="modal-header">
-      <span class="modal-title">Tool Details</span>
-      <button class="modal-close" aria-label="Close">×</button>
-    </div>
-    <div class="modal-body">
-      <div class="modal-tools-list"></div>
-    </div>
-  </div>
-</div>
-
-
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
 <script src="octoweb-lib://localhost/marked.min.js"></script>
 <script>
@@ -2453,7 +2381,19 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const MAX_QUEUE    = 2;
   const MAX_PROMPT_HISTORY = /* MAX_PROMPT_HISTORY */;
 
-  const kindLabel = { read:'R', edit:'E', delete:'D', search:'S', execute:'X', think:'T', fetch:'F', move:'M', other:'·' };
+  // Tool-kind glyphs — mini stroke icons, tinted by .tool-kind.<kind> CSS.
+  const KIND_ICONS = {
+    read:    '<svg viewBox="0 0 16 16" fill="none"><path d="M4 1.5h5.5L13 5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 14V3A1.5 1.5 0 0 1 4.5 1.5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M9.5 1.5V5H13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+    edit:    '<svg viewBox="0 0 16 16" fill="none"><path d="M11.5 2.5a1.7 1.7 0 0 1 2.4 2.4L5 13.8l-3.2.8.8-3.2 8.9-8.9z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+    delete:  '<svg viewBox="0 0 16 16" fill="none"><path d="M2.5 4h11M5.5 4V2.8A1.3 1.3 0 0 1 6.8 1.5h2.4a1.3 1.3 0 0 1 1.3 1.3V4m1.7 0v9.2a1.3 1.3 0 0 1-1.3 1.3H5.1a1.3 1.3 0 0 1-1.3-1.3V4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    search:  '<svg viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    execute: '<svg viewBox="0 0 16 16" fill="none"><path d="M2.5 3.5l4 4-4 4M8.5 12.5H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    think:   '<svg viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1.4 3.6a2 2 0 0 0 1.1 1.1l3.6 1.4-3.6 1.4a2 2 0 0 0-1.1 1.1L8 13.7 6.6 10.1a2 2 0 0 0-1.1-1.1L1.9 7.6l3.6-1.4a2 2 0 0 0 1.1-1.1L8 1.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
+    fetch:   '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.4"/><path d="M1.8 8h12.4M8 1.8c-3.2 3.4-3.2 9 0 12.4 3.2-3.4 3.2-9 0-12.4z" stroke="currentColor" stroke-width="1.4"/></svg>',
+    move:    '<svg viewBox="0 0 16 16" fill="none"><path d="M3 5.5h8.5M9 2.5l3 3-3 3M13 10.5H4.5M7 13.5l-3-3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    other:   '<svg viewBox="0 0 16 16" fill="none"><circle cx="3.5" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="12.5" cy="8" r="1.2" fill="currentColor"/></svg>'
+  };
+  function kindIcon(kind) { return KIND_ICONS[kind] || KIND_ICONS.other; }
 
   // ── Welcome screen toggle ─────────────────────────────────────────────
   function updateWelcome() {
@@ -2493,7 +2433,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     container.dataset.sid = sid;
     const thinking = document.createElement('div');
     thinking.id = 'thinking-' + sid;
-    thinking.className = '';
+    thinking.className = 'activity-feed';
     container.appendChild(thinking);
 
     const tab = document.createElement('div');
@@ -2556,9 +2496,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       toolCount: 0,
       toolDetails: [],
       toolRows: {},
-      // per-message tool details (keyed by message wrap element) — drives
-      // the tool details modal opened by clicking the "N tools" label.
-      messageToolDetails: new WeakMap(),
+      // count of tools still running — keeps the live feed visible when a
+      // tool starts after text already began streaming.
+      runningTools: 0,
       activityStart: 0,
       activityTimer: null,
       // commands
@@ -2765,11 +2705,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       active.container.removeChild(active.container.firstChild);
     }
     active.container.appendChild(active.thinking);
-    active.thinking.className = '';
+    active.thinking.className = 'activity-feed';
     active.thinking.innerHTML = '';
     active.currentAgentBubble = null;
     active.currentAgentRaw = '';
     active.isThinking = false;
+    active.runningTools = 0;
     // Clearing the session restarts the agent on Rust side — drop busy and any
     // queued prompts so we don't dispatch stale messages into the new run.
     active.busy = false;
@@ -2796,7 +2737,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (!s) return;
     while (s.container.firstChild) s.container.removeChild(s.container.firstChild);
     s.container.appendChild(s.thinking);
-    s.thinking.className = '';
+    s.thinking.className = 'activity-feed';
     s.thinking.innerHTML = '';
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
@@ -3003,6 +2944,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     bubble.textContent = text;
     wrap.appendChild(label);
     wrap.appendChild(bubble);
+    if (role === 'user') {
+      // dataset.raw, not bubble.textContent — doc chips appended later
+      // would otherwise leak their filenames into the copied text.
+      wrap.dataset.raw = text;
+      bubble.appendChild(makeCopyBtn(wrap));
+    }
     s.container.insertBefore(wrap, s.thinking);
     if (s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
     return bubble;
@@ -3053,7 +3000,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   function formatLabel(key) {
-    return key.replace(/_/g, ' ');
+    var s = key.replace(/_/g, ' ');
+    return s.charAt(0).toUpperCase() + s.slice(1);
   }
 
   function renderCommandValue(val) {
@@ -3436,8 +3384,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return '<div class="cmd-output">' + header + body + '</div>';
   }
 
-  // Called once Done arrives — stores raw, appends copy btn, collapses if tall
-  function finishAgentBubble(s, bubble, rawText, toolCount, details) {
+  // Called once Done arrives — stores raw, mounts the steps group above the
+  // bubble, appends copy btn, collapses if tall.
+  function finishAgentBubble(s, bubble, rawText, toolCount, details, turnMs) {
     const wrap = bubble.closest('.msg');
     if (!wrap) return;
     wrap.dataset.raw = rawText;
@@ -3448,20 +3397,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
 
     if (toolCount > 0) {
-      const sepEl = wrap.querySelector('.msg-sep');
-      if (sepEl) sepEl.style.display = 'inline';
-      const toolsEl = wrap.querySelector('.msg-tools');
-      if (toolsEl) {
-        toolsEl.textContent = toolCount + ' tools';
-        toolsEl.style.display = 'inline';
-        toolsEl.style.cursor = 'pointer';
-        s.messageToolDetails.set(wrap, details);
-        toolsEl.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const d = s.messageToolDetails.get(wrap);
-          if (d) showToolModal(d);
-        });
-      }
+      wrap.insertBefore(buildToolGroup(details, turnMs), bubble);
+    }
+
+    // Tool-only turn — the steps group is the record; no empty bubble.
+    if (!rawText.trim() && bubble.childElementCount === 0) {
+      bubble.style.display = 'none';
+      return;
     }
 
     bubble.appendChild(makeCopyBtn(wrap));
@@ -3493,17 +3435,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
-    const sep = document.createElement('span');
-    sep.className = 'msg-sep';
-    sep.textContent = '·';
-    sep.style.display = 'none';
-    const tools = document.createElement('span');
-    tools.className = 'msg-tools';
-    tools.style.display = 'none';
     label.appendChild(who);
     label.appendChild(time);
-    label.appendChild(sep);
-    label.appendChild(tools);
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
     wrap.appendChild(label);
@@ -3519,11 +3452,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (!s.currentAgentBubble) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
-      // Hide the activity spinner UI now that real output is streaming.
+      // Real output is streaming — drop the thinking state but keep the feed
+      // rows alive: a tool starting mid-stream re-shows them via syncFeed.
       // Do NOT touch `s.busy` — the agent is still running until Done.
       s.isThinking = false;
-      s.thinking.className = '';
-      clearActivity(s);
+      syncFeed(s);
     }
     s.currentAgentRaw += text;
     var cmdObj = tryParseCommandJson(s.currentAgentRaw);
@@ -3537,10 +3470,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (!s.currentAgentBubble) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
-      // Same rationale as __appendChunk — spinner hide only, busy stays true.
+      // Same rationale as __appendChunk — feed sync only, busy stays true.
       s.isThinking = false;
-      s.thinking.className = '';
-      clearActivity(s);
+      syncFeed(s);
     }
     const img = document.createElement('img');
     img.className = 'chat-img';
@@ -3556,10 +3488,95 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
   }
 
+  // Final durations: sub-10s show one decimal ("0.4s"), longer ones round.
+  function fmtDuration(ms) {
+    if (ms < 9950) return (Math.max(ms, 100) / 1000).toFixed(1) + 's';
+    return fmtElapsed(ms);
+  }
+
+  // Feed is visible while the agent hasn't produced output yet (thinking) or
+  // any tool is still running — including tools started mid-stream.
+  function syncFeed(s) {
+    s.thinking.classList.toggle('visible', s.isThinking || s.runningTools > 0);
+  }
+
   function clearActivity(s) {
     if (s.activityTimer) { clearInterval(s.activityTimer); s.activityTimer = null; }
     s.thinking.innerHTML = '';
     for (const k in s.toolRows) delete s.toolRows[k];
+    s.runningTools = 0;
+  }
+
+  function formatJson(val) {
+    if (val === null || val === undefined) return null;
+    try { return JSON.stringify(val, null, 2); } catch(e) { return String(val); }
+  }
+
+  function renderToolDetail(t) {
+    let html = '';
+    if (t.locations && t.locations.length > 0) {
+      html += '<div class="tool-detail-title">Locations</div>';
+      for (const l of t.locations) html += '<div class="tool-loc">' + escapeHtml(l) + '</div>';
+    }
+    const inputJson = formatJson(t.rawInput);
+    if (inputJson) html += '<div class="tool-detail-title">Input</div><pre>' + escapeHtml(inputJson) + '</pre>';
+    const outputJson = formatJson(t.rawOutput);
+    if (outputJson) html += '<div class="tool-detail-title">Output</div><pre>' + escapeHtml(outputJson) + '</pre>';
+    return html || '<div class="tool-detail-title">No details</div>';
+  }
+
+  // Toggle the inline detail under a tool row. Re-renders on every open so
+  // late-arriving output on live rows is always current.
+  function toggleToolDetail(item, detail, t) {
+    const open = item.classList.toggle('expanded');
+    if (open) detail.innerHTML = renderToolDetail(t);
+  }
+
+  // ── Steps group — persistent, collapsed record of a turn's tool work ───
+  function buildToolGroup(details, turnMs) {
+    const group = document.createElement('div');
+    group.className = 'tool-group';
+    const fails = details.filter(t => t.status === 'failed').length;
+    const header = document.createElement('div');
+    header.className = 'tool-group-header';
+    header.innerHTML =
+      '<span class="tool-group-chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+      '<span class="tool-group-count">' + details.length + (details.length === 1 ? ' step' : ' steps') + '</span>' +
+      (fails ? '<span class="tool-group-fail">' + fails + ' failed</span>' : '') +
+      (turnMs ? '<span class="tool-group-time">' + fmtDuration(turnMs) + '</span>' : '');
+    const list = document.createElement('div');
+    list.className = 'tool-group-list';
+    header.addEventListener('click', () => {
+      const open = group.classList.toggle('expanded');
+      if (open && !list.childElementCount) {
+        for (const t of details) list.appendChild(buildGroupItem(t));
+      }
+    });
+    group.appendChild(header);
+    group.appendChild(list);
+    return group;
+  }
+
+  function buildGroupItem(t) {
+    const failed = t.status === 'failed';
+    const completed = t.status === 'completed';
+    const item = document.createElement('div');
+    item.className = 'tool-item';
+    const row = document.createElement('div');
+    row.className = 'tool-row ' + (failed ? 'failed' : 'done');
+    row.innerHTML =
+      '<span class="tool-kind ' + (KIND_ICONS[t.kind] ? t.kind : 'other') + '">' + kindIcon(t.kind) + '</span>' +
+      '<span class="tool-title">' + escapeHtml(t.title) + '</span>' +
+      // A tool still 'running' at turn end was interrupted — no duration, no mark.
+      '<span class="tool-time">' + (completed || failed ? fmtDuration(t.duration || 0) : '—') + '</span>' +
+      (failed ? '<span class="tool-fail">' + ICON_X_CIRCLE + '</span>'
+              : completed ? '<span class="tool-check">' + ICON_CHECK + '</span>' : '');
+    const detail = document.createElement('div');
+    detail.className = 'tool-detail';
+    row.addEventListener('click', () => toggleToolDetail(item, detail, t));
+    item.appendChild(row);
+    item.appendChild(detail);
+    return item;
   }
 
   function tickActivity(s) {
@@ -3588,12 +3605,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return;
     }
     s.toolCount++;
-    s.toolDetails.push({ id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null });
+    const d = { id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null };
+    s.toolDetails.push(d);
+    const item = document.createElement('div');
+    item.className = 'tool-item';
     const row = document.createElement('div');
-    row.className = 'tool-row';
+    row.className = 'tool-row running';
     const icon = document.createElement('span');
-    icon.className = 'tool-kind ' + kind;
-    icon.textContent = kindLabel[kind] || '·';
+    icon.className = 'tool-kind ' + (KIND_ICONS[kind] ? kind : 'other');
+    icon.innerHTML = kindIcon(kind);
     const ttl = document.createElement('span');
     ttl.className = 'tool-title';
     ttl.textContent = title;
@@ -3603,12 +3623,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     row.appendChild(icon);
     row.appendChild(ttl);
     row.appendChild(tm);
-    row.addEventListener('click', () => {
-      const detail = s.toolDetails[s.toolRows[id].idx];
-      if (detail) showSingleToolModal(sid, detail);
-    });
-    s.thinking.appendChild(row);
-    s.toolRows[id] = { el: row, startTime: Date.now(), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
+    const detail = document.createElement('div');
+    detail.className = 'tool-detail';
+    row.addEventListener('click', () => toggleToolDetail(item, detail, d));
+    item.appendChild(row);
+    item.appendChild(detail);
+    s.thinking.appendChild(item);
+    s.toolRows[id] = { el: row, item, detail, startTime: Date.now(), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
+    s.runningTools++;
+    syncFeed(s);
     if (sid === activeSid) scrollToBottom();
   };
 
@@ -3618,43 +3641,44 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (s.suppressedToolIds && s.suppressedToolIds.has(id)) return;
     const t = s.toolRows[id];
     if (!t) return;
+    const d = s.toolDetails[t.idx];
     if (title) {
       t.el.querySelector('.tool-title').textContent = title;
-      s.toolDetails[t.idx].title = title;
+      d.title = title;
     }
     if (rawOutput !== undefined && rawOutput !== null) {
-      s.toolDetails[t.idx].rawOutput = rawOutput;
+      d.rawOutput = rawOutput;
     }
-    if (status === 'completed') {
+    if ((status === 'completed' || status === 'failed') && !t.finished) {
       t.finished = true;
-      t.el.classList.add('done');
-      const duration = Date.now() - t.startTime;
-      t.timerEl.textContent = fmtElapsed(duration);
-      s.toolDetails[t.idx].status = 'completed';
-      s.toolDetails[t.idx].duration = duration;
-      const check = document.createElement('span');
-      check.className = 'tool-check';
-      check.innerHTML = ICON_CHECK;
-      t.timerEl.replaceWith(check);
-    } else if (status === 'failed') {
-      t.finished = true;
-      t.el.classList.add('failed');
-      s.toolDetails[t.idx].status = 'failed';
-      s.toolDetails[t.idx].duration = Date.now() - t.startTime;
-      const fail = document.createElement('span');
-      fail.className = 'tool-fail';
-      fail.innerHTML = ICON_X_CIRCLE;
-      t.timerEl.replaceWith(fail);
+      s.runningTools = Math.max(0, s.runningTools - 1);
+      t.el.classList.remove('running');
+      d.status = status;
+      d.duration = Date.now() - t.startTime;
+      t.timerEl.textContent = fmtDuration(d.duration);
+      const mark = document.createElement('span');
+      if (status === 'completed') {
+        t.el.classList.add('done');
+        mark.className = 'tool-check';
+        mark.innerHTML = ICON_CHECK;
+      } else {
+        t.el.classList.add('failed');
+        mark.className = 'tool-fail';
+        mark.innerHTML = ICON_X_CIRCLE;
+      }
+      t.el.appendChild(mark);
+      syncFeed(s);
     }
-    // If modal is open watching this specific tool live, refresh it.
-    refreshLiveModalRow(sid, s.toolDetails[t.idx]);
+    // Inline detail open on a live row — refresh so output lands as it arrives.
+    if (t.item.classList.contains('expanded')) {
+      t.detail.innerHTML = renderToolDetail(d);
+    }
   };
 
   window.__setThinking = function(sid, on) {
     const s = sessions.get(sid);
     if (!s) return;
     s.isThinking = on;
-    s.thinking.className = on ? 'visible' : '';
     if (sid === activeSid) {
       sendBtn.classList.toggle('stop-mode', on);
       sendBtn.title = on ? 'Stop' : 'Send (Return)';
@@ -3668,9 +3692,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.activityStart = Date.now();
       const hdr = document.createElement('div');
       hdr.className = 'activity-header';
-      hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span><span class="activity-elapsed">0s</span>';
+      hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span>' +
+        '<span class="activity-label">Working…</span>' +
+        '<span class="activity-elapsed">0s</span>';
       s.thinking.appendChild(hdr);
       s.activityTimer = setInterval(() => tickActivity(s), 1000);
+      syncFeed(s);
       if (sid === activeSid) scrollToBottom();
     } else {
       // Terminal event for this prompt (Done/Cancelled/Error path via main.rs).
@@ -3679,15 +3706,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.busy = false;
       const savedToolCount = s.toolCount;
       const savedToolDetails = [...s.toolDetails];
+      const turnMs = s.activityStart ? Date.now() - s.activityStart : 0;
       clearActivity(s);
-      // Synthesize an empty bubble for tool-only turns — otherwise the work
-      // disappears with the activity feed and there's no record of it.
+      syncFeed(s);
+      // Synthesize a bubble for tool-only turns — finishAgentBubble keeps the
+      // steps group as the record and hides the empty bubble itself.
       if (!s.currentAgentBubble && savedToolCount > 0) {
         s.currentAgentBubble = startAgentBubble(s);
         s.currentAgentRaw = '';
       }
       if (s.currentAgentBubble) {
-        finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails);
+        finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails, turnMs);
         s.currentAgentBubble = null;
         s.currentAgentRaw = '';
       }
@@ -3704,8 +3733,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Replay persisted messages on cold-start. Rust calls this once per session
   // on sidebar bootstrap with the full message log restored from disk.
   // Entries: { role: 'user'|'agent'|'error'|'ui', text: string, ts?: number,
-  //            a2ui?: <envelope-body> }. Skips toolDetails/images — those
-  // aren't persisted (live-only).
+  //            a2ui?: <envelope-body>, tools?: [tool records], turn_ms?: number }.
+  // Agent turns rebuild their steps group from `tools`; inline images are
+  // live-only and skipped.
   window.__replayMessages = function(sid, msgs) {
     const s = sessions.get(sid);
     if (!s || !Array.isArray(msgs) || msgs.length === 0) return;
@@ -3720,7 +3750,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (!bubble) continue;
         const cmdObj = tryParseCommandJson(text);
         bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
-        finishAgentBubble(s, bubble, text, 0, []);
+        // Persisted snake_case tool records → live detail shape.
+        const tools = Array.isArray(m.tools) ? m.tools.map(t => ({
+          kind: t.kind,
+          title: t.title || '',
+          status: t.status,
+          duration: t.duration_ms || 0,
+          rawInput: t.raw_input != null ? t.raw_input : null,
+          locations: Array.isArray(t.locations) ? t.locations : [],
+          rawOutput: t.raw_output != null ? t.raw_output : null
+        })) : [];
+        finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0);
       } else if (role === 'ui' && m && m.a2ui) {
         // Rebuild the A2UI bubble from the persisted envelope body. Replays
         // are ghosts (no live poll) and anchor on the persisted creation ts
@@ -4117,112 +4157,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     fsExit.style.display  = on ? '' : 'none';
     fsBtn.title = on ? 'Exit fullscreen (⌘⇧Return)' : 'Toggle fullscreen (⌘⇧Return)';
   };
-
-  // ── Tool Details Modal ───────────────────────────────────────────────────
-  const toolModal = document.getElementById('tool-modal');
-  const toolModalBody = toolModal.querySelector('.modal-body');
-  const toolModalClose = toolModal.querySelector('.modal-close');
-
-  // When modal shows a single live tool, track its id so __toolUpdate can refresh it.
-  let liveModalSid = null;
-  let liveModalToolId = null;
-
-  function buildModalRow(t, autoExpand) {
-    const row = document.createElement('div');
-    row.className = 'modal-tool-row';
-    if (autoExpand) row.classList.add('expanded');
-    row.dataset.id = t.id;
-    row.innerHTML = `
-      <div class="modal-tool-header">
-        <span class="modal-tool-kind ${t.kind}">${kindLabel[t.kind] || '·'}</span>
-        <span class="modal-tool-title">${escapeHtml(t.title)}</span>
-        <span class="modal-tool-status ${t.status}">${t.status}</span>
-        <span class="modal-tool-duration">${t.duration ? fmtElapsed(t.duration) : '-'}</span>
-        <span class="modal-tool-chevron">▶</span>
-      </div>
-      <div class="modal-tool-details">
-        ${buildToolDetails(t)}
-      </div>
-    `;
-    row.querySelector('.modal-tool-header').addEventListener('click', () => {
-      row.classList.toggle('expanded');
-    });
-    return row;
-  }
-
-  function showToolModal(details) {
-    liveModalSid = null;
-    liveModalToolId = null;
-    const list = toolModal.querySelector('.modal-tools-list');
-    list.innerHTML = '';
-    for (const t of details) {
-      list.appendChild(buildModalRow(t, false));
-    }
-    toolModal.classList.add('show');
-  }
-
-  // Open modal focused on one specific tool (live or finished).
-  function showSingleToolModal(sid, toolDetail) {
-    liveModalSid = toolDetail.status === 'running' ? sid : null;
-    liveModalToolId = toolDetail.status === 'running' ? toolDetail.id : null;
-    const list = toolModal.querySelector('.modal-tools-list');
-    list.innerHTML = '';
-    list.appendChild(buildModalRow(toolDetail, true));
-    toolModal.classList.add('show');
-  }
-
-  // Refresh the modal row when a live tool updates.
-  function refreshLiveModalRow(sid, toolDetail) {
-    if (liveModalSid !== sid || liveModalToolId !== toolDetail.id) return;
-    const list = toolModal.querySelector('.modal-tools-list');
-    const existing = list.querySelector('.modal-tool-row');
-    if (!existing) return;
-    const wasExpanded = existing.classList.contains('expanded');
-    const fresh = buildModalRow(toolDetail, wasExpanded);
-    list.replaceChild(fresh, existing);
-    // Once the tool finishes, stop tracking live updates.
-    if (toolDetail.status !== 'running') {
-      liveModalSid = null;
-      liveModalToolId = null;
-    }
-  }
-
-  function formatJson(val) {
-    if (val === null || val === undefined) return null;
-    try { return JSON.stringify(val, null, 2); } catch(e) { return String(val); }
-  }
-
-  function buildToolDetails(t) {
-    let html = '';
-    if (t.locations && t.locations.length > 0) {
-      html += '<div class="detail-section"><div class="detail-section-title">Locations</div>';
-      for (const l of t.locations) {
-        html += `<div class="detail-location">${escapeHtml(l)}</div>`;
-      }
-      html += '</div>';
-    }
-    const inputJson = formatJson(t.rawInput);
-    if (inputJson) {
-      html += '<div class="detail-section"><div class="detail-section-title">Input</div><pre class="detail-code">' + escapeHtml(inputJson) + '</pre></div>';
-    }
-    const outputJson = formatJson(t.rawOutput);
-    if (outputJson) {
-      html += '<div class="detail-section"><div class="detail-section-title">Output</div><pre class="detail-code">' + escapeHtml(outputJson) + '</pre></div>';
-    }
-    return html;
-  }
-
-  function hideToolModal() {
-    toolModal.classList.remove('show');
-  }
-
-  toolModalClose.addEventListener('click', hideToolModal);
-  toolModal.addEventListener('click', e => {
-    if (e.target === toolModal) hideToolModal();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && toolModal.classList.contains('show')) hideToolModal();
-  });
 
   // Tab / Shift+Tab fallback for when focus is NOT in the prompt input
   // (e.g. user clicked a session tab header). The textarea's own keydown

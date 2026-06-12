@@ -225,10 +225,28 @@ fn ai_prompt_history_path() -> PathBuf {
 
 // ── ACP chat history persistence ──────────────────────────────────────────────
 // Persists every assistant session (id, title, tag, optional ACP resume id) and
-// its message log (user prompts, agent responses, errors) so the sidebar can
-// be restored verbatim across browser restarts. Tool details and inline images
-// are intentionally NOT persisted — they bloat the file and can't be replayed
-// faithfully (durations are stale, tool buttons are inert after restart).
+// its message log (user prompts, agent responses with their tool runs, errors)
+// so the sidebar can be restored verbatim across browser restarts. Inline
+// images stay live-only; tool input/output payloads are capped at persist time
+// so the history file stays small.
+
+/// One tool run inside an agent turn. Persisted so the sidebar's steps group
+/// can be rebuilt (and re-inspected) after a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpToolRecord {
+    pub kind: String,
+    pub title: String,
+    /// "completed" | "failed" | "running" (= interrupted by cancel/restart)
+    pub status: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_output: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpMessage {
@@ -244,6 +262,13 @@ pub struct AcpMessage {
     /// surface bubble on cold-start. None for all other roles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2ui: Option<serde_json::Value>,
+    /// Tool runs of this agent turn (role="agent" only) — drives the steps
+    /// group on replay. Empty for other roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AcpToolRecord>,
+    /// Wall-clock duration of the whole turn in ms (role="agent" only).
+    #[serde(default)]
+    pub turn_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
