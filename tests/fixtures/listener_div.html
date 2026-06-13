@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Listener Div</title>
+</head>
+<body>
+  <h1>Listener Div Fixture</h1>
+  <!-- Plain div, interactive ONLY via addEventListener('click').
+       Must show up in browser_snapshot with role "clickable". -->
+  <div id="ld">Listener Div Target</div>
+  <div id="status">unclicked</div>
+  <script>
+    document.getElementById('ld').addEventListener('click', function () {
+      document.getElementById('status').textContent = 'div-clicked';
+    });
+  </script>
+</body>
+</html>

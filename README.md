@@ -132,28 +132,34 @@ Claude Desktop / octomind / any MCP client
 
 | Tool | What it does |
 |------|--------------|
-| `browser_navigate` | Navigate to a URL — always in the background (new tab, or in-place via `tab_id`) |
+| `browser_navigate` | Navigate to a URL — always in the background (new tab, or in-place via `tab_id`); never steals focus |
 | `browser_go_back` | Go back in history |
 | `browser_go_forward` | Go forward in history |
 | `browser_reload` | Reload current page |
-| `browser_wait` | Wait for page load to complete |
+| `browser_wait` | Wait for load / SPA readiness / a CSS selector to appear |
 | `browser_get_tabs` | List all open tabs with IDs, titles, URLs |
-| `browser_get_current_tab` | Get the active tab's ID |
-| `browser_switch_tab` | Switch to a tab by ID |
+| `browser_get_current_tab` | Get the tab the user is viewing |
+| `browser_switch_tab` | Show a tab to the user (the only tool that changes focus) |
 | `browser_close_tab` | Close a tab by ID |
+| `browser_snapshot` | Map of interactive elements with `@N` refs — pierces iframes, shadow DOM, and listener-only clickables |
 | `browser_get_page_info` | Get title, URL, meta description |
 | `browser_get_page_content` | Get page text content (innerText) |
-| `browser_execute_js` | Run arbitrary JavaScript in the page |
-| `browser_click` | Click an element by CSS selector |
-| `browser_type` | Type text into an input by CSS selector |
-| `browser_scroll` | Scroll the page (pixels or to element) |
-| `browser_press_key` | Press a key (e.g., Enter, Tab, Escape) |
-| `browser_select_option` | Select an option in a `<select>` element |
+| `browser_execute_js` | Run JavaScript in the page (Promises are awaited) |
+| `browser_click` | Click an element — auto-retries until present, stable, and unobstructed; reports what covers it |
+| `browser_type` | Set an input/textarea/contenteditable value (React-safe) |
+| `browser_hover` | Hover with full pointer + mouse event sequence |
+| `browser_scroll` | Scroll the window, or an element's scrollable container via `selector` |
+| `browser_press_key` | Press a key; Enter on a form input submits like a real keypress |
+| `browser_select_option` | Select an option in a `<select>` by value or label |
 | `browser_screenshot` | Take a screenshot (`full_page: true` for entire page) |
+| `browser_console_messages` | Recent console output + JS errors of the page |
+| `browser_network_requests` | Recent fetch/XHR activity with statuses and timings |
+| `browser_handle_dialog` | Arm auto-answers for upcoming `alert`/`confirm`/`prompt` dialogs |
+| `browser_upload_file` | Arm the next file chooser with local file paths |
 | `browser_get_history` | Get browsing history entries |
 | `browser_get_playing_tabs` | List tabs currently playing audio/video |
 
-Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
+Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch. Set `OCTOWEB_MCP_PORT` / `OCTOWEB_CONFIG_DIR` to run an isolated second instance (e.g. for the e2e suite: `python3 test_mcp.py --mcp-url http://127.0.0.1:3435/mcp`).
 
 ### Using octomind as the MCP client
 

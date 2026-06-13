@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Select Option</title>
+</head>
+<body>
+  <h1>Select Option Fixture</h1>
+  <select id="sel">
+    <option value="alpha">Alpha</option>
+    <option value="beta">Beta</option>
+    <option value="gamma">Gamma</option>
+  </select>
+  <div id="status">none</div>
+  <script>
+    document.getElementById('sel').addEventListener('change', function (e) {
+      document.getElementById('status').textContent = e.target.value;
+    });
+  </script>
+</body>
+</html>

@@ -673,7 +673,7 @@ def snapshot_scroll_header():
         lines = [ln for ln in snap.splitlines() if ln.strip()]
         expect(lines, "snapshot is empty")
         header = lines[0].lower()
-        expect("scroll" in header or "height" in header,
+        expect(re.search(r"viewport \d+-\d+ of \d+px", header) is not None,
                f"snapshot header lacks scroll/height info: {lines[0]!r}")
 
 

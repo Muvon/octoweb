@@ -65,9 +65,21 @@ pub fn load_session() -> Option<SessionData> {
     serde_json::from_str(&raw).ok()
 }
 
-fn session_path() -> PathBuf {
+/// Base directory for all persisted state (config, session, history, ...).
+/// `OCTOWEB_CONFIG_DIR` overrides the platform default — lets isolated
+/// instances run side-by-side (e2e test profile next to the daily browser).
+pub fn base_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OCTOWEB_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+}
+
+fn session_path() -> PathBuf {
+    base_dir()
         .join("octoweb")
         .join("session.json")
 }
@@ -98,8 +110,7 @@ pub fn load_favicons() -> std::collections::HashMap<String, String> {
 }
 
 fn favicons_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("favicons.json")
 }
@@ -138,8 +149,7 @@ pub fn load_history() -> Vec<crate::browser::HistoryEntry> {
 }
 
 fn history_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("history.json")
 }
@@ -176,8 +186,7 @@ pub fn load_prompt_history() -> Vec<String> {
 }
 
 fn prompt_history_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("prompt_history.json")
 }
@@ -217,8 +226,7 @@ pub fn load_ai_prompt_history() -> Vec<String> {
 }
 
 fn ai_prompt_history_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("ai_prompt_history.json")
 }
@@ -320,8 +328,7 @@ pub fn load_acp_history() -> Option<AcpHistory> {
 }
 
 fn acp_history_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("acp_history.json")
 }
@@ -451,8 +458,7 @@ impl Config {
 }
 
 fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    base_dir()
         .join("octoweb")
         .join("config.toml")
 }

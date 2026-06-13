@@ -60,15 +60,19 @@ Two ACP connections run independently:
 
 ### MCP — Browser Control Server (`mcp.rs`)
 
-HTTP JSON-RPC on `localhost:3434/mcp`. External AI agents control the browser via 20 tools:
+HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 25 tools:
 
 | Category | Tools |
 |----------|-------|
-| Navigation | `browser_navigate`, `browser_go_back`, `browser_go_forward`, `browser_reload`, `browser_wait` |
+| Navigation | `browser_navigate` (always background), `browser_go_back`, `browser_go_forward`, `browser_reload`, `browser_wait` |
 | Tab management | `browser_get_tabs`, `browser_get_current_tab`, `browser_switch_tab`, `browser_close_tab` |
-| Page content | `browser_get_page_info`, `browser_get_page_content`, `browser_execute_js`, `browser_screenshot` |
-| Interaction | `browser_click`, `browser_type`, `browser_scroll`, `browser_press_key`, `browser_select_option` |
+| Page content | `browser_snapshot`, `browser_get_page_info`, `browser_get_page_content`, `browser_execute_js`, `browser_screenshot` |
+| Interaction | `browser_click`, `browser_hover`, `browser_type`, `browser_scroll`, `browser_press_key`, `browser_select_option` |
+| Dialogs & uploads | `browser_handle_dialog`, `browser_upload_file` (arm before the triggering click) |
+| Diagnostics | `browser_console_messages`, `browser_network_requests` |
 | History & media | `browser_get_history`, `browser_get_playing_tabs` |
+
+Interactions run through an actionability harness (`dom_actions.rs`): resolve with retry, bounding-box stability, occlusion detection, pointer+mouse event sequences. Async scripts evaluate via `callAsyncJavaScript` (`async_eval.rs`) so Promises are actually awaited. End-to-end suite: `test_mcp.py` + `tests/fixtures/` (28 tests against a live instance).
 
 **Architecture:**
 - `McpServer` tool handlers → `McpCommand` enum → `mpsc` channel → main event loop

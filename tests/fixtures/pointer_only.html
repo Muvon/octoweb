@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Pointer Only Button</title>
+</head>
+<body>
+  <h1>Pointer Only Fixture</h1>
+  <!-- No 'click' listener at all: only pointerdown/pointerup. -->
+  <button id="ptr-btn">Pointer Button</button>
+  <div id="status">unclicked</div>
+  <script>
+    var down = false;
+    var btn = document.getElementById('ptr-btn');
+    btn.addEventListener('pointerdown', function () { down = true; });
+    btn.addEventListener('pointerup', function () {
+      if (down) document.getElementById('status').textContent = 'pointer-activated';
+    });
+  </script>
+</body>
+</html>

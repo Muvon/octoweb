@@ -559,8 +559,7 @@ fn mod_prefix(mods: u8) -> String {
 }
 
 fn path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    crate::config::base_dir()
         .join("octoweb")
         .join("keybindings.json")
 }

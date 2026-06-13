@@ -21,8 +21,7 @@ use std::time::SystemTime;
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
 fn log_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    crate::config::base_dir()
         .join("octoweb")
 }
 

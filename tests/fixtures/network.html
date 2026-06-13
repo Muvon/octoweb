@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Network Requests</title>
+</head>
+<body>
+  <h1>Network Requests Fixture</h1>
+  <script>
+    var done = 0;
+    function markDone() {
+      if (++done === 2) {
+        var d = document.createElement('div');
+        d.id = 'done';
+        d.textContent = 'done';
+        document.body.appendChild(d);
+      }
+    }
+    fetch('/api/data?src=fetch').then(function (r) { return r.json(); }).then(markDone);
+    var x = new XMLHttpRequest();
+    x.open('GET', '/api/data?src=xhr');
+    x.onload = markDone;
+    x.send();
+  </script>
+</body>
+</html>

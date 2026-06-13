@@ -507,13 +507,36 @@ pub struct McpServer {
     state: McpState,
 }
 
+/// Tool-level error: model-visible (`isError` result), unlike protocol
+/// errors which many clients surface only as opaque transport failures.
+/// Domain failures (tab gone, element missing, occluded, …) are part of the
+/// browsing loop and the AI must be able to read and react to them.
+fn err_result(msg: String) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(msg)])
+}
+
+/// Unwrap a browser-domain `Result` inside a tool body: `Ok(v)` yields `v`,
+/// `Err(msg)` returns a model-visible tool error from the enclosing tool fn.
+macro_rules! browser_try {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(msg) => return Ok(err_result(msg)),
+        }
+    };
+}
+
 /// Helpers (separate impl block so the #[tool_router] macro doesn't interfere).
 impl McpServer {
     /// Send a command to the main event loop and wait for the response (30 s timeout).
+    ///
+    /// Outer error = infrastructure failure (channel/timeout) → protocol error.
+    /// Inner error = browser-domain failure → tools surface it via
+    /// `browser_try!` as a model-visible `isError` result.
     async fn send_command<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, String>>) -> McpCommand,
-    ) -> Result<T, McpError> {
+    ) -> Result<Result<T, String>, McpError> {
         let (tx, rx) = oneshot::channel();
         self.state
             .command_tx
@@ -539,8 +562,7 @@ impl McpServer {
                         .to_string(),
                     None,
                 )
-            })?
-            .map_err(|e| McpError::internal_error(e, None))
+            })
     }
 }
 
@@ -564,13 +586,13 @@ impl McpServer {
         let in_place = req.tab_id.is_some();
         tracing::debug!(url = %req.url, ?req.tab_id, "MCP browser_navigate");
 
-        let tab_id = self
+        let tab_id = browser_try!(self
             .send_command(|tx| McpCommand::Navigate {
                 url: req.url,
                 tab_id: req.tab_id,
                 response: tx,
             })
-            .await?;
+            .await?);
 
         let result = serde_json::json!({
             "tab_id": tab_id,
@@ -591,11 +613,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::GoBack {
+        browser_try!(self.send_command(|tx| McpCommand::GoBack {
             tab_id: req.tab_id,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(
             "Navigated back",
         )]))
@@ -606,11 +628,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::GoForward {
+        browser_try!(self.send_command(|tx| McpCommand::GoForward {
             tab_id: req.tab_id,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(
             "Navigated forward",
         )]))
@@ -621,11 +643,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::Reload {
+        browser_try!(self.send_command(|tx| McpCommand::Reload {
             tab_id: req.tab_id,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(
             "Page reloaded",
         )]))
@@ -642,14 +664,14 @@ impl McpServer {
         // Cap below send_command's 30 s ceiling so a maxed-out wait returns a
         // clean "timeout" instead of racing the generic MCP-timeout error.
         let timeout_ms = req.timeout_ms.unwrap_or(10_000).min(25_000);
-        let result = self
+        let result = browser_try!(self
             .send_command(|tx| McpCommand::Wait {
                 tab_id: req.tab_id,
                 event,
                 timeout_ms,
                 response: tx,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -659,9 +681,9 @@ impl McpServer {
         description = "List all open tabs. Returns [{id, title, url, is_active, is_playing_audio}]. is_active marks the visible tab. Use the IDs to target other tools."
     )]
     async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
-        let tabs = self
+        let tabs = browser_try!(self
             .send_command(|tx| McpCommand::GetTabs { response: tx })
-            .await?;
+            .await?);
         let json = serde_json::to_string(&tabs)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -671,9 +693,9 @@ impl McpServer {
         description = "Get the tab the user is currently viewing. Use this to know what's on screen right now. For background tabs, use browser_get_tabs instead."
     )]
     async fn browser_get_current_tab(&self) -> Result<CallToolResult, McpError> {
-        let tab = self
+        let tab = browser_try!(self
             .send_command(|tx| McpCommand::GetCurrentTab { response: tx })
-            .await?;
+            .await?);
         let json = serde_json::to_string(&tab)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -686,11 +708,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<SwitchTabRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::SwitchTab {
+        browser_try!(self.send_command(|tx| McpCommand::SwitchTab {
             tab_id: req.tab_id,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Switched to tab {}",
             req.tab_id
@@ -704,11 +726,11 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<CloseTabRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::CloseTab {
+        browser_try!(self.send_command(|tx| McpCommand::CloseTab {
             tab_id: req.tab_id,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Closed tab {}",
             req.tab_id
@@ -722,13 +744,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let info = self
+        let info = browser_try!(self
             .send_command(|tx| McpCommand::GetPageInfo {
                 tab_id: req.tab_id,
                 response: tx,
                 is_retry: false,
             })
-            .await?;
+            .await?);
         let json = serde_json::to_string(&info)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -741,13 +763,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let content = self
+        let content = browser_try!(self
             .send_command(|tx| McpCommand::GetPageContent {
                 tab_id: req.tab_id,
                 response: tx,
                 is_retry: false,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
@@ -758,13 +780,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<SnapshotRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self
+        let snapshot = browser_try!(self
             .send_command(|tx| McpCommand::Snapshot {
                 tab_id: req.tab_id,
                 response: tx,
                 is_retry: false,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(snapshot)]))
     }
 
@@ -775,13 +797,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<ExecuteJsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let value = self
+        let value = browser_try!(self
             .send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script: req.script,
                 response: tx,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(value)]))
     }
 
@@ -792,13 +814,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<ScreenshotRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let b64_png = self
+        let b64_png = browser_try!(self
             .send_command(|tx| McpCommand::Screenshot {
                 tab_id: req.tab_id,
                 full_page: req.full_page.unwrap_or(false),
                 response: tx,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::image(
             b64_png,
             "image/png",
@@ -814,13 +836,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<ClickRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = self
+        let found = browser_try!(self
             .send_command(|tx| McpCommand::Click {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 response: tx,
             })
-            .await?;
+            .await?);
         if found {
             Ok(CallToolResult::success(vec![Content::text(
                 "Element clicked successfully",
@@ -840,13 +862,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<HoverRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = self
+        let found = browser_try!(self
             .send_command(|tx| McpCommand::Hover {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 response: tx,
             })
-            .await?;
+            .await?);
         if found {
             Ok(CallToolResult::success(vec![Content::text(
                 "Element hovered successfully",
@@ -866,14 +888,14 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<TypeRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = self
+        let found = browser_try!(self
             .send_command(|tx| McpCommand::Type {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 text: req.text,
                 response: tx,
             })
-            .await?;
+            .await?);
         if found {
             Ok(CallToolResult::success(vec![Content::text(
                 "Text typed successfully",
@@ -893,14 +915,14 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<ScrollRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.send_command(|tx| McpCommand::Scroll {
+        browser_try!(self.send_command(|tx| McpCommand::Scroll {
             tab_id: req.tab_id,
             direction: req.direction.clone(),
             pixels: req.pixels,
             selector: req.selector,
             response: tx,
         })
-        .await?;
+        .await?);
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Scrolled {}",
             req.direction
@@ -914,7 +936,7 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<PressKeyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = self
+        let found = browser_try!(self
             .send_command(|tx| McpCommand::PressKey {
                 tab_id: req.tab_id,
                 key: req.key.clone(),
@@ -922,7 +944,7 @@ impl McpServer {
                 modifiers: req.modifiers.unwrap_or_default(),
                 response: tx,
             })
-            .await?;
+            .await?);
         if found {
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Pressed key: {}",
@@ -943,14 +965,14 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<SelectOptionRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = self
+        let found = browser_try!(self
             .send_command(|tx| McpCommand::SelectOption {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 value: req.value.clone(),
                 response: tx,
             })
-            .await?;
+            .await?);
         if found {
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Selected option: {}",
@@ -971,12 +993,12 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<GetHistoryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let entries = self
+        let entries = browser_try!(self
             .send_command(|tx| McpCommand::GetHistory {
                 limit: req.limit,
                 response: tx,
             })
-            .await?;
+            .await?);
         let json = serde_json::to_string(&entries)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -984,9 +1006,9 @@ impl McpServer {
 
     #[tool(description = "Tabs currently playing audio or video.")]
     async fn browser_get_playing_tabs(&self) -> Result<CallToolResult, McpError> {
-        let tabs = self
+        let tabs = browser_try!(self
             .send_command(|tx| McpCommand::GetPlayingTabs { response: tx })
-            .await?;
+            .await?);
         let json = serde_json::to_string(&tabs)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1011,13 +1033,13 @@ impl McpServer {
         };
         let script =
             format!("JSON.stringify((window.__octoweb_console||[]){filter}.slice(-{limit}))");
-        let value = self
+        let value = browser_try!(self
             .send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script,
                 response: tx,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(
             sanitize_json_entries(&value, "text", sanitize::sanitize_text),
         )]))
@@ -1039,13 +1061,13 @@ impl McpServer {
             None => String::new(),
         };
         let script = format!("JSON.stringify((window.__octoweb_net||[]){filter}.slice(-{limit}))");
-        let value = self
+        let value = browser_try!(self
             .send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script,
                 response: tx,
             })
-            .await?;
+            .await?);
         Ok(CallToolResult::success(vec![Content::text(
             sanitize_json_entries(&value, "url", sanitize::sanitize_url),
         )]))
@@ -1220,15 +1242,21 @@ pub fn spawn_mcp_server() -> McpHandle {
 
             let app = axum::Router::new().nest_service("/mcp", service);
 
-            let listener = match tokio::net::TcpListener::bind("127.0.0.1:3434").await {
+            // OCTOWEB_MCP_PORT override lets a second instance (e2e tests,
+            // isolated profiles) run beside the daily browser on 3434.
+            let port: u16 = std::env::var("OCTOWEB_MCP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3434);
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
                 Ok(l) => l,
                 Err(e) => {
-                    tracing::warn!(error = %e, "MCP HTTP server failed to bind");
+                    tracing::warn!(error = %e, port, "MCP HTTP server failed to bind");
                     return;
                 }
             };
 
-            tracing::info!("MCP HTTP server listening on http://127.0.0.1:3434/mcp");
+            tracing::info!("MCP HTTP server listening on http://127.0.0.1:{port}/mcp");
 
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!(error = %e, "MCP HTTP server error");

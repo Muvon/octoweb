@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Iframe Inner</title>
+</head>
+<body>
+  <button id="iframe-btn">Iframe Button</button>
+  <script>
+    // Same-origin: report the click to the parent document so the test can
+    // assert via execute_js in the top frame.
+    document.getElementById('iframe-btn').addEventListener('click', function () {
+      parent.document.getElementById('iframe-status').textContent = 'iframe-clicked';
+    });
+  </script>
+</body>
+</html>
