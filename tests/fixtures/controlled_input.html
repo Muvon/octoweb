@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Controlled Input</title>
+</head>
+<body>
+  <h1>Controlled Input Fixture</h1>
+  <!-- Simulates a React-style controlled input: component state is the only
+       source of truth. Every 100ms the input value is re-rendered from state,
+       so text set via the value property WITHOUT a dispatched 'input' event
+       gets wiped. Typed text survives only if the tool uses the native value
+       setter AND fires an 'input' event. -->
+  <input id="ctl" type="text">
+  <div id="mirror"></div>
+  <script>
+    var state = '';
+    var input = document.getElementById('ctl');
+    input.addEventListener('input', function (e) {
+      state = e.target.value;
+      input.value = state; // controlled re-render on every input event
+      document.getElementById('mirror').textContent = state;
+    });
+    setInterval(function () { input.value = state; }, 100); // periodic re-render from state
+  </script>
+</body>
+</html>

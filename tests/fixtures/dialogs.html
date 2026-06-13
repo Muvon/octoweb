@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Dialogs</title>
+</head>
+<body>
+  <h1>Dialogs Fixture</h1>
+  <!-- DANGER: these buttons open NATIVE modal dialogs. Tests must ALWAYS arm
+       browser_handle_dialog BEFORE clicking, or the app hangs on a modal. -->
+  <button id="confirm-btn">Open Confirm</button>
+  <button id="prompt-btn">Open Prompt</button>
+  <div id="confirm-result">none</div>
+  <div id="prompt-result">none</div>
+  <script>
+    document.getElementById('confirm-btn').addEventListener('click', function () {
+      document.getElementById('confirm-result').textContent =
+        confirm('Proceed?') ? 'accepted' : 'dismissed';
+    });
+    document.getElementById('prompt-btn').addEventListener('click', function () {
+      var v = prompt('Say something:');
+      document.getElementById('prompt-result').textContent = v === null ? 'null' : v;
+    });
+  </script>
+</body>
+</html>

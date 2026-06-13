@@ -42,8 +42,7 @@ pub fn to_json(slots: &QuickSlots) -> String {
 }
 
 fn slots_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    crate::config::base_dir()
         .join("octoweb")
         .join("quickslots.json")
 }

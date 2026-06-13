@@ -67,6 +67,28 @@ impl TabManager {
         self.active_id = Some(id);
         id
     }
+    /// Register a new tab WITHOUT making it active — MCP navigation must
+    /// never change which tab the user sees (is_active stays truthful for
+    /// browser_get_tabs / browser_get_current_tab and the sidebar highlight).
+    pub fn open_background(&mut self, url: String) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.tabs.push(Tab {
+            id,
+            title: String::new(),
+            url,
+            is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
+            last_active_at: Instant::now(),
+        });
+        // First tab ever: something must be active.
+        if self.active_id.is_none() {
+            self.active_id = Some(id);
+        }
+        id
+    }
+
     /// Register a new tab with a pre-filled title (used for session restore).
     pub fn open_with_title(&mut self, url: String, title: String) -> usize {
         let id = self.next_id;

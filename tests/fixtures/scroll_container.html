@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Scroll Container</title>
+</head>
+<body>
+  <h1>Scroll Container Fixture</h1>
+  <!-- Page itself is short; only #box scrolls. browser_scroll with a selector
+       inside #box must scroll #box, not the window. -->
+  <div id="box" style="height:200px;overflow:auto;border:1px solid #333">
+    <div id="inner" style="height:2000px">
+      <p id="inner-top">Top of inner content</p>
+    </div>
+  </div>
+</body>
+</html>

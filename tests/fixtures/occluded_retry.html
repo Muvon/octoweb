@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Occluded Retry</title>
+</head>
+<body>
+  <h1>Occluded Retry Fixture</h1>
+  <!-- Overlay removes itself after 800ms: click auto-retry must succeed. -->
+  <button id="target" onclick="document.getElementById('status').textContent='clicked'">Eventually Clickable</button>
+  <div id="status">unclicked</div>
+  <div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,255,0.3);z-index:9999"></div>
+  <script>
+    setTimeout(function () { document.getElementById('overlay').remove(); }, 800);
+  </script>
+</body>
+</html>

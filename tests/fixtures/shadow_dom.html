@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Shadow DOM</title>
+</head>
+<body>
+  <h1>Shadow DOM Fixture</h1>
+  <div id="host"></div>
+  <div id="status">unclicked</div>
+  <script>
+    var root = document.getElementById('host').attachShadow({ mode: 'open' });
+    var btn = document.createElement('button');
+    btn.id = 'shadow-btn';
+    btn.textContent = 'Shadow Button';
+    btn.addEventListener('click', function () {
+      document.getElementById('host').setAttribute('data-clicked', '1');
+      document.getElementById('status').textContent = 'shadow-clicked';
+    });
+    root.appendChild(btn);
+  </script>
+</body>
+</html>

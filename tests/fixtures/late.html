@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Late Element</title>
+</head>
+<body>
+  <h1>Late Element Fixture</h1>
+  <!-- #late appears 750ms after load. Used for both selector-resolve retry
+       on click and browser_wait with a CSS selector. #never never appears. -->
+  <div id="status">waiting</div>
+  <script>
+    setTimeout(function () {
+      var b = document.createElement('button');
+      b.id = 'late';
+      b.textContent = 'Late Button';
+      b.addEventListener('click', function () {
+        document.getElementById('status').textContent = 'late-clicked';
+      });
+      document.body.appendChild(b);
+    }, 750);
+  </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Console Messages</title>
+</head>
+<body>
+  <h1>Console Messages Fixture</h1>
+  <script>
+    console.log('fixture-log-message');
+    console.warn('fixture-warn-message');
+    console.error('fixture-error-message');
+    // Uncaught error 100ms after load: must surface via window.onerror capture.
+    setTimeout(function () { throw new Error('fixture-uncaught-error'); }, 100);
+  </script>
+</body>
+</html>

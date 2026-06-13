@@ -198,8 +198,12 @@ pub fn type_script(selector: &str, text: &str) -> String {
 pub fn press_key_script(selector: Option<&str>, key: &str, modifiers: &[String]) -> String {
     let has = |m: &str| modifiers.iter().any(|x| x == m).to_string();
     // Synthetic key events never trigger native default actions, so Enter on
-    // an <input> wouldn't submit its form. Emulate that one default unless a
-    // keydown handler called preventDefault.
+    // an <input> wouldn't submit its form. Emulate that default:
+    //  - keydown not prevented → submit immediately (native behavior).
+    //  - keydown prevented → the page claimed it, but some sites preventDefault
+    //    and then ignore untrusted events (DuckDuckGo). Wait 250 ms; if the page
+    //    visibly reacted (URL changed, network fired, form re-rendered) trust
+    //    it, otherwise force the submit.
     let act = r#"
     if (el.focus) try { el.focus(); } catch (e) {}
     var KEY = __KEY__;
@@ -208,8 +212,23 @@ pub fn press_key_script(selector: Option<&str>, key: &str, modifiers: &[String])
     var proceed = el.dispatchEvent(new W.KeyboardEvent('keydown', opts));
     if (KEY.length === 1) el.dispatchEvent(new W.KeyboardEvent('keypress', opts));
     el.dispatchEvent(new W.KeyboardEvent('keyup', opts));
-    if (KEY === 'Enter' && proceed && el.tagName === 'INPUT' && el.form) {
-      if (el.form.requestSubmit) el.form.requestSubmit(); else el.form.submit();
+    if (KEY === 'Enter' && el.tagName === 'INPUT' && el.form) {
+      var f = el.form;
+      if (proceed) {
+        if (f.requestSubmit) f.requestSubmit(); else f.submit();
+      } else {
+        var href = W.location.href;
+        var net = (W === window) ? (window.__octoweb_net || []) : [];
+        var n0 = net.length;
+        setTimeout(function () {
+          try {
+            if (W.location.href !== href) return;
+            if (net.length > n0) return;
+            if (!f.isConnected) return;
+            if (f.requestSubmit) f.requestSubmit(); else f.submit();
+          } catch (e) {}
+        }, 250);
+      }
     }
     __done('true');
 "#
