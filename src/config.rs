@@ -74,14 +74,11 @@ pub fn base_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
+    dirs::config_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")))
 }
 
 fn session_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("session.json")
+    base_dir().join("octoweb").join("session.json")
 }
 
 // ── Favicon cache ─────────────────────────────────────────────────────────────
@@ -110,9 +107,7 @@ pub fn load_favicons() -> std::collections::HashMap<String, String> {
 }
 
 fn favicons_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("favicons.json")
+    base_dir().join("octoweb").join("favicons.json")
 }
 
 // ── History persistence ────────────────────────────────────────────────────────
@@ -149,9 +144,7 @@ pub fn load_history() -> Vec<crate::browser::HistoryEntry> {
 }
 
 fn history_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("history.json")
+    base_dir().join("octoweb").join("history.json")
 }
 
 // ── Prompt history persistence ────────────────────────────────────────────────
@@ -186,9 +179,7 @@ pub fn load_prompt_history() -> Vec<String> {
 }
 
 fn prompt_history_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("prompt_history.json")
+    base_dir().join("octoweb").join("prompt_history.json")
 }
 
 // ── AI sidebar prompt history persistence ─────────────────────────────────────
@@ -226,9 +217,7 @@ pub fn load_ai_prompt_history() -> Vec<String> {
 }
 
 fn ai_prompt_history_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("ai_prompt_history.json")
+    base_dir().join("octoweb").join("ai_prompt_history.json")
 }
 
 // ── ACP chat history persistence ──────────────────────────────────────────────
@@ -328,9 +317,7 @@ pub fn load_acp_history() -> Option<AcpHistory> {
 }
 
 fn acp_history_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("acp_history.json")
+    base_dir().join("octoweb").join("acp_history.json")
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -458,7 +445,5 @@ impl Config {
 }
 
 fn config_path() -> PathBuf {
-    base_dir()
-        .join("octoweb")
-        .join("config.toml")
+    base_dir().join("octoweb").join("config.toml")
 }
