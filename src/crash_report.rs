@@ -21,8 +21,7 @@ use std::time::SystemTime;
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
 fn log_dir() -> PathBuf {
-    crate::config::base_dir()
-        .join("octoweb")
+    crate::config::base_dir().join("octoweb")
 }
 
 fn crash_log_path() -> PathBuf {

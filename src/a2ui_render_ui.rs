@@ -204,7 +204,9 @@ fn link_user_tools() {
     };
     for ent in entries.flatten() {
         let src = ent.path();
-        let Some(name) = src.file_name() else { continue };
+        let Some(name) = src.file_name() else {
+            continue;
+        };
         if name == "render_ui" {
             continue;
         }
