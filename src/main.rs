@@ -2115,6 +2115,32 @@ fn main() {
         }};
     }
 
+    /// Re-assert keyboard first-responder on the visible page WebView.
+    ///
+    /// `browser_win.set_focus()` only restores *window-level* key status. The
+    /// command palette (`overlay_win`) is a separate key window the user drives
+    /// by keyboard; once it closes, the page WebView is visible but is NOT the
+    /// first responder, so keystrokes land nowhere until the user clicks the
+    /// page. wry's `focus()` calls `makeFirstResponder:` on the WebView's
+    /// NSView, fixing keyboard-only navigation (palette / address bar). Skipped
+    /// when another surface legitimately owns input (sidebar, overlay,
+    /// settings/shortcuts panels) or the app isn't frontmost.
+    macro_rules! focus_active_webview {
+        () => {{
+            if is_app_active()
+                && !overlay_visible
+                && !settings_visible
+                && !shortcuts_visible
+                && !sidebar_owns_key.load(Ordering::Relaxed)
+            {
+                browser_win.set_focus();
+                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    let _ = wv.focus();
+                }
+            }
+        }};
+    }
+
     /// Refresh the overlay item list (if visible).
     macro_rules! refresh_overlay {
         () => {
@@ -4033,7 +4059,7 @@ fn main() {
                     inline_edit_response.clear();
                 }
                 if tab_id == active_wv_id {
-                    if is_app_active() { browser_win.set_focus(); }
+                    focus_active_webview!();
                     return;
                 }
                 switch_visible_tab!(tab_id);
@@ -4044,7 +4070,7 @@ fn main() {
                 sys_stats_mem.store(0, Ordering::Relaxed);
                 sys_stats_next_at = std::time::Instant::now();
                 let _ = address_bar_wv.evaluate_script("window.__sysStats && window.__sysStats(null, null)");
-                if is_app_active() { browser_win.set_focus(); }
+                focus_active_webview!();
             }
 
             // ── Close tab ─────────────────────────────────────────────────
@@ -5065,6 +5091,13 @@ fn main() {
                             }
                         }
                         pending_swap = None;
+                        // The page just became visible after a keyboard-driven
+                        // navigation (palette / address bar). The palette was the
+                        // key window; now that it's gone, hand keyboard
+                        // first-responder to the page so typing works without a
+                        // click. `browser_win.set_focus()` (in NavigateTo) only
+                        // set window-level key, not the view-level responder.
+                        focus_active_webview!();
                     }
                 }
                 if tab_id == active_wv_id {
