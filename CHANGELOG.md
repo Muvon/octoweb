@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.8.0] - 2026-06-15
+
+### 📋 Release Summary
+
+This release introduces a comprehensive overhaul of the user interface and an interactive agent surface system, featuring improved tool persistence, customizable keybindings, and native macOS fullscreen support (17433748, b950d73d, 92eebeaf, 3f7e99de). Significant enhancements were made to browser automation, MCP integration, and accessibility, including a new editable address bar and Web Speech API support (41f898a3, 3a880bda, 90d458f0, 6b4f14e9). Additionally, several bug fixes improve webview focus, layout stability, and overall system reliability (2f1290eb, 07ff2e89, fd941f93).
+
+
+### ✨ New Features & Enhancements
+
+- **mcp**: actionability harness, observability, dialogs/uploads, e2e suite `6b4f14e9`
+- **browser**: enhance MCP browser automation and observability `41f898a3`
+- **browser**: enhance navigation and interaction reliability `e644b298`
+- **ui**: overhaul visual styling and tool persistence `17433748`
+- **sandbox**: confine agent filesystem access to workspace `660a134a`
+- **keybindings**: implement configurable global shortcuts `b950d73d`
+- **ui**: change command palette shortcut to ⌘⇧P `b63c3832`
+- **mcp**: improve tab management and navigation `211e9a1f`
+- **sidebar**: add clickable tool rows and live modal updates `85cd136b`
+- **sidebar**: move input hints to placeholder `fb863cfe`
+- **address-bar**: implement editable URL and autocomplete `3a880bda`
+- **ui/core**: overhaul iconography and memory management `4f307771`
+- **web**: enable Web Speech API recognition `90d458f0`
+- **mcp**: add callback watchdogs and retry logic `a05af4cb`
+- **browser**: implement SPA readiness probe and stability monitoring `6e1450c2`
+- **ui**: implement robust A2UI surface routing and persistence `7b9cf9e3`
+- **macos**: implement native and sidebar fullscreen modes `92eebeaf`
+- **ui**: persist A2UI surface snapshots and improve markdown `4397a458`
+- **sidebar**: add rich UI renderers for slash commands `31a2f97f`
+- **sidebar**: implement v0.9 UI component specification `2b8b4d52`
+- **ui**: implement A2UI interactive agent surface system `3f7e99de`
+
+### 🔧 Improvements & Optimizations
+
+- unify formatting and improve readability `e526450f`
+- **github**: migrate rust jobs to shared workflow `f9fd4c24`
+- **release**: migrate to shared release workflow `8e1b0ef4`
+- **macos**: improve shortcut handling and cleanup `d77dbdd3`
+- **workflow**: migrate pr brief to reusable workflow `97cb24b3`
+- **readiness**: reformat rustdoc comments for clarity `1eee611d`
+- **sidebar**: modernize command output UI `de6e78c2`
+
+### 🐛 Bug Fixes & Stability
+
+- **ui**: restore keyboard focus to active webview `2f1290eb`
+- **ui**: set quickslots bar height to 36px `25d41d11`
+- **webview**: reset bounds when showing tabs `07ff2e89`
+- **ui**: improve inline edit positioning and layering `17e175e4`
+- **mcp**: clarify error for dropped browser calls `3792045c`
+- **ui**: prevent duplicate bubbles and preserve timestamps `fd941f93`
+- **ui**: improve out-of-band event handling and A2UI rendering `f89242ae`
+- **sidebar**: resolve scalar items in list templates `5398bb0a`
+
 ## [0.7.0] - 2026-05-14
 
 ### 📋 Release Summary
