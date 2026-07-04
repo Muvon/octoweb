@@ -624,6 +624,24 @@ pub fn escape_js_template(s: &str) -> String {
     out
 }
 
+/// Wrap a JS *expression* so its string result is well-formed UTF-16 before it
+/// leaves the page.
+///
+/// wry's `evaluate_script_with_callback` completion handler does
+/// `NSJSONSerialization::dataWithJSONObject(...).unwrap()` (wry 0.55
+/// `wkwebview/mod.rs:742`). `NSJSONSerialization` returns NSError 3852 ("data
+/// couldn't be written because of an error in the content of the data") for a
+/// string containing a *lone UTF-16 surrogate* — routine in `innerText` /
+/// element text on emoji-heavy pages. wry unwraps that Err and panics on the
+/// main thread *inside an Objective-C block*, which cannot unwind → `abort()`
+/// (whole-app crash). `String.prototype.toWellFormed()` (WebKit, Safari 17+)
+/// replaces lone surrogates with U+FFFD while preserving valid pairs, so the
+/// serializer never fails. Guarded so a non-string result or an older engine
+/// passes through unchanged.
+pub fn well_formed_js(expr: &str) -> String {
+    format!("(function(){{var v=({expr});return (typeof v==='string'&&v.toWellFormed)?v.toWellFormed():v;}})()")
+}
+
 /// Look up a cached favicon data-URI by domain extracted from the URL.
 pub fn cached_favicon<'a>(url: &str, favicons: &'a HashMap<String, String>) -> Option<&'a str> {
     let domain = extract_domain(url)?;

@@ -2829,7 +2829,7 @@ fn main() {
                     if let Some(wv) = tab_webviews.get(&active_wv_id) {
                         let lp = proxy.clone();
                         let _ = wv.evaluate_script_with_callback(
-                            "document.body ? document.body.innerText : ''",
+                            &webview_utils::well_formed_js("document.body ? document.body.innerText : ''"),
                             move |val| {
                                 let text = serde_json::from_str::<String>(&val).unwrap_or(val);
                                 let _ = lp.send_event(AppEvent::LearningReady(text));
@@ -3037,7 +3037,7 @@ fn main() {
                                     let cb_title = title.clone();
                                     let cb_url = url.clone();
                                     match wv.evaluate_script_with_callback(
-                                        "document.querySelector('meta[name=\"description\"]')?.content || ''",
+                                        &webview_utils::well_formed_js("document.querySelector('meta[name=\"description\"]')?.content || ''"),
                                         move |val| {
                                             if let Some(tx) = response_cb.lock().unwrap().take() {
                                                 let desc = serde_json::from_str::<String>(&val).unwrap_or(val);
@@ -3408,7 +3408,7 @@ fn main() {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             match wv.evaluate_script_with_callback(
-                                "document.body ? document.body.innerText : ''",
+                                &webview_utils::well_formed_js("document.body ? document.body.innerText : ''"),
                                 move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         // val comes as a JSON string — strip outer quotes
@@ -3632,7 +3632,7 @@ fn main() {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             match wv.evaluate_script_with_callback(
-                                snapshot_js::SNAPSHOT_JS,
+                                &webview_utils::well_formed_js(snapshot_js::SNAPSHOT_JS),
                                 move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         let text = serde_json::from_str::<String>(&val).unwrap_or(val);
