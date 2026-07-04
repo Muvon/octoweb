@@ -65,6 +65,17 @@ new Promise(function(__done){
     return false;
   }
 
+  // Dispatch a synthetic event, isolating the PAGE's own handlers. Those run
+  // synchronously inside this Promise executor; if one throws, WebKit surfaces
+  // the opaque "A JavaScript exception occurred" and rejects the promise — so a
+  // click we DID deliver gets reported as failed, and the AI retries into a
+  // double-fire (tweet posted twice). A real browser reports a throwing
+  // listener and keeps dispatching, so we do the same: the throw is the page's
+  // bug, not our delivery. Returns dispatchEvent's result (false = canceled;
+  // true on throw = treat as not-canceled). Our OWN bugs (event construction,
+  // selector logic) stay outside this guard and still surface as real errors.
+  function fire(t, ev) { try { return t.dispatchEvent(ev); } catch (e) { return true; } }
+
   function describe(n) {
     if (!n || !n.tagName) return 'unknown element';
     var d = n.tagName.toLowerCase();
@@ -144,13 +155,13 @@ pub fn click_script(selector: &str) -> String {
     let act = r#"
     var o = { bubbles: true, cancelable: true, composed: true, view: W, clientX: x, clientY: y };
     var p = Object.assign({}, o, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
-    if (el.tagName === 'INPUT' && el.type === 'file') { el.click(); return __done('true'); }
-    el.dispatchEvent(new PointerEvent('pointerdown', p));
-    el.dispatchEvent(new MouseEvent('mousedown', o));
+    if (el.tagName === 'INPUT' && el.type === 'file') { try { el.click(); } catch (e) {} return __done('true'); }
+    fire(el, new PointerEvent('pointerdown', p));
+    fire(el, new MouseEvent('mousedown', o));
     if (el.focus) try { el.focus(); } catch (e) {}
-    el.dispatchEvent(new PointerEvent('pointerup', p));
-    el.dispatchEvent(new MouseEvent('mouseup', o));
-    el.dispatchEvent(new MouseEvent('click', o));
+    fire(el, new PointerEvent('pointerup', p));
+    fire(el, new MouseEvent('mouseup', o));
+    fire(el, new MouseEvent('click', o));
     __done('true');
 "#;
     build(&json(selector), GATE_ENABLED, true, true, act)
@@ -160,12 +171,12 @@ pub fn hover_script(selector: &str) -> String {
     let act = r#"
     var o = { bubbles: true, cancelable: true, composed: true, view: W, clientX: x, clientY: y };
     var p = Object.assign({}, o, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
-    el.dispatchEvent(new PointerEvent('pointerover', p));
-    el.dispatchEvent(new PointerEvent('pointerenter', Object.assign({}, p, { bubbles: false })));
-    el.dispatchEvent(new MouseEvent('mouseenter', Object.assign({}, o, { bubbles: false })));
-    el.dispatchEvent(new MouseEvent('mouseover', o));
-    el.dispatchEvent(new PointerEvent('pointermove', p));
-    el.dispatchEvent(new MouseEvent('mousemove', o));
+    fire(el, new PointerEvent('pointerover', p));
+    fire(el, new PointerEvent('pointerenter', Object.assign({}, p, { bubbles: false })));
+    fire(el, new MouseEvent('mouseenter', Object.assign({}, o, { bubbles: false })));
+    fire(el, new MouseEvent('mouseover', o));
+    fire(el, new PointerEvent('pointermove', p));
+    fire(el, new MouseEvent('mousemove', o));
     __done('true');
 "#;
     build(&json(selector), "", true, false, act)
@@ -230,8 +241,8 @@ pub fn type_script(selector: &str, text: &str) -> String {
     else if (el instanceof W.HTMLInputElement) setter = Object.getOwnPropertyDescriptor(W.HTMLInputElement.prototype, 'value').set;
     if (setter) setter.call(el, TXT); else el.value = TXT;
     var IE = W.InputEvent || Event;
-    el.dispatchEvent(new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
+    fire(el, new Event('change', { bubbles: true }));
     __done('true');
 "#
     .replace("__TXT__", &json(text));
@@ -252,13 +263,13 @@ pub fn press_key_script(selector: Option<&str>, key: &str, modifiers: &[String])
     var KEY = __KEY__;
     var opts = { key: KEY, bubbles: true, cancelable: true, composed: true,
                  shiftKey: __S__, ctrlKey: __C__, altKey: __A__, metaKey: __M__ };
-    var proceed = el.dispatchEvent(new W.KeyboardEvent('keydown', opts));
-    if (KEY.length === 1) el.dispatchEvent(new W.KeyboardEvent('keypress', opts));
-    el.dispatchEvent(new W.KeyboardEvent('keyup', opts));
+    var proceed = fire(el, new W.KeyboardEvent('keydown', opts));
+    if (KEY.length === 1) fire(el, new W.KeyboardEvent('keypress', opts));
+    fire(el, new W.KeyboardEvent('keyup', opts));
     if (KEY === 'Enter' && el.tagName === 'INPUT' && el.form) {
       var f = el.form;
       if (proceed) {
-        if (f.requestSubmit) f.requestSubmit(); else f.submit();
+        try { if (f.requestSubmit) f.requestSubmit(); else f.submit(); } catch (e) {}
       } else {
         var href = W.location.href;
         var net = (W === window) ? (window.__octoweb_net || []) : [];
@@ -296,8 +307,8 @@ pub fn select_option_script(selector: &str, value: &str) -> String {
            || Array.prototype.find.call(el.options, function (o) { return o.text.trim() === VAL; });
     if (!opt) return __done('no-such-option');
     el.value = opt.value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    fire(el, new Event('input', { bubbles: true }));
+    fire(el, new Event('change', { bubbles: true }));
     __done('true');
 "#
     .replace("__VAL__", &json(value));
