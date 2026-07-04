@@ -229,6 +229,15 @@ pub fn interpret_dom_result(val: &str, selector: &str) -> Result<bool, String> {
         "disabled" => Err(format!(
             "Element '{selector}' stayed disabled/readonly — wait for the page to enable it or pick another element"
         )),
+        "noteditable" => Err(format!(
+            "Element '{selector}' is not a text field — it is not an <input>, <textarea>, or contenteditable. \
+             Pick the editable element itself (in browser_snapshot it shows as a 'textbox'/contenteditable @ref); \
+             avoid placeholder/label nodes that overlay the real editor"
+        )),
+        "typefailed" => Err(format!(
+            "Could not insert text into '{selector}' — the editor accepted neither a synthetic paste nor an editing command. \
+             It may require a real click to focus first (try browser_click on it, then browser_type), or it is a custom editor that needs key-by-key input"
+        )),
         s if s.starts_with("occluded:") => Err(format!(
             "Element '{selector}' is covered by {} — dismiss that overlay (cookie banner, modal, dropdown) first, or scroll it away, then retry",
             &s[9..]
@@ -903,7 +912,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Set the value of an input. Works with <input>, <textarea>, and contenteditable (Gmail compose, rich editors). REPLACES the existing value — does not append. Bypasses React's controlled-input cache by using the prototype's value setter, then fires input+change. To press Enter / submit afterwards, use browser_press_key. Defaults to the visible tab."
+        description = "Set the value of a text field. Works with <input>, <textarea>, and contenteditable rich editors including model-backed ones (Lexical, DraftJS, ProseMirror) — their internal model updates so submit buttons gated on it enable. REPLACES the existing value — does not append. For inputs it bypasses React's controlled-input cache via the prototype value setter; for rich editors it drives a synthetic paste (falling back to an editing command). Errors clearly if the target is not actually editable (e.g. a placeholder/label node) instead of silently doing nothing. To press Enter / submit afterwards, use browser_press_key, or click the submit button with browser_click. Defaults to the visible tab."
     )]
     async fn browser_type(
         &self,

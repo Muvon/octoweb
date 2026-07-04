@@ -508,6 +508,33 @@ def contenteditable_type():
 
 
 @test
+def controlled_editor_type():
+    """Typing into a model-backed editor updates its internal model, not just
+    the DOM — a submit button gated on that model must enable. Guards the
+    rich-editor (Lexical/DraftJS/ProseMirror) regression where synthetic DOM
+    writes left the model empty and the button disabled."""
+    with fixture_tab("controlled_editor.html") as tab:
+        tool_text("browser_type", {"tab_id": tab, "selector": "#editor", "text": "model gets this"})
+        content = js_text(tab, "editor").strip('"')  # js_text returns JSON-encoded value
+        expect(content == "model gets this",
+               f"controlled editor textContent mismatch (expected exact replace, no doubling): {content!r}")
+        disabled = exec_js(tab, "document.getElementById('post').disabled")
+        expect("false" in disabled.lower(),
+               f"submit button gated on the editor model did not enable: disabled={disabled!r}")
+
+
+@test
+def type_rejects_non_editable():
+    """browser_type must error (not falsely succeed) when the target is not a
+    text field — the false 'success' that masks a wrong selector."""
+    with fixture_tab("contenteditable.html") as tab:
+        is_err, _, text = call_tool("browser_type", {"tab_id": tab, "selector": "h1", "text": "nope"})
+        expect(is_err, f"typing into a non-editable <h1> should error, got success: {text!r}")
+        expect("not a text field" in text,
+               f"expected a clear 'not a text field' error, got: {text!r}")
+
+
+@test
 def console_messages():
     """console.log/warn/error and an uncaught error are captured with right levels."""
     with fixture_tab("console_log.html") as tab:

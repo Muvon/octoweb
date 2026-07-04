@@ -132,8 +132,11 @@ fn json(s: &str) -> String {
 }
 
 const GATE_ENABLED: &str = "if (el.disabled) { lastErr = 'disabled'; return retry(); }";
-const GATE_EDITABLE: &str =
-    "if (el.disabled || el.readOnly) { lastErr = 'disabled'; return retry(); }";
+// Typing target must be a real text field. Without this check, typing into a
+// non-editable element (e.g. a placeholder/label node overlaying the real
+// editor) silently "succeeds" and inserts nothing — the false success that
+// makes callers conclude the editor is broken.
+const GATE_TYPE: &str = "if (!(el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) { lastErr = 'noteditable'; return retry(); } if (el.disabled || el.readOnly) { lastErr = 'disabled'; return retry(); }";
 
 pub fn click_script(selector: &str) -> String {
     // File inputs need the native click() activation path to open the chooser
@@ -169,30 +172,70 @@ pub fn hover_script(selector: &str) -> String {
 }
 
 pub fn type_script(selector: &str, text: &str) -> String {
+    // Two paths, both replace (don't append) per the tool contract:
+    //
+    //  - contenteditable → a fallback chain, because no single primitive works
+    //    across editors AND background tabs:
+    //      1. Synthetic `paste` (DataTransfer text/plain). Model-backed editors
+    //         (Lexical, DraftJS, ProseMirror) keep their own model and have
+    //         paste handlers that route through it, so the model updates and any
+    //         submit button gated on it enables. This is focus-independent — it
+    //         works even on background tabs, where some sites refuse
+    //         programmatic focus and `execCommand` (which needs document focus)
+    //         silently inserts nothing or, when focus is held, double-inserts
+    //         under such editors.
+    //      2. If paste didn't land (plain contenteditable has no paste handler),
+    //         fall back to `execCommand('insertText')` — WebKit's editing
+    //         command, which plain editors honour.
+    //    Existing content is cleared first (selectAll+delete) for replace
+    //    semantics. We poll briefly between the two so a synchronous framework
+    //    paste is detected before the execCommand fallback fires (no double).
+    //
+    //  - <input>/<textarea> → set value via the prototype setter (bypasses
+    //    React's controlled-input cache) and fire input+change.
+    //
     // Value setter must come from the element's own interface AND window
     // (iframe elements have their own constructors); WebKit brand-checks
     // prototype setters, so HTMLInputElement's setter throws on <textarea>.
     let act = r#"
+    var TXT = __TXT__;
     try { el.focus(); } catch (e) {}
     if (el.isContentEditable) {
-      var sroot = el.getRootNode();
-      var s = (sroot.getSelection ? sroot : el.ownerDocument).getSelection();
-      var rg = el.ownerDocument.createRange();
-      rg.selectNodeContents(el); s.removeAllRanges(); s.addRange(rg);
-      el.ownerDocument.execCommand('insertText', false, __TXT__);
-      return __done('true');
+      var doc = el.ownerDocument, root = el.getRootNode();
+      function selAll() {
+        try {
+          var s = (root.getSelection ? root : doc).getSelection();
+          var rg = doc.createRange(); rg.selectNodeContents(el);
+          s.removeAllRanges(); s.addRange(rg);
+        } catch (e) {}
+      }
+      selAll();
+      try { doc.execCommand('selectAll', false, null); doc.execCommand('delete', false, null); } catch (e) {}
+      try {
+        var dt = new DataTransfer(); dt.setData('text/plain', TXT);
+        el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+      } catch (e) {}
+      var tries = 0;
+      (function check() {
+        if (el.textContent.indexOf(TXT) !== -1) return __done('true');
+        if (tries++ < 3) return setTimeout(check, 30);
+        selAll();
+        try { doc.execCommand('insertText', false, TXT); } catch (e) {}
+        return __done(el.textContent.indexOf(TXT) !== -1 ? 'true' : 'typefailed');
+      })();
+      return;
     }
     var setter;
     if (el instanceof W.HTMLTextAreaElement) setter = Object.getOwnPropertyDescriptor(W.HTMLTextAreaElement.prototype, 'value').set;
     else if (el instanceof W.HTMLInputElement) setter = Object.getOwnPropertyDescriptor(W.HTMLInputElement.prototype, 'value').set;
-    if (setter) setter.call(el, __TXT__); else el.value = __TXT__;
+    if (setter) setter.call(el, TXT); else el.value = TXT;
     var IE = W.InputEvent || Event;
-    el.dispatchEvent(new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: __TXT__ }));
+    el.dispatchEvent(new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     __done('true');
 "#
     .replace("__TXT__", &json(text));
-    build(&json(selector), GATE_EDITABLE, false, false, &act)
+    build(&json(selector), GATE_TYPE, false, false, &act)
 }
 
 pub fn press_key_script(selector: Option<&str>, key: &str, modifiers: &[String]) -> String {
