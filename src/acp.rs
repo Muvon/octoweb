@@ -11,7 +11,14 @@
 ///   3. The main thread polls `AcpHandle::rx` for `AgentEvent` variants.
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use agent_client_protocol::{self as acp, Agent};
+use agent_client_protocol::schema::v1::{
+    AvailableCommandInput, CancelNotification, ContentBlock, ContentChunk, ImageContent,
+    Implementation, InitializeRequest, NewSessionRequest, PermissionOptionId, PermissionOptionKind,
+    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
+};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
 
 /// Events streamed from the agent back to the main thread.
 #[derive(Debug)]
@@ -69,174 +76,82 @@ pub struct CommandInfo {
     pub hint: Option<String>,
 }
 
-/// Minimal Client impl — handles streaming text chunks and auto-approves permissions.
-/// All fs/terminal methods return method_not_found (not needed for chat).
-struct BrowserClient {
-    tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
-    /// Notified on every session_notification — resets the idle timeout.
-    activity: std::sync::Arc<tokio::sync::Notify>,
-}
-
-#[async_trait::async_trait(?Send)]
-impl acp::Client for BrowserClient {
-    async fn request_permission(
-        &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        // Reset idle timeout — permission request is also a sign of life.
-        self.activity.notify_one();
-        // Auto-approve by selecting the first allow option from the request.
-        // Agent is a trusted local process — no need to prompt the user.
-        let option_id = args
-            .options
-            .iter()
-            .find(|o| {
-                matches!(
-                    o.kind,
-                    acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-                )
-            })
-            .or_else(|| args.options.first())
-            .map(|o| o.option_id.clone())
-            .unwrap_or_else(|| acp::PermissionOptionId::new("allow"));
-        Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
-        ))
-    }
-
-    async fn write_text_file(
-        &self,
-        _args: acp::WriteTextFileRequest,
-    ) -> acp::Result<acp::WriteTextFileResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn read_text_file(
-        &self,
-        _args: acp::ReadTextFileRequest,
-    ) -> acp::Result<acp::ReadTextFileResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn create_terminal(
-        &self,
-        _args: acp::CreateTerminalRequest,
-    ) -> acp::Result<acp::CreateTerminalResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn terminal_output(
-        &self,
-        _args: acp::TerminalOutputRequest,
-    ) -> acp::Result<acp::TerminalOutputResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn release_terminal(
-        &self,
-        _args: acp::ReleaseTerminalRequest,
-    ) -> acp::Result<acp::ReleaseTerminalResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn wait_for_terminal_exit(
-        &self,
-        _args: acp::WaitForTerminalExitRequest,
-    ) -> acp::Result<acp::WaitForTerminalExitResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn kill_terminal(
-        &self,
-        _args: acp::KillTerminalRequest,
-    ) -> acp::Result<acp::KillTerminalResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        // Reset idle timeout — agent is actively working.
-        self.activity.notify_one();
-
-        match args.update {
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
-                match content {
-                    acp::ContentBlock::Text(t) if !t.text.is_empty() => {
-                        let _ = self.tx.send(AgentEvent::Chunk(t.text));
-                        (self.wake)();
-                    }
-                    acp::ContentBlock::Image(img) => {
-                        let _ = self.tx.send(AgentEvent::Image {
-                            data: img.data,
-                            mime_type: img.mime_type,
-                        });
-                        (self.wake)();
-                    }
-                    acp::ContentBlock::ResourceLink(r) if !r.uri.is_empty() => {
-                        let _ = self.tx.send(AgentEvent::Chunk(r.uri));
-                        (self.wake)();
-                    }
-                    _ => {}
-                }
+/// Forward one `session/update` to the main thread as `AgentEvent`s.
+/// Registered as the notification handler on the client connection —
+/// fs/terminal requests stay unregistered so the SDK answers them with
+/// method_not_found (not needed for chat).
+fn handle_session_update(
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    wake: &std::sync::Arc<dyn Fn() + Send + Sync>,
+    update: SessionUpdate,
+) {
+    match update {
+        SessionUpdate::AgentMessageChunk(ContentChunk { content, .. }) => match content {
+            ContentBlock::Text(t) if !t.text.is_empty() => {
+                let _ = tx.send(AgentEvent::Chunk(t.text));
+                wake();
             }
-            acp::SessionUpdate::ToolCall(tc) => {
-                let locations: Vec<String> = tc
-                    .locations
-                    .iter()
-                    .map(|l| l.path.to_string_lossy().to_string())
-                    .collect();
-                let _ = self.tx.send(AgentEvent::ToolStart {
-                    id: tc.tool_call_id.0.to_string(),
-                    title: tc.title,
-                    kind: format!("{:?}", tc.kind).to_lowercase(),
-                    raw_input: tc.raw_input.clone(),
-                    locations,
+            ContentBlock::Image(img) => {
+                let _ = tx.send(AgentEvent::Image {
+                    data: img.data,
+                    mime_type: img.mime_type,
                 });
-                (self.wake)();
+                wake();
             }
-            acp::SessionUpdate::ToolCallUpdate(upd) => {
-                let status = match upd.fields.status {
-                    Some(s) => format!("{:?}", s).to_lowercase(),
-                    None => String::new(),
-                };
-                let _ = self.tx.send(AgentEvent::ToolUpdate {
-                    id: upd.tool_call_id.0.to_string(),
-                    title: upd.fields.title.clone(),
-                    status,
-                    raw_output: upd.fields.raw_output.clone(),
-                });
-                (self.wake)();
-            }
-            acp::SessionUpdate::AvailableCommandsUpdate(update) => {
-                let commands: Vec<CommandInfo> = update
-                    .available_commands
-                    .into_iter()
-                    .map(|cmd| {
-                        let hint = cmd.input.and_then(|inp| match inp {
-                            acp::AvailableCommandInput::Unstructured(u) => Some(u.hint),
-                            _ => None,
-                        });
-                        CommandInfo {
-                            name: cmd.name,
-                            description: cmd.description,
-                            hint,
-                        }
-                    })
-                    .collect();
-                let _ = self.tx.send(AgentEvent::AvailableCommands(commands));
-                (self.wake)();
+            ContentBlock::ResourceLink(r) if !r.uri.is_empty() => {
+                let _ = tx.send(AgentEvent::Chunk(r.uri));
+                wake();
             }
             _ => {}
+        },
+        SessionUpdate::ToolCall(tc) => {
+            let locations: Vec<String> = tc
+                .locations
+                .iter()
+                .map(|l| l.path.to_string_lossy().to_string())
+                .collect();
+            let _ = tx.send(AgentEvent::ToolStart {
+                id: tc.tool_call_id.0.to_string(),
+                title: tc.title,
+                kind: format!("{:?}", tc.kind).to_lowercase(),
+                raw_input: tc.raw_input.clone(),
+                locations,
+            });
+            wake();
         }
-        Ok(())
-    }
-
-    async fn ext_method(&self, _args: acp::ExtRequest) -> acp::Result<acp::ExtResponse> {
-        Err(acp::Error::method_not_found())
-    }
-
-    async fn ext_notification(&self, _args: acp::ExtNotification) -> acp::Result<()> {
-        Ok(())
+        SessionUpdate::ToolCallUpdate(upd) => {
+            let status = match upd.fields.status {
+                Some(s) => format!("{:?}", s).to_lowercase(),
+                None => String::new(),
+            };
+            let _ = tx.send(AgentEvent::ToolUpdate {
+                id: upd.tool_call_id.0.to_string(),
+                title: upd.fields.title.clone(),
+                status,
+                raw_output: upd.fields.raw_output.clone(),
+            });
+            wake();
+        }
+        SessionUpdate::AvailableCommandsUpdate(update) => {
+            let commands: Vec<CommandInfo> = update
+                .available_commands
+                .into_iter()
+                .map(|cmd| {
+                    let hint = cmd.input.and_then(|inp| match inp {
+                        AvailableCommandInput::Unstructured(u) => Some(u.hint),
+                        _ => None,
+                    });
+                    CommandInfo {
+                        name: cmd.name,
+                        description: cmd.description,
+                        hint,
+                    }
+                })
+                .collect();
+            let _ = tx.send(AgentEvent::AvailableCommands(commands));
+            wake();
+        }
+        _ => {}
     }
 }
 
@@ -379,122 +294,155 @@ async fn init_session(
     });
 
     let activity = std::sync::Arc::new(tokio::sync::Notify::new());
-    let (conn, handle_io) = acp::ClientSideConnection::new(
-        BrowserClient {
-            tx: tx.clone(),
-            wake: std::sync::Arc::clone(&wake),
-            activity: std::sync::Arc::clone(&activity),
-        },
-        outgoing,
-        incoming,
-        |fut| {
-            tokio::task::spawn_local(fut);
-        },
-    );
 
-    tokio::task::spawn_local(handle_io);
+    let notif_tx = tx.clone();
+    let notif_wake = std::sync::Arc::clone(&wake);
+    let notif_activity = std::sync::Arc::clone(&activity);
+    let perm_activity = std::sync::Arc::clone(&activity);
 
-    conn.initialize(
-        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-            acp::Implementation::new("octoweb", env!("CARGO_PKG_VERSION")).title("Octoweb Browser"),
-        ),
-    )
-    .await?;
+    Client
+        .builder()
+        .name("octoweb")
+        .on_receive_notification(
+            async move |args: SessionNotification, _cx| {
+                // Reset idle timeout — agent is actively working.
+                notif_activity.notify_one();
+                handle_session_update(&notif_tx, &notif_wake, args.update);
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            async move |args: RequestPermissionRequest, responder, _cx| {
+                // Reset idle timeout — permission request is also a sign of life.
+                perm_activity.notify_one();
+                // Auto-approve by selecting the first allow option from the request.
+                // Agent is a trusted local process — no need to prompt the user.
+                let option_id = args
+                    .options
+                    .iter()
+                    .find(|o| {
+                        matches!(
+                            o.kind,
+                            PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+                        )
+                    })
+                    .or_else(|| args.options.first())
+                    .map(|o| o.option_id.clone())
+                    .unwrap_or_else(|| PermissionOptionId::new("allow"));
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(
+            ByteStreams::new(outgoing, incoming),
+            async move |cx: ConnectionTo<Agent>| {
+                cx.send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_info(
+                        Implementation::new("octoweb", env!("CARGO_PKG_VERSION"))
+                            .title("Octoweb Browser"),
+                    ),
+                )
+                .block_task()
+                .await?;
 
-    // Workspace cwd for the session — octomind uses this to discover local
-    // tools at `<cwd>/.agents/tools/*` and as the `--sandbox` root. Must match
-    // the process cwd set above so tool discovery and the sandbox agree, and so
-    // it survives launchd launches where `current_dir()` would be `/`.
-    let resp = conn
-        .new_session(acp::NewSessionRequest::new(workspace.clone()))
-        .await?;
+                // Workspace cwd for the session — octomind uses this to discover local
+                // tools at `<cwd>/.agents/tools/*` and as the `--sandbox` root. Must match
+                // the process cwd set above so tool discovery and the sandbox agree, and so
+                // it survives launchd launches where `current_dir()` would be `/`.
+                let resp = cx
+                    .send_request(NewSessionRequest::new(workspace.clone()))
+                    .block_task()
+                    .await?;
 
-    let session_id = resp.session_id;
-    let _ = tx.send(AgentEvent::Connected(session_id.0.to_string()));
-    wake();
+                let session_id = resp.session_id;
+                let _ = tx.send(AgentEvent::Connected(session_id.0.to_string()));
+                wake();
 
-    // Process prompts sequentially — one at a time.
-    while let Some(msg) = prompt_rx.recv().await {
-        let mut content: Vec<acp::ContentBlock> = Vec::new();
-        for (data, mime) in msg.images {
-            content.push(acp::ContentBlock::Image(acp::ImageContent::new(data, mime)));
-        }
-        content.push(msg.text.into());
-        let prompt_fut = conn.prompt(acp::PromptRequest::new(session_id.clone(), content));
-        tokio::pin!(prompt_fut);
+                // Process prompts sequentially — one at a time.
+                while let Some(msg) = prompt_rx.recv().await {
+                    let mut content: Vec<ContentBlock> = Vec::new();
+                    for (data, mime) in msg.images {
+                        content.push(ContentBlock::Image(ImageContent::new(data, mime)));
+                    }
+                    content.push(ContentBlock::Text(TextContent::new(msg.text)));
+                    let prompt_fut = cx
+                        .send_request(PromptRequest::new(session_id.clone(), content))
+                        .block_task();
+                    tokio::pin!(prompt_fut);
 
-        // Idle timeout: fires only when the agent sends no activity for 20 minutes.
-        // Resets on every session_notification (chunks, tool starts, tool updates)
-        // and on permission requests. The previous 5-minute window produced false
-        // positives on long-running tool calls (large MCP fetches, slow agent steps)
-        // that legitimately produce no intermediate output.
-        const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
-        let idle_timeout = async {
-            loop {
-                tokio::select! {
-                    biased; // Check notification first to avoid false timeouts
-                    _ = activity.notified() => continue, // Activity received — restart timer
-                    _ = tokio::time::sleep(IDLE_TIMEOUT) => break, // No activity for 5 min
-                }
-            }
-        };
-        tokio::pin!(idle_timeout);
+                    // Idle timeout: fires only when the agent sends no activity for 20 minutes.
+                    // Resets on every session_notification (chunks, tool starts, tool updates)
+                    // and on permission requests. The previous 5-minute window produced false
+                    // positives on long-running tool calls (large MCP fetches, slow agent steps)
+                    // that legitimately produce no intermediate output.
+                    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
+                    let idle_timeout = async {
+                        loop {
+                            tokio::select! {
+                                biased; // Check notification first to avoid false timeouts
+                                _ = activity.notified() => continue, // Activity received — restart timer
+                                _ = tokio::time::sleep(IDLE_TIMEOUT) => break, // No activity for 20 min
+                            }
+                        }
+                    };
+                    tokio::pin!(idle_timeout);
 
-        // After cancel we keep awaiting prompt_fut so the ACP connection stays
-        // clean (response is properly consumed). A 10s deadline prevents hanging
-        // if the agent ignores the cancel notification.
-        let mut cancelled = false;
-        let cancel_deadline = tokio::time::sleep(std::time::Duration::from_secs(86400));
-        tokio::pin!(cancel_deadline);
+                    // After cancel we keep awaiting prompt_fut so the ACP connection stays
+                    // clean (response is properly consumed). A 10s deadline prevents hanging
+                    // if the agent ignores the cancel notification.
+                    let mut cancelled = false;
+                    let cancel_deadline = tokio::time::sleep(std::time::Duration::from_secs(86400));
+                    tokio::pin!(cancel_deadline);
 
-        loop {
-            tokio::select! {
-                res = &mut prompt_fut => {
-                    if cancelled {
-                        let _ = tx.send(AgentEvent::Cancelled);
-                    } else {
-                        match res {
-                            Ok(_) => { let _ = tx.send(AgentEvent::Done); }
-                            Err(_) if cancelled => { let _ = tx.send(AgentEvent::Cancelled); }
-                            Err(e) => { let _ = tx.send(AgentEvent::Error(e.to_string())); }
+                    loop {
+                        tokio::select! {
+                            res = &mut prompt_fut => {
+                                if cancelled {
+                                    let _ = tx.send(AgentEvent::Cancelled);
+                                } else {
+                                    match res {
+                                        Ok(_) => { let _ = tx.send(AgentEvent::Done); }
+                                        Err(e) => { let _ = tx.send(AgentEvent::Error(e.to_string())); }
+                                    }
+                                }
+                                wake();
+                                break;
+                            }
+                            _ = cancel_rx.recv(), if !cancelled => {
+                                // Arm the 10s deadline FIRST, then fire the cancel
+                                // notification (a non-blocking channel send in this SDK)
+                                // so the loop unwedges even if the agent ignores it.
+                                cancelled = true;
+                                cancel_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+                                let _ = cx.send_notification(CancelNotification::new(session_id.clone()));
+                                // Don't break — keep looping so prompt_fut completes cleanly
+                            }
+                            _ = &mut cancel_deadline, if cancelled => {
+                                // Agent didn't finish within 10s after cancel — give up
+                                let _ = tx.send(AgentEvent::Cancelled);
+                                wake();
+                                break;
+                            }
+                            _ = &mut idle_timeout, if !cancelled => {
+                                // Agent went silent for 20 minutes — considered stuck
+                                let _ = tx.send(AgentEvent::Error(
+                                    "agent idle for 20 minutes — no response".into(),
+                                ));
+                                wake();
+                                break;
+                            }
                         }
                     }
-                    wake();
-                    break;
                 }
-                _ = cancel_rx.recv(), if !cancelled => {
-                    // Arm the 10s deadline FIRST. The cancel notification below
-                    // can block if the agent's stdin is full or it's unresponsive;
-                    // arming the deadline up front guarantees the loop unwedges
-                    // and emits Cancelled even in that case.
-                    cancelled = true;
-                    cancel_deadline.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
-                    // Bound the cancel notification so a wedged agent can't pin
-                    // the select loop. Fire-and-forget on timeout.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        conn.cancel(acp::CancelNotification::new(session_id.clone())),
-                    )
-                    .await;
-                    // Don't break — keep looping so prompt_fut completes cleanly
-                }
-                _ = &mut cancel_deadline, if cancelled => {
-                    // Agent didn't finish within 10s after cancel — give up
-                    let _ = tx.send(AgentEvent::Cancelled);
-                    wake();
-                    break;
-                }
-                _ = &mut idle_timeout, if !cancelled => {
-                    // Agent went silent for 5 minutes — considered stuck
-                    let _ = tx.send(AgentEvent::Error(
-                        "agent idle for 5 minutes — no response".into(),
-                    ));
-                    wake();
-                    break;
-                }
-            }
-        }
-    }
+
+                Ok(())
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("ACP connection error: {e}"))?;
 
     Ok(())
 }
