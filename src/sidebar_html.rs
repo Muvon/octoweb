@@ -2864,38 +2864,60 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   });
 
   // ── Markdown render helper ─────────────────────────────────────────────
-  // During streaming, the accumulated text may contain an unclosed fenced
-  // code block (``` opened but closing ``` not yet received). marked.js
-  // renders that as broken HTML — the fence line becomes visible plain text
-  // and the content leaks out unstyled. We detect this and close the fence
-  // before parsing so the partial block renders correctly at every chunk.
-  function closeUnclosedFences(text) {
-    // Count ``` fence openings vs closings. A fence line starts with optional
-    // whitespace then 3+ backticks. We track open/close pairs; if an odd
-    // number of fence markers exist the last one is unclosed.
+  // Two fence problems marked.js can't handle on its own:
+  // 1. Streaming: an opened ``` fence whose closing ``` hasn't arrived yet
+  //    renders as broken HTML — we append the missing closers.
+  // 2. Nesting: a ``` block whose body itself contains ``` fences (agent
+  //    quoting markdown). CommonMark closes the outer block at the first
+  //    inner bare ```, leaking the rest as rendered markdown. We treat a
+  //    ```lang line inside an open fence as a nested opener and give each
+  //    fence more backticks than any fence it contains, so marked keeps
+  //    the inner markers as literal content.
+  function normalizeFences(text) {
     const lines = text.split('\n');
-    let inFence = false;
-    let fenceLang = '';
-    for (const line of lines) {
-      const m = line.match(/^[ \t]*(`{3,})(.*)/);
-      if (m) {
-        if (!inFence) {
-          inFence = true;
-          fenceLang = m[2].trim();
-        } else {
-          inFence = false;
-          fenceLang = '';
-        }
+    const stack = [];  // open fences: {line, ticks}
+    const pairs = [];  // closed fences, innermost first: {open, close}
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^[ \t]*(`{3,})(.*)/);
+      if (!m) continue;
+      const ticks = m[1].length;
+      const info = m[2].trim();
+      // Shorter marker than the enclosing fence = literal content per
+      // CommonMark, already nests correctly — leave it alone.
+      if (stack.length && ticks < stack[stack.length - 1].ticks) continue;
+      if (stack.length && !info) {
+        pairs.push({ open: stack.pop().line, close: i });
+      } else {
+        stack.push({ line: i, ticks: ticks });
       }
     }
-    // If we ended inside a fence, append a closing marker so marked sees
-    // a complete block. The trailing newline is required by marked's lexer.
-    return inFence ? text + '\n```' : text;
+    // Streaming: close whatever is still open, innermost first.
+    while (stack.length) {
+      pairs.push({ open: stack.pop().line, close: lines.length });
+      lines.push('```');
+    }
+    // Assign tick counts bottom-up (pairs holds children before parents):
+    // each fence needs more backticks than any fence nested inside it.
+    const ticks = pairs.map(p => lines[p.open].match(/`{3,}/)[0].length);
+    for (let i = 0; i < pairs.length; i++) {
+      for (let j = 0; j < i; j++) {
+        if (pairs[j].open > pairs[i].open && pairs[j].close < pairs[i].close) {
+          ticks[i] = Math.max(ticks[i], ticks[j] + 1);
+        }
+      }
+      const orig = lines[pairs[i].open].match(/`{3,}/)[0].length;
+      if (ticks[i] > orig) {
+        const fence = '`'.repeat(ticks[i]);
+        lines[pairs[i].open] = lines[pairs[i].open].replace(/`{3,}/, fence);
+        lines[pairs[i].close] = lines[pairs[i].close].replace(/`{3,}/, fence);
+      }
+    }
+    return lines.join('\n');
   }
 
   function renderMd(raw) {
     if (typeof marked === 'undefined') return escapeHtml(raw);
-    return marked.parse(closeUnclosedFences(raw));
+    return marked.parse(normalizeFences(raw));
   }
 
   function escapeHtml(s) {
