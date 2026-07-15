@@ -43,6 +43,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   /* ── Tahoe Liquid Glass tokens ─────────────────────────────────────────── */
   :root {
     --glass-solid:     rgb(235, 235, 240);
@@ -2239,7 +2243,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       </svg>
     </div>
     <div id="welcome-title">How can I help?</div>
-    <div id="welcome-desc">Ask questions, paste code, describe a bug, or attach a file. Can browse and act on your behalf in the background.</div>
+    <div id="welcome-desc">Ask questions, paste code, describe a bug, or attach a file. The assistant can browse and act on your behalf in the background.</div>
     <div id="welcome-suggestions">
       <button class="suggestion-btn" data-prompt="Summarize the current page">Summarize the current page</button>
       <button class="suggestion-btn" data-prompt="Explain this error and suggest a fix">Explain this error and suggest a fix</button>
@@ -2875,20 +2879,50 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   //    the inner markers as literal content.
   function normalizeFences(text) {
     const lines = text.split('\n');
-    const stack = [];  // open fences: {line, ticks}
-    const pairs = [];  // closed fences, innermost first: {open, close}
+    const fences = [];  // every fence line: {line, ticks, info}
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(/^[ \t]*(`{3,})(.*)/);
-      if (!m) continue;
-      const ticks = m[1].length;
-      const info = m[2].trim();
+      if (m) fences.push({ line: i, ticks: m[1].length, info: m[2].trim() });
+    }
+    // A bare ``` while a root fence is open is ambiguous: the root's closer,
+    // or the opener of a nested block that has no language tag. Prefer the
+    // longest reading whose interior stays balanced — but only when a
+    // lang-tagged inner fence (or a ```markdown root) proves the block really
+    // quotes markdown; otherwise CommonMark wins and the first bare ```
+    // closes the root.
+    function rootClose(r) {
+      const T = fences[r].ticks;
+      let best = -1;
+      for (let j = r + 1; j < fences.length; j++) {
+        if (fences[j].ticks < T || fences[j].info) continue;
+        let depth = 0, lang = /^(markdown|md|mdx)$/i.test(fences[r].info);
+        for (let k = r + 1; k < j; k++) {
+          if (fences[k].ticks < T) continue;
+          if (fences[k].info) { depth++; lang = true; }
+          else depth += depth > 0 ? -1 : 1;
+        }
+        if (depth === 0 && lang) best = fences[j].line;
+      }
+      return best;
+    }
+    const stack = [];  // open fences: {line, ticks, until}
+    const pairs = [];  // closed fences, innermost first: {open, close}
+    for (let x = 0; x < fences.length; x++) {
+      const fn = fences[x];
+      const top = stack[stack.length - 1];
       // Shorter marker than the enclosing fence = literal content per
       // CommonMark, already nests correctly — leave it alone.
-      if (stack.length && ticks < stack[stack.length - 1].ticks) continue;
-      if (stack.length && !info) {
-        pairs.push({ open: stack.pop().line, close: i });
+      if (top && fn.ticks < top.ticks) continue;
+      if (top && !fn.info) {
+        if (stack.length === 1 && top.until > fn.line) {
+          // Root provably extends past this line: nested bare opener.
+          stack.push({ line: fn.line, ticks: fn.ticks, until: -1 });
+        } else {
+          pairs.push({ open: stack.pop().line, close: fn.line });
+        }
       } else {
-        stack.push({ line: i, ticks: ticks });
+        stack.push({ line: fn.line, ticks: fn.ticks,
+                     until: stack.length ? -1 : rootClose(x) });
       }
     }
     // Streaming: close whatever is still open, innermost first.

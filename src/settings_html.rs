@@ -9,6 +9,10 @@ pub fn html() -> &'static str {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
@@ -30,8 +34,11 @@ pub fn html() -> &'static str {
     --divider:     rgba(0, 0, 0, 0.06);
     --close-hover: rgba(0, 0, 0, 0.06);
     --toggle-off:  rgba(0, 0, 0, 0.14);
-    --toggle-on:   rgba(52, 120, 247, 1);
+    --toggle-on:   #007aff;
     --toggle-knob: #fff;
+    --accent:      #007aff;
+    --focus-ring:  rgba(0, 122, 255, 0.18);
+    --focus-border: rgba(0, 122, 255, 0.6);
   }
 
   @media (prefers-color-scheme: dark) {
@@ -48,8 +55,11 @@ pub fn html() -> &'static str {
       --divider:     rgba(255, 255, 255, 0.06);
       --close-hover: rgba(255, 255, 255, 0.08);
       --toggle-off:  rgba(255, 255, 255, 0.18);
-      --toggle-on:   rgba(52, 120, 247, 1);
+      --toggle-on:   #0a84ff;
       --toggle-knob: #fff;
+      --accent:      #0a84ff;
+      --focus-ring:  rgba(10, 132, 255, 0.22);
+      --focus-border: rgba(10, 132, 255, 0.65);
     }
   }
 
@@ -189,9 +199,18 @@ pub fn html() -> &'static str {
   }
   .row input[type="text"]:focus,
   .row input[type="number"]:focus {
-    box-shadow: 0 0 0 0.5px rgba(52, 120, 247, 0.6), 0 0 0 2.5px rgba(52, 120, 247, 0.18);
+    box-shadow: 0 0 0 0.5px var(--focus-border), 0 0 0 2.5px var(--focus-ring);
   }
   .row input[type="number"] { width: 70px; flex: none; }
+
+  .row select {
+    flex: none;
+    max-width: 170px;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--text);
+    accent-color: var(--accent);
+  }
 
   /* Toggle switch */
   .toggle {
@@ -279,10 +298,10 @@ pub fn html() -> &'static str {
     cursor: pointer;
     transition: border-color 0.12s, box-shadow 0.12s;
   }
-  .kb-bind:hover { border-color: rgba(52, 120, 247, 0.6); }
+  .kb-bind:hover { border-color: var(--focus-border); }
   .kb-bind.recording {
-    border-color: rgba(52, 120, 247, 0.9);
-    box-shadow: 0 0 0 2px rgba(52, 120, 247, 0.18);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus-ring);
   }
   .rec-hint { font-size: 11px; color: var(--toggle-on); }
   .kb-reset {
@@ -344,16 +363,30 @@ pub fn html() -> &'static str {
       <div class="row with-hint">
         <div class="row-label-stack">
           <span class="row-label">Home page</span>
-          <span class="row-hint">Opens on launch and in every new tab.</span>
+          <span class="row-hint">Loads on launch when there's no previous session to restore.</span>
         </div>
         <input type="text" id="home_page" data-key="home_page">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
           <span class="row-label">Search engine</span>
-          <span class="row-hint">URL with <code>{}</code> as the query placeholder.</span>
+          <span class="row-hint">Used when you type a search instead of a URL.</span>
         </div>
-        <input type="text" id="search_engine" data-key="search_engine">
+        <select id="search_engine_select">
+          <option value="https://www.google.com/search?q={}">Google</option>
+          <option value="https://duckduckgo.com/?q={}">DuckDuckGo</option>
+          <option value="https://www.bing.com/search?q={}">Bing</option>
+          <option value="https://search.brave.com/search?q={}">Brave</option>
+          <option value="https://www.ecosia.org/search?q={}">Ecosia</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </div>
+      <div class="row with-hint" id="search_engine_custom_row" style="display:none">
+        <div class="row-label-stack">
+          <span class="row-label">Custom search URL</span>
+          <span class="row-hint"><code>{}</code> is replaced with your search terms.</span>
+        </div>
+        <input type="text" id="search_engine" data-key="search_engine" placeholder="https://example.com/search?q={}">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
@@ -489,7 +522,34 @@ pub fn html() -> &'static str {
         el.value = cfg[key];
       }
     }
+    syncSearchEngine();
   };
+
+  // ── Search engine presets ─────────────────────────────────────────────
+  // The select holds full URL templates; "custom" reveals the raw URL input.
+  var seSelect    = document.getElementById('search_engine_select');
+  var seCustomRow = document.getElementById('search_engine_custom_row');
+  var seInput     = document.getElementById('search_engine');
+
+  function syncSearchEngine() {
+    var tpl = seInput.value;
+    var preset = Array.prototype.some.call(seSelect.options, function(o) {
+      return o.value === tpl;
+    });
+    seSelect.value = preset ? tpl : 'custom';
+    seCustomRow.style.display = preset ? 'none' : '';
+  }
+
+  seSelect.addEventListener('change', function() {
+    if (seSelect.value === 'custom') {
+      seCustomRow.style.display = '';
+      seInput.focus();
+      return;
+    }
+    seCustomRow.style.display = 'none';
+    seInput.value = seSelect.value;
+    ipc({ type: 'settings_update', key: 'search_engine', value: seSelect.value });
+  });
 
   // ── Tabs ──────────────────────────────────────────────────────────────
   document.querySelectorAll('.tab').forEach(function(t) {

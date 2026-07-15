@@ -24,6 +24,10 @@ pub fn html() -> String {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;

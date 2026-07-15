@@ -461,7 +461,8 @@ fn main() {
     // Each tab gets its own WebView (build_as_child). Hide/show to switch —
     // no reload, full state (scroll, video, JS) preserved.
     let home = cfg.home_page.clone();
-    let search_engine = cfg.search_engine.clone();
+    // mut: kept in sync when the user changes the engine in Settings.
+    let mut search_engine = cfg.search_engine.clone();
 
     // Address bar lives in the macOS titlebar zone (32pt actual height). Tab WebViews start at y=0;
     // fullsize_content_view handles the titlebar inset natively.
@@ -3779,7 +3780,10 @@ fn main() {
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
-                    "search_engine" => cfg.search_engine = val,
+                    "search_engine" => {
+                        search_engine = val.clone();
+                        cfg.search_engine = val;
+                    }
                     "max_history" => {
                         if let Ok(n) = val.parse::<usize>() { cfg.max_history = n; }
                     }
@@ -3906,6 +3910,10 @@ fn main() {
                         let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
                         webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
                     };
+                    let se = webview_utils::escape_js_template(&search_engine);
+                    let _ = overlay_wv.evaluate_script(&format!(
+                        "window.__setSearchEngine && window.__setSearchEngine(`{se}`)"
+                    ));
                     let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setItems && window.__setItems({json})"
                 ));

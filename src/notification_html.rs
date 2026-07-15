@@ -19,6 +19,10 @@ pub fn html() -> &'static str {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
@@ -191,7 +195,7 @@ pub fn html() -> &'static str {
   <div class="row" id="content">
     <span class="app-icon" id="icon">🐙</span>
     <div class="content">
-      <div class="title" id="title">Octomind</div>
+      <div class="title" id="title">Assistant</div>
       <div class="preview" id="preview">New message from AI assistant</div>
     </div>
   </div>
@@ -231,7 +235,7 @@ pub fn html() -> &'static str {
   // icon/title/autoDismissMs are optional — defaults to ACP style
   window.__show = function(text, icon, title, autoDismissMs) {
     iconEl.textContent = icon || '\uD83D\uDC19';
-    titleEl.textContent = title || 'Octomind';
+    titleEl.textContent = title || 'Assistant';
     preview.textContent = text || 'New message from AI assistant';
     currentMode = (icon && icon !== '\uD83D\uDC19') ? 'download' : 'acp';
     toast.classList.remove('hide');

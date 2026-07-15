@@ -11,6 +11,12 @@ pub fn html() -> &'static str {
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    /* #modal rests at opacity 0 and relies on a `forwards` animation to appear */
+    #modal { transform: none !important; opacity: 1 !important; }
+  }
+
   /* ── Tahoe Liquid Glass tokens ─────────────────────────────────────────── */
   :root {
     /* Glass panel — light: frosted white */
@@ -348,6 +354,26 @@ pub fn html() -> &'static str {
   let items = [];
   let filtered = [];
   let sel = 0;
+  let searchEngine = 'https://www.google.com/search?q={}';
+
+  // Rust pushes the configured engine template on overlay open.
+  window.__setSearchEngine = function(tpl) {
+    if (typeof tpl === 'string' && tpl.indexOf('{}') >= 0) searchEngine = tpl;
+  };
+
+  function engineName() {
+    try {
+      const host = new URL(searchEngine.replace('{}', 'q')).hostname.replace(/^www\./, '');
+      const known = {
+        'google.com': 'Google', 'duckduckgo.com': 'DuckDuckGo', 'bing.com': 'Bing',
+        'search.brave.com': 'Brave', 'ecosia.org': 'Ecosia', 'startpage.com': 'Startpage',
+        'kagi.com': 'Kagi', 'yandex.com': 'Yandex'
+      };
+      return known[host] || host;
+    } catch (e) {
+      return 'the Web';
+    }
+  }
   let userQuery = ''; // tracks what the user actually typed (vs autofill)
   let pointerActive = false; // suppresses mouse until real movement after overlay open / keyboard nav
   let lastPointerX = 0;
@@ -396,7 +422,7 @@ pub fn html() -> &'static str {
       const raw = userQuery.trim();
       const urlLike = isLikelyUrl(raw);
       const openAction = { kind: 'url', title: 'Open URL', url: toNavigableUrl(raw), subtitle: toNavigableUrl(raw), pill: 'URL' };
-      const searchAction = { kind: 'search', title: 'Search Google', url: raw, query: raw, subtitle: raw, pill: 'Search' };
+      const searchAction = { kind: 'search', title: 'Search ' + engineName(), url: raw, query: raw, subtitle: raw, pill: 'Search' };
       const askAction = { kind: 'ask', title: 'Ask AI', url: '', query: raw, subtitle: raw, pill: 'AI' };
       const actions = urlLike ? [openAction, searchAction, askAction] : [searchAction, openAction, askAction];
       filtered = [...list, ...actions].slice(0, 14);
@@ -595,7 +621,7 @@ pub fn html() -> &'static str {
   }
 
   function searchUrl(q) {
-    return 'https://www.google.com/search?q=' + encodeURIComponent(q);
+    return searchEngine.replace('{}', encodeURIComponent(q));
   }
 
   function toNavigableUrl(raw) {
@@ -678,7 +704,7 @@ pub fn html() -> &'static str {
     };
     const searchAction = {
       kind: 'search',
-      title: 'Search Google',
+      title: 'Search ' + engineName(),
       url: raw,
       query: raw,
       subtitle: raw,

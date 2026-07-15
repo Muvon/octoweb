@@ -11,6 +11,11 @@ pub fn html() -> String {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    #spinner.active { animation: spin 1.5s linear infinite !important; }
+  }
+
   :root {
     --bg: rgba(244, 244, 244, 0.82);
     --border: rgba(0, 0, 0, 0.08);

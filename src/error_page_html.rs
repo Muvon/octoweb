@@ -88,6 +88,10 @@ document.getElementById('retryBtn').addEventListener('click', function() {{
 const ERROR_PAGE_CSS: &str = r#"
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   :root {
     --bg: #f5f5f7;
     --card-bg: rgba(255, 255, 255, 0.85);

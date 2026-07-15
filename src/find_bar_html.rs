@@ -9,6 +9,10 @@ pub fn html() -> &'static str {
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   :root {
     --bg: rgba(244, 244, 244, 0.82);
     --border: rgba(0, 0, 0, 0.08);

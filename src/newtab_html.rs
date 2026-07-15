@@ -112,6 +112,10 @@ pub fn html(slots_json: &str) -> String {
 const NEWTAB_CSS: &str = r#"
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
   :root {
     --bg: #f5f5f7;
     --text-primary: rgba(0, 0, 0, 0.85);

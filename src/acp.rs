@@ -267,7 +267,19 @@ async fn init_session(
         .stdout(std::process::Stdio::piped())
         .current_dir(&workspace)
         .kill_on_drop(true)
-        .spawn()?;
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "The AI agent ({program}) isn't installed.\n\
+                     Install it with:\n\
+                     curl -fsSL https://raw.githubusercontent.com/muvon/octomind/master/install.sh | bash\n\
+                     then set an API key (e.g. OPENROUTER_API_KEY) and reopen this sidebar."
+                )
+            } else {
+                anyhow::anyhow!("failed to start {program}: {e}")
+            }
+        })?;
 
     // Surface the spawned pid so main can map A2UI envelopes (which carry
     // the agent's pid via the bash script's $PPID) back to this session.
