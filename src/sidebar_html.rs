@@ -2884,45 +2884,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const m = lines[i].match(/^[ \t]*(`{3,})(.*)/);
       if (m) fences.push({ line: i, ticks: m[1].length, info: m[2].trim() });
     }
-    // A bare ``` while a root fence is open is ambiguous: the root's closer,
-    // or the opener of a nested block that has no language tag. Prefer the
-    // longest reading whose interior stays balanced — but only when a
-    // lang-tagged inner fence (or a ```markdown root) proves the block really
-    // quotes markdown; otherwise CommonMark wins and the first bare ```
-    // closes the root.
-    function rootClose(r) {
-      const T = fences[r].ticks;
-      let best = -1;
-      for (let j = r + 1; j < fences.length; j++) {
-        if (fences[j].ticks < T || fences[j].info) continue;
-        let depth = 0, lang = /^(markdown|md|mdx)$/i.test(fences[r].info);
-        for (let k = r + 1; k < j; k++) {
-          if (fences[k].ticks < T) continue;
-          if (fences[k].info) { depth++; lang = true; }
-          else depth += depth > 0 ? -1 : 1;
-        }
-        if (depth === 0 && lang) best = fences[j].line;
-      }
-      return best;
-    }
-    const stack = [];  // open fences: {line, ticks, until}
+    // A bare ``` inside an open block always closes the innermost block; only
+    // a lang-tagged fence opens a nested one. No lookahead: any heuristic that
+    // lets a bare ``` extend the root past its closer cannot distinguish
+    // "root quoting fenced blocks" from "sibling blocks one after another"
+    // (identical fence signatures) and ends up swallowing the siblings into
+    // the first block.
+    const stack = [];  // open fences: {line, ticks}
     const pairs = [];  // closed fences, innermost first: {open, close}
-    for (let x = 0; x < fences.length; x++) {
-      const fn = fences[x];
+    for (const fn of fences) {
       const top = stack[stack.length - 1];
       // Shorter marker than the enclosing fence = literal content per
       // CommonMark, already nests correctly — leave it alone.
       if (top && fn.ticks < top.ticks) continue;
       if (top && !fn.info) {
-        if (stack.length === 1 && top.until > fn.line) {
-          // Root provably extends past this line: nested bare opener.
-          stack.push({ line: fn.line, ticks: fn.ticks, until: -1 });
-        } else {
-          pairs.push({ open: stack.pop().line, close: fn.line });
-        }
+        pairs.push({ open: stack.pop().line, close: fn.line });
       } else {
-        stack.push({ line: fn.line, ticks: fn.ticks,
-                     until: stack.length ? -1 : rootClose(x) });
+        stack.push({ line: fn.line, ticks: fn.ticks });
       }
     }
     // Streaming: close whatever is still open, innermost first.
