@@ -102,6 +102,8 @@ enum AppEvent {
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
     AcpReconnect(u64, u64), // (session_id, gen) — scheduled reconnection attempt for given session
+    AcpSignIn(u64),         // sidebar "Sign in" button — start `/login` for the session
+    AcpRefreshAccount(u64), // re-probe `/usage` (login poller tick, or manual refresh)
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
     DownloadCompleted(String, bool), // (filename, success) — show notification toast
     DismissNotification,            // user clicked X on notification toast
@@ -259,6 +261,10 @@ struct AcpSession {
     /// `sidebar_ready` so slash-command auto-complete survives sidebar opens
     /// that occur after the agent already announced its commands.
     available_commands_json: Option<String>,
+    /// Cached account/quota status (JSON for `window.__setAccount`) from the
+    /// last `/usage` probe. Re-pushed on `sidebar_ready` so the login chip
+    /// survives sidebar opens that happen after the probe.
+    account_json: Option<String>,
     /// OS pid of this session's octomind subprocess. Set on `ProcessPid`.
     /// Used by the A2UI watcher to route incoming envelopes to the session
     /// whose octomind actually invoked `render_ui` — the bash script
@@ -1118,6 +1124,10 @@ fn main() {
                             let sid = v["session_id"].as_u64().unwrap_or(0);
                             let _ = p.send_event(AppEvent::AcpCancel(sid));
                         }
+                        Some("acp_signin") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpSignIn(sid));
+                        }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
                         }
@@ -1695,6 +1705,7 @@ fn main() {
                     tool_starts: HashMap::new(),
                     turn_started: None,
                     available_commands_json: None,
+                    account_json: None,
                     octomind_pid: None,
                 });
             }
@@ -1725,6 +1736,7 @@ fn main() {
                 tool_starts: HashMap::new(),
                 turn_started: None,
                 available_commands_json: None,
+                account_json: None,
                 octomind_pid: None,
             };
             (vec![default_session], 2u64, 1u64)
@@ -1894,6 +1906,13 @@ fn main() {
     let mut sidebar_visible = false;
     let mut sidebar_fullscreen = false; // sidebar takes the full chrome window width when true
     let mut shortcuts_visible = false;
+    // Sessions with a login flow in flight → the poller thread's stop flag. Set
+    // when `/login` starts, cleared (and the session respawned to load the new
+    // hub key) once `/usage` reports signed-in. Transient, not per-session state.
+    let mut login_pollers: std::collections::HashMap<
+        u64,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    > = std::collections::HashMap::new();
     // Address bar URL edit mode — when true, the address bar webview is grown
     // to full window height so the autocomplete dropdown and backdrop can
     // paint outside the 32 px titlebar strip without being clipped.
@@ -2757,6 +2776,75 @@ fn main() {
                         }
                         if should_persist {
                             persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                        }
+                    }
+                    acp::AgentEvent::Account { signed_in, account, over_quota, summary } => {
+                        let json = serde_json::json!({
+                            "signed_in": signed_in,
+                            "account": account,
+                            "over_quota": over_quota,
+                            "summary": summary,
+                        });
+                        let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            s.account_json = Some(json_str.clone());
+                        }
+                        let escaped = webview_utils::escape_js_template(&json_str);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setAccount && window.__setAccount({sid},`{escaped}`)"
+                        ));
+                        // A login flow was in flight and just succeeded: stop the
+                        // poller and respawn the session so the fresh OCTOHUB_API_KEY
+                        // in `.env` is loaded (it's read at process startup). Resume
+                        // by id to keep the conversation context.
+                        if signed_in {
+                            if let Some(stop) = login_pollers.remove(&sid) {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                                    s.retry_count = 0;
+                                    s.reconnect_gen += 1;
+                                    let cmd = match &s.acp_session_id {
+                                        Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
+                                        None => format!("octomind acp {}", s.tag),
+                                    };
+                                    s.handle = acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok();
+                                    let _ = sidebar_wv.evaluate_script(&format!(
+                                        "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    acp::AgentEvent::LoginStarted { url, code, already_signed_in } => {
+                        if already_signed_in {
+                            // Nothing to do — the chip already reflects it. Nudge a
+                            // refresh so any stale "signed out" state corrects.
+                            let _ = acp_proxy.send_event(AppEvent::AcpRefreshAccount(sid));
+                        } else if !url.is_empty() {
+                            // Open the verification URL in a browser tab (octoweb IS
+                            // a browser — the whole point) and show the code.
+                            let _ = acp_proxy.send_event(AppEvent::OpenInNewTab(url.clone()));
+                            let ecode = webview_utils::escape_js_template(&code);
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__loginPending && window.__loginPending({sid},`{ecode}`)"
+                            ));
+                            // Poll `/usage` until the browser approval lands. Bounded
+                            // to the server's ~15-min device-code TTL; the stop flag
+                            // ends it early once signed-in (handled in Account above).
+                            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            login_pollers.insert(sid, std::sync::Arc::clone(&stop));
+                            let proxy_clone = acp_proxy.clone();
+                            std::thread::spawn(move || {
+                                for _ in 0..100 {
+                                    std::thread::sleep(std::time::Duration::from_secs(3));
+                                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                        return;
+                                    }
+                                    if proxy_clone.send_event(AppEvent::AcpRefreshAccount(sid)).is_err() {
+                                        return;
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -4383,6 +4471,17 @@ fn main() {
             // Second click within 12s: force-kill the subprocess and respawn the
             // handle with the same agent tag. This is the user's escape hatch when
             // the agent ignores `CancelNotification` (e.g. wedged on a syscall).
+            Event::UserEvent(AppEvent::AcpSignIn(sid)) => {
+                // Kick off `/login`; the LoginStarted event opens the browser tab.
+                if let Some(h) = sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
+                    let _ = h.send_command("/login".to_string());
+                }
+            }
+            Event::UserEvent(AppEvent::AcpRefreshAccount(sid)) => {
+                if let Some(h) = sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
+                    let _ = h.send_command("/usage".to_string());
+                }
+            }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
@@ -4531,6 +4630,7 @@ fn main() {
                         tool_starts: HashMap::new(),
                         turn_started: None,
                         available_commands_json: None,
+                    account_json: None,
                         octomind_pid: None,
                     });
                     active_session_id = sid; // auto-switch to new session
@@ -4664,6 +4764,12 @@ fn main() {
                         let escaped = webview_utils::escape_js_template(json);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
+                        ));
+                    }
+                    if let Some(ref json) = s.account_json {
+                        let escaped = webview_utils::escape_js_template(json);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setAccount && window.__setAccount({sid},`{escaped}`)"
                         ));
                     }
                     if !s.messages.is_empty() {

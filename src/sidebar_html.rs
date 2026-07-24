@@ -243,6 +243,64 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     cursor: default;
   }
 
+  /* ── Account bar — slim login / quota strip under the header ─────────────── */
+  #account-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--text-secondary);
+    background: var(--agent-bg);
+    border-bottom: 1px solid var(--divider);
+    flex-shrink: 0;
+  }
+  #account-bar.hidden { display: none; }
+  #account-bar .account-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-tertiary);
+  }
+  #account-bar.signed-in  .account-dot { background: #34c759; }
+  #account-bar.signed-out .account-dot,
+  #account-bar.over-quota .account-dot { background: var(--dot-err); }
+  #account-bar.pending    .account-dot {
+    background: var(--accent);
+    animation: acct-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes acct-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+  #account-bar.over-quota {
+    color: var(--error-text);
+    background: var(--error-bg);
+    border-bottom-color: var(--error-border);
+  }
+  #account-text {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #account-action {
+    flex-shrink: 0;
+    padding: 2px 10px;
+    border-radius: 11px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  #account-action:hover { background: var(--accent-hover); }
+  #account-dismiss {
+    flex-shrink: 0;
+    width: 16px; height: 16px;
+    display: flex; align-items: center; justify-content: center;
+    border: none; background: transparent;
+    color: var(--text-tertiary);
+    cursor: pointer; font-size: 13px; line-height: 1; border-radius: 4px;
+  }
+  #account-dismiss:hover { background: var(--hover-bg); color: var(--text-secondary); }
+
   /* ── Session tabs strip ─────────────────────────────────────────────────── */
   #session-strip {
     display: flex;
@@ -2223,6 +2281,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     </button>
   </div>
 
+  <!-- Account bar — login / quota status (populated by __setAccount) -->
+  <div id="account-bar" class="hidden" role="status" aria-live="polite">
+    <span class="account-dot"></span>
+    <span id="account-text"></span>
+    <button id="account-action" type="button" style="display:none"></button>
+    <button id="account-dismiss" type="button" title="Dismiss" aria-label="Dismiss">×</button>
+  </div>
+
   <!-- Inline create-session panel (toggled by + button) -->
   <div id="session-create-panel">
     <input id="sc-title" type="text" placeholder="Title" autocomplete="off" spellcheck="false" maxlength="32">
@@ -2610,6 +2676,72 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     const s = sessions.get(sid);
     if (!s) return;
     applyStatus(s, st);
+  };
+
+  // ── Account bar (login / quota) ───────────────────────────────────────────
+  const _acctBar = document.getElementById('account-bar');
+  const _acctText = document.getElementById('account-text');
+  const _acctAction = document.getElementById('account-action');
+  const _acctDismiss = document.getElementById('account-dismiss');
+  let _acctDismissedKind = null; // stays hidden until the account state changes kind
+
+  function _acctSet(kind, text, actionLabel) {
+    _acctBar.className = kind; // single state class; also clears 'hidden'
+    _acctText.textContent = text;
+    if (actionLabel) {
+      _acctAction.textContent = actionLabel;
+      _acctAction.style.display = '';
+    } else {
+      _acctAction.style.display = 'none';
+    }
+    // Always dismissible — a dismissed bar re-shows when the account state
+    // changes, so hiding one never traps the user (and background work like a
+    // pending sign-in still completes and updates the chip).
+    _acctDismiss.style.display = '';
+  }
+
+  function renderAccount(a) {
+    if (!a || typeof a !== 'object') return;
+    let kind, text, action = null;
+    if (a.signed_in) {
+      if (a.over_quota) {
+        kind = 'over-quota';
+        text = 'Out of Octomind quota' + (a.summary ? ' · ' + a.summary : '');
+      } else {
+        kind = 'signed-in';
+        text = a.account || 'Signed in to Octomind';
+      }
+    } else {
+      kind = 'signed-out';
+      text = 'Not signed in to Octomind';
+      action = 'Sign in';
+    }
+    // A change of state re-shows a previously dismissed bar.
+    if (_acctDismissedKind && _acctDismissedKind !== kind) _acctDismissedKind = null;
+    if (_acctDismissedKind === kind) { _acctBar.className = 'hidden'; return; }
+    _acctSet(kind, text, action);
+  }
+
+  _acctAction.addEventListener('click', () => {
+    if (_acctBar.classList.contains('signed-out')) {
+      _acctSet('pending', 'Starting sign-in…', null);
+      window.ipc.postMessage(JSON.stringify({ type: 'acp_signin', session_id: activeSid || 0 }));
+    }
+  });
+  _acctDismiss.addEventListener('click', () => {
+    _acctDismissedKind = _acctBar.className.split(' ')[0] || null;
+    _acctBar.className = 'hidden';
+  });
+
+  // Callable from Rust — account/quota status parsed from `/usage`.
+  window.__setAccount = function(sid, json) {
+    let a; try { a = JSON.parse(json); } catch (e) { return; }
+    renderAccount(a);
+  };
+  // Callable from Rust — `/login` started; the verification tab is opening.
+  window.__loginPending = function(sid, code) {
+    _acctDismissedKind = null;
+    _acctSet('pending', code ? ('Waiting for browser… code ' + code) : 'Waiting for browser…', null);
   };
 
   // ── Inline rename ───────────────────────────────────────────────────────

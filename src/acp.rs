@@ -12,13 +12,15 @@
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use agent_client_protocol::schema::v1::{
-    AvailableCommandInput, CancelNotification, ContentBlock, ContentChunk, ImageContent,
-    Implementation, InitializeRequest, NewSessionRequest, PermissionOptionId, PermissionOptionKind,
-    PromptRequest, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
+    AvailableCommandInput, CancelNotification, ClientRequest, ContentBlock, ContentChunk,
+    ExtRequest, ImageContent, Implementation, InitializeRequest, NewSessionRequest,
+    PermissionOptionId, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
+    SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use serde_json::value::RawValue;
 
 /// Events streamed from the agent back to the main thread.
 #[derive(Debug)]
@@ -54,6 +56,24 @@ pub enum AgentEvent {
     Error(String),
     /// Agent sent updated list of available slash commands.
     AvailableCommands(Vec<CommandInfo>),
+    /// Octomind account status, parsed from a `/usage` ext call. Drives the
+    /// sidebar's login chip and signed-out / over-quota banner.
+    Account {
+        signed_in: bool,
+        /// "email (plan)" when known.
+        account: Option<String>,
+        /// A spend window is committed at or over its cap.
+        over_quota: bool,
+        /// Short human summary for the banner, e.g. "$3.40 / $5.00 (week)".
+        summary: Option<String>,
+    },
+    /// A device-login flow started (from `/login`). The client opens `url` in a
+    /// browser tab, shows `code`, and polls `/usage` until signed in.
+    LoginStarted {
+        url: String,
+        code: String,
+        already_signed_in: bool,
+    },
     /// Emitted once, right after spawn — the OS pid of the agent subprocess.
     /// Used by the A2UI watcher to route surface envelopes back to the
     /// session whose octomind invoked `render_ui` (the bash script stamps
@@ -163,6 +183,8 @@ pub struct AcpHandle {
     prompt_tx: tokio::sync::mpsc::UnboundedSender<PromptMessage>,
     /// Signal the ACP thread to cancel the current prompt.
     cancel_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Send slash commands (e.g. `/usage`, `/login`) to run as ACP ext calls.
+    command_tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl AcpHandle {
@@ -176,6 +198,7 @@ impl AcpHandle {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PromptMessage>();
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
 
         // Parse "program arg1 arg2 ..." — simple whitespace split, no shell quoting needed.
@@ -204,6 +227,7 @@ impl AcpHandle {
                     std::sync::Arc::clone(&wake),
                     prompt_rx,
                     cancel_rx,
+                    command_rx,
                     program,
                     args,
                 )
@@ -222,6 +246,7 @@ impl AcpHandle {
             rx: event_rx,
             prompt_tx,
             cancel_tx,
+            command_tx,
         })
     }
 
@@ -245,6 +270,113 @@ impl AcpHandle {
     pub fn cancel(&self) {
         let _ = self.cancel_tx.send(());
     }
+
+    /// Run a slash command (e.g. `/usage`, `/login`) as an ACP ext call. The
+    /// result comes back as an `AgentEvent` (`Account` or `LoginStarted`).
+    /// Returns false if the ACP thread has exited.
+    pub fn send_command(&self, command: String) -> bool {
+        self.command_tx.send(command).is_ok()
+    }
+}
+
+/// Run one `/…` slash command over the `_octomind/command` ACP ext method and
+/// forward its structured result to the main thread as an `AgentEvent`. Failures
+/// are logged, not surfaced — these are background probes, not user actions.
+async fn run_ext_command(
+    cx: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    wake: &std::sync::Arc<dyn Fn() + Send + Sync>,
+    command: &str,
+) {
+    let params = serde_json::json!({
+        "session_id": session_id.0.to_string(),
+        "command": command,
+        "args": [],
+    });
+    let Ok(raw) = serde_json::to_string(&params).and_then(RawValue::from_string) else {
+        return;
+    };
+    // Ext method names travel on the wire with a leading `_`; the agent strips it
+    // and routes to its `octomind/command` handler.
+    let req = ClientRequest::ExtMethodRequest(ExtRequest::new(
+        "_octomind/command",
+        std::sync::Arc::from(raw),
+    ));
+    let val = match cx.send_request(req).block_task().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(command, error = %e, "ACP ext command failed");
+            return;
+        }
+    };
+
+    // Response is octomind's CommandResponse: { success, output, error }.
+    let Some(out) = val.get("output") else { return };
+    match out.get("command_type").and_then(|v| v.as_str()) {
+        Some("usage") => {
+            let signed_in = out
+                .get("signed_in")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let account = out
+                .get("account")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let mut over_quota = false;
+            let mut tightest: Option<(f64, String)> = None;
+            if let Some(windows) = out.get("windows").and_then(|v| v.as_array()) {
+                for w in windows {
+                    let f = |k: &str| w.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let cap = f("cap_usd");
+                    if cap <= 0.0 {
+                        continue;
+                    }
+                    // Reserved is future burn already committed by cloud machines —
+                    // count it against the cap so headroom reads honestly.
+                    let committed = f("spent_usd") + f("reserved_usd");
+                    if committed >= cap {
+                        over_quota = true;
+                    }
+                    let label = w.get("label").and_then(|v| v.as_str()).unwrap_or("");
+                    let frac = committed / cap;
+                    if tightest.as_ref().is_none_or(|(best, _)| frac > *best) {
+                        tightest = Some((frac, format!("${committed:.2} / ${cap:.2} ({label})")));
+                    }
+                }
+            }
+            let _ = tx.send(AgentEvent::Account {
+                signed_in,
+                account,
+                over_quota,
+                summary: tightest.map(|(_, t)| t),
+            });
+            wake();
+        }
+        Some("login") => {
+            let already_signed_in = out
+                .get("already_signed_in")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let url = out
+                .get("verification_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let code = out
+                .get("user_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let _ = tx.send(AgentEvent::LoginStarted {
+                url,
+                code,
+                already_signed_in,
+            });
+            wake();
+        }
+        _ => {}
+    }
 }
 
 async fn init_session(
@@ -252,6 +384,7 @@ async fn init_session(
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
     mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
     mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    mut command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -373,8 +506,37 @@ async fn init_session(
                 let _ = tx.send(AgentEvent::Connected(session_id.0.to_string()));
                 wake();
 
-                // Process prompts sequentially — one at a time.
-                while let Some(msg) = prompt_rx.recv().await {
+                // Probe account/quota once the session is live so the panel can
+                // reflect login state. Fire-and-forget so a signed-in user on a
+                // slow network never has their first prompt wait on it.
+                {
+                    let cx = cx.clone();
+                    let tx = tx.clone();
+                    let wake = std::sync::Arc::clone(&wake);
+                    let session_id = session_id.clone();
+                    tokio::task::spawn_local(async move {
+                        run_ext_command(&cx, &session_id, &tx, &wake, "/usage").await;
+                    });
+                }
+
+                // Serve prompts one at a time, interleaving `/…` ext commands
+                // (login, usage refresh) whenever no prompt is in flight.
+                loop {
+                    let msg = tokio::select! {
+                        biased;
+                        cmd = command_rx.recv() => match cmd {
+                            Some(command) => {
+                                run_ext_command(&cx, &session_id, &tx, &wake, &command).await;
+                                continue;
+                            }
+                            None => break, // handle dropped
+                        },
+                        prompt = prompt_rx.recv() => match prompt {
+                            Some(m) => m,
+                            None => break, // handle dropped
+                        },
+                    };
+
                     let mut content: Vec<ContentBlock> = Vec::new();
                     for (data, mime) in msg.images {
                         content.push(ContentBlock::Image(ImageContent::new(data, mime)));
