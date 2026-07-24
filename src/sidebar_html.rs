@@ -2871,12 +2871,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Two fence problems marked.js can't handle on its own:
   // 1. Streaming: an opened ``` fence whose closing ``` hasn't arrived yet
   //    renders as broken HTML — we append the missing closers.
-  // 2. Nesting: a ``` block whose body itself contains ``` fences (agent
-  //    quoting markdown). CommonMark closes the outer block at the first
-  //    inner bare ```, leaking the rest as rendered markdown. We treat a
-  //    ```lang line inside an open fence as a nested opener and give each
-  //    fence more backticks than any fence it contains, so marked keeps
-  //    the inner markers as literal content.
+  // 2. Nesting: a ``` block whose body itself quotes markdown that contains
+  //    its own ``` fences (agent showing a draft). CommonMark closes the
+  //    outer block at the first inner bare ```, leaking the rest as rendered
+  //    markdown. We find each block's true extent, then give it more
+  //    backticks than any fence inside it so marked keeps the inner markers
+  //    literal.
   function normalizeFences(text) {
     const lines = text.split('\n');
     const fences = [];  // every fence line: {line, ticks, info}
@@ -2884,44 +2884,56 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const m = lines[i].match(/^[ \t]*(`{3,})(.*)/);
       if (m) fences.push({ line: i, ticks: m[1].length, info: m[2].trim() });
     }
-    // A bare ``` inside an open block always closes the innermost block; only
-    // a lang-tagged fence opens a nested one. No lookahead: any heuristic that
-    // lets a bare ``` extend the root past its closer cannot distinguish
-    // "root quoting fenced blocks" from "sibling blocks one after another"
-    // (identical fence signatures) and ends up swallowing the siblings into
-    // the first block.
-    const stack = [];  // open fences: {line, ticks}
-    const pairs = [];  // closed fences, innermost first: {open, close}
-    for (const fn of fences) {
-      const top = stack[stack.length - 1];
-      // Shorter marker than the enclosing fence = literal content per
-      // CommonMark, already nests correctly — leave it alone.
-      if (top && fn.ticks < top.ticks) continue;
-      if (top && !fn.info) {
-        pairs.push({ open: stack.pop().line, close: fn.line });
-      } else {
-        stack.push({ line: fn.line, ticks: fn.ticks });
-      }
-    }
-    // Streaming: close whatever is still open, innermost first.
-    while (stack.length) {
-      pairs.push({ open: stack.pop().line, close: lines.length });
-      lines.push('```');
-    }
-    // Assign tick counts bottom-up (pairs holds children before parents):
-    // each fence needs more backticks than any fence nested inside it.
-    const ticks = pairs.map(p => lines[p.open].match(/`{3,}/)[0].length);
-    for (let i = 0; i < pairs.length; i++) {
-      for (let j = 0; j < i; j++) {
-        if (pairs[j].open > pairs[i].open && pairs[j].close < pairs[i].close) {
-          ticks[i] = Math.max(ticks[i], ticks[j] + 1);
+    const isMd = s => /^(markdown|md|mdx)$/i.test(s);
+    // The hard case: a bare ``` inside an open block is ambiguous — it may
+    // close the block, or open a bare sub-block of quoted markdown. The only
+    // signal that a block quotes markdown is a lang-tagged child (```bash,
+    // ```toml) or a ```markdown opener. So: a PLAIN block (no such signal)
+    // closes at its first bare ``` — CommonMark, keeps sibling blocks apart.
+    // A QUOTING block instead runs to its farthest balanced ``` so its inner
+    // fenced blocks stay literal.
+    // ponytail: "quoting" then a fenced sibling after it would get swallowed
+    // by "farthest balanced" — doesn't occur in agent output (the quote block
+    // is always last), so not handled. Revisit only if that shape shows up.
+    const used = new Array(fences.length).fill(false);
+    const pairs = [];  // {open, close} line numbers
+    for (let r = 0; r < fences.length; r++) {
+      if (used[r]) continue;
+      const T = fences[r].ticks;
+      let depth = 0, quoting = isMd(fences[r].info), closeIdx = -1;
+      for (let j = r + 1; j < fences.length; j++) {
+        // Shorter marker = literal content per CommonMark — ignore.
+        if (fences[j].ticks < T) continue;
+        if (depth === 0 && !fences[j].info) {
+          closeIdx = j;
+          if (!quoting) break;  // plain block: first bare closer wins
         }
+        if (fences[j].info) { depth++; quoting = true; }
+        else depth = depth > 0 ? depth - 1 : depth + 1;
       }
-      const orig = lines[pairs[i].open].match(/`{3,}/)[0].length;
-      if (ticks[i] > orig) {
-        const fence = '`'.repeat(ticks[i]);
-        lines[pairs[i].open] = lines[pairs[i].open].replace(/`{3,}/, fence);
-        lines[pairs[i].close] = lines[pairs[i].close].replace(/`{3,}/, fence);
+      let close;
+      if (closeIdx < 0) {  // streaming: still open — append a closer
+        close = lines.length;
+        lines.push('`'.repeat(T));
+      } else {
+        close = fences[closeIdx].line;
+        for (let k = r; k <= closeIdx; k++) used[k] = true;
+      }
+      pairs.push({ open: fences[r].line, close: close });
+    }
+    // Each block must out-tick every fence nested inside it so marked keeps
+    // the inner markers literal.
+    for (const p of pairs) {
+      let maxInner = 0;
+      for (const f of fences) {
+        if (f.line > p.open && f.line < p.close) maxInner = Math.max(maxInner, f.ticks);
+      }
+      const orig = lines[p.open].match(/`{3,}/)[0].length;
+      const need = Math.max(orig, maxInner + 1);
+      if (need > orig) {
+        const fence = '`'.repeat(need);
+        lines[p.open] = lines[p.open].replace(/`{3,}/, fence);
+        if (p.close < lines.length) lines[p.close] = lines[p.close].replace(/`{3,}/, fence);
       }
     }
     return lines.join('\n');
