@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.0] - 2026-07-26
+
+### 📋 Release Summary
+
+This release introduces account authentication, updated status interfaces, and enhanced search engine accessibility (0506b302, 3e4dbcd5, 4d1b86d6). Significant improvements were made to sidebar markdown rendering and general DOM reliability (642b7c9f, 8058bd1c, d4a66687, 883f6784). Additionally, several bug fixes increase overall system stability by preventing crashes related to script errors and character encoding (d5add34d, 61715050).
+
+
+### ✨ New Features & Enhancements
+
+- **acp**: implement account authentication and status UI `0506b302`
+- **ui**: enhance search engines and accessibility `3e4dbcd5`
+- **acp**: migrate to agent-client-protocol v1.2.0 `4d1b86d6`
+
+### 🔧 Improvements & Optimizations
+
+- **sidebar**: improve nested markdown fence handling `d4a66687`
+
+### 🐛 Bug Fixes & Stability
+
+- **sidebar**: simplify fenced code block parsing `642b7c9f`
+- **sidebar**: handle nested markdown code fences `8058bd1c`
+- **dom**: prevent page script errors from failing events `d5add34d`
+- **webview**: prevent crash on lone UTF-16 surrogates `61715050`
+- **dom**: improve text insertion reliability `883f6784`
+
 ## [0.8.0] - 2026-06-15
 
 ### 📋 Release Summary
