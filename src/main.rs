@@ -1219,9 +1219,11 @@ fn main() {
                                         length: text.len(),
                                         encoding: 4u64 // NSUTF8StringEncoding
                                     ];
+                                    let ns_str = objc2::rc::Retained::from_raw(ns_str)
+                                        .expect("NSString initWithBytes failed");
                                     let arr: *mut AnyObject = msg_send![
                                         class!(NSArray),
-                                        arrayWithObject: ns_str
+                                        arrayWithObject: &*ns_str
                                     ];
                                     let _: bool = msg_send![pb, writeObjects: arr];
                                 }
@@ -1295,9 +1297,11 @@ fn main() {
                                         length: text.len(),
                                         encoding: 4u64 // NSUTF8StringEncoding
                                     ];
+                                    let ns_str = objc2::rc::Retained::from_raw(ns_str)
+                                        .expect("NSString initWithBytes failed");
                                     let arr: *mut AnyObject = msg_send![
                                         class!(NSArray),
-                                        arrayWithObject: ns_str
+                                        arrayWithObject: &*ns_str
                                     ];
                                     let _: bool = msg_send![pb, writeObjects: arr];
                                 }
@@ -5935,9 +5939,11 @@ unsafe fn nsimage_to_png_data(
     let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
         rep, initWithCGImage: cg_image
     ];
-    if rep.is_null() {
+    // Own the rep: it retains the window-sized CGImage (IOSurface-backed), so
+    // leaking it pins tens of MB per capture.
+    let Some(rep) = objc2::rc::Retained::from_raw(rep) else {
         return std::ptr::null_mut();
-    }
+    };
     let empty_dict: *mut objc2::runtime::AnyObject =
         objc2::msg_send![objc2::class!(NSDictionary), dictionary];
     // NSBitmapImageFileTypePNG = 4
@@ -6023,9 +6029,8 @@ unsafe fn pdf_data_to_cgimage(
         pdf_doc,
         initWithData: &*pdf_data
     ];
-    if pdf_doc.is_null() {
-        return None;
-    }
+    // Own the document — it retains the whole PDF NSData.
+    let pdf_doc = objc2::rc::Retained::from_raw(pdf_doc)?;
 
     let page_count: usize = objc2::msg_send![&*pdf_doc, pageCount];
     if page_count == 0 {
@@ -6132,9 +6137,10 @@ unsafe fn cgimage_to_png_data(
     let rep: *mut objc2::runtime::AnyObject = objc2::msg_send![
         rep, initWithCGImage: cg_image_ptr
     ];
-    if rep.is_null() {
+    // Own the rep — it retains the full-page bitmap.
+    let Some(rep) = objc2::rc::Retained::from_raw(rep) else {
         return std::ptr::null_mut();
-    }
+    };
     let empty_dict: *mut objc2::runtime::AnyObject =
         objc2::msg_send![objc2::class!(NSDictionary), dictionary];
     // NSBitmapImageFileTypePNG = 4
@@ -6159,10 +6165,11 @@ unsafe fn copy_cgimage_to_clipboard(cg_image: &core_graphics::image::CGImage) {
     let ns_image: *mut objc2::runtime::AnyObject = objc2::msg_send![objc2::class!(NSImage), alloc];
     let ns_image: *mut objc2::runtime::AnyObject =
         objc2::msg_send![ns_image, initWithCGImage: cg_ptr, size: size];
-    if ns_image.is_null() {
+    // Own the image — it retains the full-page bitmap.
+    let Some(ns_image) = objc2::rc::Retained::from_raw(ns_image) else {
         tracing::error!("Failed to create NSImage from CGImage");
         return;
-    }
+    };
 
     let pb: *mut objc2::runtime::AnyObject =
         objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
