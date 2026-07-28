@@ -247,7 +247,7 @@ pub struct AcpToolRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpMessage {
-    /// "user" | "agent" | "error" | "ui"
+    /// "user" | "agent" | "specialist" | "error" | "ui"
     pub role: String,
     /// Raw text. Markdown for agent, plain otherwise. For role="ui" this
     /// holds the envelope file id (so replay can rebuild the bubble).

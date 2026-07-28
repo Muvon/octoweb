@@ -13,6 +13,7 @@
 ///   window.__switchSession(sid)                   — swap active session
 ///   window.__setSessionStatus(sid, st)            — 'ready'|'connecting'|'thinking'|'error'
 ///   window.__appendChunk(sid, text)               — append streaming MD chunk
+///   window.__appendSpecialist(sid, text)          — injected specialist reply bubble
 ///   window.__appendImage(sid, mime, b64)          — append image to current bubble
 ///   window.__toolStart(sid, id, title, kind, ri, locs) — start tool row
 ///   window.__toolUpdate(sid, id, title, status, ro)    — update tool row
@@ -739,6 +740,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .msg.user  .msg-label { justify-content: flex-end; }
   .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
   .msg.error .msg-label .msg-who { color: var(--dot-err); opacity: 0.85; }
+  .msg.specialist .msg-label .msg-who { color: var(--dot-ok); opacity: 0.85; }
 
   /* Bubbles — solid material cards (HIG: no glass stacked on glass), depth
      comes from a specular inner top edge + soft ambient shadow. */
@@ -3642,6 +3644,47 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (s.sid === activeSid) scrollToBottom();
   };
 
+  // Injected message from the agent runtime — a specialist (tap-run) reply,
+  // schedule or webhook payload. Text arrives as "[<source label>] <body>";
+  // the bracket tag becomes the sender label (tap-run labels collapse to the
+  // bare role, e.g. "doctor:blood").
+  function appendSpecialistMsg(s, text) {
+    let who = 'Specialist', body = text;
+    const m = text.match(/^\[([^\]\n]+)\]\s*/);
+    if (m) { who = m[1]; body = text.slice(m[0].length); }
+    const tap = who.match(/^tap-run \S+ \((.+)\)$/);
+    if (tap) who = tap[1];
+    const wrap = document.createElement('div');
+    wrap.className = 'msg agent specialist';
+    const label = document.createElement('div');
+    label.className = 'msg-label';
+    const whoEl = document.createElement('span');
+    whoEl.className = 'msg-who';
+    whoEl.textContent = who;
+    const time = document.createElement('span');
+    time.className = 'msg-time';
+    time.textContent = fmtTime(new Date());
+    label.appendChild(whoEl);
+    label.appendChild(time);
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = renderMd(body);
+    wrap.appendChild(label);
+    wrap.appendChild(bubble);
+    s.container.insertBefore(wrap, s.thinking);
+    finishAgentBubble(s, bubble, body, 0, [], 0);
+    if (s.sid === activeSid) scrollToBottom();
+  }
+
+  window.__appendSpecialist = function(sid, text) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    // Finalize any still-open agent bubble first — the turn that follows an
+    // injection streams without a Done, so this is its close signal.
+    window.__setThinking(sid, false);
+    appendSpecialistMsg(s, text);
+  };
+
   window.__appendImage = function(sid, mimeType, b64data) {
     const s = sessions.get(sid);
     if (!s) return;
@@ -3910,7 +3953,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   // Replay persisted messages on cold-start. Rust calls this once per session
   // on sidebar bootstrap with the full message log restored from disk.
-  // Entries: { role: 'user'|'agent'|'error'|'ui', text: string, ts?: number,
+  // Entries: { role: 'user'|'agent'|'specialist'|'error'|'ui', text: string, ts?: number,
   //            a2ui?: <envelope-body>, tools?: [tool records], turn_ms?: number }.
   // Agent turns rebuild their steps group from `tools`; inline images are
   // live-only and skipped.
@@ -3923,6 +3966,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const text = (m && typeof m.text === 'string') ? m.text : '';
       if (role === 'user' || role === 'error') {
         appendMessage(s, role, text);
+      } else if (role === 'specialist') {
+        appendSpecialistMsg(s, text);
       } else if (role === 'agent') {
         const bubble = startAgentBubble(s);
         if (!bubble) continue;

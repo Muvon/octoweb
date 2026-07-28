@@ -31,6 +31,11 @@ pub enum AgentEvent {
     Connected(String),
     /// A text chunk from the agent's response (streaming).
     Chunk(String),
+    /// A message injected into the session by the agent runtime — a specialist
+    /// (tap-run) reply, schedule, webhook, etc. Arrives as a `UserMessageChunk`
+    /// with a `[<source label>] ` prefix. Rendered as its own bubble, never
+    /// merged into the streamed agent response.
+    Injected(String),
     /// An image from the agent's response.
     Image { data: String, mime_type: String },
     /// A new tool call started (id, title, kind, raw_input, locations).
@@ -124,6 +129,15 @@ fn handle_session_update(
             }
             _ => {}
         },
+        // Inbox injections (specialist replies, schedules, webhooks) — the
+        // only user-side chunks octomind emits mid-session.
+        SessionUpdate::UserMessageChunk(ContentChunk {
+            content: ContentBlock::Text(t),
+            ..
+        }) if !t.text.is_empty() => {
+            let _ = tx.send(AgentEvent::Injected(t.text));
+            wake();
+        }
         SessionUpdate::ToolCall(tc) => {
             let locations: Vec<String> = tc
                 .locations

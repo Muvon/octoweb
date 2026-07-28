@@ -2571,6 +2571,23 @@ fn main() {
                             ));
                         }
                     }
+                    acp::AgentEvent::Injected(text) => {
+                        // Specialist/inbox reply injected by the agent runtime. The
+                        // agent turn it triggers streams with no terminal Done (no
+                        // prompt in flight), so first commit whatever is still
+                        // buffered as its own agent message, then record the
+                        // injected text as a separate "specialist" entry.
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            flush_agent_turn(s, cfg.max_acp_session_messages);
+                            push_acp_msg(s, "specialist", text.clone(), cfg.max_acp_session_messages);
+                            s.turn_started = Some(std::time::Instant::now());
+                        }
+                        let escaped = webview_utils::escape_js_template(&text);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__appendSpecialist && window.__appendSpecialist({sid},`{escaped}`)"
+                        ));
+                        persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    }
                     acp::AgentEvent::ToolStart { id, title, kind, raw_input, locations } => {
                         // Record for persistence so the steps group survives a
                         // restart. `render_ui` is skipped: it renders as an A2UI
@@ -4434,6 +4451,11 @@ fn main() {
                 }
                 let mut should_persist = false;
                 if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                    // Inbox-driven turns stream with no terminal Done — commit any
+                    // response still buffered so it lands before this user message.
+                    if flush_agent_turn(s, cfg.max_acp_session_messages) {
+                        should_persist = true;
+                    }
                     // New turn starts now — anchors `turn_ms` on the flush.
                     s.turn_started = Some(std::time::Instant::now());
                     if !text.is_empty() {
