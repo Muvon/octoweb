@@ -2475,6 +2475,44 @@ fn main() {
                 pending_tabs.insert(victim_id, url.clone());
                 tracing::debug!(tab_id = victim_id, url = %url, "proactively hibernated idle tab");
             }
+
+            // ── Tab cap: auto-close least-recently-used tabs above cfg.max_tabs ──
+            // Closed pages remain reachable via history. Reuses the CloseTab
+            // event so all per-tab state (webview, snapshots, MRU, swap) is
+            // cleaned up in one place.
+            if cfg.max_tabs > 0 {
+                let victims: Vec<usize> = {
+                    let tm = tabs.lock().unwrap();
+                    let over = tm.tabs().len().saturating_sub(cfg.max_tabs);
+                    if over == 0 {
+                        Vec::new()
+                    } else {
+                        let mut candidates: Vec<(usize, std::time::Instant)> = tm
+                            .tabs()
+                            .iter()
+                            .filter(|t| {
+                                t.id != active_wv_id
+                                    && !t.is_playing_audio
+                                    && !media_playing_tabs.contains(&t.id)
+                            })
+                            .map(|t| (t.id, t.last_active_at))
+                            .collect();
+                        candidates.sort_by_key(|&(_, at)| at);
+                        candidates.truncate(over);
+                        candidates.into_iter().map(|(id, _)| id).collect()
+                    }
+                };
+                if !victims.is_empty() {
+                    tracing::info!(
+                        count = victims.len(),
+                        max_tabs = cfg.max_tabs,
+                        "closing least-recently-used tabs above cap"
+                    );
+                    for id in victims {
+                        let _ = proxy.send_event(AppEvent::CloseTab(id));
+                    }
+                }
+            }
         }
 
         // Set dock icon and app menu once — must happen after tao has initialized NSApplication.
@@ -3935,6 +3973,9 @@ fn main() {
                                 learning_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(cfg.learning_interval_min * 60));
                             }
                         }
+                    }
+                    "max_tabs" => {
+                        if let Ok(n) = val.parse::<usize>() { cfg.max_tabs = n; }
                     }
                     "aggressive_hibernation" => {
                         cfg.aggressive_hibernation = val == "true";

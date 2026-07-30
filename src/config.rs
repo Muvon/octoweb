@@ -356,6 +356,10 @@ pub struct Config {
     /// on 16 GB+ machines. Turn on for tight-RAM setups or eager reclamation.
     #[serde(default)]
     pub aggressive_hibernation: bool,
+    /// Max open tabs. Least-recently-used tabs above the cap are closed
+    /// automatically — their pages remain reachable via history. 0 disables.
+    #[serde(default = "default_max_tabs")]
+    pub max_tabs: usize,
     /// Whether the first-run welcome toast has been shown. Internal flag.
     #[serde(default)]
     pub first_run_completed: bool,
@@ -370,6 +374,10 @@ fn default_max_ai_prompt_history() -> usize {
 }
 
 fn default_max_acp_session_messages() -> usize {
+    500
+}
+
+fn default_max_tabs() -> usize {
     500
 }
 
@@ -396,6 +404,7 @@ impl Default for Config {
             proactive_learning: true,
             learning_interval_min: 30,
             aggressive_hibernation: false,
+            max_tabs: 500,
             first_run_completed: false,
         }
     }

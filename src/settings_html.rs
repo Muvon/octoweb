@@ -424,6 +424,13 @@ pub fn html() -> &'static str {
         </div>
         <button class="toggle" id="aggressive_hibernation" data-key="aggressive_hibernation"></button>
       </div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <span class="row-label">Max open tabs</span>
+          <span class="row-hint">Least-recently-used tabs above this are closed automatically; pages stay in history. 0 disables.</span>
+        </div>
+        <input type="number" id="max_tabs" data-key="max_tabs" min="0" step="50">
+      </div>
     </div>
 
     <div class="section">

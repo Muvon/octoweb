@@ -110,7 +110,11 @@ jobs:
     steps:
       - name: Dispatch update to homebrew-tap
         run: |
-          curl -X POST \
+          if [ -z "${{ secrets.TAP_GITHUB_TOKEN }}" ]; then
+            echo "::error::TAP_GITHUB_TOKEN secret is not set"
+            exit 1
+          fi
+          curl --fail-with-body -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.TAP_GITHUB_TOKEN }}" \
             https://api.github.com/repos/muvon/homebrew-tap/dispatches \

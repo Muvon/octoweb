@@ -1,9 +1,10 @@
-# octoweb
+# Octoweb — the keyboard-first AI browser for macOS
 
-[![Version](https://img.shields.io/badge/version-0.5.1-blue.svg)](https://github.com/muvon/octoweb/releases)
+[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/muvon/octoweb/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS-black.svg)](https://github.com/muvon/octoweb/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
-**The browser you reach for when you want to think.**
+**The browser you reach for when you want to think. macOS only, by design.**
 
 Built on WebKit and Rust. No Electron. No Chrome. No mouse required.
 
@@ -282,9 +283,17 @@ Full-text search with highlighting. Uses CSS Custom Highlight API for fast, nati
 
 ---
 
-## Install & build
+## Install
 
-**Requirements:** macOS, Rust toolchain, Xcode Command Line Tools.
+**Homebrew** (recommended):
+
+```bash
+brew install --cask muvon/tap/octoweb
+```
+
+**Direct download:** grab the archive for your Mac — Apple Silicon or Intel — from [GitHub Releases](https://github.com/muvon/octoweb/releases), unpack it, and drop `Octoweb.app` into `/Applications`.
+
+**Build from source** (requires Rust toolchain and Xcode Command Line Tools):
 
 ```bash
 git clone https://github.com/muvon/octoweb
