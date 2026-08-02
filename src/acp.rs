@@ -520,16 +520,28 @@ async fn init_session(
                 let _ = tx.send(AgentEvent::Connected(session_id.0.to_string()));
                 wake();
 
-                // Probe account/quota once the session is live so the panel can
-                // reflect login state. Fire-and-forget so a signed-in user on a
-                // slow network never has their first prompt wait on it.
+                // Keep account/quota status in sync with the server. Probe once
+                // immediately so the panel shows login state quickly, then refresh
+                // periodically while the session is live so reserved spend and window
+                // resets are reflected in the sidebar chip.
+                let usage_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 {
                     let cx = cx.clone();
                     let tx = tx.clone();
                     let wake = std::sync::Arc::clone(&wake);
                     let session_id = session_id.clone();
+                    let stop = std::sync::Arc::clone(&usage_stop);
                     tokio::task::spawn_local(async move {
                         run_ext_command(&cx, &session_id, &tx, &wake, "/usage").await;
+                        const REFRESH_INTERVAL: std::time::Duration =
+                            std::time::Duration::from_secs(60);
+                        loop {
+                            tokio::time::sleep(REFRESH_INTERVAL).await;
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
+                            run_ext_command(&cx, &session_id, &tx, &wake, "/usage").await;
+                        }
                     });
                 }
 
@@ -625,6 +637,9 @@ async fn init_session(
                         }
                     }
                 }
+
+                // Stop the periodic `/usage` refresh task when the session ends.
+                usage_stop.store(true, std::sync::atomic::Ordering::Relaxed);
 
                 Ok(())
             },
