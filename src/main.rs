@@ -1755,6 +1755,10 @@ fn main() {
 
     // ── Proactive learning — background agent that memorizes browsing patterns ─
     let mut learning_handle: Option<acp::AcpHandle> = None;
+    // Pid of the learning agent's octomind process — save_and_exit must SIGTERM
+    // it (like session agents) since ControlFlow::Exit skips destructors and
+    // would otherwise orphan a mid-run learning agent on every quit.
+    let mut learning_pid: Option<u32> = None;
     let mut learning_next_at: Option<std::time::Instant> = if cfg.proactive_learning {
         // First run after 2 minutes so there's some history to analyze
         Some(std::time::Instant::now() + std::time::Duration::from_secs(120))
@@ -2993,13 +2997,16 @@ fn main() {
         if let Some(ref mut h) = learning_handle {
             for ev in h.poll() {
                 match ev {
+                    acp::AgentEvent::ProcessPid(pid) => learning_pid = Some(pid),
                     acp::AgentEvent::Done => {
                         tracing::info!("proactive learning run completed");
                         learning_handle = None;
+                        learning_pid = None;
                     }
                     acp::AgentEvent::Error(err) => {
                         tracing::warn!(error = %err, "proactive learning error");
                         learning_handle = None;
+                        learning_pid = None;
                     }
                     _ => {} // Ignore Chunk, ToolStart, etc.
                 }
@@ -3964,6 +3971,7 @@ fn main() {
                         } else {
                             learning_next_at = None;
                             learning_handle = None;
+                            learning_pid = None;
                         }
                     }
                     "learning_interval_min" => {
@@ -5180,6 +5188,7 @@ fn main() {
                     &sessions,
                     active_session_id,
                     cfg.max_acp_session_messages,
+                    learning_pid,
                     control_flow,
                 );
             }
@@ -5777,6 +5786,7 @@ fn main() {
                             &sessions,
                             active_session_id,
                             cfg.max_acp_session_messages,
+                            learning_pid,
                             control_flow,
                         );
                     } else if window_id == chrome_win_id {
@@ -6548,6 +6558,7 @@ fn save_and_exit(
     acp_sessions: &[AcpSession],
     acp_active_id: u64,
     max_acp_session_messages: usize,
+    learning_pid: Option<u32>,
     control_flow: &mut ControlFlow,
 ) {
     let mut tm = tabs.lock().unwrap();
@@ -6597,7 +6608,11 @@ fn save_and_exit(
     // it and silently mint a fresh session — that's how agent context got
     // lost across restarts. SIGTERM lets octomind save; bounded wait, then
     // SIGKILL stragglers.
-    let pids: Vec<u32> = acp_sessions.iter().filter_map(|s| s.octomind_pid).collect();
+    let pids: Vec<u32> = acp_sessions
+        .iter()
+        .filter_map(|s| s.octomind_pid)
+        .chain(learning_pid)
+        .collect();
     for &pid in &pids {
         unsafe { libc::kill(pid as libc::c_int, libc::SIGTERM) };
     }

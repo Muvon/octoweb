@@ -428,8 +428,13 @@ impl Config {
             }
         };
 
-        match toml::from_str(&raw) {
-            Ok(cfg) => cfg,
+        match toml::from_str::<Config>(&raw) {
+            Ok(mut cfg) => {
+                // Floor matches the settings UI — a zero/tiny interval would make
+                // the learning agent run back-to-back, continuously spending tokens.
+                cfg.learning_interval_min = cfg.learning_interval_min.max(5);
+                cfg
+            }
             Err(e) => {
                 tracing::error!(path = %path.display(), error = %e, "Invalid config");
                 Config::default()
