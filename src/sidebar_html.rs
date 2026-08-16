@@ -2558,6 +2558,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // chat state
       currentAgentBubble: null,
       currentAgentRaw: '',
+      // Non-null while AgentMessageChunk output is causally owned by an
+      // injected specialist/inbox turn rather than the top-level Octopus.
+      agentWho: null,
       // `busy` = agent is processing a prompt right now (set on dispatch,
       // cleared on Done/Cancelled/Error). Drives queue logic and the stop
       // button. NOT the same as `isThinking` (the activity spinner UI),
@@ -2847,6 +2850,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     active.thinking.innerHTML = '';
     active.currentAgentBubble = null;
     active.currentAgentRaw = '';
+    active.agentWho = null;
     active.isThinking = false;
     active.runningTools = 0;
     // Clearing the session restarts the agent on Rust side — drop busy and any
@@ -2879,6 +2883,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.thinking.innerHTML = '';
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
+    s.agentWho = null;
     s.availableCommands = [];
     s.inputDraft = '';
     s.inputSelectionStart = 0;
@@ -3606,12 +3611,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   function startAgentBubble(s) {
     if (!s) return;
     const wrap   = document.createElement('div');
-    wrap.className = 'msg agent';
+    wrap.className = 'msg agent' + (s.agentWho ? ' specialist' : '');
     const label  = document.createElement('div');
     label.className = 'msg-label';
     const who = document.createElement('span');
     who.className = 'msg-who';
-    who.textContent = 'Octopus';
+    who.textContent = s.agentWho || 'Octopus';
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
@@ -3674,15 +3679,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.container.insertBefore(wrap, s.thinking);
     finishAgentBubble(s, bubble, body, 0, [], 0);
     if (s.sid === activeSid) scrollToBottom();
+    return who;
   }
 
   window.__appendSpecialist = function(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
-    // Finalize any still-open agent bubble first — the turn that follows an
-    // injection streams without a Done, so this is its close signal.
-    window.__setThinking(sid, false);
-    appendSpecialistMsg(s, text);
+    // The injection itself is a turn boundary. Finalize the previous bubble
+    // directly instead of faking a terminal Done: __setThinking(false) also
+    // drains the user queue and can race the autonomous response that follows.
+    finishLiveTurn(s);
+    s.isThinking = false;
+    syncFeed(s);
+    // The autonomous response produced from this injected input has no ACP
+    // Done event. Retain the source until another injection or real prompt
+    // closes the turn, so subsequent chunks are not mislabeled as Octopus.
+    s.agentWho = appendSpecialistMsg(s, text);
   };
 
   window.__appendImage = function(sid, mimeType, b64data) {
@@ -3896,6 +3908,30 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
   };
 
+  // Finalize and reset one live response without changing queue/busy state.
+  // Injections use this as a causal boundary; terminal prompt events use the
+  // same path before they release the queue.
+  function finishLiveTurn(s) {
+    const savedToolCount = s.toolCount;
+    const savedToolDetails = [...s.toolDetails];
+    const turnMs = s.activityStart ? Date.now() - s.activityStart : 0;
+    clearActivity(s);
+    // Synthesize a bubble for tool-only turns — finishAgentBubble keeps the
+    // steps group as the record and hides the empty bubble itself.
+    if (!s.currentAgentBubble && savedToolCount > 0) {
+      s.currentAgentBubble = startAgentBubble(s);
+      s.currentAgentRaw = '';
+    }
+    if (s.currentAgentBubble) {
+      finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails, turnMs);
+    }
+    s.currentAgentBubble = null;
+    s.currentAgentRaw = '';
+    s.toolCount = 0;
+    s.toolDetails = [];
+    s.activityStart = 0;
+  }
+
   window.__setThinking = function(sid, on) {
     const s = sessions.get(sid);
     if (!s) return;
@@ -3905,11 +3941,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       sendBtn.title = on ? 'Stop' : 'Send (Return)';
     }
     if (on) {
-      s.currentAgentBubble = null;
-      s.currentAgentRaw = '';
-      s.toolCount = 0;
-      s.toolDetails = [];
-      clearActivity(s);
+      // A real prompt is also the terminal boundary for an autonomous inbox
+      // response. Finalize its bubble before resetting live-turn state; the
+      // old behavior dropped the reference and left it without copy/steps.
+      finishLiveTurn(s);
+      s.agentWho = null;
       s.activityStart = Date.now();
       const hdr = document.createElement('div');
       hdr.className = 'activity-header';
@@ -3925,22 +3961,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // Clear the busy flag so queued messages can drain and new prompts go
       // straight to dispatch instead of being queued.
       s.busy = false;
-      const savedToolCount = s.toolCount;
-      const savedToolDetails = [...s.toolDetails];
-      const turnMs = s.activityStart ? Date.now() - s.activityStart : 0;
-      clearActivity(s);
+      finishLiveTurn(s);
       syncFeed(s);
-      // Synthesize a bubble for tool-only turns — finishAgentBubble keeps the
-      // steps group as the record and hides the empty bubble itself.
-      if (!s.currentAgentBubble && savedToolCount > 0) {
-        s.currentAgentBubble = startAgentBubble(s);
-        s.currentAgentRaw = '';
-      }
-      if (s.currentAgentBubble) {
-        finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails, turnMs);
-        s.currentAgentBubble = null;
-        s.currentAgentRaw = '';
-      }
+      s.agentWho = null;
     }
   };
 

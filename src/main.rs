@@ -247,6 +247,10 @@ struct AcpSession {
     /// `AgentEvent::Chunk` and flushed into `messages` on Done / Cancelled /
     /// Error so the persisted log only contains finalized turns.
     agent_buf: String,
+    /// Source label for an autonomous response triggered by an injected inbox
+    /// message. While set, streamed agent chunks belong to that specialist
+    /// turn and must not be persisted or replayed as Octopus output.
+    agent_source: Option<String>,
     /// Tool runs of the in-flight turn. Mirrors what the live feed shows;
     /// flushed into the agent message alongside `agent_buf` so the steps
     /// group survives restarts.
@@ -1705,6 +1709,7 @@ fn main() {
                     acp_session_id: snap.acp_session_id,
                     messages: snap.messages,
                     agent_buf: String::new(),
+                    agent_source: None,
                     tool_buf: Vec::new(),
                     tool_starts: HashMap::new(),
                     turn_started: None,
@@ -1736,6 +1741,7 @@ fn main() {
                 acp_session_id: None,
                 messages: Vec::new(),
                 agent_buf: String::new(),
+                agent_source: None,
                 tool_buf: Vec::new(),
                 tool_starts: HashMap::new(),
                 turn_started: None,
@@ -2622,6 +2628,7 @@ fn main() {
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             flush_agent_turn(s, cfg.max_acp_session_messages);
                             push_acp_msg(s, "specialist", text.clone(), cfg.max_acp_session_messages);
+                            s.agent_source = Some(injected_source_label(&text));
                             s.turn_started = Some(std::time::Instant::now());
                         }
                         let escaped = webview_utils::escape_js_template(&text);
@@ -4505,6 +4512,9 @@ fn main() {
                     if flush_agent_turn(s, cfg.max_acp_session_messages) {
                         should_persist = true;
                     }
+                    // This prompt is a real top-level Octopus turn. Any injected
+                    // source with no response is now superseded.
+                    s.agent_source = None;
                     // New turn starts now — anchors `turn_ms` on the flush.
                     s.turn_started = Some(std::time::Instant::now());
                     if !text.is_empty() {
@@ -4701,6 +4711,7 @@ fn main() {
                         acp_session_id: None,
                         messages: Vec::new(),
                         agent_buf: String::new(),
+                        agent_source: None,
                         tool_buf: Vec::new(),
                         tool_starts: HashMap::new(),
                         turn_started: None,
@@ -6436,10 +6447,22 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Flush the in-flight agent turn (streamed text + tool runs) into the
-/// persisted log as one "agent" message. Returns true if anything was
-/// committed. Tool-only turns (no text) are kept — the sidebar renders
-/// their steps group as the record of the work.
+/// Extract the sender label carried by Octomind's injected-message envelope.
+/// The wire payload is currently textual (`[source label] body`), so keep the
+/// parsing narrow and fall back to the generic label for foreign ACP agents.
+fn injected_source_label(text: &str) -> String {
+    text.strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(label, _)| label.trim())
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Specialist")
+        .to_string()
+}
+
+/// Flush the in-flight response (streamed text + tool runs) into the
+/// persisted log. Injected turns retain their specialist source; ordinary
+/// prompt turns remain agent messages. Returns true if anything was committed.
+/// Tool-only turns are kept so the sidebar can replay their steps group.
 fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     let text = std::mem::take(&mut s.agent_buf);
     let tools = std::mem::take(&mut s.tool_buf);
@@ -6452,8 +6475,13 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     if text.is_empty() && tools.is_empty() {
         return false;
     }
+    let source = s.agent_source.take();
+    let (role, text) = match source {
+        Some(source) => ("specialist".to_string(), format!("[{source}] {text}")),
+        None => ("agent".to_string(), text),
+    };
     let msg = config::AcpMessage {
-        role: "agent".to_string(),
+        role,
         text,
         ts: epoch_ms(),
         a2ui: None,
@@ -6462,6 +6490,38 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     };
     push_acp_message(s, msg, max_msgs);
     true
+}
+
+/// Build the durable message view for persistence without mutating live turn
+/// state. Autonomous inbox turns have no ACP Done event, so their final buffer
+/// may still be open when the app exits; omitting it here would lose the reply.
+fn acp_messages_snapshot(s: &AcpSession, max_msgs: usize) -> Vec<config::AcpMessage> {
+    let mut messages = s.messages.clone();
+    if !s.agent_buf.is_empty() || !s.tool_buf.is_empty() {
+        let (role, text) = match s.agent_source.as_deref() {
+            Some(source) => (
+                "specialist".to_string(),
+                format!("[{source}] {}", s.agent_buf),
+            ),
+            None => ("agent".to_string(), s.agent_buf.clone()),
+        };
+        messages.push(config::AcpMessage {
+            role,
+            text,
+            ts: epoch_ms(),
+            a2ui: None,
+            tools: s.tool_buf.clone(),
+            turn_ms: s
+                .turn_started
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+        });
+    }
+    if messages.len() > max_msgs {
+        let drop = messages.len() - max_msgs;
+        messages.drain(..drop);
+    }
+    messages
 }
 
 /// Cap a tool's raw input/output JSON for persistence — page dumps and MCP
@@ -6530,15 +6590,12 @@ fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, m
 fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize) {
     let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions
         .iter()
-        .map(|s| {
-            let start = s.messages.len().saturating_sub(max_msgs);
-            config::AcpSessionSnapshot {
-                id: s.id,
-                title: s.title.clone(),
-                tag: s.tag.clone(),
-                acp_session_id: s.acp_session_id.clone(),
-                messages: s.messages[start..].to_vec(),
-            }
+        .map(|s| config::AcpSessionSnapshot {
+            id: s.id,
+            title: s.title.clone(),
+            tag: s.tag.clone(),
+            acp_session_id: s.acp_session_id.clone(),
+            messages: acp_messages_snapshot(s, max_msgs),
         })
         .collect();
     let history = config::AcpHistory {
@@ -6586,15 +6643,12 @@ fn save_and_exit(
     let acp_history = config::AcpHistory {
         sessions: acp_sessions
             .iter()
-            .map(|s| {
-                let start = s.messages.len().saturating_sub(max_acp_session_messages);
-                config::AcpSessionSnapshot {
-                    id: s.id,
-                    title: s.title.clone(),
-                    tag: s.tag.clone(),
-                    acp_session_id: s.acp_session_id.clone(),
-                    messages: s.messages[start..].to_vec(),
-                }
+            .map(|s| config::AcpSessionSnapshot {
+                id: s.id,
+                title: s.title.clone(),
+                tag: s.tag.clone(),
+                acp_session_id: s.acp_session_id.clone(),
+                messages: acp_messages_snapshot(s, max_acp_session_messages),
             })
             .collect(),
         active_id: acp_active_id,
@@ -6667,5 +6721,100 @@ fn is_app_active() -> bool {
         }
         let front_pid: i32 = msg_send![frontmost, processIdentifier];
         front_pid == std::process::id() as i32
+    }
+}
+
+#[cfg(test)]
+mod injected_turn_tests {
+    use super::*;
+
+    fn session() -> AcpSession {
+        AcpSession {
+            id: 1,
+            title: "test".into(),
+            tag: "octoweb:assistant".into(),
+            handle: None,
+            retry_count: 0,
+            reconnect_gen: 0,
+            last_cancel_at: None,
+            acp_session_id: None,
+            messages: Vec::new(),
+            agent_buf: String::new(),
+            agent_source: None,
+            tool_buf: Vec::new(),
+            tool_starts: HashMap::new(),
+            turn_started: None,
+            available_commands_json: None,
+            account_json: None,
+            octomind_pid: None,
+        }
+    }
+
+    #[test]
+    fn parses_injected_source_labels_defensively() {
+        assert_eq!(
+            injected_source_label("[tap-run tap-editor-123 (content:editor)] draft"),
+            "tap-run tap-editor-123 (content:editor)"
+        );
+        assert_eq!(injected_source_label("unlabelled payload"), "Specialist");
+        assert_eq!(injected_source_label("[] empty label"), "Specialist");
+    }
+
+    #[test]
+    fn injected_response_is_persisted_as_specialist() {
+        let mut s = session();
+        s.agent_source = Some("tap-run tap-editor-123 (content:editor)".into());
+        s.agent_buf = "Edited draft".into();
+
+        assert!(flush_agent_turn(&mut s, 10));
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].role, "specialist");
+        assert_eq!(
+            s.messages[0].text,
+            "[tap-run tap-editor-123 (content:editor)] Edited draft"
+        );
+        assert!(s.agent_source.is_none());
+    }
+
+    #[test]
+    fn empty_late_terminal_does_not_erase_injected_origin() {
+        let mut s = session();
+        s.agent_source = Some("content:editor".into());
+
+        assert!(!flush_agent_turn(&mut s, 10));
+        assert_eq!(s.agent_source.as_deref(), Some("content:editor"));
+
+        s.agent_buf = "Arrived after Done".into();
+        assert!(flush_agent_turn(&mut s, 10));
+        assert_eq!(s.messages[0].role, "specialist");
+    }
+
+    #[test]
+    fn ordinary_response_remains_octopus_agent() {
+        let mut s = session();
+        s.agent_buf = "Top-level reply".into();
+
+        assert!(flush_agent_turn(&mut s, 10));
+        assert_eq!(s.messages[0].role, "agent");
+        assert_eq!(s.messages[0].text, "Top-level reply");
+    }
+
+    #[test]
+    fn snapshot_keeps_unfinished_autonomous_response() {
+        let mut s = session();
+        push_acp_msg(
+            &mut s,
+            "specialist",
+            "[content:editor] source payload".into(),
+            10,
+        );
+        s.agent_source = Some("content:editor".into());
+        s.agent_buf = "response without Done".into();
+
+        let messages = acp_messages_snapshot(&s, 10);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, "specialist");
+        assert_eq!(messages[1].text, "[content:editor] response without Done");
+        assert_eq!(s.messages.len(), 1, "snapshot must not mutate live history");
     }
 }
