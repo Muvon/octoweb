@@ -100,6 +100,7 @@ enum AppEvent {
     QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
+    TogglePin,                 // ⌘⇧N — pin/unpin current tab to quickslots
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
     AcpReconnect(u64, u64), // (session_id, gen) — scheduled reconnection attempt for given session
     AcpSignIn(u64),         // sidebar "Sign in" button — start `/login` for the session
@@ -206,6 +207,7 @@ fn keybind_to_event(
         A::ZoomOut if !overlay => AppEvent::ZoomOut,
         A::ZoomReset if !overlay => AppEvent::ZoomReset,
         A::Find if !overlay => AppEvent::ToggleFindBar,
+        A::TogglePin if !overlay => AppEvent::TogglePin,
         _ => return None,
     })
 }
@@ -4958,6 +4960,39 @@ fn main() {
                 quick_slots[slot] = None;
                 quickslots::save(&quick_slots);
                 sync_quickslots_ui!();
+            }
+
+            // ── Pin/unpin current tab (⌘⇧N) ───────────────────────────────
+            // If the current URL is already in a slot → remove it (unpin).
+            // Otherwise → save to the first empty slot (pin).
+            Event::UserEvent(AppEvent::TogglePin) => {
+                let info = {
+                    let tm = tabs.lock().unwrap();
+                    tm.active_tab().map(|t| (t.url.clone(), t.title.clone()))
+                };
+                if let Some((url, title)) = info {
+                    if url == "about:blank" || url.is_empty() {
+                        // Nothing to pin from a blank page
+                    } else {
+                        let normalized = url.trim_end_matches('/');
+                        let existing = quick_slots.iter().position(|qs| {
+                            qs.as_ref().map_or(false, |q| q.url.trim_end_matches('/') == normalized)
+                        });
+                        if let Some(slot) = existing {
+                            quick_slots[slot] = None;
+                        } else if let Some(slot) = quick_slots.iter().position(|s| s.is_none()) {
+                            let favicon = webview_utils::cached_favicon(&url, &favicon_cache)
+                                .map(String::from);
+                            quick_slots[slot] = Some(quickslots::QuickSlot {
+                                url,
+                                title,
+                                favicon,
+                            });
+                        }
+                        quickslots::save(&quick_slots);
+                        sync_quickslots_ui!();
+                    }
+                }
             }
 
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──

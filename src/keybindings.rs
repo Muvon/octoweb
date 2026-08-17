@@ -57,6 +57,7 @@ pub enum Action {
     ZoomReset,
     Find,
     Fullscreen,
+    TogglePin,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -206,6 +207,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     ),
     (Action::Settings, "settings", "Settings", "App", "cmd+comma"),
     (Action::Quit, "quit", "Quit", "App", "cmd+q"),
+    (
+        Action::TogglePin,
+        "toggle_pin",
+        "Pin/unpin tab",
+        "Tabs & Navigation",
+        "cmd+shift+n",
+    ),
 ];
 
 impl Action {
