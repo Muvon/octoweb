@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.0] - 2026-08-17
+
+### 📋 Release Summary
+
+This release introduces enhanced tab management with pinning capabilities and a maximum open tab limit (5e0c2c69, e1dfbe22). Account management is improved through better specialist tracking, message support, and automated quota refreshes (8b6d7623, 36b00314, f302bf6a). Additionally, system stability and memory efficiency have been optimized to prevent leaks and orphaned processes (dc4ecd38, 88992c56).
+
+
+### ✨ New Features & Enhancements
+
+- **tabs**: add pin and unpin tab functionality `5e0c2c69`
+- **acp**: implement specialist source tracking and persistence `8b6d7623`
+- **acp**: implement periodic account quota refresh `36b00314`
+- **tabs**: add maximum open tabs limit `e1dfbe22`
+- **acp**: add support for injected specialist messages `f302bf6a`
+
+### 🐛 Bug Fixes & Stability
+
+- **core**: prevent orphaned learning agents on exit `dc4ecd38`
+- **core**: prevent memory leaks by owning Objective-C objects `88992c56`
+
 ## [0.9.0] - 2026-07-26
 
 ### 📋 Release Summary
