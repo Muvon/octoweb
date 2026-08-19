@@ -2558,6 +2558,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // chat state
       currentAgentBubble: null,
       currentAgentRaw: '',
+      // A tool call started after the last text chunk — the next chunk
+      // begins a new message and must open its own bubble.
+      toolSinceText: false,
       // Non-null while AgentMessageChunk output is causally owned by an
       // injected specialist/inbox turn rather than the top-level Octopus.
       agentWho: null,
@@ -3634,6 +3637,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   window.__appendChunk = function(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    // Text never resumes after a tool call within one LLM message — a chunk
+    // arriving after tools is a new message, not more of the previous one.
+    if (s.toolSinceText && s.currentAgentBubble) {
+      finishLiveTurn(s);
+      s.activityStart = Date.now();
+    }
+    s.toolSinceText = false;
     if (!s.currentAgentBubble) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
@@ -3832,6 +3842,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   window.__toolStart = function(sid, id, title, kind, rawInput, locations) {
     const s = sessions.get(sid);
     if (!s) return;
+    s.toolSinceText = true;
     if (isRenderUiTool(title)) {
       s.suppressedToolIds = s.suppressedToolIds || new Set();
       s.suppressedToolIds.add(id);

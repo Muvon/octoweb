@@ -259,6 +259,10 @@ struct AcpSession {
     tool_buf: Vec<config::AcpToolRecord>,
     /// In-flight tool lookup: tool-call id → (tool_buf index, start time).
     tool_starts: HashMap<String, (usize, std::time::Instant)>,
+    /// True once a tool call started after the last streamed text chunk.
+    /// Within one LLM message text never resumes after tool use, so the next
+    /// chunk begins a new message — the buffered segment is committed first.
+    tool_since_text: bool,
     /// Wall-clock start of the in-flight turn — set on prompt dispatch,
     /// consumed by the flush into `turn_ms`.
     turn_started: Option<std::time::Instant>,
@@ -1714,6 +1718,7 @@ fn main() {
                     agent_source: None,
                     tool_buf: Vec::new(),
                     tool_starts: HashMap::new(),
+                    tool_since_text: false,
                     turn_started: None,
                     available_commands_json: None,
                     account_json: None,
@@ -1746,6 +1751,7 @@ fn main() {
                 agent_source: None,
                 tool_buf: Vec::new(),
                 tool_starts: HashMap::new(),
+                tool_since_text: false,
                 turn_started: None,
                 available_commands_json: None,
                 account_json: None,
@@ -2599,6 +2605,14 @@ fn main() {
                         // commit one finalized "agent" message to the persisted
                         // log on Done/Cancelled — no save during streaming.
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            // Text resuming after a tool call is a new LLM
+                            // message — commit the previous one on its own.
+                            if s.tool_since_text {
+                                if !s.agent_buf.is_empty() {
+                                    split_agent_segment(s, cfg.max_acp_session_messages);
+                                }
+                                s.tool_since_text = false;
+                            }
                             s.agent_buf.push_str(&chunk);
                         }
                         let escaped = webview_utils::escape_js_template(&chunk);
@@ -2644,8 +2658,11 @@ fn main() {
                         // restart. `render_ui` is skipped: it renders as an A2UI
                         // bubble (persisted separately) and the sidebar suppresses
                         // its tool row — a record here would replay as a phantom step.
-                        if !title.starts_with("render_ui") {
-                            if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                            // Any tool call ends the current text segment — the
+                            // next text chunk starts a separate message.
+                            s.tool_since_text = true;
+                            if !title.starts_with("render_ui") {
                                 s.tool_starts.insert(id.clone(), (s.tool_buf.len(), std::time::Instant::now()));
                                 s.tool_buf.push(config::AcpToolRecord {
                                     kind: kind.clone(),
@@ -4716,6 +4733,7 @@ fn main() {
                         agent_source: None,
                         tool_buf: Vec::new(),
                         tool_starts: HashMap::new(),
+                        tool_since_text: false,
                         turn_started: None,
                         available_commands_json: None,
                     account_json: None,
@@ -6527,6 +6545,17 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     true
 }
 
+/// Commit the streamed text so far as its own finalized message, mid-turn.
+/// Called when a text chunk arrives after a tool call started — that boundary
+/// begins a new LLM message. Keeps the injected source and turn clock alive
+/// so the next segment stays labelled and timed.
+fn split_agent_segment(s: &mut AcpSession, max_msgs: usize) {
+    let source = s.agent_source.clone();
+    flush_agent_turn(s, max_msgs);
+    s.agent_source = source;
+    s.turn_started = Some(std::time::Instant::now());
+}
+
 /// Build the durable message view for persistence without mutating live turn
 /// state. Autonomous inbox turns have no ACP Done event, so their final buffer
 /// may still be open when the app exits; omitting it here would lose the reply.
@@ -6778,6 +6807,7 @@ mod injected_turn_tests {
             agent_source: None,
             tool_buf: Vec::new(),
             tool_starts: HashMap::new(),
+            tool_since_text: false,
             turn_started: None,
             available_commands_json: None,
             account_json: None,
@@ -6832,6 +6862,23 @@ mod injected_turn_tests {
         assert!(flush_agent_turn(&mut s, 10));
         assert_eq!(s.messages[0].role, "agent");
         assert_eq!(s.messages[0].text, "Top-level reply");
+    }
+
+    #[test]
+    fn split_keeps_source_and_turn_clock_for_next_segment() {
+        let mut s = session();
+        s.agent_source = Some("content:editor".into());
+        s.agent_buf = "first message".into();
+
+        split_agent_segment(&mut s, 10);
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].text, "[content:editor] first message");
+        assert_eq!(s.agent_source.as_deref(), Some("content:editor"));
+        assert!(s.turn_started.is_some());
+
+        s.agent_buf = "second message".into();
+        assert!(flush_agent_turn(&mut s, 10));
+        assert_eq!(s.messages[1].text, "[content:editor] second message");
     }
 
     #[test]
