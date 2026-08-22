@@ -23,6 +23,11 @@ BINARY_NAME="octoweb"
 SIGN_IDENTITY="Developer ID Application: MUVON COMPANY LIMITED (34TUP8A7GK)"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"  # cargo must resolve this project's manifest + config
+
+# Resolved target dir — honors CARGO_TARGET_DIR env and cargo config
+# (e.g. ~/.cargo/config.toml [build] target-dir), not just ./target.
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
 ASSETS_DIR="$SCRIPT_DIR/assets"
 OUT_DIR="$SCRIPT_DIR/dist"
 APP_BUNDLE="$OUT_DIR/$APP_NAME.app"
@@ -70,11 +75,11 @@ done
 if $DEV_BUILD; then
   echo "▶ Building (debug, ad-hoc signing)…"
   cargo build 2>&1
-  BINARY_SRC="$SCRIPT_DIR/target/debug/$BINARY_NAME"
+  BINARY_SRC="$TARGET_DIR/debug/$BINARY_NAME"
 else
   echo "▶ Building (release)…"
   cargo build --release 2>&1
-  BINARY_SRC="$SCRIPT_DIR/target/release/$BINARY_NAME"
+  BINARY_SRC="$TARGET_DIR/release/$BINARY_NAME"
 fi
 
 # ── Assemble .app bundle ──────────────────────────────────────────────────────
