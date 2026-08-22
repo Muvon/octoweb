@@ -4994,7 +4994,7 @@ fn main() {
                     } else {
                         let normalized = url.trim_end_matches('/');
                         let existing = quick_slots.iter().position(|qs| {
-                            qs.as_ref().map_or(false, |q| q.url.trim_end_matches('/') == normalized)
+                            qs.as_ref().is_some_and(|q| q.url.trim_end_matches('/') == normalized)
                         });
                         if let Some(slot) = existing {
                             quick_slots[slot] = None;
