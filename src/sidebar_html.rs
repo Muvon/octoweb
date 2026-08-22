@@ -3975,6 +3975,20 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       finishLiveTurn(s);
       syncFeed(s);
       s.agentWho = null;
+      // A2UI: a click optimistically locks its card into "Processing…" and
+      // waits for the agent's next envelope to lift it. Turn end (Done /
+      // Cancelled / Error) means no envelope is coming and every render_ui
+      // bash poll of this turn is dead — unlock the cards and drop the stale
+      // poll ids so the next click routes through the ghost path (synthetic
+      // prompt) instead of resolving a file nobody is reading.
+      for (const block of a2uiBlocks.values()) {
+        if (block.sid !== sid) continue;
+        block.pollFileId = null;
+        if (block.resolved) {
+          block.resolved = false;
+          a2uiRerender(block);
+        }
+      }
     }
   };
 
