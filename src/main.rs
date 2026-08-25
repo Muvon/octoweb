@@ -10,6 +10,7 @@ mod content_rules;
 mod crash_report;
 mod dialog_patch;
 mod dom_actions;
+mod download_patch;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
@@ -653,15 +654,22 @@ fn main() {
                         wry::NewWindowResponse::Deny
                     }
                 })
-                .with_download_started_handler(move |url, _path| {
-                    // Extract filename from URL for the toast notification
-                    let filename = url
-                        .rsplit('/')
-                        .next()
-                        .and_then(|s| s.split('?').next())
+                .with_download_started_handler(move |url, path| {
+                    // wry already resolved the destination (~/Downloads + the server's
+                    // suggested filename); fall back to the URL's last segment.
+                    let filename = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
                         .filter(|s| !s.is_empty())
-                        .unwrap_or("file")
-                        .to_string();
+                        .unwrap_or_else(|| {
+                            url.rsplit('/')
+                                .next()
+                                .and_then(|s| s.split('?').next())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("file")
+                                .to_string()
+                        });
+                    tab_nav::note_download(tab_id, &filename);
                     let _ = p5.send_event(AppEvent::DownloadStarted(tab_id, filename));
                     true // allow the download
                 })
@@ -782,7 +790,7 @@ fn main() {
         usize,
         (
             std::time::Instant,
-            tokio::sync::oneshot::Sender<Result<usize, String>>,
+            tokio::sync::oneshot::Sender<Result<mcp::NavigateOutcome, String>>,
         ),
     > = HashMap::new();
     let mut quick_slots = quickslots::load();
@@ -823,6 +831,7 @@ fn main() {
             }
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             nav_error_patch::inject_from_webview(wv_ptr);
+            download_patch::inject_from_webview(wv_ptr);
             dialog_patch::inject_from_webview(wv_ptr);
             let p = proxy.clone();
             nav_error_patch::register(wv_ptr, move |url, code| {
@@ -2019,6 +2028,7 @@ fn main() {
                     }
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::inject_from_webview(wv_ptr);
+                    download_patch::inject_from_webview(wv_ptr);
                     dialog_patch::inject_from_webview(wv_ptr);
                     let p = proxy.clone();
                     nav_error_patch::register(wv_ptr, move |url, code| {
@@ -2365,7 +2375,7 @@ fn main() {
             for id in stale_ids {
                 if let Some((_, tx)) = mcp_nav_pending.remove(&id) {
                     tracing::warn!(tab_id = id, "MCP navigate: resolving stale pending (>15s)");
-                    let _ = tx.send(Ok(id));
+                    let _ = tx.send(Ok(mcp::NavigateOutcome { tab_id: id, download: None }));
                 }
             }
         }
@@ -3111,7 +3121,7 @@ fn main() {
                         if url::is_external_scheme(&url) {
                             let ok = macos::open_external_url(&url);
                             let _ = response.send(if ok {
-                                Ok(active_wv_id)
+                                Ok(mcp::NavigateOutcome { tab_id: active_wv_id, download: None })
                             } else {
                                 Err(format!("No app registered for URL: {url}"))
                             });
@@ -5388,8 +5398,13 @@ fn main() {
             }
 
             // ── Download started — show toast, keep the tab open ────────────
-            Event::UserEvent(AppEvent::DownloadStarted(_tab_id, filename)) => {
-                tracing::debug!(%filename, "Download started");
+            Event::UserEvent(AppEvent::DownloadStarted(tab_id, filename)) => {
+                tracing::debug!(tab_id, %filename, "Download started");
+                // A navigate whose response became a download never reaches
+                // PageLoadFinished — answer it now, naming the file.
+                if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
+                    let _ = response.send(Ok(mcp::NavigateOutcome { tab_id, download: Some(filename.clone()) }));
+                }
                 let msg = format!("Downloading: {filename}…");
                 let escaped = webview_utils::escape_js_template(&msg);
                 if !notification_visible {
@@ -5620,11 +5635,11 @@ fn main() {
                                     Err(e) => format!("probe-error: {e}"),
                                 };
                                 tracing::debug!(tab_id = result_id, %reason, "MCP nav readiness");
-                                let _ = tx.send(Ok(result_id));
+                                let _ = tx.send(Ok(mcp::NavigateOutcome { tab_id: result_id, download: None }));
                             }
                         });
                     } else {
-                        let _ = response.send(Ok(tab_id));
+                        let _ = response.send(Ok(mcp::NavigateOutcome { tab_id, download: None }));
                     }
                 }
             }
@@ -7001,6 +7016,7 @@ fn finish_native_action<T: objc2::Message + 'static>(
     deliver: impl FnOnce(*mut objc2::runtime::AnyObject),
 ) {
     let ptr = objc2::rc::Retained::as_ptr(&wk) as *mut objc2::runtime::AnyObject;
+    let downloads_before = tab_nav::download_state(tab_id).0;
     deliver(ptr);
     // Keep the view retained until the probe answers; the pointer must not dangle
     // if the tab is closed in between.
@@ -7011,13 +7027,21 @@ fn finish_native_action<T: objc2::Message + 'static>(
             return;
         };
         let navigated = tab_nav::get(tab_id) != gen0;
+        let (downloads_after, filename) = tab_nav::download_state(tab_id);
+        let download = (downloads_after > downloads_before).then_some(filename);
         let msg = match res {
             _ if navigated => format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id)),
             Ok(val) => {
                 let diff: String = serde_json::from_str(&val).unwrap_or(val);
-                format!("{verb}{}", mcp::format_effect(&diff))
+                format!(
+                    "{verb}{}",
+                    mcp::format_effect_with_download(&diff, download.as_deref())
+                )
             }
-            Err(e) => format!("{verb} (delivered; effect probe failed: {e})"),
+            Err(e) => match download {
+                Some(name) => format!("{verb} → download started: {name} (saved to ~/Downloads)"),
+                None => format!("{verb} (delivered; effect probe failed: {e})"),
+            },
         };
         let _ = tx.send(Ok(msg));
     });

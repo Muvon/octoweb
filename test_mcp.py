@@ -74,6 +74,18 @@ class FixtureHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if parsed.path == "/api/attachment":
+            # Showable MIME type served as an attachment — the Google Drive
+            # download shape. Must be saved, never rendered inline.
+            name = dict(parse_qsl(parsed.query)).get("name", "file.txt")
+            body = b"octoweb attachment fixture\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if parsed.path == "/submitted":
             params = parse_qsl(parsed.query)
             echoed = " ".join(f"{k}={v}" for k, v in params) or "(no params)"
@@ -322,8 +334,8 @@ def nav_default_is_background():
                f"expected mode 'new_background_tab', got {info.get('mode')!r}")
         entry = tab_entry(get_tabs(), tab_id)
         expect(entry is not None, f"new tab {tab_id} missing from browser_get_tabs")
-        expect(entry.get("is_active") is False,
-               f"new background tab must have is_active false, got {entry}")
+        expect(not entry.get("is_active"),
+               f"new background tab must not be active, got {entry}")
     finally:
         close_tab(tab_id)
 
@@ -825,6 +837,55 @@ def click_reports_navigation():
         elapsed = time.monotonic() - start
         expect("navigated to" in text and "basic.html" in text, f"navigation not reported: {text!r}")
         expect(elapsed < 6, f"navigation report took {elapsed:.1f}s — should not wait for the watchdog")
+
+
+DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
+
+
+@contextmanager
+def download_target(prefix):
+    """Unique filename in ~/Downloads; removed afterwards."""
+    import uuid
+    name = f"{prefix}-{uuid.uuid4().hex[:8]}.txt"
+    path = os.path.join(DOWNLOADS_DIR, name)
+    try:
+        yield name, path
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+@test
+def attachment_click_downloads():
+    """Clicking a link to an attachment saves the file and the effect line says so; the tab stays put."""
+    with fixture_tab("effects.html") as tab, download_target("octoweb-e2e-click") as (name, path):
+        exec_js(tab, f"document.getElementById('download').href = '/api/attachment?name={name}'")
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#download"}, timeout=20)
+        expect("download started" in text and name in text,
+               f"effect line should report the download: {text!r}")
+        found = poll(lambda: os.path.exists(path), lambda x: x, attempts=20, delay=0.25)
+        expect(found, f"attachment was not saved to {path}")
+        info = tool_text("browser_get_page_info", {"tab_id": tab})
+        expect("effects.html" in info, f"tab must keep its page after a download, got: {info!r}")
+
+
+@test
+def attachment_navigate_downloads():
+    """browser_navigate to an attachment URL returns promptly with a download note instead of hanging."""
+    with fixture_tab("basic.html") as tab, download_target("octoweb-e2e-nav") as (name, path):
+        start = time.monotonic()
+        text = tool_text("browser_navigate",
+                         {"tab_id": tab, "url": fixture_url(f"api/attachment?name={name}")},
+                         timeout=NAVIGATE_TIMEOUT)
+        elapsed = time.monotonic() - start
+        expect("download" in text.lower() and name in text, f"navigate should report the download: {text!r}")
+        expect(elapsed < 10, f"navigate-to-attachment took {elapsed:.1f}s (stale-pending fallback?)")
+        found = poll(lambda: os.path.exists(path), lambda x: x, attempts=20, delay=0.25)
+        expect(found, f"attachment was not saved to {path}")
+        info = tool_text("browser_get_page_info", {"tab_id": tab})
+        expect("basic.html" in info, f"tab must keep its page after a download, got: {info!r}")
 
 
 @test

@@ -60,7 +60,7 @@ pub enum McpCommand {
     Navigate {
         url: String,
         tab_id: Option<usize>,
-        response: oneshot::Sender<Result<usize, String>>,
+        response: oneshot::Sender<Result<NavigateOutcome, String>>,
     },
     /// Get list of open tabs, most recently active first
     GetTabs {
@@ -272,13 +272,26 @@ pub fn dom_status_error(status: &str, selector: &str) -> String {
 /// an empty diff says so explicitly — "nothing observable happened" is the
 /// signal the AI needs to stop re-clicking and look at console/network.
 pub fn format_effect(diff_json: &str) -> String {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(diff_json) else {
-        return String::new();
-    };
-    let Some(obj) = v.as_object() else {
-        return String::new();
+    format_effect_with_download(diff_json, None)
+}
+
+/// [`format_effect`] plus a download the action triggered (tracked natively —
+/// a save-to-disk leaves no trace in the DOM, so without this a working
+/// "Download" click would read as "no observable change").
+pub fn format_effect_with_download(diff_json: &str, download: Option<&str>) -> String {
+    let obj = serde_json::from_str::<serde_json::Value>(diff_json)
+        .ok()
+        .and_then(|v| v.as_object().cloned());
+    let Some(obj) = obj else {
+        return match download {
+            Some(name) => format!(" → download started: {name} (saved to ~/Downloads)"),
+            None => String::new(),
+        };
     };
     let mut parts: Vec<String> = Vec::new();
+    if let Some(name) = download {
+        parts.push(format!("download started: {name} (saved to ~/Downloads)"));
+    }
     let str_of = |k: &str| obj.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
     if let Some(u) = str_of("url") {
         parts.push(format!("url → {u}"));
@@ -299,7 +312,13 @@ pub fn format_effect(diff_json: &str) -> String {
             .filter_map(|n| n.as_str())
             .map(|n| {
                 n.split(' ')
-                    .map(|tok| if tok.contains("://") { sanitize::sanitize_url(tok) } else { tok.to_string() })
+                    .map(|tok| {
+                        if tok.contains("://") {
+                            sanitize::sanitize_url(tok)
+                        } else {
+                            tok.to_string()
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             })
@@ -321,6 +340,14 @@ pub fn format_effect(diff_json: &str) -> String {
     } else {
         format!(" → {}", parts.join(" · "))
     }
+}
+
+/// Result of `browser_navigate`: the tab, and the filename when the response
+/// turned out to be an attachment and was saved instead of rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigateOutcome {
+    pub tab_id: usize,
+    pub download: Option<String>,
 }
 
 /// `browser_get_tabs` payload: `total` is the full count so a truncated list
@@ -714,7 +741,7 @@ impl McpServer {
         let in_place = req.tab_id.is_some();
         tracing::debug!(url = %req.url, ?req.tab_id, "MCP browser_navigate");
 
-        let tab_id = browser_try!(
+        let outcome = browser_try!(
             self.send_command(|tx| McpCommand::Navigate {
                 url: req.url,
                 tab_id: req.tab_id,
@@ -723,14 +750,18 @@ impl McpServer {
             .await?
         );
 
+        let note = match &outcome.download {
+            Some(name) => format!(
+                "The response was an attachment: '{name}' is being saved to ~/Downloads. \
+                 The tab kept its previous page — nothing to read or click here."
+            ),
+            None if in_place => "Tab navigated; focus unchanged.".to_string(),
+            None => "Background tab opened — reuse this tab_id for follow-up calls; browser_switch_tab shows it to the user.".to_string(),
+        };
         let result = serde_json::json!({
-            "tab_id": tab_id,
-            "mode": if in_place { "in_place" } else { "new_background_tab" },
-            "note": if in_place {
-                "Tab navigated; focus unchanged."
-            } else {
-                "Background tab opened — reuse this tab_id for follow-up calls; browser_switch_tab shows it to the user."
-            },
+            "tab_id": outcome.tab_id,
+            "mode": if outcome.download.is_some() { "download" } else if in_place { "in_place" } else { "new_background_tab" },
+            "note": note,
         });
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
@@ -1469,6 +1500,18 @@ mod tests {
         );
         assert!(full.contains("focus → input \"q\""), "{full}");
         assert_eq!(format_effect("not json"), "");
+    }
+
+    #[test]
+    fn effect_reports_downloads_even_when_dom_is_silent() {
+        let out = format_effect_with_download("{}", Some("MVI_5662.mp4"));
+        assert_eq!(
+            out,
+            " → download started: MVI_5662.mp4 (saved to ~/Downloads)"
+        );
+        let out = format_effect_with_download("{\"dom\":\"+1/-0\"}", Some("a.jpg"));
+        assert!(out.starts_with(" → download started: a.jpg"), "{out}");
+        assert!(out.contains("dom +1/-0 nodes"), "{out}");
     }
 
     #[test]

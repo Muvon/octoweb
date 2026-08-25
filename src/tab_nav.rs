@@ -14,9 +14,34 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 static GEN: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+/// Downloads started per tab: (count, last filename). An action whose only
+/// visible effect is a download would otherwise read as "no observable change".
+static DOWNLOADS: OnceLock<Mutex<HashMap<usize, (u64, String)>>> = OnceLock::new();
 
 fn map() -> &'static Mutex<HashMap<usize, u64>> {
     GEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn downloads() -> &'static Mutex<HashMap<usize, (u64, String)>> {
+    DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record that a navigation in `tab_id` became a download of `filename`.
+pub fn note_download(tab_id: usize, filename: &str) {
+    let mut m = downloads().lock().unwrap();
+    let e = m.entry(tab_id).or_insert((0, String::new()));
+    e.0 += 1;
+    e.1 = filename.to_string();
+}
+
+/// (count, last filename) of downloads started in `tab_id`.
+pub fn download_state(tab_id: usize) -> (u64, String) {
+    downloads()
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned()
+        .unwrap_or((0, String::new()))
 }
 
 /// Record that `tab_id` started a navigation or changed its URL.
@@ -32,6 +57,7 @@ pub fn get(tab_id: usize) -> u64 {
 /// Drop bookkeeping for a closed tab.
 pub fn forget(tab_id: usize) {
     map().lock().unwrap().remove(&tab_id);
+    downloads().lock().unwrap().remove(&tab_id);
 }
 
 #[cfg(test)]
@@ -47,5 +73,16 @@ mod tests {
         assert_eq!(get(id), 2);
         forget(id);
         assert_eq!(get(id), 0);
+    }
+
+    #[test]
+    fn downloads_are_counted_per_tab() {
+        let id = 987_655;
+        assert_eq!(download_state(id), (0, String::new()));
+        note_download(id, "a.mp4");
+        note_download(id, "b.jpg");
+        assert_eq!(download_state(id), (2, "b.jpg".into()));
+        forget(id);
+        assert_eq!(download_state(id).0, 0);
     }
 }

@@ -192,7 +192,9 @@ fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {
     // requests during back/forward swipe gestures or rapid navigation. Not a real error.
     // WebKitErrorPlugInWillHandleLoad (204): standalone audio/video documents — the
     // media player took over the load and WebKit cancels the frame load as a formality.
-    if code == -999 || code == 204 {
+    // WebKitErrorFrameLoadInterruptedByPolicyChange (102): the navigation became a
+    // download (download_patch / wry policy); the tab keeps its current page.
+    if code == -999 || code == 204 || code == 102 {
         tracing::debug!(code, ?webview, "Ignoring non-error nav failure");
         return;
     }
