@@ -62,9 +62,11 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         response: oneshot::Sender<Result<usize, String>>,
     },
-    /// Get list of all tabs
+    /// Get list of open tabs, most recently active first
     GetTabs {
-        response: oneshot::Sender<Result<Vec<TabInfo>, String>>,
+        limit: usize,
+        query: Option<String>,
+        response: oneshot::Sender<Result<TabsPage, String>>,
     },
     /// Get the currently active tab
     GetCurrentTab {
@@ -91,26 +93,28 @@ pub enum McpCommand {
     ExecuteJs {
         tab_id: Option<usize>,
         script: String,
+        /// Watchdog ceiling; the script itself is not interrupted.
+        timeout_ms: u64,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Click element by selector — returns whether element was found
+    /// Click element by selector — Ok carries the effect summary
     Click {
         tab_id: Option<usize>,
         selector: String,
-        response: oneshot::Sender<Result<bool, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
-    /// Hover over element by selector — returns whether element was found
+    /// Hover over element by selector — Ok carries the effect summary
     Hover {
         tab_id: Option<usize>,
         selector: String,
-        response: oneshot::Sender<Result<bool, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
-    /// Type text into input — returns whether element was found
+    /// Type text into input — Ok carries the effect summary
     Type {
         tab_id: Option<usize>,
         selector: String,
         text: String,
-        response: oneshot::Sender<Result<bool, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     /// Navigate back in browser history
     GoBack {
@@ -159,13 +163,13 @@ pub enum McpCommand {
         selector: Option<String>,
         response: oneshot::Sender<Result<(), String>>,
     },
-    /// Press a keyboard key
+    /// Press a keyboard key — Ok carries the effect summary
     PressKey {
         tab_id: Option<usize>,
         key: String,
         selector: Option<String>,
         modifiers: Vec<String>,
-        response: oneshot::Sender<Result<bool, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     /// Wait for page load or element to appear
     Wait {
@@ -174,12 +178,12 @@ pub enum McpCommand {
         timeout_ms: u64,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Select an option in a <select> dropdown
+    /// Select an option in a <select> dropdown — Ok carries the effect summary
     SelectOption {
         tab_id: Option<usize>,
         selector: String,
         value: String,
-        response: oneshot::Sender<Result<bool, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     /// Take a snapshot of interactive elements on the page
     Snapshot {
@@ -195,7 +199,8 @@ pub enum McpCommand {
 // ─────────────────────────────────────────────────────────────────────
 
 /// Map a status string returned by our injected DOM scripts into a
-/// `Result<bool, String>` with an actionable message for the AI.
+/// `Result<String, String>`: Ok carries the effect summary (empty when the
+/// script reported plain `true`), Err an actionable message for the AI.
 ///
 /// Statuses:
 /// - `"true"`         — action succeeded
@@ -212,42 +217,126 @@ pub enum McpCommand {
 /// `val` is the JSON-encoded return value from `evaluate_script_with_callback`,
 /// so it usually arrives as a quoted string (`"\"true\""`); the trim handles
 /// both quoted and unquoted forms.
-pub fn interpret_dom_result(val: &str, selector: &str) -> Result<bool, String> {
-    let trimmed = val.trim().trim_matches('"');
+pub fn interpret_dom_result(val: &str, selector: &str) -> Result<String, String> {
+    // Scripts resolve to a JS string; async_eval hands it over JSON-encoded.
+    let inner: String = serde_json::from_str(val).unwrap_or_else(|_| val.to_string());
+    let trimmed = inner.trim();
+    if let Some(effect) = trimmed.strip_prefix("true|") {
+        return Ok(format_effect(effect));
+    }
     match trimmed {
-        "true" => Ok(true),
-        "stale" => Err(format!(
+        "true" => Ok(String::new()),
+        status => Err(dom_status_error(status, selector)),
+    }
+}
+
+/// Actionable message for a harness failure status (see `interpret_dom_result`).
+pub fn dom_status_error(status: &str, selector: &str) -> String {
+    match status {
+        "stale" => format!(
             "@ref '{selector}' is stale — call browser_snapshot first to refresh refs (they invalidate on navigation)"
-        )),
-        "missing" => Err(format!(
+        ),
+        "missing" => format!(
             "No element matched selector: {selector} (retried for {}s)",
             crate::dom_actions::RETRY_MS / 1000
-        )),
-        "detached" => Err(format!(
+        ),
+        "detached" => format!(
             "Element for '{selector}' is no longer in the DOM — re-snapshot or wait for the page to settle"
-        )),
-        "disabled" => Err(format!(
+        ),
+        "disabled" => format!(
             "Element '{selector}' stayed disabled/readonly — wait for the page to enable it or pick another element"
-        )),
-        "noteditable" => Err(format!(
+        ),
+        "noteditable" => format!(
             "Element '{selector}' is not a text field — it is not an <input>, <textarea>, or contenteditable. \
              Pick the editable element itself (in browser_snapshot it shows as a 'textbox'/contenteditable @ref); \
              avoid placeholder/label nodes that overlay the real editor"
-        )),
-        "typefailed" => Err(format!(
+        ),
+        "typefailed" => format!(
             "Could not insert text into '{selector}' — the editor accepted neither a synthetic paste nor an editing command. \
              It may require a real click to focus first (try browser_click on it, then browser_type), or it is a custom editor that needs key-by-key input"
-        )),
-        s if s.starts_with("occluded:") => Err(format!(
+        ),
+        s if s.starts_with("occluded:") => format!(
             "Element '{selector}' is covered by {} — dismiss that overlay (cookie banner, modal, dropdown) first, or scroll it away, then retry",
             &s[9..]
-        )),
-        s if s.starts_with("invalid:") => Err(format!(
+        ),
+        s if s.starts_with("invalid:") => format!(
             "Invalid CSS selector '{selector}': {}",
             &s[8..]
-        )),
-        _ => Err(format!("Unexpected DOM result: {val}")),
+        ),
+        other => format!("Unexpected DOM result: {other}"),
     }
+}
+
+/// Render an effect diff (`window.__octoweb_pre.diff()` JSON) as the
+/// one-line suffix appended to action results. Only what changed is listed;
+/// an empty diff says so explicitly — "nothing observable happened" is the
+/// signal the AI needs to stop re-clicking and look at console/network.
+pub fn format_effect(diff_json: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(diff_json) else {
+        return String::new();
+    };
+    let Some(obj) = v.as_object() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let str_of = |k: &str| obj.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+    if let Some(u) = str_of("url") {
+        parts.push(format!("url → {u}"));
+    }
+    if let Some(t) = str_of("title") {
+        parts.push(format!("title → \"{t}\""));
+    }
+    if let Some(d) = str_of("dialog") {
+        parts.push(format!("dialog opened: \"{d}\""));
+    }
+    if let Some(t) = str_of("text") {
+        parts.push(format!("new text: \"{t}\""));
+    }
+    if let Some(net) = obj.get("net").and_then(|n| n.as_array()) {
+        // Entries are "METHOD url [status] [ERR]" — scrub only the URL token.
+        let items: Vec<String> = net
+            .iter()
+            .filter_map(|n| n.as_str())
+            .map(|n| {
+                n.split(' ')
+                    .map(|tok| if tok.contains("://") { sanitize::sanitize_url(tok) } else { tok.to_string() })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
+        if !items.is_empty() {
+            parts.push(format!("requests: {}", items.join("; ")));
+        }
+    }
+    if let Some(d) = str_of("dom") {
+        parts.push(format!("dom {d} nodes"));
+    }
+    if let Some(f) = str_of("focus") {
+        parts.push(format!("focus → {f}"));
+    }
+    if parts.is_empty() {
+        " → no observable change within 450 ms (no navigation, request, DOM or focus change). \
+         If you expected one: check browser_console_messages, or the control may need a different trigger."
+            .to_string()
+    } else {
+        format!(" → {}", parts.join(" · "))
+    }
+}
+
+/// `browser_get_tabs` payload: `total` is the full count so a truncated list
+/// is never mistaken for "all tabs".
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TabsPage {
+    pub total: usize,
+    pub tabs: Vec<TabInfo>,
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -259,8 +348,14 @@ pub struct TabInfo {
     pub id: usize,
     pub title: String,
     pub url: String,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub is_playing_audio: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl TabInfo {
@@ -273,6 +368,14 @@ impl TabInfo {
             is_active,
             is_playing_audio: tab.is_playing_audio,
         }
+    }
+
+    /// Listing form: titles and URLs cut to what identifies a tab. A 200-tab
+    /// session was 36 KB (~9k tokens) per `browser_get_tabs` call before this.
+    pub fn compact(mut self) -> Self {
+        self.title = truncate_chars(&self.title, 60);
+        self.url = truncate_chars(&self.url, 100);
+        self
     }
 }
 
@@ -353,6 +456,22 @@ pub struct ExecuteJsRequest {
     pub tab_id: Option<usize>,
     #[schemars(description = "JavaScript code to execute")]
     pub script: String,
+    #[schemars(
+        description = "How long to wait for the script (and any Promise it returns) to settle. Default 10000, max 60000. Raise it for scripts that await many network calls."
+    )]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetTabsRequest {
+    #[schemars(
+        description = "Max tabs to return, most recently active first (the visible tab is always included). Default 40, max 200."
+    )]
+    pub limit: Option<usize>,
+    #[schemars(
+        description = "Case-insensitive substring to match against title or URL (e.g. \"drive.google.com\")."
+    )]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -670,7 +789,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Wait for a condition. NOT needed after browser_navigate (already waits). Use after a click that triggers an SPA route change, or for lazily-loaded content. event: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — main content rendered + DOM/JS quiet, with a steady-state fallback for live feeds; returns \"ready\" | \"live\" | \"partial\") | a CSS selector to wait for. Other events return \"ready\" or \"timeout\"."
+        description = "Wait for a condition. Rarely needed: browser_navigate already waits for SPA readiness and every action reports its effect. Use for lazily-loaded content or after an action that reported a route change. event: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — main content rendered + DOM/JS quiet, with a steady-state fallback for live feeds; returns \"ready\" | \"live\" | \"partial\") | a CSS selector to wait for. Other events return \"ready\" or \"timeout\"."
     )]
     async fn browser_wait(
         &self,
@@ -695,12 +814,19 @@ impl McpServer {
     // ── Tab management ──────────────────────────────────────────────
 
     #[tool(
-        description = "List all open tabs. Returns [{id, title, url, is_active, is_playing_audio}]. is_active marks the visible tab. Use the IDs to target other tools."
+        description = "List open tabs, most recently active first (the visible tab leads). Returns {total, tabs:[{id, title, url, is_active?, is_playing_audio?}]} — flags appear only when true, titles/URLs are trimmed. `total` counts every match so a truncated list is obvious; narrow with `query` (title/URL substring) instead of raising `limit`. Use the IDs to target other tools."
     )]
-    async fn browser_get_tabs(&self) -> Result<CallToolResult, McpError> {
+    async fn browser_get_tabs(
+        &self,
+        Parameters(req): Parameters<GetTabsRequest>,
+    ) -> Result<CallToolResult, McpError> {
         let tabs = browser_try!(
-            self.send_command(|tx| McpCommand::GetTabs { response: tx })
-                .await?
+            self.send_command(|tx| McpCommand::GetTabs {
+                limit: req.limit.unwrap_or(40).clamp(1, 200),
+                query: req.query.clone(),
+                response: tx,
+            })
+            .await?
         );
         let json = serde_json::to_string(&tabs)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -799,7 +925,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Compact map of interactive elements with @ref selectors. Each link/button/input gets a @N ref you can pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Includes same-origin iframes and open shadow DOM (web components) — @refs reach elements there that CSS selectors cannot. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Always start here on an unfamiliar page."
+        description = "Compact map of the page: header with URL, title, headings and any alert/status/dialog text (where 'Request sent' / 'Access denied' / validation errors live), then every interactive element with a @N ref you pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Form controls carry their <label> text; radios/checkboxes show checked state. Includes same-origin iframes and open shadow DOM. A '+N present-but-hidden controls' note means an auto-hiding toolbar: browser_hover the page and re-snapshot. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Start here on an unfamiliar page and re-snapshot to verify state instead of reading the DOM with browser_execute_js."
     )]
     async fn browser_snapshot(
         &self,
@@ -817,7 +943,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Run JavaScript in the page and return its JSON-encoded result. Use only when other tools don't fit — prefer browser_get_page_content for text and browser_snapshot+click/type for interaction. Last expression is the return value (wrap multi-statement code in an IIFE). Defaults to the visible tab."
+        description = "Run JavaScript in the page and return its JSON-encoded result. Escape hatch — prefer browser_snapshot (page state + @refs), browser_get_page_content (text) and the action tools (each reports what changed). Last expression is the return value; a returned Promise is awaited; wrap multi-statement code in an IIFE. Exceptions come back with their real message and line. Default watchdog 10 s (timeout_ms up to 60000); a timeout means the script is still running, NOT that the page navigated — a real navigation is reported as such. Defaults to the visible tab."
     )]
     async fn browser_execute_js(
         &self,
@@ -827,6 +953,7 @@ impl McpServer {
             self.send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script: req.script,
+                timeout_ms: req.timeout_ms.unwrap_or(10_000).clamp(1_000, 60_000),
                 response: tx,
             })
             .await?
@@ -858,13 +985,13 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, then dispatches the full pointerdown+mousedown+focus+pointerup+mouseup+click sequence (works with pointer-event UIs like React/MUI/Radix). On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone from DOM. Defaults to the visible tab."
+        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, waits until it is stable and unobstructed, then delivers a TRUSTED native click (isTrusted=true, real user gesture — works on sites that ignore synthetic events, and grants popup/clipboard/fullscreen permissions). The result tells you what happened: navigation, SPA URL change, new text that appeared (toasts, confirmations, errors), dialogs opened, network requests fired, DOM/focus changes — or explicitly 'no observable change'. Trust that line instead of re-reading the page. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone; occluded → dismiss the named overlay. Defaults to the visible tab."
     )]
     async fn browser_click(
         &self,
         Parameters(req): Parameters<ClickRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = browser_try!(
+        let summary = browser_try!(
             self.send_command(|tx| McpCommand::Click {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
@@ -872,26 +999,17 @@ impl McpServer {
             })
             .await?
         );
-        if found {
-            Ok(CallToolResult::success(vec![Content::text(
-                "Element clicked successfully",
-            )]))
-        } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Element not found: {}",
-                req.selector
-            ))]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     #[tool(
-        description = "Hover over an element. Dispatches pointer + mouse enter/over/move events — works for JS-driven menus (Bootstrap, React, MUI, Radix). Pure CSS :hover cannot be activated synthetically (WebKit limitation). Defaults to the visible tab."
+        description = "Hover over an element with a real (trusted) pointer move — activates CSS :hover, JS hover menus, and auto-hiding toolbars (video players, Drive viewers: hover then re-snapshot to reveal their controls). Reports what changed, like browser_click. Defaults to the visible tab."
     )]
     async fn browser_hover(
         &self,
         Parameters(req): Parameters<HoverRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = browser_try!(
+        let summary = browser_try!(
             self.send_command(|tx| McpCommand::Hover {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
@@ -899,26 +1017,17 @@ impl McpServer {
             })
             .await?
         );
-        if found {
-            Ok(CallToolResult::success(vec![Content::text(
-                "Element hovered successfully",
-            )]))
-        } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Element not found: {}",
-                req.selector
-            ))]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     #[tool(
-        description = "Set the value of a text field. Works with <input>, <textarea>, and contenteditable rich editors including model-backed ones (Lexical, DraftJS, ProseMirror) — their internal model updates so submit buttons gated on it enable. REPLACES the existing value — does not append. For inputs it bypasses React's controlled-input cache via the prototype value setter; for rich editors it drives a synthetic paste (falling back to an editing command). Errors clearly if the target is not actually editable (e.g. a placeholder/label node) instead of silently doing nothing. To press Enter / submit afterwards, use browser_press_key, or click the submit button with browser_click. Defaults to the visible tab."
+        description = "Set the value of a text field. Works with <input>, <textarea>, and contenteditable rich editors including model-backed ones (Lexical, DraftJS, ProseMirror) — their internal model updates so submit buttons gated on it enable. REPLACES the existing value — does not append. For inputs it bypasses React's controlled-input cache via the prototype value setter; for rich editors it drives a synthetic paste (falling back to an editing command). Errors clearly if the target is not actually editable (e.g. a placeholder/label node) instead of silently doing nothing. To press Enter / submit afterwards, use browser_press_key, or click the submit button with browser_click. Reports what changed after typing (e.g. a submit button enabling, suggestions appearing). Defaults to the visible tab."
     )]
     async fn browser_type(
         &self,
         Parameters(req): Parameters<TypeRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = browser_try!(
+        let summary = browser_try!(
             self.send_command(|tx| McpCommand::Type {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
@@ -927,16 +1036,7 @@ impl McpServer {
             })
             .await?
         );
-        if found {
-            Ok(CallToolResult::success(vec![Content::text(
-                "Text typed successfully",
-            )]))
-        } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Element not found: {}",
-                req.selector
-            ))]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     #[tool(
@@ -963,13 +1063,13 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Press a key, optionally with modifiers. Use for Enter (submit), Escape (close), Tab (focus), arrows, etc. Enter on an <input> inside a form also submits the form (like a real keypress) unless the page handled the keydown itself. If selector is given, focus that element first; otherwise the currently focused element receives the key. Note: this dispatches synthetic KeyboardEvents — for *typing characters into an input* prefer browser_type. Defaults to the visible tab."
+        description = "Press a key with a TRUSTED native key event (isTrusted=true, real default actions: Enter submits forms and activates buttons, Space toggles, Tab moves focus, Escape closes, characters insert). Optional modifiers. If selector is given, focus that element first; otherwise the currently focused element receives the key. For setting a whole field value prefer browser_type; use this for single keys. Reports what changed, like browser_click. Unknown key names are rejected — use KeyboardEvent.key names (Enter, Escape, Tab, ArrowDown, Backspace, F5) or a single character. Defaults to the visible tab."
     )]
     async fn browser_press_key(
         &self,
         Parameters(req): Parameters<PressKeyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = browser_try!(
+        let summary = browser_try!(
             self.send_command(|tx| McpCommand::PressKey {
                 tab_id: req.tab_id,
                 key: req.key.clone(),
@@ -979,27 +1079,17 @@ impl McpServer {
             })
             .await?
         );
-        if found {
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Pressed key: {}",
-                req.key
-            ))]))
-        } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Element not found: {}",
-                req.selector.unwrap_or_default()
-            ))]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     #[tool(
-        description = "Pick an option in a <select> by its value attribute. Fires a change event. The visible options are listed in browser_snapshot's `options=[...]` attribute. Defaults to the visible tab."
+        description = "Pick an option in a <select> by its value attribute. Fires a change event and reports what changed (dependent fields, requests). The visible options are listed in browser_snapshot's `options=[...]` attribute. Defaults to the visible tab."
     )]
     async fn browser_select_option(
         &self,
         Parameters(req): Parameters<SelectOptionRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let found = browser_try!(
+        let summary = browser_try!(
             self.send_command(|tx| McpCommand::SelectOption {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
@@ -1008,17 +1098,7 @@ impl McpServer {
             })
             .await?
         );
-        if found {
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Selected option: {}",
-                req.value
-            ))]))
-        } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Select element or option not found: {}",
-                req.selector
-            ))]))
-        }
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     // ── History & media ─────────────────────────────────────────────
@@ -1074,6 +1154,7 @@ impl McpServer {
             self.send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script,
+                timeout_ms: 10_000,
                 response: tx,
             })
             .await?
@@ -1084,7 +1165,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Recent network requests made by the page (fetch + XHR). Returns a JSON array [{method,url,status,type,ms,ts,error?}], newest last. status 0 + error = request failed. Use to debug missing data, failed submissions, or to discover the API behind a UI. Captured from page load (last 200 kept). Defaults to the visible tab."
+        description = "Recent network requests made by the page. Returns a JSON array [{method,url,status,type,ms,ts,error?}], newest last. type=fetch|xhr carry a real status (0 + error = failed); other types (beacon, img, script, iframe, link, other — from resource timing) prove the request fired but may report status 0. Use to debug missing data, failed submissions, or to discover the API behind a UI. Captured from page load (last 200 of each kind kept). Defaults to the visible tab."
     )]
     async fn browser_network_requests(
         &self,
@@ -1098,11 +1179,15 @@ impl McpServer {
             ),
             None => String::new(),
         };
-        let script = format!("JSON.stringify((window.__octoweb_net||[]){filter}.slice(-{limit}))");
+        let script = format!(
+            "JSON.stringify((window.__octoweb_net||[]).concat(window.__octoweb_res||[])\
+             .sort(function(a,b){{return (a.seq||0)-(b.seq||0)}}){filter}.slice(-{limit}))"
+        );
         let value = browser_try!(
             self.send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script,
+                timeout_ms: 10_000,
                 response: tx,
             })
             .await?
@@ -1214,22 +1299,32 @@ impl ServerHandler for McpServer {
                 default to the user's visible tab when tab_id is omitted; to drive that tab, pass the \
                 id from browser_get_current_tab. Close background tabs when done.\n\
                 \n\
-                Reading pages: prefer browser_get_page_content for text and browser_snapshot for \
-                actionable elements. Use browser_execute_js only when those don't fit (return value is \
-                JSON-encoded; wrap multi-statement code in an IIFE).\n\
+                Reading pages: browser_snapshot shows page state (title, headings, alerts, dialogs) plus \
+                actionable elements; browser_get_page_content gives the full text. Use browser_execute_js \
+                only for data the other tools cannot express (return value is JSON-encoded; wrap \
+                multi-statement code in an IIFE) — never just to check whether an action worked.\n\
+                \n\
+                Actions are real input: browser_click, browser_hover and browser_press_key deliver trusted \
+                native events (isTrusted=true, user gesture), so sites that ignore synthetic events work. \
+                Every action returns a one-line effect summary — navigation, URL change, new text (toasts, \
+                confirmations, errors), dialogs, requests fired, DOM/focus changes, or 'no observable \
+                change'. Read that line; do not re-read the page to find out what happened. 'No observable \
+                change' after a click is real information: try the control's other trigger (Enter/Space via \
+                browser_press_key, a hover first), or check browser_console_messages.\n\
                 \n\
                 Typing & submitting: browser_type sets a value (replaces, doesn't append) and fires \
-                input+change. To submit, follow with browser_press_key(key=\"Enter\"). For per-character \
-                key events use browser_press_key, not browser_type.\n\
+                input+change. To submit, follow with browser_press_key(key=\"Enter\") — a native Enter \
+                that submits the form. For single keys use browser_press_key, not browser_type.\n\
                 \n\
                 Waiting: browser_navigate already blocks until the page is idle — no follow-up wait needed. \
                 Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \
-                so you rarely need explicit waits; after clicks that trigger SPA route changes, use \
-                browser_wait with a CSS selector for the new content.\n\
+                so you rarely need explicit waits; after an action reports a route change, re-snapshot or \
+                browser_wait with a CSS selector for the new content. A tool reporting a navigation means \
+                one really happened (tracked natively); a timeout means the script is still running.\n\
                 \n\
                 Debugging: when a page misbehaves or an interaction has no effect, check \
-                browser_console_messages (JS errors) and browser_network_requests (failed calls) before \
-                retrying blindly.\n\
+                browser_console_messages (JS errors, with real messages) and browser_network_requests \
+                (fetch/XHR with status, plus beacons/images/scripts that fired) before retrying blindly.\n\
                 \n\
                 Dialogs & uploads: arm BEFORE the triggering click — browser_handle_dialog answers the \
                 next alert/confirm/prompt, browser_upload_file feeds the next file chooser. Un-armed \
@@ -1314,5 +1409,85 @@ impl McpHandle {
     /// Returns None if no commands are pending.
     pub fn poll(&mut self) -> Option<McpCommand> {
         self.command_rx.try_recv().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(id: usize, title: &str, url: &str) -> crate::browser::Tab {
+        crate::browser::Tab {
+            id,
+            title: title.into(),
+            url: url.into(),
+            is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
+            last_active_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn dom_result_plain_true_has_no_effect_text() {
+        assert_eq!(interpret_dom_result("\"true\"", "@1"), Ok(String::new()));
+    }
+
+    #[test]
+    fn dom_result_with_effect_payload() {
+        let val =
+            serde_json::to_string("true|{\"text\":\"Request sent\",\"dom\":\"+2/-1\"}").unwrap();
+        let out = interpret_dom_result(&val, "@7").unwrap();
+        assert!(out.contains("new text: \"Request sent\""), "{out}");
+        assert!(out.contains("dom +2/-1 nodes"), "{out}");
+    }
+
+    #[test]
+    fn dom_result_statuses_are_actionable() {
+        let err = interpret_dom_result("\"stale\"", "@3").unwrap_err();
+        assert!(err.contains("browser_snapshot"), "{err}");
+        let err = interpret_dom_result("\"occluded:div#cookie\"", "#go").unwrap_err();
+        assert!(err.contains("div#cookie"), "{err}");
+        assert_eq!(
+            dom_status_error("weird", "x"),
+            "Unexpected DOM result: weird"
+        );
+    }
+
+    #[test]
+    fn effect_lists_only_changes_and_names_silence() {
+        let quiet = format_effect("{}");
+        assert!(quiet.contains("no observable change"), "{quiet}");
+        let full = format_effect(
+            "{\"url\":\"https://x.test/next\",\"dialog\":\"Are you sure?\",\"net\":[\"POST https://x.test/api 200\"],\"focus\":\"input \\\"q\\\"\"}",
+        );
+        assert!(full.starts_with(" → url → https://x.test/next"), "{full}");
+        assert!(full.contains("dialog opened: \"Are you sure?\""), "{full}");
+        assert!(
+            full.contains("requests: POST https://x.test/api 200"),
+            "{full}"
+        );
+        assert!(full.contains("focus → input \"q\""), "{full}");
+        assert_eq!(format_effect("not json"), "");
+    }
+
+    #[test]
+    fn effect_scrubs_sensitive_query_params() {
+        let out = format_effect("{\"net\":[\"GET https://x.test/cb?token=abc123 200\"]}");
+        assert!(!out.contains("abc123"), "{out}");
+    }
+
+    #[test]
+    fn tab_info_compacts_and_skips_false_flags() {
+        let long = "t".repeat(200);
+        let info = TabInfo::from_tab(&tab(1, &long, "https://example.com/a"), false).compact();
+        assert_eq!(info.title.chars().count(), 60);
+        assert!(info.title.ends_with('…'));
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("is_active"), "{json}");
+        assert!(!json.contains("is_playing_audio"), "{json}");
+        let active =
+            serde_json::to_string(&TabInfo::from_tab(&tab(2, "x", "https://a.b"), true)).unwrap();
+        assert!(active.contains("\"is_active\":true"), "{active}");
     }
 }

@@ -442,14 +442,23 @@ pub const COMBINED_SCRIPT: &str = r#"
   // snapshot script. All globals are non-enumerable so pages iterating
   // `window` don't trip over them. Buffers cap at 200 entries (FIFO).
   (function () {
-    function ring() {
+    // Every network entry gets a monotonic `seq` (shared across both rings) so
+    // the action effect probe can ask "what fired after my click?" even after
+    // the ring has rotated.
+    var netSeq = 0;
+    function ring(seq) {
       var b = [];
-      b.push2 = function (e) { b.push(e); if (b.length > 200) b.shift(); };
+      b.push2 = function (e) { if (seq) { e.seq = ++netSeq; window.__octoweb_netseq = netSeq; } b.push(e); if (b.length > 200) b.shift(); };
       return b;
     }
-    var con = ring(), net = ring();
+    var con = ring(false), net = ring(true), res = ring(true);
     Object.defineProperty(window, '__octoweb_console', { value: con, configurable: true });
     Object.defineProperty(window, '__octoweb_net', { value: net, configurable: true });
+    // Resource-timing ring: beacons, images, scripts, iframes, form posts —
+    // everything the fetch/XHR wrappers can't see. Kept separate so a page
+    // with 300 images doesn't rotate the fetch/XHR entries out.
+    Object.defineProperty(window, '__octoweb_res', { value: res, configurable: true });
+    window.__octoweb_netseq = 0;
 
     // Console wrap — keeps original behavior, mirrors a truncated text line.
     ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
@@ -490,6 +499,21 @@ pub const COMBINED_SCRIPT: &str = r#"
         function (err) { rec(0, String(err).substring(0, 200)); throw err; }
       );
     };
+
+    // Resource timing — no status code from this API (responseStatus only on
+    // newer WebKit), but it proves *whether* a beacon / image / script fired.
+    try {
+      var po = new PerformanceObserver(function (l) {
+        var es = l.getEntries();
+        for (var i = 0; i < es.length; i++) {
+          var e = es[i], it = e.initiatorType || 'other';
+          if (it === 'fetch' || it === 'xmlhttprequest') continue;
+          res.push2({ method: it === 'beacon' ? 'POST' : 'GET', url: String(e.name).substring(0, 300),
+                      status: e.responseStatus || 0, type: it, ms: Math.round(e.duration || 0), ts: Date.now() });
+        }
+      });
+      po.observe({ type: 'resource', buffered: true });
+    } catch (e) {}
 
     // XHR wrap
     var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Trusted Key</title>
+</head>
+<body>
+  <h1>Trusted Key Fixture</h1>
+  <input type="text" id="field" placeholder="type here">
+  <button id="btn">Space Me</button>
+  <div id="keys">none</div>
+  <div id="btnstatus">idle</div>
+  <script>
+    document.getElementById('field').addEventListener('keydown', function (e) {
+      document.getElementById('keys').textContent = (e.isTrusted ? 'trusted:' : 'synthetic:') + e.key;
+    });
+    document.getElementById('btn').addEventListener('click', function (e) {
+      document.getElementById('btnstatus').textContent = e.isTrusted ? 'activated-trusted' : 'activated-synthetic';
+    });
+  </script>
+</body>
+</html>

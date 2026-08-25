@@ -231,8 +231,13 @@ def navigate(url, tab_id=None):
     return info
 
 
-def get_tabs():
-    return parse_json_text(tool_text("browser_get_tabs"), "browser_get_tabs")
+def get_tabs(**args):
+    """Returns the tab list; pass limit/query to exercise paging."""
+    args.setdefault("limit", 200)
+    page = parse_json_text(tool_text("browser_get_tabs", args), "browser_get_tabs")
+    expect(isinstance(page, dict) and "tabs" in page and "total" in page,
+           f"browser_get_tabs must return {{total, tabs}}, got: {str(page)[:200]!r}")
+    return page["tabs"]
 
 
 def tab_entry(tabs, tab_id):
@@ -725,6 +730,158 @@ def page_content_and_info():
         info = tool_text("browser_get_page_info", {"tab_id": tab})
         expect("OW Fixture: Basic" in info or "basic.html" in info,
                f"page info lacks fixture title/url: {info[:300]!r}")
+
+
+@test
+def trusted_click():
+    """Native click: the page sees isTrusted=true and the effect line names the new text."""
+    with fixture_tab("trusted_click.html") as tab:
+        ref, _ = find_ref(snapshot(tab), "Request access")
+        text = tool_text("browser_click", {"tab_id": tab, "selector": ref}, timeout=15)
+        status = js_text(tab, "status")
+        expect(status == "trusted-click", f"click was not trusted: status={status!r}")
+        activation = js_text(tab, "activation")
+        expect(activation in ("true", "unsupported"), f"no user activation after click: {activation!r}")
+        expect("Request sent to owner" in text,
+               f"effect summary should quote the new status text, got: {text!r}")
+        snap = snapshot(tab)
+        expect("Request sent to owner" in snap, f"snapshot header lacks role=status text: {snap[:500]!r}")
+
+
+@test
+def trusted_hover_css():
+    """Native hover activates CSS :hover and fires a trusted mouseover."""
+    with fixture_tab("trusted_click.html") as tab:
+        tool_text("browser_hover", {"tab_id": tab, "selector": "#hoverzone"}, timeout=15)
+        hovered = js_text(tab, "hovered")
+        expect(hovered == "trusted-hover", f"hover was not trusted: {hovered!r}")
+        display = exec_js(tab, "getComputedStyle(document.getElementById('menu')).display")
+        expect("block" in display, f"CSS :hover did not apply after native hover: {display!r}")
+
+
+@test
+def trusted_key_events():
+    """Native keys: trusted keydown, Space activates a button, characters insert."""
+    with fixture_tab("trusted_key.html") as tab:
+        tool_text("browser_press_key", {"tab_id": tab, "key": "a", "selector": "#field"}, timeout=15)
+        keys = js_text(tab, "keys")
+        expect(keys == "trusted:a", f"keydown not trusted / wrong key: {keys!r}")
+        value = exec_js(tab, "document.getElementById('field').value")
+        expect("a" in value, f"native key press did not insert the character: {value!r}")
+        tool_text("browser_press_key", {"tab_id": tab, "key": "Space", "selector": "#btn"}, timeout=15)
+        status = js_text(tab, "btnstatus")
+        expect(status == "activated-trusted", f"Space did not activate the button natively: {status!r}")
+
+
+@test
+def press_key_rejects_unknown():
+    """A typo'd key name errors instead of pressing garbage."""
+    with fixture_tab("basic.html") as tab:
+        is_err, _, text = call_tool("browser_press_key", {"tab_id": tab, "key": " \""})
+        expect(is_err, f"bogus key must error, got: {text[:200]!r}")
+        expect("Unknown key" in text, f"error should say Unknown key: {text[:200]!r}")
+
+
+@test
+def snapshot_labels_and_state():
+    """Snapshot shows <label> text for controls, headings, alerts and hidden-control count."""
+    with fixture_tab("labels_state.html") as tab:
+        snap = snapshot(tab)
+        for needle in ('radio "Viewer"', 'radio "Commenter"', 'radio "Editor"'):
+            expect(needle in snap, f"snapshot lacks labelled {needle}: {snap[:800]!r}")
+        expect('"Editor"' in snap and "checked" in snap.split('"Editor"')[1].split("\n")[0],
+               f"checked state missing on Editor radio: {snap[:800]!r}")
+        expect('textbox "Message (optional)"' in snap, f"wrapping <label> not used: {snap[:800]!r}")
+        expect('textbox "Search query"' in snap, f"aria-labelledby not resolved: {snap[:800]!r}")
+        expect('h1 "You need access"' in snap, f"h1 missing from state header: {snap[:800]!r}")
+        expect('alert: "Access denied for this account"' in snap, f"role=alert missing: {snap[:800]!r}")
+        expect("present-but-hidden controls" in snap, f"hidden toolbar count missing: {snap[:800]!r}")
+        expect("Download" not in snap.split("elements")[1], "hidden buttons must not get @refs")
+
+
+@test
+def effect_feedback_variants():
+    """Action results describe the observable effect: text, route, dialog, requests, or silence."""
+    with fixture_tab("effects.html") as tab:
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#toast"}, timeout=15)
+        expect("Saved successfully" in text, f"toast text not in effect line: {text!r}")
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#route"}, timeout=15)
+        expect("#/settings" in text, f"SPA route change not in effect line: {text!r}")
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#fetch"}, timeout=15)
+        expect("api/data?src=effect" in text, f"fetch not in effect line: {text!r}")
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#dialog"}, timeout=15)
+        expect("dialog opened" in text and "Confirm the thing" in text, f"dialog not in effect line: {text!r}")
+        tool_text("browser_click", {"tab_id": tab, "selector": "#dlg-close"}, timeout=15)
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#silent"}, timeout=15)
+        expect("no observable change" in text, f"silent click must say so: {text!r}")
+
+
+@test
+def click_reports_navigation():
+    """A click that navigates is reported as success naming the new URL, not as a dropped call."""
+    with fixture_tab("effects.html") as tab:
+        start = time.monotonic()
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#navigate"}, timeout=20)
+        elapsed = time.monotonic() - start
+        expect("navigated to" in text and "basic.html" in text, f"navigation not reported: {text!r}")
+        expect(elapsed < 6, f"navigation report took {elapsed:.1f}s — should not wait for the watchdog")
+
+
+@test
+def network_sees_beacons_and_images():
+    """Resource-timing capture: sendBeacon and <img> loads show up in browser_network_requests."""
+    with fixture_tab("effects.html") as tab:
+        tool_text("browser_click", {"tab_id": tab, "selector": "#beacon"}, timeout=15)
+
+        def entries():
+            return parse_json_text(
+                tool_text("browser_network_requests", {"tab_id": tab, "filter": "api/data"}),
+                "browser_network_requests",
+            )
+
+        got = poll(entries, lambda es: any("src=beacon" in e["url"] for e in es) and any("src=img" in e["url"] for e in es))
+        expect(any("src=beacon" in e["url"] for e in got), f"beacon not captured: {got}")
+        expect(any("src=img" in e["url"] for e in got), f"image load not captured: {got}")
+
+
+@test
+def execute_js_errors_and_timeouts():
+    """JS exceptions carry their message; a slow script times out as 'still running', not 'navigated'."""
+    with fixture_tab("basic.html") as tab:
+        is_err, _, text = call_tool("browser_execute_js",
+                                    {"tab_id": tab, "script": "(() => { throw new TypeError('boom from page'); })()"})
+        expect(is_err and "boom from page" in text, f"exception message not surfaced: {text!r}")
+        start = time.monotonic()
+        is_err, _, text = call_tool("browser_execute_js",
+                                    {"tab_id": tab, "script": "new Promise(r => setTimeout(r, 3000))", "timeout_ms": 1000},
+                                    timeout=15)
+        elapsed = time.monotonic() - start
+        expect(is_err, f"slow script should time out, got: {text!r}")
+        expect("did not finish" in text and "did NOT navigate" in text,
+               f"timeout must be reported as a timeout, not a navigation: {text!r}")
+        expect(0.9 <= elapsed < 3.0, f"timeout_ms not honoured: {elapsed:.1f}s")
+
+
+@test
+def wait_ready_on_static_page():
+    """browser_wait event=ready resolves 'ready' on a static page (regression: phantom 'navigated')."""
+    with fixture_tab("basic.html") as tab:
+        text = tool_text("browser_wait", {"tab_id": tab, "event": "ready"}, timeout=15)
+        expect(text.strip() in ("ready", "live"), f"wait ready on static page returned: {text!r}")
+
+
+@test
+def get_tabs_paging():
+    """browser_get_tabs honours limit and query and always reports total."""
+    with fixture_tab("basic.html") as tab:
+        page = parse_json_text(tool_text("browser_get_tabs", {"limit": 1}), "browser_get_tabs")
+        expect(page["total"] >= 1 and len(page["tabs"]) == 1, f"limit=1 not honoured: {page}")
+        page = parse_json_text(tool_text("browser_get_tabs", {"query": "basic.html", "limit": 200}), "browser_get_tabs")
+        ids = [t["id"] for t in page["tabs"]]
+        expect(tab in ids, f"query did not match the fixture tab: {page}")
+        expect(all("basic.html" in t["url"] for t in page["tabs"]), f"query returned non-matching tabs: {page}")
+        expect(not any(t.get("is_playing_audio") is False for t in page["tabs"]),
+               "false flags should be omitted from tab entries")
 
 
 # ──────────────────────────────────────────────────────────────────────

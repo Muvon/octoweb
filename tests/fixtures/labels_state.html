@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Labels and State</title>
+</head>
+<body>
+  <h1>You need access</h1>
+  <h2>Request access, or switch to an account with access.</h2>
+  <div role="alert">Access denied for this account</div>
+
+  <input type="radio" name="role" id="r-viewer" value="1"><label for="r-viewer">Viewer</label>
+  <input type="radio" name="role" id="r-commenter" value="2"><label for="r-commenter">Commenter</label>
+  <input type="radio" name="role" id="r-editor" value="3" checked><label for="r-editor">Editor</label>
+  <label>Message (optional) <textarea id="msg"></textarea></label>
+  <div id="lbl">Search query</div>
+  <input type="text" id="search" aria-labelledby="lbl">
+
+  <style>
+    .toolbar { visibility: hidden; }
+    .toolbar:hover, body:hover .toolbar { visibility: visible; }
+  </style>
+  <div class="toolbar">
+    <button id="hidden-a">Download</button>
+    <button id="hidden-b">Transcript</button>
+  </div>
+</body>
+</html>

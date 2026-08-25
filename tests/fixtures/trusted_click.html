@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Trusted Click</title>
+</head>
+<body>
+  <h1>Trusted Click Fixture</h1>
+  <!-- Mirrors sites that gate the real action on a trusted event
+       (Google Drive "Request access", user-activation-gated APIs). -->
+  <button id="gated">Request access</button>
+  <div id="status">untouched</div>
+  <div id="activation">unknown</div>
+  <div id="hovered">not-hovered</div>
+  <style>
+    #menu { display: none; }
+    #hoverzone:hover + #menu { display: block; }
+  </style>
+  <div id="hoverzone" style="padding:20px;background:#eee">hover me</div>
+  <div id="menu">Hover Menu Item</div>
+  <script>
+    document.getElementById('gated').addEventListener('click', function (e) {
+      if (!e.isTrusted) {
+        document.getElementById('status').textContent = 'synthetic-rejected';
+        return;
+      }
+      document.getElementById('status').textContent = 'trusted-click';
+      var ua = navigator.userActivation;
+      document.getElementById('activation').textContent = ua ? String(ua.isActive) : 'unsupported';
+      var d = document.createElement('div');
+      d.setAttribute('role', 'status');
+      d.textContent = 'Request sent to owner';
+      document.body.appendChild(d);
+    });
+    document.getElementById('hoverzone').addEventListener('mouseover', function (e) {
+      document.getElementById('hovered').textContent = e.isTrusted ? 'trusted-hover' : 'synthetic-hover';
+    });
+  </script>
+</body>
+</html>

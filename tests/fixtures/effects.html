@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Effects</title>
+</head>
+<body>
+  <h1>Effects Fixture</h1>
+  <button id="toast">Show toast</button>
+  <button id="route">Change route</button>
+  <button id="dialog">Open dialog</button>
+  <button id="fetch">Call API</button>
+  <button id="beacon">Send beacon</button>
+  <button id="silent">Do nothing</button>
+  <a id="navigate" href="basic.html">Go to basic</a>
+  <dialog id="dlg"><p>Confirm the thing?</p><button id="dlg-close">Close</button></dialog>
+  <script>
+    document.getElementById('toast').addEventListener('click', function () {
+      var d = document.createElement('div');
+      d.textContent = 'Saved successfully';
+      document.body.appendChild(d);
+    });
+    document.getElementById('route').addEventListener('click', function () {
+      history.pushState({}, '', '/effects.html#/settings');
+    });
+    document.getElementById('dialog').addEventListener('click', function () {
+      document.getElementById('dlg').showModal();
+    });
+    document.getElementById('dlg-close').addEventListener('click', function () {
+      document.getElementById('dlg').close();
+    });
+    document.getElementById('fetch').addEventListener('click', function () {
+      fetch('/api/data?src=effect');
+    });
+    document.getElementById('beacon').addEventListener('click', function () {
+      navigator.sendBeacon('/api/data?src=beacon', 'x');
+      var img = new Image();
+      img.src = '/api/data?src=img';
+    });
+  </script>
+</body>
+</html>

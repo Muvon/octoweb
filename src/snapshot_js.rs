@@ -13,6 +13,9 @@
 //!   them even though `document.querySelector` can't reach there.
 //! - Cross-origin iframe contents and closed shadow roots are skipped.
 //! - Sensitive input values (passwords, card numbers, etc.) are never returned.
+//! - Header carries page state (title, h1–h3, alert/status/dialog text) and a
+//!   count of present-but-hidden controls, so outcome checks ("Request sent",
+//!   "Access denied") don't need a `browser_execute_js` round-trip.
 
 pub const SNAPSHOT_JS: &str = r#"
 (function() {
@@ -21,10 +24,19 @@ pub const SNAPSHOT_JS: &str = r#"
   var counter = 1;
   var lines = [];
 
+  var hiddenControls = 0;
   function isVisible(el) {
     if (el.tagName === 'INPUT' && el.type === 'hidden') return true;
     var style = getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden' || style.opacity === '0') {
+      // Present but invisible: auto-hiding toolbars (Drive, video players)
+      // collapse in a pointer-less background tab. Counted for the header
+      // so the AI knows a hover would reveal more, not that the page is empty.
+      var r0 = el.getBoundingClientRect();
+      if (r0.width > 0 && r0.height > 0) hiddenControls++;
+      return false;
+    }
     if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') return false;
     var rect = el.getBoundingClientRect();
     return rect.width > 0 || rect.height > 0;
@@ -53,12 +65,33 @@ pub const SNAPSHOT_JS: &str = r#"
     return tag;
   }
 
+  function labelledBy(el) {
+    var ids = el.getAttribute('aria-labelledby');
+    if (!ids) return '';
+    var doc = el.ownerDocument, out = [];
+    ids.split(/\s+/).forEach(function (id) { var n = doc.getElementById(id); if (n) out.push(n.innerText || n.textContent || ''); });
+    return out.join(' ');
+  }
+  // Form controls: the human-visible name is usually a <label for>, a wrapping
+  // <label>, or aria-labelledby — none of which live on the element itself.
+  // Without this a radio group renders as "val=1 / val=2 / val=3".
+  function controlLabel(el) {
+    var labels = el.labels;
+    if (labels && labels.length) return labels[0].innerText || labels[0].textContent || '';
+    var wrap = el.closest && el.closest('label');
+    if (wrap) return wrap.innerText || wrap.textContent || '';
+    return '';
+  }
   function getText(el) {
+    var tag = el.tagName;
+    var isControl = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
     var text = el.getAttribute('aria-label')
+      || labelledBy(el)
+      || (isControl ? controlLabel(el) : '')
       || el.getAttribute('title')
       || el.getAttribute('alt')
       || el.getAttribute('placeholder')
-      || (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ? '' : (el.innerText || ''));
+      || (isControl ? '' : (el.innerText || ''));
     return (text || '').trim().replace(/\s+/g, ' ').substring(0, 80);
   }
 
@@ -157,6 +190,33 @@ pub const SNAPSHOT_JS: &str = r#"
   }
 
   scan(document);
+
+  // Page state the AI otherwise has to fetch with execute_js: what the page
+  // is saying (headings), and anything it is shouting (alerts, status
+  // regions, open dialogs) — where "Request sent" / "Access denied" live.
+  function clean(t, n) { return (t || '').trim().replace(/\s+/g, ' ').substring(0, n); }
+  function visibleText(el, n) {
+    var st = getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden') return '';
+    return clean(el.innerText, n);
+  }
+  var state = [];
+  var heads = [], hs = document.querySelectorAll('h1,h2,h3');
+  for (var h = 0; h < hs.length && heads.length < 6; h++) {
+    var ht = visibleText(hs[h], 80);
+    if (ht) heads.push(hs[h].tagName.toLowerCase() + ' "' + ht.replace(/"/g, '\\"') + '"');
+  }
+  if (heads.length) state.push(heads.join(' · '));
+  var live = document.querySelectorAll('[role=alert],[role=status],[aria-live=polite],[aria-live=assertive],[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open]');
+  var liveSeen = 0;
+  for (var l = 0; l < live.length && liveSeen < 4; l++) {
+    var lt = visibleText(live[l], 160);
+    if (!lt) continue;
+    var role = live[l].getAttribute('role') || (live[l].tagName === 'DIALOG' ? 'dialog' : (live[l].getAttribute('aria-modal') ? 'dialog' : 'live'));
+    state.push(role + ': "' + lt.replace(/"/g, '\\"') + '"');
+    liveSeen++;
+  }
+
   // Non-enumerable so pages iterating `window` can't fingerprint it.
   Object.defineProperty(window, '__octoweb_refs', { value: refs, configurable: true });
   // Header tells the AI how many refs were captured, that they expire on
@@ -164,11 +224,17 @@ pub const SNAPSHOT_JS: &str = r#"
   // follow-up clarification round-trips.
   var se = document.scrollingElement || document.documentElement;
   var meta = 'page: ' + location.href.substring(0, 150)
+    + (document.title ? ' | title: ' + clean(document.title, 80) : '')
     + ' | viewport ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + window.innerHeight)
     + ' of ' + Math.round(se.scrollHeight) + 'px';
   var header = lines.length === 0
     ? '(no interactive elements found)'
     : lines.length + ' elements (refs valid until next navigation):';
-  return meta + '\n' + header + '\n' + lines.join('\n');
+  if (hiddenControls) header += ' +' + hiddenControls + ' present-but-hidden controls (auto-hiding UI: browser_hover a visible element or the page centre to reveal, then re-snapshot)';
+  var out = [meta];
+  if (state.length) out.push(state.join('\n'));
+  out.push(header);
+  if (lines.length) out.push(lines.join('\n'));
+  return out.join('\n');
 })()
 "#;

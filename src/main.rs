@@ -18,6 +18,7 @@ mod inline_edit_html;
 mod keybindings;
 mod macos;
 mod mcp;
+mod native_input;
 mod nav_error_patch;
 mod newtab_html;
 mod notification_html;
@@ -32,6 +33,7 @@ mod settings_html;
 mod shortcuts_html;
 mod sidebar_html;
 mod snapshot_js;
+mod tab_nav;
 mod tab_stats;
 mod url;
 mod webview_utils;
@@ -2077,6 +2079,32 @@ fn main() {
         }};
     }
 
+    /// Navigation-aware watchdog. A discarded callback has two very different
+    /// causes and the AI needs to know which: the tab navigated (for actions
+    /// that is the *result* — `$on_nav(url)` builds the reply), or the script
+    /// simply never finished (`$timeout_msg`, an error). Before this every
+    /// timeout was reported as "the page navigated", sending agents chasing
+    /// phantom navigations on static pages.
+    macro_rules! mcp_nav_watchdog {
+        ($arc:expr, $delay_ms:expr, $tab_id:expr, $gen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
+            let arc_wd = $arc.clone();
+            let tabs_wd = tabs.clone();
+            let (tab_wd, gen_wd) = ($tab_id, $gen0);
+            let on_nav = $on_nav;
+            let msg: String = $timeout_msg;
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis($delay_ms));
+                if let Some(tx) = arc_wd.lock().unwrap().take() {
+                    if tab_nav::get(tab_wd) != gen_wd {
+                        let _ = tx.send(on_nav(tab_url(&tabs_wd, tab_wd)));
+                    } else {
+                        let _ = tx.send(Err(msg));
+                    }
+                }
+            });
+        }};
+    }
+
     /// Auto-restore for MCP handlers: if `target` is a known tab in TabManager but
     /// has been hibernated (WebView dropped, URL parked in `pending_tabs`), recreate
     /// the WebView in-place. Returns true if the tab is known, false if the id is bogus.
@@ -3153,18 +3181,34 @@ fn main() {
                             }
                         }
                     }
-                    McpCommand::GetTabs { response } => {
-                        tracing::debug!("MCP get_tabs");
+                    McpCommand::GetTabs { limit, query, response } => {
+                        tracing::debug!(limit, ?query, "MCP get_tabs");
 
                         let tm = tabs.lock().unwrap();
                         let active = tm.active_id();
-                        let tabs_list: Vec<TabInfo> = tm.tabs().iter().map(|t| {
-                            TabInfo::from_tab(t, active == Some(t.id))
+                        let q = query.map(|q| q.to_lowercase()).filter(|q| !q.is_empty());
+                        let mut matched: Vec<&browser::Tab> = tm.tabs().iter().filter(|t| match &q {
+                            Some(q) => t.title.to_lowercase().contains(q.as_str()) || t.url.to_lowercase().contains(q.as_str()),
+                            None => true,
                         }).collect();
+                        let total = matched.len();
+                        // Visible tab first, then most recently active — the tabs the
+                        // AI is working in are what it asks about; a 200-tab session
+                        // must not cost 9k tokens per call.
+                        matched.sort_by(|a, b| {
+                            (Some(b.id) == active)
+                                .cmp(&(Some(a.id) == active))
+                                .then(b.last_active_at.cmp(&a.last_active_at))
+                        });
+                        let tabs_list: Vec<TabInfo> = matched
+                            .into_iter()
+                            .take(limit)
+                            .map(|t| TabInfo::from_tab(t, active == Some(t.id)).compact())
+                            .collect();
 
-                        tracing::debug!(count = tabs_list.len(), "MCP get_tabs response");
+                        tracing::debug!(total, shown = tabs_list.len(), "MCP get_tabs response");
 
-                        let _ = response.send(Ok(tabs_list));
+                        let _ = response.send(Ok(mcp::TabsPage { total, tabs: tabs_list }));
                     }
                     McpCommand::SwitchTab { tab_id, response } => {
                         tracing::debug!(tab_id, "MCP switch_tab");
@@ -3195,6 +3239,7 @@ fn main() {
                             // browser_get_tabs no longer lists it; the event tears
                             // down the WebView (its close() re-run is a no-op).
                             tabs.lock().unwrap().close(tab_id);
+                            tab_nav::forget(tab_id);
                             let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
                             let _ = response.send(Ok(()));
                         } else {
@@ -3273,7 +3318,7 @@ fn main() {
                             }
                         }
                     }
-                    McpCommand::ExecuteJs { tab_id, script, response } => {
+                    McpCommand::ExecuteJs { tab_id, script, timeout_ms, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             if script.trim().is_empty() {
@@ -3287,17 +3332,33 @@ fn main() {
                                 // (fetch chains, waits) resolve to their settled value.
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
+                                let gen0 = tab_nav::get(id);
+                                let tabs_cb = tabs.clone();
                                 async_eval::eval_async_expr(wv, &script, move |res| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let _ = tx.send(res.map_err(|e| format!("JS error: {e}")));
+                                        let _ = tx.send(res.map_err(|e| {
+                                            if tab_nav::get(id) != gen0 {
+                                                format!(
+                                                    "JS context torn down by a navigation (tab now at {}) — the script \
+                                                     may have partially run; re-run once the page settles if it is idempotent",
+                                                    tab_url(&tabs_cb, id)
+                                                )
+                                            } else {
+                                                format!("JS error: {e}")
+                                            }
+                                        }));
                                     }
                                 });
-                                mcp_eval_err_watchdog!(response, 10_000, format!(
-                                    "browser_execute_js callback was discarded — the page navigated or \
-                                     the JS context tore down during the call. The script may or may not \
-                                     have run. Verify with browser_get_tabs / browser_snapshot and retry. \
-                                     Not auto-retried because the script's intent is unknown."
-                                ));
+                                mcp_nav_watchdog!(response, timeout_ms, id, gen0,
+                                    |url: String| Err(format!(
+                                        "browser_execute_js was interrupted by a navigation (tab now at {url}); \
+                                         the script may have partially run. Re-run it once the page settles if it is idempotent."
+                                    )),
+                                    format!(
+                                        "browser_execute_js did not finish within {timeout_ms} ms and the tab did NOT navigate. \
+                                         The script is still running or awaiting (long fetch loops hit this): pass a larger \
+                                         timeout_ms (max 60000), run requests in parallel with Promise.all, or split the work."
+                                    ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -3314,29 +3375,58 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
-                                // Returns: "true" | "stale" | "missing" | "detached"
-                                //   stale    → @ref but no snapshot taken yet (or refs cleared by navigation)
-                                //   missing  → selector matched no element
-                                //   detached → element existed but is no longer in the DOM
-                                let script = dom_actions::click_script(&selector);
+                                // Phase 1 (JS): resolve, scroll, stabilise, occlusion-check, arm
+                                // effect capture, return the centre point (or a status:
+                                // stale / missing / detached / occluded:<what> / disabled).
+                                // Phase 2 (native): trusted mouse events at that point.
+                                // Phase 3 (JS): effect probe → one-line "what changed" summary.
+                                let script = dom_actions::click_locate_script(&selector);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
-                                let sel_for_err = selector.clone();
+                                let gen0 = tab_nav::get(id);
+                                let wk = wv.webview();
+                                let tabs_cb = tabs.clone();
+                                let sel = selector.clone();
+                                let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
-                                    if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let _ = tx.send(res
-                                            .map_err(|e| format!("Click failed: {e}"))
-                                            .and_then(|val| interpret_dom_result(&val, &sel_for_err)));
+                                    let val = match res {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Err(format!("Click failed: {e}")));
+                                            }
+                                            return;
+                                        }
+                                    };
+                                    match dom_actions::parse_target(&val) {
+                                        Ok(Some(t)) => finish_native_action(
+                                            wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                            format!("Clicked {} ({sel})", t.desc),
+                                            |ptr| native_input::click(ptr, t.x, t.y, zoom),
+                                        ),
+                                        Ok(None) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Ok(format!(
+                                                    "Clicked file input ({sel}) — the armed files were handed to its chooser"
+                                                )));
+                                            }
+                                        }
+                                        Err(status) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Err(mcp::dom_status_error(&status, &sel)));
+                                            }
+                                        }
                                     }
                                 });
-                                mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
-                                    "Click on '{selector}' was dropped — the JS callback never fired, almost \
-                                     always because the page navigated or re-rendered during the click \
-                                     (common on heavy SPAs and with parallel clicks). The tab is still \
-                                     alive; whether the click happened is unknown. Call browser_get_tabs \
-                                     to confirm state, browser_snapshot to refresh @refs, then retry \
-                                     sequentially."
-                                ));
+                                let sel_wd = selector.clone();
+                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                    move |url: String| Ok(format!("Clicked '{sel_wd}' → page navigated to {url}")),
+                                    format!(
+                                        "Click on '{selector}' got no answer from the page within {}s and the tab did \
+                                         not navigate — its JS context is frozen or busy (heavy re-render, blocked main \
+                                         thread). browser_snapshot to refresh @refs, then retry.",
+                                        dom_actions::WATCHDOG_MS / 1000
+                                    ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -3353,21 +3443,52 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
-                                let script = dom_actions::hover_script(&selector);
+                                // Same three phases as Click; the native event is a mouse move,
+                                // which is what real CSS :hover and JS hover menus react to.
+                                let script = dom_actions::hover_locate_script(&selector);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
-                                let sel_for_err = selector.clone();
+                                let gen0 = tab_nav::get(id);
+                                let wk = wv.webview();
+                                let tabs_cb = tabs.clone();
+                                let sel = selector.clone();
+                                let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
-                                    if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let _ = tx.send(res
-                                            .map_err(|e| format!("Hover failed: {e}"))
-                                            .and_then(|val| interpret_dom_result(&val, &sel_for_err)));
+                                    let val = match res {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Err(format!("Hover failed: {e}")));
+                                            }
+                                            return;
+                                        }
+                                    };
+                                    match dom_actions::parse_target(&val) {
+                                        Ok(Some(t)) => finish_native_action(
+                                            wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                            format!("Hovered {} ({sel})", t.desc),
+                                            |ptr| native_input::hover(ptr, t.x, t.y, zoom),
+                                        ),
+                                        Ok(None) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Ok(format!("Hovered {sel}")));
+                                            }
+                                        }
+                                        Err(status) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Err(mcp::dom_status_error(&status, &sel)));
+                                            }
+                                        }
                                     }
                                 });
-                                mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
-                                    "Hover on '{selector}' was dropped (JS callback discarded by page \
-                                     navigation/re-render). Re-snapshot and retry."
-                                ));
+                                let sel_wd = selector.clone();
+                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                    move |url: String| Ok(format!("Hovered '{sel_wd}' → page navigated to {url}")),
+                                    format!(
+                                        "Hover on '{selector}' got no answer from the page within {}s and the tab did \
+                                         not navigate. browser_snapshot to refresh @refs, then retry.",
+                                        dom_actions::WATCHDOG_MS / 1000
+                                    ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -3388,18 +3509,24 @@ fn main() {
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
+                                let gen0 = tab_nav::get(id);
                                 async_eval::eval_async_expr(wv, &script, move |res| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         let _ = tx.send(res
                                             .map_err(|e| format!("Type failed: {e}"))
-                                            .and_then(|val| interpret_dom_result(&val, &sel_for_err)));
+                                            .and_then(|val| interpret_dom_result(&val, &sel_for_err))
+                                            .map(|effect| format!("Typed into {sel_for_err}{effect}")));
                                     }
                                 });
-                                mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
-                                    "Type into '{selector}' was dropped (JS callback discarded by page \
-                                     navigation/re-render). Whether the text was set is unknown — \
-                                     re-snapshot, verify field state, and retry."
-                                ));
+                                let sel_wd = selector.clone();
+                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                    move |url: String| Ok(format!("Typed into '{sel_wd}' → page navigated to {url}")),
+                                    format!(
+                                        "Type into '{selector}' got no answer from the page within {}s and the tab did \
+                                         not navigate. Whether the text was set is unknown — re-snapshot, verify the \
+                                         field state, and retry.",
+                                        dom_actions::WATCHDOG_MS / 1000
+                                    ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
                             }
@@ -3685,10 +3812,14 @@ fn main() {
                     }
                     McpCommand::PressKey { tab_id, key, selector, modifiers, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
-                        if key.is_empty() {
-                            let _ = response.send(Err("key is empty — pass a KeyboardEvent.key value like 'Enter', 'Escape', 'a'".into()));
+                        let Some(key_info) = native_input::key_info(&key) else {
+                            let _ = response.send(Err(format!(
+                                "Unknown key '{key}' — pass a KeyboardEvent.key name (Enter, Escape, Tab, Backspace, \
+                                 Delete, Space, ArrowUp/ArrowDown/ArrowLeft/ArrowRight, Home, End, PageUp, PageDown, \
+                                 F1–F12) or a single character"
+                            )));
                             continue;
-                        }
+                        };
                         if let Some(ref s) = selector {
                             if s.trim().is_empty() {
                                 let _ = response.send(Err("selector is empty — omit it to target the focused element, or pass a CSS selector / @ref".into()));
@@ -3697,23 +3828,59 @@ fn main() {
                         }
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
-                            let script =
-                                dom_actions::press_key_script(selector.as_deref(), &key, &modifiers);
+                            // Phase 1 (JS): focus the target (or keep the current focus) and arm
+                            // effect capture. Phase 2 (native): trusted key down/up — native
+                            // default actions apply (Enter submits, Space activates, Tab moves
+                            // focus, characters insert). Phase 3 (JS): effect probe.
+                            let script = dom_actions::key_focus_script(selector.as_deref());
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone().unwrap_or_else(|| "(focused element)".into());
                             let sel_for_msg = sel_for_err.clone();
+                            let gen0 = tab_nav::get(target_id);
+                            let wk = wv.webview();
+                            let tabs_cb = tabs.clone();
+                            let key_label = if modifiers.is_empty() {
+                                key.clone()
+                            } else {
+                                format!("{}+{key}", modifiers.join("+"))
+                            };
                             async_eval::eval_async_expr(wv, &script, move |res| {
-                                if let Some(tx) = response_cb.lock().unwrap().take() {
-                                    let _ = tx.send(res
-                                        .map_err(|e| format!("PressKey failed: {e}"))
-                                        .and_then(|val| interpret_dom_result(&val, &sel_for_err)));
+                                let val = match res {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("PressKey failed: {e}")));
+                                        }
+                                        return;
+                                    }
+                                };
+                                match dom_actions::parse_target(&val) {
+                                    Ok(Some(t)) => finish_native_action(
+                                        wk.clone(), target_id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                        format!("Pressed {key_label} on {}", t.desc),
+                                        |ptr| native_input::press_key(ptr, &key_info, &modifiers),
+                                    ),
+                                    Ok(None) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Ok(format!("Pressed {key_label}")));
+                                        }
+                                    }
+                                    Err(status) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Err(mcp::dom_status_error(&status, &sel_for_err)));
+                                        }
+                                    }
                                 }
                             });
-                            mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
-                                "PressKey on '{sel_for_msg}' was dropped (JS callback discarded by page \
-                                 navigation/re-render). Re-snapshot and retry."
-                            ));
+                            let key_wd = key.clone();
+                            mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, target_id, gen0,
+                                move |url: String| Ok(format!("Pressed {key_wd} → page navigated to {url}")),
+                                format!(
+                                    "PressKey on '{sel_for_msg}' got no answer from the page within {}s and the tab \
+                                     did not navigate. Re-snapshot and retry.",
+                                    dom_actions::WATCHDOG_MS / 1000
+                                ));
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
@@ -3747,24 +3914,33 @@ fn main() {
                             // before resolving with 'timeout'. The watchdog only fires if
                             // the callback was discarded — give the script timeout_ms + 5s.
                             let wd_ms = timeout_ms.saturating_add(5000);
+                            let gen0 = tab_nav::get(target_id);
+                            let tabs_cb = tabs.clone();
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
-                                    // A JS exception mid-wait almost always means the
-                                    // page navigated and tore down the wait's context —
-                                    // for the AI that's a signal, not a failure.
-                                    let _ = tx.send(Ok(match res {
-                                        Ok(val) => serde_json::from_str::<String>(&val).unwrap_or(val),
-                                        Err(_) => "interrupted: the page navigated mid-wait — \
-                                                   call browser_wait again to wait on the new page"
-                                            .to_string(),
-                                    }));
+                                    // Only a real navigation (nav generation moved) is reported
+                                    // as "interrupted"; any other failure is the probe's own error
+                                    // and the AI needs to see it, not a phantom navigation.
+                                    let _ = tx.send(match res {
+                                        Ok(val) => Ok(serde_json::from_str::<String>(&val).unwrap_or(val)),
+                                        Err(_) if tab_nav::get(target_id) != gen0 => Ok(format!(
+                                            "interrupted: the page navigated mid-wait (now at {}) — \
+                                             call browser_wait again to wait on the new page",
+                                            tab_url(&tabs_cb, target_id)
+                                        )),
+                                        Err(e) => Err(format!("browser_wait probe failed: {e}")),
+                                    });
                                 }
                             });
-                            mcp_eval_err_watchdog!(response, wd_ms, format!(
-                                "browser_wait callback was discarded — the page navigated mid-wait. \
-                                 If the navigation is what you wanted, call browser_get_tabs to verify \
-                                 and continue; otherwise retry."
-                            ));
+                            mcp_nav_watchdog!(response, wd_ms, target_id, gen0,
+                                |url: String| Ok(format!(
+                                    "interrupted: the page navigated mid-wait (now at {url}) — \
+                                     call browser_wait again to wait on the new page"
+                                )),
+                                format!(
+                                    "browser_wait got no answer within {wd_ms} ms and the tab did not navigate — \
+                                     the page's JS context is frozen or busy; check browser_get_tabs / browser_snapshot."
+                                ));
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
@@ -3784,6 +3960,7 @@ fn main() {
                             let sel_for_err = selector.clone();
                             let sel_for_msg = sel_for_err.clone();
                             let val_for_err = value.clone();
+                            let gen0 = tab_nav::get(target_id);
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
                                     let result = res
@@ -3794,14 +3971,19 @@ fn main() {
                                                 "no-such-option" => Err(format!("<select> '{sel_for_err}' has no option with value='{val_for_err}'")),
                                                 _ => interpret_dom_result(&val, &sel_for_err),
                                             }
-                                        });
+                                        })
+                                        .map(|effect| format!("Selected '{val_for_err}' in {sel_for_err}{effect}"));
                                     let _ = tx.send(result);
                                 }
                             });
-                            mcp_eval_err_watchdog!(response, dom_actions::WATCHDOG_MS, format!(
-                                "SelectOption on '{sel_for_msg}' was dropped (JS callback discarded by \
-                                 page navigation/re-render). Re-snapshot and retry."
-                            ));
+                            let sel_wd = sel_for_msg.clone();
+                            mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, target_id, gen0,
+                                move |url: String| Ok(format!("SelectOption on '{sel_wd}' → page navigated to {url}")),
+                                format!(
+                                    "SelectOption on '{sel_for_msg}' got no answer from the page within {}s and the \
+                                     tab did not navigate. Re-snapshot and retry.",
+                                    dom_actions::WATCHDOG_MS / 1000
+                                ));
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
@@ -4291,6 +4473,7 @@ fn main() {
                         }
                     }
                     tabs.lock().unwrap().close(id);
+                    tab_nav::forget(id);
                     if let Some(wv) = tab_webviews.get(&id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
@@ -5274,6 +5457,7 @@ fn main() {
             // ── URL update from page load ─────────────────────────────────
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
                 tracing::debug!(tab_id, %url, "BrowserUrlChanged");
+                tab_nav::bump(tab_id);
                 // During snapshot restore, suppress about:blank URL changes so the
                 // real URL in TabManager is not clobbered by the transient snapshot load.
                 if restoring_tabs.contains(&tab_id) {
@@ -5332,6 +5516,7 @@ fn main() {
             // Skip progress bar for about:blank (instant, no network).
             Event::UserEvent(AppEvent::PageLoadStarted(tab_id)) => {
                 tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadStarted");
+                tab_nav::bump(tab_id);
                 // Deferred swap: first bytes received (didCommitNavigation) — page is rendering,
                 // safe to show it now and hide the old tab.
                 if let Some((old_id, new_id)) = pending_swap {
@@ -6786,6 +6971,56 @@ fn is_app_active() -> bool {
         let front_pid: i32 = msg_send![frontmost, processIdentifier];
         front_pid == std::process::id() as i32
     }
+}
+
+/// Current (sanitized) URL of a tab, for navigation-aware messages built off
+/// the main thread (watchdogs) or inside eval callbacks.
+fn tab_url(tabs: &Arc<Mutex<TabManager>>, tab_id: usize) -> String {
+    tabs.lock()
+        .unwrap()
+        .tabs()
+        .iter()
+        .find(|t| t.id == tab_id)
+        .map(|t| sanitize::sanitize_url(&t.url))
+        .unwrap_or_default()
+}
+
+type McpReply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>>;
+
+/// Second half of a trusted pointer/key action: deliver the native event,
+/// then run the effect probe and answer `<verb> → <what changed>`. When the
+/// probe's callback dies because the action navigated, that navigation *is*
+/// the effect and is reported as success — not as a dropped call.
+fn finish_native_action<T: objc2::Message + 'static>(
+    wk: objc2::rc::Retained<T>,
+    tab_id: usize,
+    gen0: u64,
+    tabs: Arc<Mutex<TabManager>>,
+    response: McpReply,
+    verb: String,
+    deliver: impl FnOnce(*mut objc2::runtime::AnyObject),
+) {
+    let ptr = objc2::rc::Retained::as_ptr(&wk) as *mut objc2::runtime::AnyObject;
+    deliver(ptr);
+    // Keep the view retained until the probe answers; the pointer must not dangle
+    // if the tab is closed in between.
+    let keep = wk;
+    async_eval::eval_async_expr_ptr(ptr, &dom_actions::effect_script(), move |res| {
+        let _ = &keep;
+        let Some(tx) = response.lock().unwrap().take() else {
+            return;
+        };
+        let navigated = tab_nav::get(tab_id) != gen0;
+        let msg = match res {
+            _ if navigated => format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id)),
+            Ok(val) => {
+                let diff: String = serde_json::from_str(&val).unwrap_or(val);
+                format!("{verb}{}", mcp::format_effect(&diff))
+            }
+            Err(e) => format!("{verb} (delivered; effect probe failed: {e})"),
+        };
+        let _ = tx.send(Ok(msg));
+    });
 }
 
 #[cfg(test)]

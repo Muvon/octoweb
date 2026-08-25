@@ -30,6 +30,10 @@
 //!   rendered shape, waiting longer won't help).
 //! - `"partial"` — 8 s ceiling reached. Returns *something* on pathological
 //!   sites instead of hanging the navigate.
+//!
+//! The constant is a bare *expression* (no trailing `;`): `async_eval` wraps it
+//! as `return (<expr>);`, so a trailing semicolon is a SyntaxError that makes
+//! navigate stop waiting and `browser_wait` report a phantom navigation.
 
 pub const READINESS_JS: &str = r#"
 new Promise(function(r){
@@ -69,5 +73,5 @@ new Promise(function(r){
     setTimeout(tick,200);
   }
   setTimeout(tick,200);
-});
+})
 "#;
