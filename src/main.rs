@@ -92,12 +92,16 @@ enum AppEvent {
     SidebarReFocus,           // app reactivated while sidebar owned key — restore textarea focus
     AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
-    OpenInNewTab(String),     // Cmd+click / target=_blank — open URL in new tab and switch to it
-    PageLoadStarted(usize),   // (tab_id) — show progress bar
-    PageLoadFinished(usize),  // (tab_id) — hide progress bar
+    // Open URL in a new tab. Second field = the tab that requested it (a page's
+    // window.open / target=_blank), or None for UI surfaces (sidebar, A2UI, ACP
+    // login). Foregrounded only when the source is the visible tab or None — so a
+    // page the agent drives in a BACKGROUND tab can't yank the user's view/focus.
+    OpenInNewTab(String, Option<usize>),
+    PageLoadStarted(usize),                 // (tab_id) — show progress bar
+    PageLoadFinished(usize),                // (tab_id) — hide progress bar
     NavigationError(usize, String, String), // (tab_id, url, error) — show error page
-    Reload,                   // Cmd+R — reload current page
-    MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
+    Reload,                                 // Cmd+R — reload current page
+    MediaPlaying(usize, bool),              // (tab_id, is_playing) — audio/video state changed
     PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
     RemoveHistory(String),     // URL to remove from history
     QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
@@ -617,7 +621,7 @@ fn main() {
                             }
                             Some("open_new_tab") => {
                                 if let Some(url) = v["url"].as_str() {
-                                    let _ = p3.send_event(AppEvent::OpenInNewTab(url.to_string()));
+                                    let _ = p3.send_event(AppEvent::OpenInNewTab(url.to_string(), Some(tab_id)));
                                 }
                             }
                             _ => {}
@@ -650,7 +654,7 @@ fn main() {
                         // <a target="_blank"> clicks are already intercepted by the JS
                         // listener in COMBINED_SCRIPT, but window.open() calls bypass
                         // that listener and arrive here.
-                        let _ = p4.send_event(AppEvent::OpenInNewTab(url));
+                        let _ = p4.send_event(AppEvent::OpenInNewTab(url, Some(tab_id)));
                         wry::NewWindowResponse::Deny
                     }
                 })
@@ -1113,7 +1117,7 @@ fn main() {
                 }
                 // External links → open in a browser tab instead
                 if url.starts_with("http://") || url.starts_with("https://") {
-                    let _ = p.send_event(AppEvent::OpenInNewTab(url));
+                    let _ = p.send_event(AppEvent::OpenInNewTab(url, None));
                     return false;
                 }
                 true
@@ -1222,7 +1226,7 @@ fn main() {
                         Some("a2ui_open_url") => {
                             // A2UI `Button.action.openUrl` — open in a new browser tab.
                             if let Some(url) = v["url"].as_str() {
-                                let _ = p.send_event(AppEvent::OpenInNewTab(url.to_string()));
+                                let _ = p.send_event(AppEvent::OpenInNewTab(url.to_string(), None));
                             }
                         }
                         Some("copy_text") => {
@@ -2950,7 +2954,7 @@ fn main() {
                         } else if !url.is_empty() {
                             // Open the verification URL in a browser tab (octoweb IS
                             // a browser — the whole point) and show the code.
-                            let _ = acp_proxy.send_event(AppEvent::OpenInNewTab(url.clone()));
+                            let _ = acp_proxy.send_event(AppEvent::OpenInNewTab(url.clone(), None));
                             let ecode = webview_utils::escape_js_template(&code);
                             let _ = sidebar_wv.evaluate_script(&format!(
                                 "window.__loginPending && window.__loginPending({sid},`{ecode}`)"
@@ -4383,13 +4387,30 @@ fn main() {
             }
 
             // ── Open in new tab: Cmd+click or target=_blank ───────────────
-            Event::UserEvent(AppEvent::OpenInNewTab(url)) => {
+            Event::UserEvent(AppEvent::OpenInNewTab(url, source)) => {
+                // Foreground the new tab only when the request came from the visible
+                // tab (a real user click) or a UI surface (None). A background tab the
+                // agent is driving must not switch the user's view or steal focus.
+                let foreground = source.is_none_or(|src| src == active_wv_id);
+
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&url) {
                     macos::open_external_url(&url);
-                    browser_win.set_focus();
+                    if foreground {
+                        browser_win.set_focus();
+                    }
                     return;
                 }
+
+                if !foreground {
+                    // Silent background open — mirrors MCP background navigate:
+                    // no active-tab switch, no pending_swap, no set_focus.
+                    let new_id = tabs.lock().unwrap().open_background(url.clone());
+                    spawn_tab_webview!(new_id, &url);
+                    tracing::debug!(new_id, ?source, "OpenInNewTab kept in background (agent-driven source)");
+                    return;
+                }
+
                 let tab_id = tabs.lock().unwrap().open(url.clone());
                 // Keep the currently visible tab on screen while new one loads.
                 // Clean up orphaned tab if a swap was already pending.
