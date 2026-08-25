@@ -190,8 +190,10 @@ fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {
 
     // NSURLErrorCancelled (-999): fires routinely when WKWebView cancels in-flight
     // requests during back/forward swipe gestures or rapid navigation. Not a real error.
-    if code == -999 {
-        tracing::debug!(?webview, "Ignoring NSURLErrorCancelled (-999)");
+    // WebKitErrorPlugInWillHandleLoad (204): standalone audio/video documents — the
+    // media player took over the load and WebKit cancels the frame load as a formality.
+    if code == -999 || code == 204 {
+        tracing::debug!(code, ?webview, "Ignoring non-error nav failure");
         return;
     }
 
