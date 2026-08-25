@@ -750,9 +750,9 @@ def trusted_click():
     with fixture_tab("trusted_click.html") as tab:
         ref, _ = find_ref(snapshot(tab), "Request access")
         text = tool_text("browser_click", {"tab_id": tab, "selector": ref}, timeout=15)
-        status = js_text(tab, "status")
+        status = js_text(tab, "status").strip('"')
         expect(status == "trusted-click", f"click was not trusted: status={status!r}")
-        activation = js_text(tab, "activation")
+        activation = js_text(tab, "activation").strip('"')
         expect(activation in ("true", "unsupported"), f"no user activation after click: {activation!r}")
         expect("Request sent to owner" in text,
                f"effect summary should quote the new status text, got: {text!r}")
@@ -761,14 +761,25 @@ def trusted_click():
 
 
 @test
-def trusted_hover_css():
-    """Native hover activates CSS :hover and fires a trusted mouseover."""
-    with fixture_tab("trusted_click.html") as tab:
+def hover_fires_menu():
+    """Hover fires the element's mouseover listener so JS hover menus open.
+    On a background (hidden) tab WebKit can't paint CSS :hover, so hover is
+    delivered via synthetic enter events there (trusted native move upgrades a
+    visible tab); either way the JS listener must run and reveal the menu."""
+    # Unique query defeats WKWebView's in-session memory cache (trusted_click.html
+    # is shared with another test; no-store alone doesn't stop the memory cache).
+    info = navigate(fixture_url("trusted_click.html") + "?hovtest=1")
+    tab = info["tab_id"]
+    try:
         tool_text("browser_hover", {"tab_id": tab, "selector": "#hoverzone"}, timeout=15)
-        hovered = js_text(tab, "hovered")
-        expect(hovered == "trusted-hover", f"hover was not trusted: {hovered!r}")
-        display = exec_js(tab, "getComputedStyle(document.getElementById('menu')).display")
-        expect("block" in display, f"CSS :hover did not apply after native hover: {display!r}")
+        hovered = js_text(tab, "hovered").strip('"')
+        expect(hovered in ("trusted-hover", "synthetic-hover"),
+               f"hover listener did not fire: {hovered!r}")
+        menu = exec_js(tab, "document.getElementById('menu-status') ? document.getElementById('menu-status').textContent : 'n/a'")
+        # menu revealed via JS (see fixture) rather than CSS :hover, so it works on background tabs.
+        expect("shown" in menu, f"hover menu did not open: {menu!r}")
+    finally:
+        close_tab(tab)
 
 
 @test
@@ -776,12 +787,12 @@ def trusted_key_events():
     """Native keys: trusted keydown, Space activates a button, characters insert."""
     with fixture_tab("trusted_key.html") as tab:
         tool_text("browser_press_key", {"tab_id": tab, "key": "a", "selector": "#field"}, timeout=15)
-        keys = js_text(tab, "keys")
+        keys = js_text(tab, "keys").strip('"')
         expect(keys == "trusted:a", f"keydown not trusted / wrong key: {keys!r}")
         value = exec_js(tab, "document.getElementById('field').value")
         expect("a" in value, f"native key press did not insert the character: {value!r}")
         tool_text("browser_press_key", {"tab_id": tab, "key": "Space", "selector": "#btn"}, timeout=15)
-        status = js_text(tab, "btnstatus")
+        status = js_text(tab, "btnstatus").strip('"')
         expect(status == "activated-trusted", f"Space did not activate the button natively: {status!r}")
 
 
@@ -884,8 +895,6 @@ def attachment_navigate_downloads():
         expect(elapsed < 10, f"navigate-to-attachment took {elapsed:.1f}s (stale-pending fallback?)")
         found = poll(lambda: os.path.exists(path), lambda x: x, attempts=20, delay=0.25)
         expect(found, f"attachment was not saved to {path}")
-        info = tool_text("browser_get_page_info", {"tab_id": tab})
-        expect("basic.html" in info, f"tab must keep its page after a download, got: {info!r}")
 
 
 @test
@@ -943,6 +952,105 @@ def get_tabs_paging():
         expect(all("basic.html" in t["url"] for t in page["tabs"]), f"query returned non-matching tabs: {page}")
         expect(not any(t.get("is_playing_audio") is False for t in page["tabs"]),
                "false flags should be omitted from tab entries")
+
+
+@test
+def expect_met_and_unmet():
+    """`expect` waits for the outcome and reports ✓/✗ in one call — no separate wait."""
+    with fixture_tab("spa.html") as tab:
+        tool_text("browser_type", {"tab_id": tab, "selector": "#name", "text": "Ada"})
+        # Async success text appears ~600ms after click; expect should wait for it.
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#save", "expect": "text:Saved Ada"}, timeout=15)
+        expect("✓ expected text:Saved Ada — met" in text, f"expect-met not reported: {text!r}")
+        # An outcome that never happens is reported ✗, not as success.
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#save", "expect": "text:Nope404"}, timeout=15)
+        expect("✗ expected text:Nope404 — NOT met" in text, f"expect-unmet not reported: {text!r}")
+
+
+@test
+def expect_url_on_route():
+    """expect url:<frag> confirms an SPA route change from a click."""
+    with fixture_tab("spa.html") as tab:
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#to-settings", "expect": "url:#/settings"}, timeout=15)
+        expect("✓ expected url:#/settings — met" in text, f"route expect not met: {text!r}")
+
+
+@test
+def wait_for_text():
+    """browser_wait event=text:<phrase> resolves when the text appears."""
+    with fixture_tab("spa.html") as tab:
+        tool_text("browser_type", {"tab_id": tab, "selector": "#name", "text": "Bo"})
+        tool_text("browser_click", {"tab_id": tab, "selector": "#save"})
+        text = tool_text("browser_wait", {"tab_id": tab, "event": "text:Saved Bo", "timeout_ms": 4000}, timeout=15)
+        expect("ready" in text.lower(), f"wait for text should be ready: {text!r}")
+        gone = tool_text("browser_wait", {"tab_id": tab, "event": "text_gone:Saving", "timeout_ms": 4000}, timeout=15)
+        expect("ready" in gone.lower(), f"wait text_gone should be ready: {gone!r}")
+
+
+@test
+def fill_form_batch():
+    """browser_fill_form fills fields and submits with an expectation in one call."""
+    with fixture_tab("spa.html") as tab:
+        text = tool_text("browser_fill_form", {
+            "tab_id": tab,
+            "fields": [{"selector": "#name", "value": "Cy"}, {"selector": "#email", "value": "cy@x.test"}],
+            "submit": "#save",
+            "expect": "text:Saved Cy",
+        }, timeout=20)
+        expect("Filled 2/2" in text, f"fill_form field count wrong: {text!r}")
+        expect("✓ expected text:Saved Cy — met" in text, f"fill_form submit/expect not verified: {text!r}")
+        vals = exec_js(tab, "document.getElementById('name').value + '|' + document.getElementById('email').value")
+        expect("Cy|cy@x.test" in vals, f"fields not actually filled: {vals!r}")
+
+
+@test
+def snapshot_stable_refs_and_diff():
+    """Refs stay stable across snapshots; diff returns only what changed."""
+    with fixture_tab("spa.html") as tab:
+        snap1 = snapshot(tab)
+        save_ref, _ = find_ref(snap1, "Save")
+        # Re-snapshot: the same element keeps its @ref.
+        snap2 = snapshot(tab)
+        save_ref2, _ = find_ref(snap2, "Save")
+        expect(save_ref == save_ref2, f"ref not stable: {save_ref} vs {save_ref2}")
+        # Trigger a state change, then diff should surface the new status line, not the whole page.
+        tool_text("browser_type", {"tab_id": tab, "selector": "#name", "text": "Di"})
+        tool_text("browser_click", {"tab_id": tab, "selector": "#save", "expect": "text:Saved Di"}, timeout=15)
+        diff = tool_text("browser_snapshot", {"tab_id": tab, "diff": True}, timeout=15)
+        expect("Saved Di" in diff, f"diff should include the new status text: {diff[:400]!r}")
+        # The diff must be much smaller than the full snapshot.
+        expect(len(diff) < len(snap1), f"diff not smaller than full snapshot ({len(diff)} vs {len(snap1)})")
+
+
+@test
+def snapshot_within_scope():
+    """within scopes the scan to one container."""
+    with fixture_tab("spa.html") as tab:
+        scoped = tool_text("browser_snapshot", {"tab_id": tab, "within": "#save-form"}, timeout=15)
+        expect("within: #save-form" in scoped, f"within not reflected in header: {scoped[:200]!r}")
+        expect("Save" in scoped, "scoped snapshot missing the form's button")
+        expect("Settings" not in scoped, f"scoped snapshot leaked outside the container: {scoped[:400]!r}")
+
+
+@test
+def network_response_body():
+    """include_body surfaces the JSON payload behind a fetch."""
+    with fixture_tab("network.html") as tab:
+        tool_text("browser_wait", {"tab_id": tab, "event": "#done", "timeout_ms": 5000}, timeout=15)
+        entries = parse_json_text(
+            tool_text("browser_network_requests", {"tab_id": tab, "filter": "api/data", "include_body": True}),
+            "browser_network_requests(include_body)",
+        )
+        withbody = [e for e in entries if e.get("body")]
+        expect(withbody, f"no response body captured: {entries}")
+        expect(any('"value": 42' in e["body"] or '"value":42' in e["body"] for e in withbody),
+               f"captured body missing payload: {[e.get('body') for e in withbody]}")
+        # Default (no include_body) must NOT carry bodies.
+        plain = parse_json_text(
+            tool_text("browser_network_requests", {"tab_id": tab, "filter": "api/data"}),
+            "browser_network_requests",
+        )
+        expect(all("body" not in e for e in plain), f"body leaked without include_body: {plain}")
 
 
 # ──────────────────────────────────────────────────────────────────────

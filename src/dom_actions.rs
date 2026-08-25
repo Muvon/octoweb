@@ -36,13 +36,18 @@
 /// How long an action retries before reporting its last failure reason.
 pub const RETRY_MS: u64 = 2500;
 
-/// Watchdog ceiling for action callbacks: retry window + effect window + page-load slack.
-pub const WATCHDOG_MS: u64 = RETRY_MS + EFFECT_MS + 5000;
+/// Watchdog ceiling for action callbacks: retry window + expectation poll +
+/// page-load slack. Only hit when the JS callback is discarded outright.
+pub const WATCHDOG_MS: u64 = RETRY_MS + SETTLE_MS + 5000;
 
-/// How long after an action we watch the page before summarising its effect.
-/// Long enough for XHR round-trips on a LAN and framework re-renders, short
-/// enough that every click doesn't feel sluggish.
+/// How long after an action we watch the page before summarising its effect
+/// when no expectation is given. Long enough for XHR round-trips on a LAN and
+/// framework re-renders, short enough that every click doesn't feel sluggish.
 pub const EFFECT_MS: u64 = 450;
+
+/// Max time to poll for a supplied `expect` condition before reporting it
+/// unmet. Matches the feel of an explicit wait without a separate call.
+pub const SETTLE_MS: u64 = 6000;
 
 /// Effect-capture helpers, shared by the harness and the standalone effect
 /// probe. Installs `window.__octoweb_pre` with a `diff()` method.
@@ -101,6 +106,33 @@ const EFFECT_PRE_JS: &str = r#"
       if (f !== st.focus) out.focus = f || 'none';
       return out;
     };
+    // Is an expectation currently satisfied? `exp` is {kind, value} or null.
+    st.check = function (exp) {
+      if (!exp) return true;
+      var v = exp.value, body = document.body ? document.body.innerText : '';
+      if (exp.kind === 'text') return body.indexOf(v) !== -1;
+      if (exp.kind === 'text_gone') return body.indexOf(v) === -1;
+      if (exp.kind === 'url') return location.href.indexOf(v) !== -1;
+      if (exp.kind === 'selector') { try { return !!document.querySelector(v); } catch (e) { return false; } }
+      if (exp.kind === 'selector_gone') { try { return !document.querySelector(v); } catch (e) { return false; } }
+      return true;
+    };
+    // Settle after an action: with no expectation, wait baseMs then snapshot the
+    // diff. With one, poll until it holds (met:true) or maxMs elapses (met:false)
+    // — one call decides whether the action achieved its goal.
+    st.settle = function (exp, baseMs, maxMs) {
+      var self = this;
+      return new Promise(function (res) {
+        var start = performance.now();
+        function fin(met) { res({ diff: self.diff(), met: met, expect: exp ? (exp.kind + ':' + exp.value) : null }); }
+        if (!exp) { setTimeout(function () { fin(true); }, baseMs); return; }
+        (function poll() {
+          if (self.check(exp)) return fin(true);
+          if (performance.now() - start >= maxMs) return fin(false);
+          setTimeout(poll, 100);
+        })();
+      });
+    };
     Object.defineProperty(window, '__octoweb_pre', { value: st, configurable: true, writable: true });
   }
 "#;
@@ -120,10 +152,11 @@ new Promise(function(__resolve){
   __PRE__
   function __done(v) {
     if (!__EFFECT__ || v !== 'true') return __resolve(v);
-    setTimeout(function () {
-      var d = {}; try { d = window.__octoweb_pre ? window.__octoweb_pre.diff() : {}; } catch (e) {}
-      __resolve('true|' + JSON.stringify(d));
-    }, __EFFECT_MS__);
+    var p = window.__octoweb_pre;
+    if (!p) return __resolve('true|' + JSON.stringify({ diff: {}, met: !__EXPECT__ }));
+    p.settle(__EXPECT__, __EFFECT_MS__, __SETTLE_MS__).then(function (r) {
+      __resolve('true|' + JSON.stringify(r));
+    });
   }
 
   function resolve() {
@@ -220,18 +253,49 @@ new Promise(function(__resolve){
 "#;
 
 /// Build a script from the harness. `sel_json` must already be a JSON string
-/// literal (or `null`).
-fn build(sel_json: &str, gate: &str, stability: bool, occlusion: bool, act: &str) -> String {
+/// literal (or `null`); `expect_json` a `{kind,value}` literal or `null`.
+fn build(
+    sel_json: &str,
+    gate: &str,
+    stability: bool,
+    occlusion: bool,
+    expect_json: &str,
+    act: &str,
+) -> String {
     HARNESS
         .replace("__SEL__", sel_json)
         .replace("__RETRY_MS__", &RETRY_MS.to_string())
         .replace("__PRE__", EFFECT_PRE_JS)
         .replace("__EFFECT_MS__", &EFFECT_MS.to_string())
+        .replace("__SETTLE_MS__", &SETTLE_MS.to_string())
+        .replace("__EXPECT__", expect_json)
         .replace("__GATE__", gate)
         .replace("__STABILITY__", if stability { "true" } else { "false" })
         .replace("__OCCLUSION__", if occlusion { "true" } else { "false" })
         .replace("__EFFECT__", "true")
         .replace("__ACT__", act)
+}
+
+/// Translate the `expect` DSL into a `{kind,value}` JSON literal (or `null`).
+/// Forms: `text:…` (default when no known prefix), `gone:…`/`text_gone:…`,
+/// `url:…`, `selector:…`/`css:…`, `selector_gone:…`. A value containing a
+/// colon but no known prefix (e.g. a URL) is treated as plain text.
+pub fn expect_json(expect: Option<&str>) -> String {
+    let Some(raw) = expect.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "null".into();
+    };
+    let (kind, value) = match raw.split_once(':') {
+        Some((k, v)) => match k.trim() {
+            "text" => ("text", v.trim()),
+            "gone" | "text_gone" => ("text_gone", v.trim()),
+            "url" => ("url", v.trim()),
+            "selector" | "css" => ("selector", v.trim()),
+            "selector_gone" | "gone_selector" => ("selector_gone", v.trim()),
+            _ => ("text", raw),
+        },
+        None => ("text", raw),
+    };
+    format!("{{\"kind\":{},\"value\":{}}}", json(kind), json(value))
 }
 
 fn json(s: &str) -> String {
@@ -283,14 +347,33 @@ const LOCATE_ACT: &str = r#"
 /// for a trusted native click.
 pub fn click_locate_script(selector: &str) -> String {
     let act = format!(
-        "if (el.tagName === 'INPUT' && el.type === 'file') {{ try {{ el.click(); }} catch (e) {{}} return __done('true'); }}{LOCATE_ACT}"
+        "if (el.tagName === 'INPUT' && el.type === 'file') {{ try {{ el.click(); }} catch (e) {{}} return __resolve('true'); }}{LOCATE_ACT}"
     );
-    build(&json(selector), GATE_ENABLED, true, true, &act)
+    build(&json(selector), GATE_ENABLED, true, true, "null", &act)
 }
 
-/// Locate a hover target (no occlusion gate — hovering the overlay is fine).
+/// Locate a hover target (no occlusion gate — hovering the overlay is fine),
+/// AND dispatch synthetic enter events. Native `mouseMoved:` gives a trusted
+/// hover on the *visible* tab (real CSS `:hover`), but WebKit drops it on a
+/// hidden background tab — where MCP work happens. The synthetic
+/// pointerover/mouseover/mouseenter cover JS hover menus there (most don't
+/// gate on isTrusted); the native move that follows still upgrades a visible
+/// tab to a trusted hover.
 pub fn hover_locate_script(selector: &str) -> String {
-    build(&json(selector), "", true, false, LOCATE_ACT)
+    let act = r#"
+    var o = { bubbles: true, cancelable: true, composed: true, view: W, clientX: x, clientY: y };
+    var p = Object.assign({}, o, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    fire(el, new PointerEvent('pointerover', p));
+    fire(el, new PointerEvent('pointerenter', Object.assign({}, p, { bubbles: false })));
+    fire(el, new MouseEvent('mouseover', o));
+    fire(el, new MouseEvent('mouseenter', Object.assign({}, o, { bubbles: false })));
+    fire(el, new PointerEvent('pointermove', p));
+    fire(el, new MouseEvent('mousemove', o));
+    var d = (el.getAttribute('aria-label') || el.innerText || el.value || el.placeholder || '').trim().replace(/\s+/g, ' ').substring(0, 40);
+    var pt = top(el, x, y);
+    __resolve(JSON.stringify({ x: pt.x, y: pt.y, desc: el.tagName.toLowerCase() + (d ? ' "' + d + '"' : '') }));
+"#;
+    build(&json(selector), "", true, false, "null", act)
 }
 
 /// Focus the key target (or keep the current focus when `selector` is None)
@@ -306,18 +389,23 @@ pub fn key_focus_script(selector: Option<&str>) -> String {
         Some(s) => json(s),
         None => "null".into(),
     };
-    build(&sel_json, "", false, false, act)
+    build(&sel_json, "", false, false, "null", act)
 }
 
-/// Standalone effect probe: after a native action, wait `EFFECT_MS` in-page
-/// and report `window.__octoweb_pre.diff()` (empty object if none armed).
-pub fn effect_script() -> String {
+/// Standalone effect+expectation probe for the native-input path (click / hover
+/// / press_key). Reads `window.__octoweb_pre` (armed by the locate phase) and
+/// resolves to `{diff, met, expect}` — the same payload shape the harness emits
+/// after `true|`. With no expectation it waits `EFFECT_MS`; with one it polls
+/// up to `SETTLE_MS` for it to hold.
+pub fn effect_script(expect: Option<&str>) -> String {
+    let exp = expect_json(expect);
     format!(
-        "new Promise(function(r){{ setTimeout(function(){{ var d = {{}}; try {{ d = window.__octoweb_pre ? window.__octoweb_pre.diff() : {{}}; }} catch (e) {{}} r(JSON.stringify(d)); }}, {EFFECT_MS}); }})"
+        "new Promise(function(r){{ var p = window.__octoweb_pre;          if (!p) return r(JSON.stringify({{ diff: {{}}, met: {no_exp} }}));          p.settle({exp}, {EFFECT_MS}, {SETTLE_MS}).then(function(x){{ r(JSON.stringify(x)); }}); }})",
+        no_exp = if exp == "null" { "true" } else { "false" },
     )
 }
 
-pub fn type_script(selector: &str, text: &str) -> String {
+pub fn type_script(selector: &str, text: &str, expect: Option<&str>) -> String {
     // Two paths, both replace (don't append) per the tool contract:
     //
     //  - contenteditable → a fallback chain, because no single primitive works
@@ -381,10 +469,17 @@ pub fn type_script(selector: &str, text: &str) -> String {
     __done('true');
 "#
     .replace("__TXT__", &json(text));
-    build(&json(selector), GATE_TYPE, false, false, &act)
+    build(
+        &json(selector),
+        GATE_TYPE,
+        false,
+        false,
+        &expect_json(expect),
+        &act,
+    )
 }
 
-pub fn select_option_script(selector: &str, value: &str) -> String {
+pub fn select_option_script(selector: &str, value: &str, expect: Option<&str>) -> String {
     // Matches by option value first, visible label second.
     let act = r#"
     if (el.tagName !== 'SELECT') return __done('not-select');
@@ -398,7 +493,14 @@ pub fn select_option_script(selector: &str, value: &str) -> String {
     __done('true');
 "#
     .replace("__VAL__", &json(value));
-    build(&json(selector), GATE_ENABLED, false, false, &act)
+    build(
+        &json(selector),
+        GATE_ENABLED,
+        false,
+        false,
+        &expect_json(expect),
+        &act,
+    )
 }
 
 /// Scroll the nearest scrollable container of `selector` (or the element
@@ -428,7 +530,7 @@ pub fn scroll_script(selector: &str, direction: &str, pixels: Option<i32>) -> St
         "__PX__",
         &pixels.map(|p| p.to_string()).unwrap_or_else(|| "null".into()),
     );
-    build(&json(selector), "", false, false, &act)
+    build(&json(selector), "", false, false, "null", &act)
 }
 
 #[cfg(test)]
@@ -461,10 +563,12 @@ mod tests {
             hover_locate_script("#a"),
             key_focus_script(None),
             key_focus_script(Some("@2")),
-            type_script("#t", "he\"llo"),
-            select_option_script("#s", "v"),
+            type_script("#t", "he\"llo", None),
+            type_script("#t", "x", Some("text:Saved")),
+            select_option_script("#s", "v", None),
             scroll_script("#c", "down", Some(10)),
-            effect_script(),
+            effect_script(None),
+            effect_script(Some("url:/next")),
         ] {
             assert!(!s.trim_end().ends_with(';'), "trailing semicolon in {s}");
             assert!(
@@ -472,6 +576,41 @@ mod tests {
                 "unreplaced placeholder"
             );
         }
+    }
+
+    #[test]
+    fn expect_dsl_maps_kinds() {
+        assert_eq!(expect_json(None), "null");
+        assert_eq!(expect_json(Some("")), "null");
+        assert_eq!(
+            expect_json(Some("Request sent")),
+            "{\"kind\":\"text\",\"value\":\"Request sent\"}"
+        );
+        assert_eq!(
+            expect_json(Some("text:hi")),
+            "{\"kind\":\"text\",\"value\":\"hi\"}"
+        );
+        assert_eq!(
+            expect_json(Some("gone:Loading")),
+            "{\"kind\":\"text_gone\",\"value\":\"Loading\"}"
+        );
+        assert_eq!(
+            expect_json(Some("url:/dashboard")),
+            "{\"kind\":\"url\",\"value\":\"/dashboard\"}"
+        );
+        assert_eq!(
+            expect_json(Some("selector:.ok")),
+            "{\"kind\":\"selector\",\"value\":\".ok\"}"
+        );
+        assert_eq!(
+            expect_json(Some("selector_gone:.spinner")),
+            "{\"kind\":\"selector_gone\",\"value\":\".spinner\"}"
+        );
+        // Unknown prefix (a URL value) → treated as plain text, kept whole.
+        assert_eq!(
+            expect_json(Some("https://x.test/a")),
+            "{\"kind\":\"text\",\"value\":\"https://x.test/a\"}"
+        );
     }
 
     #[test]

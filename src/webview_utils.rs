@@ -484,18 +484,36 @@ pub const COMBINED_SCRIPT: &str = r#"
       con.push2({ level: 'error', text: ('Unhandled rejection: ' + r).substring(0, 500), ts: Date.now() });
     });
 
+    // Response bodies let the AI read the API behind a UI without scraping the
+    // DOM. Cap at 20 KB, texty content-types only (json/text/xml/urlencoded) —
+    // never buffer images or downloads. Body is read from a clone so the page's
+    // own consumer is unaffected.
+    var BODY_CAP = 20000;
+    function textyType(ct) { return /json|text|xml|javascript|urlencoded|graphql/i.test(ct || ''); }
+
     // fetch wrap
     var origFetch = window.fetch;
     if (origFetch) window.fetch = function (input, init) {
       var url = ''; try { url = (typeof input === 'string') ? input : ((input && input.url) || String(input)); } catch (e) {}
       var method = (init && init.method) || (input && input.method) || 'GET';
       var t0 = performance.now();
+      var entry = null;
       function rec(status, error) {
-        net.push2({ method: method, url: String(url).substring(0, 300), status: status, type: 'fetch',
-                    ms: Math.round(performance.now() - t0), ts: Date.now(), error: error });
+        entry = { method: method, url: String(url).substring(0, 300), status: status, type: 'fetch',
+                  ms: Math.round(performance.now() - t0), ts: Date.now(), error: error };
+        net.push2(entry);
       }
       return origFetch.apply(this, arguments).then(
-        function (res) { rec(res.status); return res; },
+        function (res) {
+          rec(res.status);
+          try {
+            var ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
+            if (entry && textyType(ct)) {
+              res.clone().text().then(function (t) { if (entry) entry.body = String(t).substring(0, BODY_CAP); }).catch(function () {});
+            }
+          } catch (e) {}
+          return res;
+        },
         function (err) { rec(0, String(err).substring(0, 200)); throw err; }
       );
     };
@@ -522,8 +540,15 @@ pub const COMBINED_SCRIPT: &str = r#"
       var x = this, t0 = performance.now();
       x.addEventListener('loadend', function () {
         var i = x.__ow_req || ['?', '?'];
-        net.push2({ method: i[0], url: i[1].substring(0, 300), status: x.status, type: 'xhr',
-                    ms: Math.round(performance.now() - t0), ts: Date.now() });
+        var entry = { method: i[0], url: i[1].substring(0, 300), status: x.status, type: 'xhr',
+                      ms: Math.round(performance.now() - t0), ts: Date.now() };
+        try {
+          var ct = x.getResponseHeader && x.getResponseHeader('content-type');
+          if (textyType(ct) && (x.responseType === '' || x.responseType === 'text')) {
+            entry.body = String(x.responseText || '').substring(0, BODY_CAP);
+          }
+        } catch (e) {}
+        net.push2(entry);
       });
       return XS.apply(this, arguments);
     };

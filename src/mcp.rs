@@ -101,12 +101,14 @@ pub enum McpCommand {
     Click {
         tab_id: Option<usize>,
         selector: String,
+        expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Hover over element by selector — Ok carries the effect summary
     Hover {
         tab_id: Option<usize>,
         selector: String,
+        expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Type text into input — Ok carries the effect summary
@@ -114,6 +116,7 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         selector: String,
         text: String,
+        expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Navigate back in browser history
@@ -169,6 +172,7 @@ pub enum McpCommand {
         key: String,
         selector: Option<String>,
         modifiers: Vec<String>,
+        expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Wait for page load or element to appear
@@ -183,11 +187,16 @@ pub enum McpCommand {
         tab_id: Option<usize>,
         selector: String,
         value: String,
+        expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Take a snapshot of interactive elements on the page
     Snapshot {
         tab_id: Option<usize>,
+        /// CSS selector or @ref to scope the scan to one container.
+        within: Option<String>,
+        /// Only report elements changed since the last snapshot of this tab.
+        diff: bool,
         response: oneshot::Sender<Result<String, String>>,
         /// Internal: see `GetPageContent::is_retry`.
         is_retry: bool,
@@ -271,24 +280,46 @@ pub fn dom_status_error(status: &str, selector: &str) -> String {
 /// one-line suffix appended to action results. Only what changed is listed;
 /// an empty diff says so explicitly — "nothing observable happened" is the
 /// signal the AI needs to stop re-clicking and look at console/network.
-pub fn format_effect(diff_json: &str) -> String {
-    format_effect_with_download(diff_json, None)
+pub fn format_effect(payload_json: &str) -> String {
+    format_effect_with_download(payload_json, None)
 }
 
 /// [`format_effect`] plus a download the action triggered (tracked natively —
 /// a save-to-disk leaves no trace in the DOM, so without this a working
 /// "Download" click would read as "no observable change").
-pub fn format_effect_with_download(diff_json: &str, download: Option<&str>) -> String {
-    let obj = serde_json::from_str::<serde_json::Value>(diff_json)
-        .ok()
-        .and_then(|v| v.as_object().cloned());
-    let Some(obj) = obj else {
+///
+/// `payload_json` is either the settle shape `{diff,met,expect}` (actions with
+/// effect capture) or a bare diff object (legacy callers). An expectation that
+/// was checked is surfaced first — `✓ met` / `✗ NOT met` — since it's the
+/// answer the agent asked for.
+pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(payload_json).ok();
+    // Settle shape carries the diff under "diff"; otherwise treat the whole
+    // object as the diff.
+    let (diff, met, expect) = match parsed {
+        Some(serde_json::Value::Object(o)) if o.contains_key("diff") => (
+            o.get("diff").and_then(|d| d.as_object().cloned()),
+            o.get("met").and_then(|m| m.as_bool()),
+            o.get("expect").and_then(|e| e.as_str()).map(str::to_string),
+        ),
+        Some(serde_json::Value::Object(o)) => (Some(o), None, None),
+        _ => (None, None, None),
+    };
+    let Some(obj) = diff else {
         return match download {
             Some(name) => format!(" → download started: {name} (saved to ~/Downloads)"),
             None => String::new(),
         };
     };
     let mut parts: Vec<String> = Vec::new();
+    match (&expect, met) {
+        (Some(e), Some(true)) => parts.push(format!("✓ expected {e} — met")),
+        (Some(e), Some(false)) => parts.push(format!(
+            "✗ expected {e} — NOT met within {}s",
+            crate::dom_actions::SETTLE_MS / 1000
+        )),
+        _ => {}
+    }
     if let Some(name) = download {
         parts.push(format!("download started: {name} (saved to ~/Downloads)"));
     }
@@ -507,6 +538,10 @@ pub struct ClickRequest {
     pub tab_id: Option<usize>,
     #[schemars(description = "CSS selector or @ref from browser_snapshot.")]
     pub selector: String,
+    #[schemars(
+        description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
+    )]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -515,6 +550,10 @@ pub struct HoverRequest {
     pub tab_id: Option<usize>,
     #[schemars(description = "CSS selector or @ref from browser_snapshot.")]
     pub selector: String,
+    #[schemars(
+        description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
+    )]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -527,6 +566,36 @@ pub struct TypeRequest {
     pub selector: String,
     #[schemars(description = "Text to set. Replaces the existing value — does not append.")]
     pub text: String,
+    #[schemars(
+        description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
+    )]
+    pub expect: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FormField {
+    #[schemars(
+        description = "CSS selector or @ref of an <input>, <textarea>, or contenteditable."
+    )]
+    pub selector: String,
+    #[schemars(description = "Value to set (replaces the existing value).")]
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FillFormRequest {
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
+    pub tab_id: Option<usize>,
+    #[schemars(description = "Fields to fill, in order.")]
+    pub fields: Vec<FormField>,
+    #[schemars(
+        description = "Optional CSS selector or @ref of a submit button to click after filling."
+    )]
+    pub submit: Option<String>,
+    #[schemars(
+        description = "Optional expected outcome after submit (see browser_click's expect)."
+    )]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -573,6 +642,10 @@ pub struct PressKeyRequest {
     pub selector: Option<String>,
     #[schemars(description = "Modifiers to hold: any of \"shift\", \"ctrl\", \"alt\", \"meta\".")]
     pub modifiers: Option<Vec<String>>,
+    #[schemars(
+        description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
+    )]
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -580,7 +653,7 @@ pub struct WaitRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "\"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves to \"ready\"/\"live\"/\"partial\") | a CSS selector to wait for."
+        description = "What to wait for: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves \"ready\"/\"live\"/\"partial\") | \"text:<phrase>\" (until that visible text appears) | \"text_gone:<phrase>\" (until it disappears) | a CSS selector (until it matches). Resolves \"ready\" or \"timeout\"."
     )]
     pub event: Option<String>,
     #[schemars(
@@ -593,6 +666,14 @@ pub struct WaitRequest {
 pub struct SnapshotRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
+    #[schemars(
+        description = "Scope the scan to one container (a dialog, a form, a list): a CSS selector or an @ref from a prior snapshot. Omit to scan the whole page."
+    )]
+    pub within: Option<String>,
+    #[schemars(
+        description = "When true, return only elements that appeared, changed, or were removed since the last snapshot of this tab (refs are stable across snapshots). On a busy SPA this is far cheaper than a full re-snapshot. Default false."
+    )]
+    pub diff: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -615,6 +696,10 @@ pub struct NetworkRequest {
     pub filter: Option<String>,
     #[schemars(description = "Max entries, newest last. Default 50, max 200.")]
     pub limit: Option<usize>,
+    #[schemars(
+        description = "Include captured response bodies (fetch/XHR, texty content-types, ≤20 KB each) — use to read the JSON API behind a UI. Off by default to save tokens; narrow with `filter` first."
+    )]
+    pub include_body: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -643,6 +728,10 @@ pub struct SelectOptionRequest {
     pub selector: String,
     #[schemars(description = "Value attribute of the <option> to select.")]
     pub value: String,
+    #[schemars(
+        description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
+    )]
+    pub expect: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -956,7 +1045,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Compact map of the page: header with URL, title, headings and any alert/status/dialog text (where 'Request sent' / 'Access denied' / validation errors live), then every interactive element with a @N ref you pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option as the selector — much cheaper than guessing CSS. Form controls carry their <label> text; radios/checkboxes show checked state. Includes same-origin iframes and open shadow DOM. A '+N present-but-hidden controls' note means an auto-hiding toolbar: browser_hover the page and re-snapshot. Refs invalidate on navigation; call again after browser_navigate or any SPA route change. Start here on an unfamiliar page and re-snapshot to verify state instead of reading the DOM with browser_execute_js."
+        description = "Compact map of the page: header with URL, title, headings and any alert/status/dialog text (where 'Request sent' / 'Access denied' / validation errors live), then every interactive element with a @N ref you pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option — much cheaper than guessing CSS. Refs are STABLE: the same element keeps its @N across snapshots of this tab (until navigation). Form controls carry their <label> text; radios/checkboxes show checked state. Includes same-origin iframes and open shadow DOM. A '+N present-but-hidden controls' note means an auto-hiding toolbar: browser_hover the page and re-snapshot. Use `within` (a CSS selector or @ref) to scan just one dialog/form/list, and `diff:true` to get only what changed since the last snapshot — on a busy SPA that is far cheaper than re-scanning the whole page. Start here on an unfamiliar page and re-snapshot to verify state instead of reading the DOM with browser_execute_js."
     )]
     async fn browser_snapshot(
         &self,
@@ -965,6 +1054,8 @@ impl McpServer {
         let snapshot = browser_try!(
             self.send_command(|tx| McpCommand::Snapshot {
                 tab_id: req.tab_id,
+                within: req.within.clone(),
+                diff: req.diff.unwrap_or(false),
                 response: tx,
                 is_retry: false,
             })
@@ -1026,6 +1117,7 @@ impl McpServer {
             self.send_command(|tx| McpCommand::Click {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
+                expect: req.expect.clone(),
                 response: tx,
             })
             .await?
@@ -1044,6 +1136,7 @@ impl McpServer {
             self.send_command(|tx| McpCommand::Hover {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
+                expect: req.expect.clone(),
                 response: tx,
             })
             .await?
@@ -1063,11 +1156,68 @@ impl McpServer {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 text: req.text,
+                expect: req.expect.clone(),
                 response: tx,
             })
             .await?
         );
         Ok(CallToolResult::success(vec![Content::text(summary)]))
+    }
+
+    #[tool(
+        description = "Fill several fields and (optionally) submit in ONE call — the whole form instead of N round-trips. Each field is {selector, value} (CSS or @ref); values replace, not append. Pass `submit` (a button selector/@ref) to click after filling, and `expect` to verify the result (see browser_click). Reports each field ✓/✗ plus the submit's effect. Defaults to the visible tab."
+    )]
+    async fn browser_fill_form(
+        &self,
+        Parameters(req): Parameters<FillFormRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if req.fields.is_empty() {
+            return Ok(err_result(
+                "fields is empty — pass at least one {selector, value}".into(),
+            ));
+        }
+        let mut lines = Vec::with_capacity(req.fields.len());
+        let mut filled = 0usize;
+        for f in &req.fields {
+            let r = self
+                .send_command(|tx| McpCommand::Type {
+                    tab_id: req.tab_id,
+                    selector: f.selector.clone(),
+                    text: f.value.clone(),
+                    expect: None,
+                    response: tx,
+                })
+                .await?;
+            match r {
+                Ok(_) => {
+                    filled += 1;
+                    lines.push(format!("✓ {}", f.selector));
+                }
+                Err(e) => lines.push(format!("✗ {}: {e}", f.selector)),
+            }
+        }
+        let submit_line = if let Some(sub) = &req.submit {
+            let r = self
+                .send_command(|tx| McpCommand::Click {
+                    tab_id: req.tab_id,
+                    selector: sub.clone(),
+                    expect: req.expect.clone(),
+                    response: tx,
+                })
+                .await?;
+            match r {
+                Ok(effect) => format!("\nsubmit: {effect}"),
+                Err(e) => format!("\nsubmit ✗ {sub}: {e}"),
+            }
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "Filled {filled}/{} field(s):\n{}{submit_line}",
+            req.fields.len(),
+            lines.join("\n")
+        );
+        Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
     #[tool(
@@ -1106,6 +1256,7 @@ impl McpServer {
                 key: req.key.clone(),
                 selector: req.selector.clone(),
                 modifiers: req.modifiers.unwrap_or_default(),
+                expect: req.expect.clone(),
                 response: tx,
             })
             .await?
@@ -1125,6 +1276,7 @@ impl McpServer {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 value: req.value.clone(),
+                expect: req.expect.clone(),
                 response: tx,
             })
             .await?
@@ -1203,6 +1355,7 @@ impl McpServer {
         Parameters(req): Parameters<NetworkRequest>,
     ) -> Result<CallToolResult, McpError> {
         let limit = req.limit.unwrap_or(50).min(200);
+        let include_body = req.include_body.unwrap_or(false);
         let filter = match &req.filter {
             Some(f) => format!(
                 ".filter(function(e){{return e.url.indexOf({})!==-1}})",
@@ -1210,9 +1363,16 @@ impl McpServer {
             ),
             None => String::new(),
         };
+        // Strip bodies unless asked — a page under load can buffer many 20 KB
+        // JSON payloads and blow the response budget.
+        let strip = if include_body {
+            String::new()
+        } else {
+            ".map(function(e){var c={};for(var k in e){if(k!=='body'&&k!=='seq')c[k]=e[k];}return c;})".to_string()
+        };
         let script = format!(
             "JSON.stringify((window.__octoweb_net||[]).concat(window.__octoweb_res||[])\
-             .sort(function(a,b){{return (a.seq||0)-(b.seq||0)}}){filter}.slice(-{limit}))"
+             .sort(function(a,b){{return (a.seq||0)-(b.seq||0)}}){filter}.slice(-{limit}){strip})"
         );
         let value = browser_try!(
             self.send_command(|tx| McpCommand::ExecuteJs {
@@ -1223,9 +1383,15 @@ impl McpServer {
             })
             .await?
         );
-        Ok(CallToolResult::success(vec![Content::text(
-            sanitize_json_entries(&value, "url", sanitize::sanitize_url),
-        )]))
+        let scrubbed = sanitize_json_entries(&value, "url", sanitize::sanitize_url);
+        // Response bodies can carry PANs/tokens the URL scrub misses — run the
+        // PAN/text redactor over them too.
+        let scrubbed = if include_body {
+            sanitize_json_entries(&scrubbed, "body", sanitize::sanitize_text)
+        } else {
+            scrubbed
+        };
+        Ok(CallToolResult::success(vec![Content::text(scrubbed)]))
     }
 
     // ── Dialogs & uploads ───────────────────────────────────────────
@@ -1355,7 +1521,16 @@ impl ServerHandler for McpServer {
                 \n\
                 Debugging: when a page misbehaves or an interaction has no effect, check \
                 browser_console_messages (JS errors, with real messages) and browser_network_requests \
-                (fetch/XHR with status, plus beacons/images/scripts that fired) before retrying blindly.\n\
+                (fetch/XHR with status; pass include_body=true to read the JSON API behind a UI, plus \
+                beacons/images/scripts that fired) before retrying blindly.\n\
+                \n\
+                One-call efficiency — prefer these over act-then-poll-then-verify chains: give any \
+                action an `expect` (\"text:Saved\", \"gone:Loading\", \"url:/done\", \"selector:.ok\") and it \
+                waits up to 6s for that outcome and reports ✓/✗ — no separate browser_wait. Fill a whole \
+                form with browser_fill_form (fields + submit + expect in one call). @refs are STABLE \
+                across snapshots, so after a change use browser_snapshot(diff:true) to see only what moved, \
+                or browser_snapshot(within:\"@ref\") to read just one dialog/form. browser_wait also takes \
+                \"text:<phrase>\" / \"text_gone:<phrase>\".\n\
                 \n\
                 Dialogs & uploads: arm BEFORE the triggering click — browser_handle_dialog answers the \
                 next alert/confirm/prompt, browser_upload_file feeds the next file chooser. Un-armed \

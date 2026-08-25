@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Controlled Editor</title>
+</head>
+<body>
+  <h1>Controlled Editor Fixture</h1>
+  <!-- Model-backed rich editor (Lexical/DraftJS/ProseMirror shape): a JS model
+       is the source of truth, updated from paste/input events. The submit
+       button is gated on the model being non-empty — so a synthetic value
+       write that never reaches the model would leave it disabled. -->
+  <div id="editor" contenteditable="true" style="border:1px solid #ccc;min-height:24px"></div>
+  <button id="post" disabled>Post</button>
+  <div id="model-mirror"></div>
+  <script>
+    var model = '';
+    var ed = document.getElementById('editor');
+    var post = document.getElementById('post');
+    function sync() {
+      model = ed.textContent;
+      post.disabled = model.length === 0;
+      document.getElementById('model-mirror').textContent = model;
+    }
+    ed.addEventListener('input', sync);
+    ed.addEventListener('paste', function () { setTimeout(sync, 0); });
+  </script>
+</body>
+</html>

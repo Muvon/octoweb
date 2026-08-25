@@ -345,7 +345,19 @@ fn main() {
     }
 
     cold_open::install_early(); // capture kAEGetURL before tao drops it
-    let event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
+    let mut event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
+    // Background/agent mode: octoweb runs as an MCP-driven worker that must never
+    // pull focus from whatever the user is doing. Accessory policy (no Dock icon,
+    // no menu bar) + not activating on launch = windows still render and the agent
+    // drives them, but the app stays behind the frontmost app. Also how the e2e
+    // suite runs so it can't disrupt a live session.
+    if std::env::var_os("OCTOWEB_BACKGROUND").is_some() {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+        event_loop.set_activate_ignoring_other_apps(false);
+        event_loop.set_dock_visibility(false);
+        tracing::info!("OCTOWEB_BACKGROUND: accessory activation policy — will not steal focus");
+    }
     cold_open::install(); // hook application:openURLs: for warm launch
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
@@ -2096,9 +2108,14 @@ fn main() {
     /// Navigation-aware watchdog. A discarded callback has two very different
     /// causes and the AI needs to know which: the tab navigated (for actions
     /// that is the *result* — `$on_nav(url)` builds the reply), or the script
-    /// simply never finished (`$timeout_msg`, an error). Before this every
-    /// timeout was reported as "the page navigated", sending agents chasing
-    /// phantom navigations on static pages.
+    /// simply never finished (`$timeout_msg`, an error).
+    ///
+    /// It POLLS rather than sleeps the whole ceiling: a full navigation tears
+    /// down the WKWebView JS context and WebKit silently drops the completion
+    /// handler (it never fires), so the only signal is the nav-generation bump.
+    /// Polling every 150 ms answers "navigated" in a fraction of a second
+    /// instead of making the tool call hang until the ceiling — the difference
+    /// between an Enter-that-submits reporting promptly and timing out.
     macro_rules! mcp_nav_watchdog {
         ($arc:expr, $delay_ms:expr, $tab_id:expr, $gen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
@@ -2106,13 +2123,64 @@ fn main() {
             let (tab_wd, gen_wd) = ($tab_id, $gen0);
             let on_nav = $on_nav;
             let msg: String = $timeout_msg;
+            let ceiling = std::time::Duration::from_millis($delay_ms);
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis($delay_ms));
-                if let Some(tx) = arc_wd.lock().unwrap().take() {
+                let start = std::time::Instant::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let mut guard = arc_wd.lock().unwrap();
+                    if guard.is_none() {
+                        return; // the JS callback already answered (no navigation)
+                    }
                     if tab_nav::get(tab_wd) != gen_wd {
-                        let _ = tx.send(on_nav(tab_url(&tabs_wd, tab_wd)));
-                    } else {
-                        let _ = tx.send(Err(msg));
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(on_nav(tab_url(&tabs_wd, tab_wd)));
+                        }
+                        return;
+                    }
+                    if start.elapsed() >= ceiling {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(Err(msg));
+                        }
+                        return;
+                    }
+                }
+            });
+        }};
+    }
+
+    /// Like [`mcp_nav_watchdog`] but only a HARD navigation (full page load)
+    /// short-circuits to "navigated". SPA pushState routes bump the soft
+    /// counter but leave the JS context alive, so the action's own effect probe
+    /// answers them — and can evaluate an `expect: url:#/route`. Used by the
+    /// trusted-input actions (click / hover / press_key).
+    macro_rules! mcp_nav_watchdog_hard {
+        ($arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
+            let arc_wd = $arc.clone();
+            let tabs_wd = tabs.clone();
+            let (tab_wd, hgen_wd) = ($tab_id, $hgen0);
+            let on_nav = $on_nav;
+            let msg: String = $timeout_msg;
+            let ceiling = std::time::Duration::from_millis($delay_ms);
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let mut guard = arc_wd.lock().unwrap();
+                    if guard.is_none() {
+                        return; // the effect probe already answered
+                    }
+                    if tab_nav::hard_get(tab_wd) != hgen_wd {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(on_nav(tab_url(&tabs_wd, tab_wd)));
+                        }
+                        return;
+                    }
+                    if start.elapsed() >= ceiling {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(Err(msg));
+                        }
+                        return;
                     }
                 }
             });
@@ -3380,7 +3448,7 @@ fn main() {
                             let _ = response.send(Err("No active tab".to_string()));
                         }
                     }
-                    McpCommand::Click { tab_id, selector, response } => {
+                    McpCommand::Click { tab_id, selector, expect, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
@@ -3416,6 +3484,7 @@ fn main() {
                                         Ok(Some(t)) => finish_native_action(
                                             wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
                                             format!("Clicked {} ({sel})", t.desc),
+                                            expect.clone(),
                                             |ptr| native_input::click(ptr, t.x, t.y, zoom),
                                         ),
                                         Ok(None) => {
@@ -3433,7 +3502,7 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
                                     move |url: String| Ok(format!("Clicked '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Click on '{selector}' got no answer from the page within {}s and the tab did \
@@ -3448,7 +3517,7 @@ fn main() {
                             let _ = response.send(Err("No active tab".to_string()));
                         }
                     }
-                    McpCommand::Hover { tab_id, selector, response } => {
+                    McpCommand::Hover { tab_id, selector, expect, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
@@ -3481,6 +3550,7 @@ fn main() {
                                         Ok(Some(t)) => finish_native_action(
                                             wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
                                             format!("Hovered {} ({sel})", t.desc),
+                                            expect.clone(),
                                             |ptr| native_input::hover(ptr, t.x, t.y, zoom),
                                         ),
                                         Ok(None) => {
@@ -3496,7 +3566,7 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
                                     move |url: String| Ok(format!("Hovered '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Hover on '{selector}' got no answer from the page within {}s and the tab did \
@@ -3510,7 +3580,7 @@ fn main() {
                             let _ = response.send(Err("No active tab".to_string()));
                         }
                     }
-                    McpCommand::Type { tab_id, selector, text, response } => {
+                    McpCommand::Type { tab_id, selector, text, expect, response } => {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
@@ -3519,7 +3589,7 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(id);
                             if let Some(wv) = tab_webviews.get(&id) {
-                                let script = dom_actions::type_script(&selector, &text);
+                                let script = dom_actions::type_script(&selector, &text, expect.as_deref());
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
@@ -3824,7 +3894,7 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::PressKey { tab_id, key, selector, modifiers, response } => {
+                    McpCommand::PressKey { tab_id, key, selector, modifiers, expect, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let Some(key_info) = native_input::key_info(&key) else {
                             let _ = response.send(Err(format!(
@@ -3873,6 +3943,7 @@ fn main() {
                                     Ok(Some(t)) => finish_native_action(
                                         wk.clone(), target_id, gen0, tabs_cb.clone(), response_cb.clone(),
                                         format!("Pressed {key_label} on {}", t.desc),
+                                        expect.clone(),
                                         |ptr| native_input::press_key(ptr, &key_info, &modifiers),
                                     ),
                                     Ok(None) => {
@@ -3888,7 +3959,7 @@ fn main() {
                                 }
                             });
                             let key_wd = key.clone();
-                            mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, target_id, gen0,
+                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
                                 move |url: String| Ok(format!("Pressed {key_wd} → page navigated to {url}")),
                                 format!(
                                     "PressKey on '{sel_for_msg}' got no answer from the page within {}s and the tab \
@@ -3914,6 +3985,18 @@ fn main() {
                                 // Has its own 8 s internal cap; the `timeout_ms` argument
                                 // is intentionally ignored here.
                                 "ready" => readiness_js::READINESS_JS.to_string(),
+                                // Wait for visible text to appear / disappear — the outcome
+                                // an agent usually means by "wait" (parity with Playwright /
+                                // Chrome DevTools MCP wait_for(text)).
+                                other if other.starts_with("text:") || other.starts_with("text_gone:") => {
+                                    let gone = other.starts_with("text_gone:");
+                                    let needle = other.splitn(2, ':').nth(1).unwrap_or("");
+                                    let n_json = serde_json::to_string(needle).unwrap_or_default();
+                                    let want = if gone { "=== -1" } else { "!== -1" };
+                                    format!(
+                                        "new Promise(r => {{ var has = () => (document.body ? document.body.innerText.indexOf({n_json}) : -1) {want}; if (has()) return r('ready'); const t = setTimeout(() => {{ if (o) o.disconnect(); r('timeout'); }}, {timeout_ms}); const o = new MutationObserver(() => {{ if (has()) {{ o.disconnect(); clearTimeout(t); r('ready'); }} }}); o.observe(document.documentElement, {{childList: true, subtree: true, characterData: true}}); }})"
+                                    )
+                                }
                                 // Treat anything else as a CSS selector
                                 selector => {
                                     let sel_json = serde_json::to_string(selector).unwrap_or_default();
@@ -3959,7 +4042,7 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::SelectOption { tab_id, selector, value, response } => {
+                    McpCommand::SelectOption { tab_id, selector, value, expect, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         if selector.trim().is_empty() {
                             let _ = response.send(Err("selector is empty — pass a CSS selector or @ref of a <select>".into()));
@@ -3968,7 +4051,7 @@ fn main() {
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             // Returns: "true" | "stale" | "missing" | "detached" | "not-select" | "no-such-option"
-                            let script = dom_actions::select_option_script(&selector, &value);
+                            let script = dom_actions::select_option_script(&selector, &value, expect.as_deref());
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let sel_for_err = selector.clone();
@@ -4002,14 +4085,15 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
-                    McpCommand::Snapshot { tab_id, response, is_retry } => {
+                    McpCommand::Snapshot { tab_id, within, diff, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
                         if let Some(wv) = tab_webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
+                            let script = snapshot_js::snapshot_script(within.as_deref(), diff);
                             match wv.evaluate_script_with_callback(
-                                &webview_utils::well_formed_js(snapshot_js::SNAPSHOT_JS),
+                                &webview_utils::well_formed_js(&script),
                                 move |val| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         let text = serde_json::from_str::<String>(&val).unwrap_or(val);
@@ -4031,6 +4115,8 @@ fn main() {
                                             if let Some(tx) = arc_wd.lock().unwrap().take() {
                                                 let _ = tx_for_retry.send(mcp::McpCommand::Snapshot {
                                                     tab_id: Some(target_id),
+                                                    within: within.clone(),
+                                                    diff,
                                                     response: tx,
                                                     is_retry: true,
                                                 });
@@ -5552,7 +5638,7 @@ fn main() {
             // Skip progress bar for about:blank (instant, no network).
             Event::UserEvent(AppEvent::PageLoadStarted(tab_id)) => {
                 tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadStarted");
-                tab_nav::bump(tab_id);
+                tab_nav::bump_hard(tab_id);
                 // Deferred swap: first bytes received (didCommitNavigation) — page is rendering,
                 // safe to show it now and hide the old tab.
                 if let Some((old_id, new_id)) = pending_swap {
@@ -7034,6 +7120,7 @@ fn finish_native_action<T: objc2::Message + 'static>(
     tabs: Arc<Mutex<TabManager>>,
     response: McpReply,
     verb: String,
+    expect: Option<String>,
     deliver: impl FnOnce(*mut objc2::runtime::AnyObject),
 ) {
     let ptr = objc2::rc::Retained::as_ptr(&wk) as *mut objc2::runtime::AnyObject;
@@ -7042,30 +7129,51 @@ fn finish_native_action<T: objc2::Message + 'static>(
     // Keep the view retained until the probe answers; the pointer must not dangle
     // if the tab is closed in between.
     let keep = wk;
-    async_eval::eval_async_expr_ptr(ptr, &dom_actions::effect_script(), move |res| {
-        let _ = &keep;
-        let Some(tx) = response.lock().unwrap().take() else {
-            return;
-        };
-        let navigated = tab_nav::get(tab_id) != gen0;
-        let (downloads_after, filename) = tab_nav::download_state(tab_id);
-        let download = (downloads_after > downloads_before).then_some(filename);
-        let msg = match res {
-            _ if navigated => format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id)),
-            Ok(val) => {
-                let diff: String = serde_json::from_str(&val).unwrap_or(val);
-                format!(
-                    "{verb}{}",
-                    mcp::format_effect_with_download(&diff, download.as_deref())
-                )
-            }
-            Err(e) => match download {
-                Some(name) => format!("{verb} → download started: {name} (saved to ~/Downloads)"),
-                None => format!("{verb} (delivered; effect probe failed: {e})"),
-            },
-        };
-        let _ = tx.send(Ok(msg));
-    });
+    async_eval::eval_async_expr_ptr(
+        ptr,
+        &dom_actions::effect_script(expect.as_deref()),
+        move |res| {
+            let _ = &keep;
+            let Some(tx) = response.lock().unwrap().take() else {
+                return;
+            };
+            let navigated = tab_nav::get(tab_id) != gen0;
+            let (downloads_after, filename) = tab_nav::download_state(tab_id);
+            let download = (downloads_after > downloads_before).then_some(filename);
+            let msg = match res {
+                // The probe ran (same-document): trust its settle result. This
+                // covers SPA pushState routes, where the nav generation bumps but
+                // the context survives — an `expect: url:#/x` must be checked here,
+                // not short-circuited to "navigated". With no expectation, a
+                // nav-gen change is itself the reportable effect.
+                Ok(val) => {
+                    let settled: String = serde_json::from_str(&val).unwrap_or(val);
+                    if expect.is_none() && navigated {
+                        format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id))
+                    } else {
+                        format!(
+                            "{verb}{}",
+                            mcp::format_effect_with_download(&settled, download.as_deref())
+                        )
+                    }
+                }
+                // Callback discarded — a full navigation tore the context down.
+                Err(e) => {
+                    if navigated {
+                        format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id))
+                    } else {
+                        match download {
+                            Some(name) => {
+                                format!("{verb} → download started: {name} (saved to ~/Downloads)")
+                            }
+                            None => format!("{verb} (delivered; effect probe failed: {e})"),
+                        }
+                    }
+                }
+            };
+            let _ = tx.send(Ok(msg));
+        },
+    );
 }
 
 #[cfg(test)]

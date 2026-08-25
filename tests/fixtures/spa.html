@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: SPA</title>
+</head>
+<body>
+  <h1>SPA Fixture</h1>
+  <nav>
+    <button id="to-home">Home</button>
+    <button id="to-settings">Settings</button>
+  </nav>
+  <div id="view">home view</div>
+
+  <!-- A form that only reveals its result asynchronously, like a real SPA save. -->
+  <form id="save-form" onsubmit="return false">
+    <input type="text" id="name" placeholder="name">
+    <input type="text" id="email" placeholder="email">
+    <button id="save" type="button">Save</button>
+  </form>
+  <div id="result"></div>
+
+  <script>
+    var view = document.getElementById('view');
+    function route(name) {
+      history.pushState({}, '', '/spa.html#/' + name);
+      view.textContent = name + ' view';
+    }
+    document.getElementById('to-home').addEventListener('click', function () { route('home'); });
+    document.getElementById('to-settings').addEventListener('click', function () { route('settings'); });
+
+    document.getElementById('save').addEventListener('click', function () {
+      var r = document.getElementById('result');
+      r.textContent = 'Saving…';
+      // Async success — the toast the agent's `expect: text:Saved` waits for.
+      setTimeout(function () {
+        var n = document.getElementById('name').value;
+        r.setAttribute('role', 'status');
+        r.textContent = 'Saved ' + n;
+      }, 600);
+    });
+  </script>
+</body>
+</html>

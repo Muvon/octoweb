@@ -18,6 +18,7 @@
   </style>
   <div id="hoverzone" style="padding:20px;background:#eee">hover me</div>
   <div id="menu">Hover Menu Item</div>
+  <div id="menu-status">hidden</div>
   <script>
     document.getElementById('gated').addEventListener('click', function (e) {
       if (!e.isTrusted) {
@@ -34,6 +35,10 @@
     });
     document.getElementById('hoverzone').addEventListener('mouseover', function (e) {
       document.getElementById('hovered').textContent = e.isTrusted ? 'trusted-hover' : 'synthetic-hover';
+      // JS-driven reveal (like a real hover menu) — works on background tabs
+      // where CSS :hover cannot paint.
+      var ms = document.getElementById('menu-status');
+      if (ms) ms.textContent = 'shown';
     });
   </script>
 </body>

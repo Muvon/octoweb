@@ -222,9 +222,20 @@ unsafe fn mouse_event(ty: usize, pt: CGPoint, win: isize, clicks: isize) -> *mut
 
 /// Move the pointer to the point (hover state, `mouseover`, CSS `:hover`).
 /// `wk` must be a live WKWebView pointer; main thread only.
+///
+/// Two moves, not one: WebKit derives `mouseover`/`mouseenter` and `:hover`
+/// from the *transition* between the previous point and this one. A single
+/// move from an unknown prior position often lands with no enter event, so we
+/// first move just outside the target, then onto it — guaranteeing the cross.
 pub fn hover(wk: *mut AnyObject, x_css: f64, y_css: f64, zoom: f64) {
     unsafe {
         let (pt, win) = window_point(wk, x_css, y_css, zoom);
+        let approach = CGPoint {
+            x: pt.x - 8.0,
+            y: pt.y - 8.0,
+        };
+        let mv0 = mouse_event(NS_MOUSE_MOVED, approach, win, 0);
+        let _: () = msg_send![&*wk, mouseMoved: mv0];
         let mv = mouse_event(NS_MOUSE_MOVED, pt, win, 0);
         let _: () = msg_send![&*wk, mouseMoved: mv];
     }

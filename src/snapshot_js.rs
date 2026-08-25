@@ -1,13 +1,15 @@
 //! JavaScript for `browser_snapshot` — builds a compact element map with numeric refs.
 //!
-//! The script discovers all interactive elements, assigns `@N` refs, stores a
+//! The script discovers interactive elements, assigns `@N` refs, stores a
 //! `Map<string, Element>` on `window.__octoweb_refs` for subsequent tool calls
 //! (click, type, hover, etc.) to resolve by ref, and returns a compact text
 //! representation optimised for LLM token efficiency.
 //!
 //! Notes:
-//! - `__octoweb_refs` lives on `window` so it survives until the next navigation.
-//!   Refs become invalid after navigation, full reload, or DOM tear-down.
+//! - `__octoweb_refs` (element lookup) and `__octoweb_refkeys` (a WeakMap giving
+//!   each element a **stable** `@N` across snapshots) live on `window`, so a
+//!   ref keeps pointing at the same element until navigation tears the context
+//!   down. Stable refs are what make `diff` meaningful.
 //! - Same-origin iframes and open shadow roots are scanned recursively; the
 //!   resulting @refs hold direct element references, so click/type work inside
 //!   them even though `document.querySelector` can't reach there.
@@ -16,23 +18,71 @@
 //! - Header carries page state (title, h1–h3, alert/status/dialog text) and a
 //!   count of present-but-hidden controls, so outcome checks ("Request sent",
 //!   "Access denied") don't need a `browser_execute_js` round-trip.
+//! - `within` scopes the scan to one container (a dialog, a form); `diff`
+//!   returns only elements that appeared/changed/left since the last snapshot —
+//!   on a busy SPA that's the difference between 8 lines and 200.
 
-pub const SNAPSHOT_JS: &str = r#"
+/// Build the snapshot expression. `within` is an optional CSS selector or `@ref`
+/// to scope the scan; `diff` limits output to changes since the previous
+/// snapshot of the same tab.
+pub fn snapshot_script(within: Option<&str>, diff: bool) -> String {
+    let root_expr = match within {
+        Some(sel) if sel.starts_with('@') => {
+            let s = serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into());
+            format!("(window.__octoweb_refs && window.__octoweb_refs.get({s})) || null")
+        }
+        Some(sel) => {
+            let s = serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into());
+            format!("(function(){{ try {{ return document.querySelector({s}); }} catch(e) {{ return null; }} }})()")
+        }
+        None => "document".into(),
+    };
+    let within_desc = match within {
+        Some(sel) => serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into()),
+        None => "null".into(),
+    };
+    SNAPSHOT_TEMPLATE
+        .replace("__ROOT__", &root_expr)
+        .replace("__WITHIN__", &within_desc)
+        .replace("__DIFF__", if diff { "true" } else { "false" })
+}
+
+const SNAPSHOT_TEMPLATE: &str = r#"
 (function() {
-  var refs = new Map();
-  var seen = new WeakSet();
-  var counter = 1;
-  var lines = [];
+  var DIFF = __DIFF__;
+  var WITHIN = __WITHIN__;
+  var root = __ROOT__;
+  if (WITHIN !== null && !root) {
+    return 'within: no element matched ' + WITHIN + ' — re-snapshot without `within`, or fix the selector.';
+  }
+  if (!root) root = document;
 
+  // Stable ref registry: same element → same @N across snapshots.
+  if (!window.__octoweb_refkeys) {
+    Object.defineProperty(window, '__octoweb_refkeys', { value: new WeakMap(), configurable: true });
+  }
+  var refkeys = window.__octoweb_refkeys;
+  function assignRef(el) {
+    var ref = refkeys.get(el);
+    if (!ref) {
+      window.__octoweb_refctr = (window.__octoweb_refctr || 0) + 1;
+      ref = '@' + window.__octoweb_refctr;
+      refkeys.set(el, ref);
+    }
+    return ref;
+  }
+
+  var refs = new Map();       // ref -> element (this snapshot's actionable set)
+  var seen = new WeakSet();
+  var cur = {};               // ref -> line
+  var order = [];             // refs in document order
   var hiddenControls = 0;
+
   function isVisible(el) {
     if (el.tagName === 'INPUT' && el.type === 'hidden') return true;
     var style = getComputedStyle(el);
     if (style.display === 'none') return false;
     if (style.visibility === 'hidden' || style.opacity === '0') {
-      // Present but invisible: auto-hiding toolbars (Drive, video players)
-      // collapse in a pointer-less background tab. Counted for the header
-      // so the AI knows a hover would reveal more, not that the page is empty.
       var r0 = el.getBoundingClientRect();
       if (r0.width > 0 && r0.height > 0) hiddenControls++;
       return false;
@@ -72,9 +122,6 @@ pub const SNAPSHOT_JS: &str = r#"
     ids.split(/\s+/).forEach(function (id) { var n = doc.getElementById(id); if (n) out.push(n.innerText || n.textContent || ''); });
     return out.join(' ');
   }
-  // Form controls: the human-visible name is usually a <label for>, a wrapping
-  // <label>, or aria-labelledby — none of which live on the element itself.
-  // Without this a radio group renders as "val=1 / val=2 / val=3".
   function controlLabel(el) {
     var labels = el.labels;
     if (labels && labels.length) return labels[0].innerText || labels[0].textContent || '';
@@ -97,7 +144,6 @@ pub const SNAPSHOT_JS: &str = r#"
 
   var SENSITIVE_NAMES = /password|passwd|pwd|secret|token|csrf|xsrf|api_key|apikey|auth_token|access_token|refresh_token|session|nonce|ssn|credit.?card|cc.?number|card.?number|card.?no|card.?#|cc.?num|acct.?num|cvv|cvc|csc|cvn|security.?code|verification|card.?identification|pin|otp|expir|exp.?date|exp.?month|exp.?year|ccmonth|cardmonth|card.?holder|name.?on.?card|cc.?name|cc.?full.?name/i;
   var SENSITIVE_AC = /^(cc-|new-password|current-password)/;
-
   function isSensitiveInput(el) {
     if (el.type === 'password' || el.type === 'hidden') return true;
     if (SENSITIVE_NAMES.test(el.name || '')) return true;
@@ -137,63 +183,55 @@ pub const SNAPSHOT_JS: &str = r#"
     return parts.length ? ' ' + parts.join(' ') : '';
   }
 
-  function scan(doc) {
-    var selector = 'a[href],button,input,select,textarea,'
-      + '[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],'
-      + '[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],'
-      + '[role=textbox],[role=combobox],[role=searchbox],[role=slider],[role=spinbutton],'
-      + '[role=treeitem],[onclick],[contenteditable=true]';
-    var elements = doc.querySelectorAll(selector);
+  function record(el, role, textOverride) {
+    var ref = assignRef(el);
+    refs.set(ref, el);
+    var text = textOverride != null ? textOverride : getText(el);
+    var attrs = role === 'clickable' ? '' : getAttrs(el);
+    var textPart = text ? ' "' + text.replace(/"/g, '\\"') + '"' : '';
+    cur[ref] = ref + ' ' + role + textPart + attrs;
+    order.push(ref);
+  }
+
+  var SEL = 'a[href],button,input,select,textarea,'
+    + '[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],'
+    + '[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],'
+    + '[role=textbox],[role=combobox],[role=searchbox],[role=slider],[role=spinbutton],'
+    + '[role=treeitem],[onclick],[contenteditable=true]';
+
+  function scan(node) {
+    var elements = node.querySelectorAll(SEL);
     for (var i = 0; i < elements.length; i++) {
       var el = elements[i];
-      // Dedup across nested matches and recursive iframe scans.
-      // (Bug fix: original code used `refs.has(el)` but `refs` keys are ref
-      // strings, not elements — the check never triggered.)
       if (seen.has(el)) continue;
       if (!isVisible(el)) continue;
       seen.add(el);
-      var ref = '@' + counter++;
-      refs.set(ref, el);
-      var role = getRole(el);
-      var text = getText(el);
-      var attrs = getAttrs(el);
-      var textPart = text ? ' "' + text.replace(/"/g, '\\"') + '"' : '';
-      lines.push(ref + ' ' + role + textPart + attrs);
+      record(el, getRole(el));
     }
-    var iframes = doc.querySelectorAll('iframe');
+    var iframes = node.querySelectorAll('iframe');
     for (var j = 0; j < iframes.length; j++) {
-      try {
-        // Cross-origin frames throw on contentDocument access — caught and skipped.
-        if (iframes[j].contentDocument) scan(iframes[j].contentDocument);
-      } catch(e) {}
+      try { if (iframes[j].contentDocument) scan(iframes[j].contentDocument); } catch(e) {}
     }
-    // Single full walk doing two jobs:
-    //  1. Pierce open shadow roots — web-component UIs (Lit, Polymer, LWC)
-    //     render everything inside shadowRoot, invisible to querySelectorAll.
-    //  2. Surface listener-only clickables — <div>s whose sole interactivity
-    //     is an addEventListener('click'), tagged at document-start by
-    //     COMBINED_SCRIPT. Skipped when they contain a real interactive
-    //     element (event-delegation roots like React containers).
     var tagged = window.__octoweb_listeners;
-    var all = doc.querySelectorAll('*');
+    var all = node.querySelectorAll('*');
     for (var k = 0; k < all.length; k++) {
-      var node = all[k];
-      if (node.shadowRoot) scan(node.shadowRoot);
-      if (tagged && tagged.has(node) && !seen.has(node) && isVisible(node) && !node.querySelector(selector)) {
-        seen.add(node);
-        var cRef = '@' + counter++;
-        refs.set(cRef, node);
-        var cText = getText(node);
-        lines.push(cRef + ' clickable' + (cText ? ' "' + cText.replace(/"/g, '\\"') + '"' : ''));
+      var n = all[k];
+      if (n.shadowRoot) scan(n.shadowRoot);
+      if (tagged && tagged.has(n) && !seen.has(n) && isVisible(n) && !n.querySelector(SEL)) {
+        seen.add(n);
+        record(n, 'clickable');
       }
     }
   }
 
-  scan(document);
+  // A scoped element root: include it if it is itself interactive, then descend.
+  if (root.nodeType === 1 && root.matches && root.matches(SEL) && isVisible(root)) {
+    seen.add(root);
+    record(root, getRole(root));
+  }
+  scan(root);
 
-  // Page state the AI otherwise has to fetch with execute_js: what the page
-  // is saying (headings), and anything it is shouting (alerts, status
-  // regions, open dialogs) — where "Request sent" / "Access denied" live.
+  // Page state (always emitted, even in diff mode — it's the outcome signal).
   function clean(t, n) { return (t || '').trim().replace(/\s+/g, ' ').substring(0, n); }
   function visibleText(el, n) {
     var st = getComputedStyle(el);
@@ -212,29 +250,83 @@ pub const SNAPSHOT_JS: &str = r#"
   for (var l = 0; l < live.length && liveSeen < 4; l++) {
     var lt = visibleText(live[l], 160);
     if (!lt) continue;
-    var role = live[l].getAttribute('role') || (live[l].tagName === 'DIALOG' ? 'dialog' : (live[l].getAttribute('aria-modal') ? 'dialog' : 'live'));
-    state.push(role + ': "' + lt.replace(/"/g, '\\"') + '"');
+    var lrole = live[l].getAttribute('role') || (live[l].tagName === 'DIALOG' ? 'dialog' : (live[l].getAttribute('aria-modal') ? 'dialog' : 'live'));
+    state.push(lrole + ': "' + lt.replace(/"/g, '\\"') + '"');
     liveSeen++;
   }
 
-  // Non-enumerable so pages iterating `window` can't fingerprint it.
   Object.defineProperty(window, '__octoweb_refs', { value: refs, configurable: true });
-  // Header tells the AI how many refs were captured, that they expire on
-  // navigation, and how much of the page is below the fold — saves
-  // follow-up clarification round-trips.
+
+  // Diff against the previous snapshot of this tab, then store the new baseline.
+  var prev = window.__octoweb_snaplines || {};
+  var outLines, removed = [];
+  if (DIFF) {
+    outLines = [];
+    for (var oi = 0; oi < order.length; oi++) {
+      var rref = order[oi];
+      if (cur[rref] !== prev[rref]) outLines.push(cur[rref]);
+    }
+    for (var pk in prev) { if (Object.prototype.hasOwnProperty.call(prev, pk) && !(pk in cur)) removed.push(pk); }
+  } else {
+    outLines = order.map(function (r) { return cur[r]; });
+  }
+  Object.defineProperty(window, '__octoweb_snaplines', { value: cur, configurable: true });
+
   var se = document.scrollingElement || document.documentElement;
   var meta = 'page: ' + location.href.substring(0, 150)
     + (document.title ? ' | title: ' + clean(document.title, 80) : '')
+    + (WITHIN !== null ? ' | within: ' + WITHIN : '')
     + ' | viewport ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + window.innerHeight)
     + ' of ' + Math.round(se.scrollHeight) + 'px';
-  var header = lines.length === 0
-    ? '(no interactive elements found)'
-    : lines.length + ' elements (refs valid until next navigation):';
+
+  var header;
+  if (DIFF) {
+    header = outLines.length === 0 && removed.length === 0
+      ? '(no changes since last snapshot)'
+      : outLines.length + ' new/changed' + (removed.length ? ', ' + removed.length + ' removed (' + removed.join(' ') + ')' : '') + ' — refs stable across snapshots:';
+  } else {
+    header = order.length === 0
+      ? '(no interactive elements found)'
+      : order.length + ' elements (refs stable until navigation):';
+  }
   if (hiddenControls) header += ' +' + hiddenControls + ' present-but-hidden controls (auto-hiding UI: browser_hover a visible element or the page centre to reveal, then re-snapshot)';
+
   var out = [meta];
   if (state.length) out.push(state.join('\n'));
   out.push(header);
-  if (lines.length) out.push(lines.join('\n'));
+  if (outLines.length) out.push(outLines.join('\n'));
   return out.join('\n');
 })()
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::snapshot_script;
+
+    #[test]
+    fn root_expression_by_mode() {
+        // No `within` → scans the whole document.
+        assert!(snapshot_script(None, false).contains("var root = document;"));
+        // CSS selector → querySelector, JSON-escaped.
+        let css = snapshot_script(Some(".dialog"), false);
+        assert!(css.contains("document.querySelector(\".dialog\")"));
+        assert!(css.contains("var WITHIN = \".dialog\";"));
+        // @ref → resolved through the live ref map.
+        let refd = snapshot_script(Some("@7"), true);
+        assert!(refd.contains("window.__octoweb_refs.get(\"@7\")"));
+        assert!(refd.contains("var DIFF = true;"));
+    }
+
+    #[test]
+    fn is_a_bare_expression() {
+        for s in [
+            snapshot_script(None, false),
+            snapshot_script(Some("#form"), true),
+        ] {
+            assert!(!s.trim_end().ends_with(';'), "trailing semicolon");
+            assert!(
+                !s.contains("__ROOT__") && !s.contains("__DIFF__") && !s.contains("__WITHIN__")
+            );
+        }
+    }
+}
