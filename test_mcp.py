@@ -195,8 +195,14 @@ def mcp_initialize():
     return result
 
 
+# Calls-to-success benchmark: total MCP tool calls per test. Fewer calls to
+# reach the same verified outcome = a more efficient (less "stupid") agent.
+CALL_COUNTER = {"n": 0}
+
+
 def call_tool(name, arguments=None, timeout=DEFAULT_TIMEOUT):
     """Returns (is_error, content_list, joined_text)."""
+    CALL_COUNTER["n"] += 1
     result = rpc("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
     content = result.get("content", [])
     text = "\n".join(c.get("text", "") for c in content if c.get("type") == "text")
@@ -1053,6 +1059,35 @@ def network_response_body():
         expect(all("body" not in e for e in plain), f"body leaked without include_body: {plain}")
 
 
+@test
+def dismiss_overlay_rejects():
+    """browser_dismiss_overlay clears a consent wall via Reject, unblocking the page."""
+    with fixture_tab("cookie_banner.html") as tab:
+        # The CTA is covered by the overlay → a plain click reports occluded.
+        is_err, _, text = call_tool("browser_click", {"tab_id": tab, "selector": "#cta"}, timeout=15)
+        expect(is_err and "covered" in text.lower(), f"CTA should be occluded by the banner: {text[:200]!r}")
+        # Dismiss chooses Reject (not Accept) and the banner leaves.
+        out = tool_text("browser_dismiss_overlay", {"tab_id": tab}, timeout=15)
+        expect("reject" in out.lower(), f"dismiss should use the reject control: {out!r}")
+        gone = exec_js(tab, "!document.getElementById('cookie-consent')")
+        expect("true" in gone.lower(), f"overlay not removed: {gone!r}")
+        # Now the underlying CTA is clickable.
+        tool_text("browser_click", {"tab_id": tab, "selector": "#cta", "expect": "text:bought"}, timeout=15)
+        status = js_text(tab, "cta-status").strip('"')
+        expect(status == "bought", f"CTA not reachable after dismiss: {status!r}")
+
+
+@test
+def dismiss_overlay_never_accepts():
+    """When only an accept/agree control exists, dismiss reports it and does NOT click."""
+    with fixture_tab("cookie_accept_only.html") as tab:
+        out = tool_text("browser_dismiss_overlay", {"tab_id": tab}, timeout=15)
+        expect("accept" in out.lower() and "not clicking" in out.lower(),
+               f"should refuse to auto-accept: {out!r}")
+        still = exec_js(tab, "!!document.getElementById('consent')")
+        expect("true" in still.lower(), f"accept-only overlay must be left in place: {still!r}")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Runner
 # ──────────────────────────────────────────────────────────────────────
@@ -1097,11 +1132,14 @@ def main():
             return 1
 
         failed = []
+        call_counts = {}
         for fn in selected:
             start = time.monotonic()
+            CALL_COUNTER["n"] = 0
             try:
                 fn()
-                print(f"PASS {fn.__name__} ({time.monotonic() - start:.2f}s)")
+                call_counts[fn.__name__] = CALL_COUNTER["n"]
+                print(f"PASS {fn.__name__} ({time.monotonic() - start:.2f}s, {CALL_COUNTER['n']} calls)")
             except TestFailure as exc:
                 failed.append(fn.__name__)
                 print(f"FAIL {fn.__name__} ({time.monotonic() - start:.2f}s)")
@@ -1119,6 +1157,12 @@ def main():
 
         total = len(selected)
         print()
+        if call_counts:
+            tot = sum(call_counts.values())
+            worst = sorted(call_counts.items(), key=lambda kv: -kv[1])[:5]
+            print(f"calls-to-success: {tot} MCP tool calls across {len(call_counts)} passing scenarios "
+                  f"(avg {tot / len(call_counts):.1f}/scenario)")
+            print("  heaviest: " + ", ".join(f"{n}={c}" for n, c in worst))
         print(f"{total - len(failed)}/{total} tests passed")
         if failed:
             print("failed: " + ", ".join(failed))

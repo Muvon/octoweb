@@ -392,6 +392,107 @@ pub fn key_focus_script(selector: Option<&str>) -> String {
     build(&sel_json, "", false, false, "null", act)
 }
 
+/// The dismiss control an overlay scan located.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct DismissTarget {
+    /// Present when a safe control (reject/close) was found and should be clicked.
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub desc: String,
+    /// "reject" | "close" | "accept-only" | "none".
+    pub kind: String,
+}
+
+/// Scan the page (main document, open shadow roots, same-origin iframes) for a
+/// cookie/consent/newsletter overlay and the best control to get PAST it.
+/// Ranks Reject/Decline highest (dismisses without granting consent), then
+/// Close/×. Accept/Agree is NEVER auto-selected — granting consent is the
+/// user's decision — it's only reported as `accept-only` so the agent can
+/// choose. This clears the single most common blocker on real sites.
+pub fn dismiss_overlay_script() -> String {
+    // `return (` on the same line — DISMISS_BODY starts with a newline, so a bare
+    // `return` would trip ASI into `return;` and drop the Promise.
+    format!(
+        "(function(){{{pre}\nreturn ({body});}})()",
+        pre = EFFECT_PRE_JS,
+        body = DISMISS_BODY
+    )
+}
+
+const DISMISS_BODY: &str = r##"
+new Promise(function(__resolve){
+  function frameOffset(el){
+    var w = el.ownerDocument.defaultView, x = 0, y = 0;
+    while (w && w !== window && w.frameElement){ var fr = w.frameElement.getBoundingClientRect(); x += fr.left; y += fr.top; try { w = w.parent; } catch(e){ break; } }
+    return { x: x, y: y };
+  }
+  function visible(el){
+    try { var s = getComputedStyle(el); if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false; var r = el.getBoundingClientRect(); return r.width > 4 && r.height > 4; } catch(e){ return false; }
+  }
+  function txt(el){ return ((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').substring(0, 60); }
+
+  var REJECT = /\b(reject|decline|refuse|only necessary|only essential|essential only|necessary only|disagree|deny|opt.?out)\b/i;
+  var CLOSE = /\b(close|dismiss|no thanks|not now|skip|maybe later)\b|^[\s]*[×✕✖⨯xX✗✘]\s*$/;
+  var ACCEPT = /\b(accept|agree|allow|got it|enable|consent|i understand)\b/i;
+  var CTX = /cookie|consent|gdpr|ccpa|privacy|banner|modal|overlay|popup|popover|newsletter|subscribe|onetrust|cookiebot|truste|didomi|usercentrics|cmp|backdrop/i;
+
+  var clickables = [];
+  function collect(root, depth){
+    if (depth > 4 || !root) return;
+    var els; try { els = root.querySelectorAll('button,a[href],[role=button],[onclick],input[type=button],input[type=submit],[aria-label]'); } catch(e){ return; }
+    for (var i = 0; i < els.length; i++){ if (visible(els[i])) clickables.push(els[i]); }
+    var all; try { all = root.querySelectorAll('*'); } catch(e){ all = []; }
+    for (var k = 0; k < all.length; k++){ if (all[k].shadowRoot) collect(all[k].shadowRoot, depth + 1); }
+    var ifr; try { ifr = root.querySelectorAll('iframe'); } catch(e){ ifr = []; }
+    for (var j = 0; j < ifr.length; j++){ try { if (ifr[j].contentDocument) collect(ifr[j].contentDocument, depth + 1); } catch(e){} }
+  }
+  collect(document, 0);
+
+  function inOverlay(el){
+    for (var n = el; n && n.nodeType === 1 && n !== document.body; n = n.parentNode || n.host){
+      var role = n.getAttribute && n.getAttribute('role');
+      if (role === 'dialog' || role === 'alertdialog') return true;
+      if (n.getAttribute && n.getAttribute('aria-modal') === 'true') return true;
+      var s; try { s = getComputedStyle(n); } catch(e){ continue; }
+      if ((s.position === 'fixed' || s.position === 'sticky') && (parseInt(s.zIndex) || 0) >= 10) return true;
+      var idc = ((n.id || '') + ' ' + (n.className && n.className.toString ? n.className.toString() : '')).toLowerCase();
+      if (CTX.test(idc)) return true;
+    }
+    return false;
+  }
+
+  var best = null, bestScore = -1, acceptFallback = null;
+  for (var i = 0; i < clickables.length; i++){
+    var el = clickables[i], t = txt(el); if (!t) continue;
+    var ov = inOverlay(el), score = -1, kind = null;
+    if (REJECT.test(t)) { score = ov ? 100 : 55; kind = 'reject'; }
+    else if (CLOSE.test(t)) { score = ov ? 80 : 25; kind = 'close'; }
+    else if (ov && ACCEPT.test(t)) { if (!acceptFallback) acceptFallback = t; continue; }
+    else continue;
+    // Require overlay context unless it's an unambiguous close glyph, so we
+    // never nuke a real page button that merely says "close".
+    if (!ov && kind !== 'close') continue;
+    if (score > bestScore){ bestScore = score; best = { el: el, t: t, kind: kind }; }
+  }
+
+  if (best){
+    var r = best.el.getBoundingClientRect(), off = frameOffset(best.el);
+    try { __pre(); } catch(e){}  // arm effect capture so the follow-up probe sees the overlay leave
+    return __resolve(JSON.stringify({ x: r.left + r.width / 2 + off.x, y: r.top + r.height / 2 + off.y, desc: best.t, kind: best.kind }));
+  }
+  if (acceptFallback) return __resolve(JSON.stringify({ kind: 'accept-only', desc: acceptFallback }));
+  return __resolve(JSON.stringify({ kind: 'none' }));
+})
+"##;
+
+/// Parse the overlay scan result.
+pub fn parse_dismiss(val: &str) -> Result<DismissTarget, String> {
+    let inner: String = serde_json::from_str(val).unwrap_or_else(|_| val.to_string());
+    serde_json::from_str::<DismissTarget>(inner.trim())
+        .map_err(|e| format!("bad dismiss payload: {e}"))
+}
+
 /// Standalone effect+expectation probe for the native-input path (click / hover
 /// / press_key). Reads `window.__octoweb_pre` (armed by the locate phase) and
 /// resolves to `{diff, met, expect}` — the same payload shape the harness emits
@@ -569,6 +670,7 @@ mod tests {
             scroll_script("#c", "down", Some(10)),
             effect_script(None),
             effect_script(Some("url:/next")),
+            dismiss_overlay_script(),
         ] {
             assert!(!s.trim_end().ends_with(';'), "trailing semicolon in {s}");
             assert!(
@@ -610,6 +712,25 @@ mod tests {
         assert_eq!(
             expect_json(Some("https://x.test/a")),
             "{\"kind\":\"text\",\"value\":\"https://x.test/a\"}"
+        );
+    }
+
+    #[test]
+    fn parse_dismiss_variants() {
+        let r = parse_dismiss("\"{\\\"x\\\":12,\\\"y\\\":34,\\\"desc\\\":\\\"Reject all\\\",\\\"kind\\\":\\\"reject\\\"}\"").unwrap();
+        assert_eq!(
+            (r.x, r.y, r.kind.as_str()),
+            (Some(12.0), Some(34.0), "reject")
+        );
+        let n = parse_dismiss("\"{\\\"kind\\\":\\\"none\\\"}\"").unwrap();
+        assert_eq!(n.kind, "none");
+        assert!(n.x.is_none());
+        let a =
+            parse_dismiss("\"{\\\"kind\\\":\\\"accept-only\\\",\\\"desc\\\":\\\"Accept all\\\"}\"")
+                .unwrap();
+        assert_eq!(
+            (a.kind.as_str(), a.desc.as_str()),
+            ("accept-only", "Accept all")
         );
     }
 

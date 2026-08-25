@@ -4085,6 +4085,69 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
+                    McpCommand::DismissOverlay { tab_id, response } => {
+                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        let _ = mcp_ensure_tab!(target_id);
+                        if let Some(wv) = tab_webviews.get(&target_id) {
+                            let script = dom_actions::dismiss_overlay_script();
+                            let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+                            let response_cb = response.clone();
+                            let gen0 = tab_nav::get(target_id);
+                            let wk = wv.webview();
+                            let tabs_cb = tabs.clone();
+                            let zoom = zoom_level;
+                            async_eval::eval_async_expr(wv, &script, move |res| {
+                                let val = match res {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Err(format!("DismissOverlay scan failed: {e}")));
+                                        }
+                                        return;
+                                    }
+                                };
+                                match dom_actions::parse_dismiss(&val) {
+                                    Ok(t) if t.x.is_some() && t.y.is_some() => finish_native_action(
+                                        wk.clone(), target_id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                        format!("Dismissed overlay via {} control \"{}\"", t.kind, t.desc),
+                                        None,
+                                        |ptr| native_input::click(ptr, t.x.unwrap(), t.y.unwrap(), zoom),
+                                    ),
+                                    Ok(t) if t.kind == "accept-only" => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Ok(format!(
+                                                "Found an overlay but its only control is an accept/agree button (\"{}\"). \
+                                                 Not clicking it — granting consent is your call. browser_click it to accept, \
+                                                 or browser_snapshot to see other options.",
+                                                t.desc
+                                            )));
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Ok(
+                                                "No dismissible overlay detected (no cookie/consent/modal banner with a reject or close control)."
+                                                    .to_string(),
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(tx) = response_cb.lock().unwrap().take() {
+                                            let _ = tx.send(Err(e));
+                                        }
+                                    }
+                                }
+                            });
+                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
+                                |url: String| Ok(format!("Dismissed overlay → page navigated to {url}")),
+                                format!(
+                                    "browser_dismiss_overlay got no answer within {}s and the tab did not navigate.",
+                                    dom_actions::WATCHDOG_MS / 1000
+                                ));
+                        } else {
+                            let _ = response.send(Err("Tab not found".to_string()));
+                        }
+                    }
                     McpCommand::Snapshot { tab_id, within, diff, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);

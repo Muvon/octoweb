@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Accept-only Banner</title>
+</head>
+<body>
+  <h1>Accept-only Banner Fixture</h1>
+  <!-- A consent wall whose only control grants consent — the tool must NOT
+       click it on the user's behalf. -->
+  <div id="consent" role="dialog" aria-modal="true"
+       style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center">
+    <div style="background:#fff;padding:24px">
+      <p>By continuing you agree to our cookies.</p>
+      <button id="agree">I agree</button>
+    </div>
+  </div>
+</body>
+</html>

@@ -190,6 +190,12 @@ pub enum McpCommand {
         expect: Option<String>,
         response: oneshot::Sender<Result<String, String>>,
     },
+    /// Find and dismiss a cookie/consent/newsletter overlay (trusted click on
+    /// the reject/close control; never auto-accepts).
+    DismissOverlay {
+        tab_id: Option<usize>,
+        response: oneshot::Sender<Result<String, String>>,
+    },
     /// Take a snapshot of interactive elements on the page
     Snapshot {
         tab_id: Option<usize>,
@@ -1218,6 +1224,23 @@ impl McpServer {
             lines.join("\n")
         );
         Ok(CallToolResult::success(vec![Content::text(body)]))
+    }
+
+    #[tool(
+        description = "Get past a cookie/consent/newsletter overlay blocking the page. Scans the document, shadow DOM and same-origin iframes for the dismiss control and clicks it (trusted) — preferring Reject/Decline, then Close/×. It NEVER auto-clicks Accept/Agree (granting consent is the user's choice); if only an accept-type control exists it reports that so you can decide. Call this when a click returns `occluded` or a banner covers the page. Defaults to the visible tab."
+    )]
+    async fn browser_dismiss_overlay(
+        &self,
+        Parameters(req): Parameters<TabIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let summary = browser_try!(
+            self.send_command(|tx| McpCommand::DismissOverlay {
+                tab_id: req.tab_id,
+                response: tx,
+            })
+            .await?
+        );
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
     #[tool(

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Cookie Banner</title>
+</head>
+<body>
+  <h1>Cookie Banner Fixture</h1>
+  <button id="cta">Buy now</button>
+  <div id="cta-status">idle</div>
+
+  <!-- A fixed consent overlay covering the page, like OneTrust/Cookiebot. -->
+  <div id="cookie-consent" role="dialog" aria-modal="true"
+       style="position:fixed;left:0;right:0;bottom:0;top:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center">
+    <div style="background:#fff;padding:24px">
+      <p>We use cookies. Manage your preferences.</p>
+      <button id="reject">Reject all</button>
+      <button id="accept">Accept all</button>
+      <button id="close" aria-label="Close">×</button>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('cta').addEventListener('click', function () {
+      document.getElementById('cta-status').textContent = 'bought';
+    });
+    function hide() { var b = document.getElementById('cookie-consent'); if (b) b.remove(); }
+    document.getElementById('reject').addEventListener('click', hide);
+    document.getElementById('accept').addEventListener('click', hide);
+    document.getElementById('close').addEventListener('click', hide);
+  </script>
+</body>
+</html>
