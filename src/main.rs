@@ -3516,7 +3516,13 @@ fn main() {
                                     };
                                     match dom_actions::parse_target(&val) {
                                         Ok(Some(t)) => finish_native_action(
-                                            wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                            wk.clone(),
+                                            &NativeActionCtx {
+                                                tab_id: id,
+                                                gen0,
+                                                tabs: tabs_cb.clone(),
+                                                response: response_cb.clone(),
+                                            },
                                             format!("Clicked {} ({sel})", t.desc),
                                             expect.clone(),
                                             |ptr| native_input::click(ptr, t.x, t.y, zoom),
@@ -3582,7 +3588,13 @@ fn main() {
                                     };
                                     match dom_actions::parse_target(&val) {
                                         Ok(Some(t)) => finish_native_action(
-                                            wk.clone(), id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                            wk.clone(),
+                                            &NativeActionCtx {
+                                                tab_id: id,
+                                                gen0,
+                                                tabs: tabs_cb.clone(),
+                                                response: response_cb.clone(),
+                                            },
                                             format!("Hovered {} ({sel})", t.desc),
                                             expect.clone(),
                                             |ptr| native_input::hover(ptr, t.x, t.y, zoom),
@@ -3975,7 +3987,13 @@ fn main() {
                                 };
                                 match dom_actions::parse_target(&val) {
                                     Ok(Some(t)) => finish_native_action(
-                                        wk.clone(), target_id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                        wk.clone(),
+                                        &NativeActionCtx {
+                                            tab_id: target_id,
+                                            gen0,
+                                            tabs: tabs_cb.clone(),
+                                            response: response_cb.clone(),
+                                        },
                                         format!("Pressed {key_label} on {}", t.desc),
                                         expect.clone(),
                                         |ptr| native_input::press_key(ptr, &key_info, &modifiers),
@@ -4142,7 +4160,13 @@ fn main() {
                                 };
                                 match dom_actions::parse_dismiss(&val) {
                                     Ok(t) if t.x.is_some() && t.y.is_some() => finish_native_action(
-                                        wk.clone(), target_id, gen0, tabs_cb.clone(), response_cb.clone(),
+                                        wk.clone(),
+                                        &NativeActionCtx {
+                                            tab_id: target_id,
+                                            gen0,
+                                            tabs: tabs_cb.clone(),
+                                            response: response_cb.clone(),
+                                        },
                                         format!("Dismissed overlay via {} control \"{}\"", t.kind, t.desc),
                                         None,
                                         |ptr| native_input::click(ptr, t.x.unwrap(), t.y.unwrap(), zoom),
@@ -7237,21 +7261,31 @@ fn tab_url(tabs: &Arc<Mutex<TabManager>>, tab_id: usize) -> String {
 
 type McpReply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>>;
 
-/// Second half of a trusted pointer/key action: deliver the native event,
-/// then run the effect probe and answer `<verb> → <what changed>`. When the
-/// probe's callback dies because the action navigated, that navigation *is*
-/// the effect and is reported as success — not as a dropped call.
-#[allow(clippy::too_many_arguments)]
-fn finish_native_action<T: objc2::Message + 'static>(
-    wk: objc2::rc::Retained<T>,
+/// Everything `finish_native_action` needs about the MCP action's tab: which
+/// tab ran it, the nav-generation snapshot taken before delivery, and where
+/// the reply goes. One bundle instead of four loose arguments.
+struct NativeActionCtx {
     tab_id: usize,
     gen0: u64,
     tabs: Arc<Mutex<TabManager>>,
     response: McpReply,
+}
+
+/// Second half of a trusted pointer/key action: deliver the native event,
+/// then run the effect probe and answer `<verb> → <what changed>`. When the
+/// probe's callback dies because the action navigated, that navigation *is*
+/// the effect and is reported as success — not as a dropped call.
+fn finish_native_action<T: objc2::Message + 'static>(
+    wk: objc2::rc::Retained<T>,
+    ctx: &NativeActionCtx,
     verb: String,
     expect: Option<String>,
     deliver: impl FnOnce(*mut objc2::runtime::AnyObject),
 ) {
+    let tab_id = ctx.tab_id;
+    let gen0 = ctx.gen0;
+    let tabs = ctx.tabs.clone();
+    let response = ctx.response.clone();
     let ptr = objc2::rc::Retained::as_ptr(&wk) as *mut objc2::runtime::AnyObject;
     let downloads_before = tab_nav::download_state(tab_id).0;
     deliver(ptr);
