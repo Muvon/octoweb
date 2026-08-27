@@ -772,6 +772,10 @@ fn main() {
     // Deferred tab swap: (old_visible_tab, new_loading_tab).
     // Old tab stays visible while new one loads behind it (Safari-style).
     let mut pending_swap: Option<(usize, usize)> = None;
+    // When pending_swap was set — drives the watchdog in the tick loop that
+    // force-completes a swap whose completion events never arrive.
+    let mut pending_swap_at: Option<std::time::Instant> = None;
+    const PENDING_SWAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
     // favicon_order tracks insertion order for FIFO eviction at 500 entries —
@@ -2218,6 +2222,7 @@ fn main() {
             // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
             ensure_webview!(target);
             tabs.lock().unwrap().switch(target);
+            pending_swap_at = None;
             if let Some((old_id, new_id)) = pending_swap.take() {
                 if let Some(wv) = tab_webviews.get(&old_id) {
                     let _ = wv.set_visible(false);
@@ -2394,6 +2399,9 @@ fn main() {
         if let Some(save_at) = history_save_at {
             next_wake = next_wake.min(save_at);
         }
+        if let Some(swap_at) = pending_swap_at {
+            next_wake = next_wake.min(swap_at + PENDING_SWAP_TIMEOUT);
+        }
         if let Some(earliest) = mcp_nav_pending.values().map(|(t, _)| *t).min() {
             next_wake = next_wake.min(earliest + std::time::Duration::from_secs(15));
         }
@@ -2407,6 +2415,32 @@ fn main() {
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
+            }
+        }
+
+        // Watchdog: force-complete a deferred swap whose completion events never
+        // arrived (first navigation of a fresh hidden tab cancelled silently, or
+        // a load hung past WebKit's own timeout). Showing whatever the new tab
+        // has beats leaving the user stuck on the old page forever.
+        if let Some(swap_at) = pending_swap_at {
+            if std::time::Instant::now() >= swap_at + PENDING_SWAP_TIMEOUT {
+                if let Some((old_id, new_id)) = pending_swap.take() {
+                    tracing::warn!(old_id, new_id, "pending_swap watchdog fired — forcing swap");
+                    if let Some(wv) = tab_webviews.get(&new_id) {
+                        let _ = wv.set_visible(true);
+                    }
+                    if old_id != new_id {
+                        if let Some(wv) = tab_webviews.get(&old_id) {
+                            let _ = wv.set_visible(false);
+                        }
+                    }
+                }
+                if progress_visible {
+                    let _ = progress_wv.set_visible(false);
+                    progress_visible = false;
+                    progress_hide_at = None;
+                }
+                pending_swap_at = None;
             }
         }
         // ── Sample active tab's WebContent process stats ─────────────────
@@ -4520,6 +4554,7 @@ fn main() {
                 spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
+                pending_swap_at = Some(std::time::Instant::now());
                 tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
@@ -4583,6 +4618,7 @@ fn main() {
                 spawn_tab_webview!(tab_id, &url);
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
+                pending_swap_at = Some(std::time::Instant::now());
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
@@ -4642,11 +4678,13 @@ fn main() {
                     if let Some((old_id, new_id)) = pending_swap.take() {
                         if id == new_id {
                             // Closing the loading tab — old tab is still visible, keep it
+                            pending_swap_at = None;
                         } else if id == old_id {
                             // Closing the old visible tab — show the new one
                             if let Some(wv) = tab_webviews.get(&new_id) {
                                 let _ = wv.set_visible(true);
                             }
+                            pending_swap_at = None;
                         } else {
                             // Closing an unrelated tab — restore pending_swap
                             pending_swap = Some((old_id, new_id));
@@ -5715,6 +5753,7 @@ fn main() {
                             }
                         }
                         pending_swap = None;
+                        pending_swap_at = None;
                         // The page just became visible after a keyboard-driven
                         // navigation (palette / address bar). The palette was the
                         // key window; now that it's gone, hand keyboard
@@ -5821,6 +5860,31 @@ fn main() {
                     browser_win.set_focus();
                     return;
                 }
+                // Noise codes (-999 cancelled / 204 media takeover / 102 became
+                // download) were historically dropped inside nav_error_patch,
+                // which stranded pending_swap forever when the FIRST load of a
+                // fresh hidden tab died this way. They now reach here: established
+                // tabs keep the historical silence; the loading tab completes its
+                // deferred swap — visibility only, no error page, since the load
+                // wasn't a real failure.
+                if matches!(error.trim().parse::<i64>().ok(), Some(-999 | 204 | 102)) {
+                    if let Some((old_id, new_id)) = pending_swap {
+                        if tab_id == new_id {
+                            if let Some(wv) = tab_webviews.get(&new_id) {
+                                let _ = wv.set_visible(true);
+                            }
+                            if old_id != new_id {
+                                if let Some(wv) = tab_webviews.get(&old_id) {
+                                    let _ = wv.set_visible(false);
+                                }
+                            }
+                            pending_swap = None;
+                            pending_swap_at = None;
+                            tracing::warn!(tab_id, %url, %error, "noise nav failure on loading tab — completed deferred swap");
+                        }
+                    }
+                    return;
+                }
                 // Fail pending MCP navigate
                 if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err(format!("Navigation error: {error}")));
@@ -5851,6 +5915,7 @@ fn main() {
                             }
                         }
                         pending_swap = None;
+                        pending_swap_at = None;
                     }
                 }
             }

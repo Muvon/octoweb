@@ -194,9 +194,13 @@ fn fire_error_callback(webview: *mut AnyObject, error: *mut AnyObject) {
     // media player took over the load and WebKit cancels the frame load as a formality.
     // WebKitErrorFrameLoadInterruptedByPolicyChange (102): the navigation became a
     // download (download_patch / wry policy); the tab keeps its current page.
+    // Noise codes (-999 cancelled / 204 media takeover / 102 became download)
+    // are not real failures, but they are still forwarded to the app: when the
+    // FIRST load of a fresh hidden tab dies this way, dropping the event here
+    // strands pending_swap forever (no PageLoadStarted will ever come). The
+    // NavigationError handler decides per-tab whether to act on them.
     if code == -999 || code == 204 || code == 102 {
-        tracing::debug!(code, ?webview, "Ignoring non-error nav failure");
-        return;
+        tracing::debug!(code, ?webview, "Forwarding non-error nav failure to app");
     }
 
     tracing::debug!(code, ?webview, "Nav-error callback fired");
