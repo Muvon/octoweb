@@ -4024,7 +4024,7 @@ fn main() {
                                 // Chrome DevTools MCP wait_for(text)).
                                 other if other.starts_with("text:") || other.starts_with("text_gone:") => {
                                     let gone = other.starts_with("text_gone:");
-                                    let needle = other.splitn(2, ':').nth(1).unwrap_or("");
+                                    let needle = other.split_once(':').map(|x| x.1).unwrap_or("");
                                     let n_json = serde_json::to_string(needle).unwrap_or_default();
                                     let want = if gone { "=== -1" } else { "!== -1" };
                                     format!(
@@ -7241,6 +7241,7 @@ type McpReply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<String, Str
 /// then run the effect probe and answer `<verb> → <what changed>`. When the
 /// probe's callback dies because the action navigated, that navigation *is*
 /// the effect and is reported as success — not as a dropped call.
+#[allow(clippy::too_many_arguments)]
 fn finish_native_action<T: objc2::Message + 'static>(
     wk: objc2::rc::Retained<T>,
     tab_id: usize,
