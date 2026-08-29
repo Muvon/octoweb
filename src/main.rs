@@ -158,6 +158,21 @@ enum AppEvent {
     Quit,
 }
 
+/// The tab currently painted in the browser window. During a deferred swap,
+/// `active_wv_id` already names the loading tab while the old tab remains
+/// visible and interactive.
+fn visible_tab_id(active_wv_id: usize, pending_swap: Option<(usize, usize)>) -> usize {
+    pending_swap.map_or(active_wv_id, |(old_id, _)| old_id)
+}
+
+fn foreground_page_open(
+    source: Option<usize>,
+    active_wv_id: usize,
+    pending_swap: Option<(usize, usize)>,
+) -> bool {
+    source.is_none_or(|source_id| source_id == visible_tab_id(active_wv_id, pending_swap))
+}
+
 /// Map a remappable [`keybindings::Action`] to the concrete [`AppEvent`] for the
 /// current UI context. Returns `None` when the action is suppressed in this
 /// context (e.g. scrolling while the command palette is open) — the caller then
@@ -4564,6 +4579,11 @@ fn main() {
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
                 pending_swap_at = Some(std::time::Instant::now());
+                // The address bar represents the selected tab, even while its
+                // WebView is loading behind the old visible page. Do not leave
+                // the previous tab's URL displayed until WebKit commits.
+                update_address_bar_url!(url);
+                browser_win.set_title(&url);
                 tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
@@ -4584,7 +4604,7 @@ fn main() {
                 // Foreground the new tab only when the request came from the visible
                 // tab (a real user click) or a UI surface (None). A background tab the
                 // agent is driving must not switch the user's view or steal focus.
-                let foreground = source.is_none_or(|src| src == active_wv_id);
+                let foreground = foreground_page_open(source, active_wv_id, pending_swap);
 
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&url) {
@@ -4628,6 +4648,8 @@ fn main() {
                 active_wv_id = tab_id;
                 pending_swap = Some((visible_id, tab_id));
                 pending_swap_at = Some(std::time::Instant::now());
+                update_address_bar_url!(url);
+                browser_win.set_title(&url);
                 macos::mru_push(&mut mru, tab_id);
                 browser_win.set_focus();
             }
@@ -7322,6 +7344,28 @@ fn finish_native_action<T: objc2::Message + 'static>(
             let _ = tx.send(Ok(msg));
         },
     );
+}
+
+#[cfg(test)]
+mod navigation_state_tests {
+    use super::*;
+
+    #[test]
+    fn visible_page_click_stays_foreground_during_deferred_swap() {
+        assert!(foreground_page_open(Some(4), 5, Some((4, 5))));
+    }
+
+    #[test]
+    fn hidden_loading_or_background_page_cannot_steal_focus() {
+        assert!(!foreground_page_open(Some(5), 5, Some((4, 5))));
+        assert!(!foreground_page_open(Some(3), 4, None));
+    }
+
+    #[test]
+    fn active_page_and_ui_surface_open_in_foreground() {
+        assert!(foreground_page_open(Some(4), 4, None));
+        assert!(foreground_page_open(None, 4, Some((3, 4))));
+    }
 }
 
 #[cfg(test)]
