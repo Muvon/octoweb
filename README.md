@@ -1,12 +1,28 @@
 # Octoweb — the keyboard-first AI browser for macOS
 
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/muvon/octoweb/releases)
+[![Version](https://img.shields.io/badge/version-0.10.0-blue.svg)](https://github.com/muvon/octoweb/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS-black.svg)](https://github.com/muvon/octoweb/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
 **The browser you reach for when you want to think. macOS only, by design.**
 
 Built on WebKit and Rust. No Electron. No Chrome. No mouse required.
+
+🏠 [Product page](https://octomind.run/product/octoweb/) · [Changelog](CHANGELOG.md)
+
+---
+
+## Contents
+
+- [Why Octoweb?](#why-octoweb)
+- [Features](#features)
+- [AI Assistant](#ai-assistant)
+- [MCP server (AI browser control)](#mcp-server-ai-browser-control)
+- [Keyboard shortcuts](#keyboard-shortcuts)
+- [Install](#install)
+- [Configuration](#configuration)
+- [What it is (and isn't)](#what-it-is-and-isnt)
+- [Tech stack](#tech-stack)
 
 ---
 
@@ -16,11 +32,11 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 
 **Three things it does differently:**
 
-1. **Keyboard-first navigation** — Every action has a shortcut. Nothing requires a click. The command palette (`⌘⇧P`) fuzzy-searches tabs and history. Pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘0` from anywhere.
+1. **Keyboard-first navigation** — Every action has a shortcut. Nothing requires a click. The command palette (`⌘⇧P`) fuzzy-searches tabs and history. Pin any page to a fast-access slot with `⌘⇧1`–`⌘⇧0` and jump back with `⌘1`–`⌘9` from anywhere.
 
 2. **AI assistant built in** — Not an extension, not a tab. A sidebar overlay powered by a local [octomind](https://github.com/muvon/octomind) agent via [ACP](https://github.com/muvon/agent-client-protocol). Ask questions about the current page, get code explanations, summarize content — all without leaving the browser.
 
-3. **MCP server inside the browser** — Your AI tools can actually *drive* the browser. Octoweb runs an MCP server on `localhost:3434/mcp` that exposes 20+ tools for navigation, tab management, page interaction, and content extraction. Point Claude Desktop or any MCP client at it and watch it browse.
+3. **MCP server inside the browser** — Your AI tools can actually *drive* the browser. Octoweb runs an MCP server on `localhost:3434/mcp` that exposes 28 tools for navigation, tab management, page interaction, and content extraction. Point Claude Desktop or any MCP client at it and watch it browse.
 
 ---
 
@@ -28,10 +44,12 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 
 - **Command palette** (`⌘⇧P`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
 - **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access. Footer bar shows all slots.
+- **Tab pinning** (`⌘⇧N`) — Pin the current tab to the fast-access bar with one keystroke.
+- **Configurable keybindings** — Remap any shortcut in Settings (`⌘,`). Changes apply on the next keystroke, no restart.
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
-- **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. Opt-in, configurable interval.
-- **MCP server** — 20+ tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
+- **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. Enabled by default, configurable interval — disable in Settings (`⌘,`).
+- **MCP server** — 28 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
 - **Find-in-page** (`⌘F`) — Full-text search with highlighting.
 - **Page zoom** — `+`/`-` to zoom, `⌘0` to reset.
 - **Screenshots** — `⌘S` for viewport, `⌘⇧S` for full page. Copied to clipboard.
@@ -92,9 +110,13 @@ The agent tag in the sidebar header defaults to `octoweb:assistant`. You can typ
 
 No data leaves your machine unless your agent sends it somewhere. The AI provider call is made by octomind, not by the browser.
 
+### Agent-rendered UI (A2UI)
+
+Agents can do more than reply with text: via the `render_ui` tool they can draw interactive surfaces — forms, buttons, live views — inline in the sidebar chat. Buttons can open URLs in a new tab or resolve back to the agent.
+
 ### Proactive Learning
 
-Octoweb can optionally run a background agent that periodically analyzes your browsing patterns and memorizes insights. This is disabled by default and can be enabled in Settings (`⌘,`).
+Octoweb runs a background agent that periodically analyzes your browsing patterns and memorizes insights. This is enabled by default — turn it off in Settings (`⌘,`).
 
 **How it works:**
 
@@ -148,6 +170,8 @@ Claude Desktop / octomind / any MCP client
 | `browser_execute_js` | Run JavaScript in the page (Promises are awaited) |
 | `browser_click` | Click an element — auto-retries until present, stable, and unobstructed; reports what covers it |
 | `browser_type` | Set an input/textarea/contenteditable value (React-safe) |
+| `browser_fill_form` | Fill several fields — and optionally submit — in one call |
+| `browser_dismiss_overlay` | Dismiss cookie/consent overlays — prefers Reject/Decline, never auto-accepts |
 | `browser_hover` | Hover with full pointer + mouse event sequence |
 | `browser_scroll` | Scroll the window, or an element's scrollable container via `selector` |
 | `browser_press_key` | Press a key; Enter on a form input submits like a real keypress |
@@ -177,21 +201,29 @@ The agent can now navigate pages, extract content, and interact with the browser
 
 ## Keyboard shortcuts
 
+Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.config/octoweb/keybindings.json` and apply on the very next keystroke, no restart. The `⌘`+digit slot keys are positional and not remappable.
+
 ### Global
 
 | Shortcut | Action |
 |---|---|
 | `⌘⇧P` | Open command palette |
-| `⌘W` | Close current tab |
+| `⌘W` | Close tab / session |
+| `⌘T` | New AI session |
 | `⌘R` | Reload current page |
+| `⌘E` | Edit address |
 | `⌘S` | Screenshot (viewport) — copy to clipboard |
 | `⌘⇧S` | Screenshot (full page) — copy to clipboard |
 | `⌘F` | Toggle find-in-page bar |
 | `⌘/` | Show keyboard shortcuts |
+| `⌘,` | Settings |
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧I` | Toggle DevTools |
-| `⌘1` – `⌘9`, `⌘0` | Open fast-access slot 1–10 |
+| `⌘↵` | Fullscreen window |
+| `⌘⇧↵` | Fullscreen AI sidebar |
+| `⌘⇧N` | Pin/unpin tab |
+| `⌘1` – `⌘9` | Open fast-access slot 1–9 |
 | `⌘⇧1` – `⌘⇧9`, `⌘⇧0` | Save current page to slot 1–10 |
 | `⌃N` | Next tab (MRU order) |
 | `⌃P` | Previous tab (MRU order) |
@@ -205,9 +237,11 @@ The agent can now navigate pages, extract content, and interact with the browser
 Pin any page to a numbered slot and jump back to it instantly — one keystroke from anywhere. Slots are shown in a footer bar at the bottom of the window and on the new-tab page.
 
 - **`⌘⇧1`–`⌘⇧9` / `⌘⇧0`** — save the current page to slot 1–9 / 10
-- **`⌘1`–`⌘9` / `⌘0`** — navigate to the saved URL in that slot
+- **`⌘1`–`⌘9`** — navigate to the saved URL in that slot
 
 Slots persist across restarts. An empty slot does nothing.
+
+`⌘0` defaults to zoom reset and wins over slot 10 — rebind zoom reset in Settings if you want `⌘0` to open slot 10. `⌘⇧0` still saves to slot 10.
 
 ### Command palette (`⌘⇧P`)
 
@@ -323,16 +357,19 @@ Config lives at `~/Library/Application Support/octoweb/config.toml`. Created on 
 Open Settings with `⌘,` to configure visually, or edit the file directly:
 
 ```toml
-home_page              = "https://www.google.com"
-search_engine          = "https://www.google.com/search?q={}"
-max_history            = 1000
-window_width           = 1280
-window_height          = 800
-ai_edit_auto_hide      = false      # auto-hide inline edit after submit
-max_prompt_history     = 50         # editor prompt history size
-max_ai_prompt_history  = 50         # sidebar prompt history size
-proactive_learning     = true       # enable background learning agent
-learning_interval_min  = 30         # minutes between learning runs
+home_page                = "https://www.google.com"
+search_engine            = "https://www.google.com/search?q={}"
+max_history              = 1000
+window_width             = 1280
+window_height            = 800
+ai_edit_auto_hide        = false      # auto-hide inline edit after submit
+max_prompt_history       = 50         # editor prompt history size
+max_ai_prompt_history    = 50         # sidebar prompt history size
+max_acp_session_messages = 500        # chat messages retained per AI session (FIFO)
+proactive_learning       = true       # enable background learning agent
+learning_interval_min    = 30         # minutes between learning runs
+aggressive_hibernation   = false      # aggressive tab-hibernation curve for tight-RAM machines
+max_tabs                 = 500        # max open tabs (0 = no limit)
 ```
 
 **Persistence:**
@@ -368,4 +405,4 @@ It won't replace your main browser. It might become the browser you reach for wh
 
 ## License
 
-Apache 2.0
+[Apache 2.0](LICENSE)
