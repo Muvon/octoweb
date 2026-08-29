@@ -173,6 +173,14 @@ fn foreground_page_open(
     source.is_none_or(|source_id| source_id == visible_tab_id(active_wv_id, pending_swap))
 }
 
+fn close_affects_display(
+    closed_id: usize,
+    active_wv_id: usize,
+    pending_swap: Option<(usize, usize)>,
+) -> bool {
+    closed_id == active_wv_id || closed_id == visible_tab_id(active_wv_id, pending_swap)
+}
+
 /// Map a remappable [`keybindings::Action`] to the concrete [`AppEvent`] for the
 /// current UI context. Returns `None` when the action is suppressed in this
 /// context (e.g. scrolling while the command palette is open) — the caller then
@@ -4705,6 +4713,8 @@ fn main() {
                     }
                 };
                 if let Some(id) = id {
+                    let selected_id = active_wv_id;
+                    let render_successor = close_affects_display(id, active_wv_id, pending_swap);
                     // Cancel any pending swap involving this tab
                     if let Some((old_id, new_id)) = pending_swap.take() {
                         if id == new_id {
@@ -4739,12 +4749,26 @@ fn main() {
                         let _ = response.send(Err("Tab closed".into()));
                     }
                     mru.retain(|&x| x != id);
-                    // Pick a successor only when the closed tab was the visible
-                    // one. Closing a background tab (the normal MCP cleanup path)
-                    // must not re-switch tabs or steal the user's focus.
-                    if id == active_wv_id {
-                        // Switch to the most-recently-used tab (MRU[0] after removal)
-                        match mru.first().copied() {
+                    // Render a successor when closing either the visible tab or
+                    // the selected loading tab. Closing an unrelated background
+                    // tab must not re-switch tabs or steal the user's focus.
+                    if render_successor {
+                        // If the visible old page was closed during a deferred
+                        // swap, keep the already-selected loading tab. Otherwise
+                        // fall back to the most-recently-used surviving tab.
+                        let selected_survives = id != selected_id
+                            && tabs
+                                .lock()
+                                .unwrap()
+                                .tabs()
+                                .iter()
+                                .any(|tab| tab.id == selected_id);
+                        let successor = if selected_survives {
+                            Some(selected_id)
+                        } else {
+                            mru.first().copied()
+                        };
+                        match successor {
                             Some(next) => {
                                 tabs.lock().unwrap().switch(next);
                                 // switch_visible_tab! handles lazy loading (pending_tabs) and
@@ -7365,6 +7389,14 @@ mod navigation_state_tests {
     fn active_page_and_ui_surface_open_in_foreground() {
         assert!(foreground_page_open(Some(4), 4, None));
         assert!(foreground_page_open(None, 4, Some((3, 4))));
+    }
+
+    #[test]
+    fn closing_visible_or_selected_tab_requires_a_rendered_successor() {
+        assert!(close_affects_display(3, 4, Some((3, 4))));
+        assert!(close_affects_display(4, 4, Some((3, 4))));
+        assert!(close_affects_display(4, 4, None));
+        assert!(!close_affects_display(2, 4, Some((3, 4))));
     }
 }
 
