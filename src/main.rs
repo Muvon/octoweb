@@ -2877,13 +2877,14 @@ fn main() {
                             "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
                         ));
                     }
-                    acp::AgentEvent::Done => {
+                    acp::AgentEvent::Done | acp::AgentEvent::Cancelled => {
                         let mut should_persist = false;
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
                             // Flush the streamed response + tool runs into the
                             // persisted log as a single "agent" message so the
-                            // steps group survives restarts.
+                            // steps group survives restarts. Cancelled saves the
+                            // partial turn so the user sees what was on screen.
                             if flush_agent_turn(s, cfg.max_acp_session_messages) {
                                 should_persist = true;
                             }
@@ -2891,28 +2892,12 @@ fn main() {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
-                        if !sidebar_visible {
+                        // Only Done bumps the hidden-sidebar badge.
+                        if matches!(ev, acp::AgentEvent::Done) && !sidebar_visible {
                             let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
                             );
                         }
-                        if should_persist {
-                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
-                        }
-                    }
-                    acp::AgentEvent::Cancelled => {
-                        let mut should_persist = false;
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
-                            s.last_cancel_at = None;
-                            // Save the partial turn (cancelled mid-stream) so
-                            // the user sees the same thing they had on screen.
-                            if flush_agent_turn(s, cfg.max_acp_session_messages) {
-                                should_persist = true;
-                            }
-                        }
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__setThinking && window.__setThinking({sid},false)"
-                        ));
                         if should_persist {
                             persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
                         }

@@ -3611,15 +3611,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     });
   }
 
-  function startAgentBubble(s) {
+  // whoOverride labels a specialist bubble (appendSpecialistMsg); live agent
+  // bubbles omit it and fall back to the session's current source or Octopus.
+  function startAgentBubble(s, whoOverride) {
     if (!s) return;
     const wrap   = document.createElement('div');
-    wrap.className = 'msg agent' + (s.agentWho ? ' specialist' : '');
+    wrap.className = 'msg agent' + (whoOverride || s.agentWho ? ' specialist' : '');
     const label  = document.createElement('div');
     label.className = 'msg-label';
     const who = document.createElement('span');
     who.className = 'msg-who';
-    who.textContent = s.agentWho || 'Octopus';
+    who.textContent = whoOverride || s.agentWho || 'Octopus';
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
@@ -3634,6 +3636,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return bubble;
   }
 
+  // Open the live agent bubble if this turn doesn't have one yet. Shared by
+  // text chunks and inline images — first real output drops the thinking
+  // state but keeps the feed rows alive (a tool starting mid-stream re-shows
+  // them via syncFeed). Do NOT touch `s.busy` — the agent runs until Done.
+  function ensureAgentBubble(s) {
+    if (s.currentAgentBubble) return;
+    s.currentAgentBubble = startAgentBubble(s);
+    s.currentAgentRaw = '';
+    s.isThinking = false;
+    syncFeed(s);
+  }
+
   window.__appendChunk = function(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
@@ -3644,15 +3658,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.activityStart = Date.now();
     }
     s.toolSinceText = false;
-    if (!s.currentAgentBubble) {
-      s.currentAgentBubble = startAgentBubble(s);
-      s.currentAgentRaw = '';
-      // Real output is streaming — drop the thinking state but keep the feed
-      // rows alive: a tool starting mid-stream re-shows them via syncFeed.
-      // Do NOT touch `s.busy` — the agent is still running until Done.
-      s.isThinking = false;
-      syncFeed(s);
-    }
+    ensureAgentBubble(s);
     s.currentAgentRaw += text;
     var cmdObj = tryParseCommandJson(s.currentAgentRaw);
     s.currentAgentBubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(s.currentAgentRaw);
@@ -3669,24 +3675,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (m) { who = m[1]; body = text.slice(m[0].length); }
     const tap = who.match(/^tap-run \S+ \((.+)\)$/);
     if (tap) who = tap[1];
-    const wrap = document.createElement('div');
-    wrap.className = 'msg agent specialist';
-    const label = document.createElement('div');
-    label.className = 'msg-label';
-    const whoEl = document.createElement('span');
-    whoEl.className = 'msg-who';
-    whoEl.textContent = who;
-    const time = document.createElement('span');
-    time.className = 'msg-time';
-    time.textContent = fmtTime(new Date());
-    label.appendChild(whoEl);
-    label.appendChild(time);
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
+    const bubble = startAgentBubble(s, who);
+    if (!bubble) return who;
     bubble.innerHTML = renderMd(body);
-    wrap.appendChild(label);
-    wrap.appendChild(bubble);
-    s.container.insertBefore(wrap, s.thinking);
     finishAgentBubble(s, bubble, body, 0, [], 0);
     if (s.sid === activeSid) scrollToBottom();
     return who;
@@ -3710,13 +3701,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   window.__appendImage = function(sid, mimeType, b64data) {
     const s = sessions.get(sid);
     if (!s) return;
-    if (!s.currentAgentBubble) {
-      s.currentAgentBubble = startAgentBubble(s);
-      s.currentAgentRaw = '';
-      // Same rationale as __appendChunk — feed sync only, busy stays true.
-      s.isThinking = false;
-      syncFeed(s);
-    }
+    ensureAgentBubble(s);
     const img = document.createElement('img');
     img.className = 'chat-img';
     img.src = 'data:' + mimeType + ';base64,' + b64data;
