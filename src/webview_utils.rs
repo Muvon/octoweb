@@ -607,13 +607,16 @@ pub fn build_items_json(
     // ── Tabs ──────────────────────────────────────────────────────────────────
     let open_urls: std::collections::HashSet<&str> =
         tabs.iter().map(|t| t.url.trim_end_matches('/')).collect();
+    let visits_by_url: HashMap<&str, u32> = history
+        .iter()
+        .map(|e| (e.url.trim_end_matches('/'), e.visit_count))
+        .collect();
 
     for tab in tabs {
         // Look up this tab's visit count from history (it's stored there)
-        let visits = history
-            .iter()
-            .find(|e| e.url.trim_end_matches('/') == tab.url.trim_end_matches('/'))
-            .map(|e| e.visit_count)
+        let visits = visits_by_url
+            .get(tab.url.trim_end_matches('/'))
+            .copied()
             .unwrap_or(0);
         items.push(serde_json::json!({
             "kind": "tab",

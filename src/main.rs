@@ -554,8 +554,11 @@ fn main() {
                 .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
                 .with_bounds(bounds)
-                // Suspend JS timers, rAF, and network on hidden tabs (macOS 14+, no-op on older)
-                .with_background_throttling(BackgroundThrottlingPolicy::Suspend)
+                // Throttle JS timers/rAF on hidden tabs (macOS 14+, no-op on older).
+                // Suspend would also pause page loads in hidden webviews — new tabs
+                // spawn hidden and load before the deferred swap, so Suspend stalls
+                // exactly that pipeline (slow/never PageLoadStarted).
+                .with_background_throttling(BackgroundThrottlingPolicy::Throttle)
                 // Safari-compatible UA so sites serve optimised WebKit assets; octoweb tag for identification
                 .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Octoweb/1.0")
                 // Single merged script: page stats + favicon + URL tracking +
@@ -4531,11 +4534,9 @@ fn main() {
                     };
                     let se = webview_utils::escape_js_template(&search_engine);
                     let _ = overlay_wv.evaluate_script(&format!(
-                        "window.__setSearchEngine && window.__setSearchEngine(`{se}`)"
+                        "window.__setSearchEngine && window.__setSearchEngine(`{se}`);\
+                         window.__setItems && window.__setItems({json})"
                     ));
-                    let _ = overlay_wv.evaluate_script(&format!(
-                    "window.__setItems && window.__setItems({json})"
-                ));
                     overlay_win.set_visible(true);
                     overlay_win.set_focus();
                     objc2_app_kit::NSCursor::setHiddenUntilMouseMoves(true);
@@ -4552,6 +4553,10 @@ fn main() {
                                 .iter()
                                 .filter_map(|h| {
                                     webview_utils::extract_domain(&h.url)
+                                        // hostname charset only — this string is spliced into JS
+                                        .filter(|d| d.chars().all(|c| {
+                                            c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':'
+                                        }))
                                         .map(|d| d.to_string())
                                 })
                                 .filter(|d| seen.insert(d.clone()))
@@ -4563,8 +4568,7 @@ fn main() {
                                 .iter()
                                 .map(|d| {
                                     format!(
-                                        "{{var l=document.createElement('link');l.rel='dns-prefetch';l.href='https://{}';document.head.appendChild(l);}}",
-                                        d
+                                        "{{window.__owDns=window.__owDns||{{}};if(!window.__owDns['{d}']){{window.__owDns['{d}']=1;var l=document.createElement('link');l.rel='dns-prefetch';l.href='https://{d}';document.head.appendChild(l);}}}}"
                                     )
                                 })
                                 .collect();

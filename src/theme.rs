@@ -68,7 +68,7 @@ pub const CSS: &str = r#"
     --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
     --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
     --t-fast: 0.12s;
-    --t-pop: 0.3s;
+    --t-pop: 0.2s;
   }
 
   @supports (color: AccentColor) {
