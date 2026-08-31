@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use wry::http::Response;
+
 use crate::browser;
 
 /// Single JS script injected into every tab page at document-start.
@@ -595,7 +597,9 @@ pub const COMBINED_SCRIPT: &str = r#"
 /// memory (update_url upserts), so we just iterate newest-first, skip open-tab
 /// URLs, and cap at 200 entries. visit_count is stored on each HistoryEntry.
 ///
-/// Favicons come from the local cache (base64 data-URIs) — no external requests.
+/// Favicons are referenced via the lazy `octoweb-fav://<domain>` custom
+/// protocol (empty string if uncached) instead of inline base64 data-URIs —
+/// keeps this payload small even at ~400 items.
 pub fn build_items_json(
     tabs: &[browser::Tab],
     history: &[browser::HistoryEntry],
@@ -623,7 +627,7 @@ pub fn build_items_json(
             "tab_id": tab.id,
             "title": tab.title,
             "url": tab.url,
-            "favicon": cached_favicon(&tab.url, favicons),
+            "favicon": favicon_ref(&tab.url, favicons),
             "visit_count": visits,
             "visited_at": 0u64,  // tabs are live — recency handled in JS as "now"
             "hibernated": hibernated.contains(&tab.id),
@@ -648,7 +652,7 @@ pub fn build_items_json(
             "kind": "history",
             "title": entry.title,
             "url": entry.url,
-            "favicon": cached_favicon(&entry.url, favicons),
+            "favicon": favicon_ref(&entry.url, favicons),
             "visit_count": entry.visit_count,
             "visited_at": entry.visited_at,
         }));
@@ -698,6 +702,50 @@ pub fn well_formed_js(expr: &str) -> String {
 pub fn cached_favicon<'a>(url: &str, favicons: &'a HashMap<String, String>) -> Option<&'a str> {
     let domain = extract_domain(url)?;
     favicons.get(domain).map(|s| s.as_str())
+}
+
+/// Lazy favicon reference for `build_items_json` — an `octoweb-fav://<domain>`
+/// URL when the domain has a cached favicon, empty string otherwise (matches
+/// the previous "no favicon" semantics, which JS already treats as falsy).
+fn favicon_ref(url: &str, favicons: &HashMap<String, String>) -> String {
+    match extract_domain(url) {
+        Some(domain) if favicons.contains_key(domain) => format!("octoweb-fav://{domain}"),
+        _ => String::new(),
+    }
+}
+
+/// Build the `octoweb-fav://<domain>` response body for the overlay and
+/// address-bar custom-protocol handlers — decodes the cached base64 data-URI
+/// into raw image bytes so it never has to be inlined into the bulk item JSON.
+/// Unknown domain or malformed cache entry → 404 with an empty body.
+pub fn favicon_protocol_response(
+    domain: &str,
+    favicons: &HashMap<String, String>,
+) -> Response<std::borrow::Cow<'static, [u8]>> {
+    let not_found = || -> Response<std::borrow::Cow<'static, [u8]>> {
+        Response::builder()
+            .status(404)
+            .body(Vec::new().into())
+            .unwrap()
+    };
+    let Some(data_uri) = favicons.get(domain) else {
+        return not_found();
+    };
+    let Some((mime, b64)) = data_uri
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+    else {
+        return not_found();
+    };
+    use base64::Engine;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+        return not_found();
+    };
+    Response::builder()
+        .header("Content-Type", mime)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(bytes.into())
+        .unwrap()
 }
 
 /// Extract the domain (host) from a URL, e.g. "https://example.com/path" → "example.com".

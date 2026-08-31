@@ -812,8 +812,10 @@ fn main() {
     // favicon_order tracks insertion order for FIFO eviction at 500 entries —
     // prevents unbounded memory growth during long browsing sessions.
     // Loaded in a background thread (same pattern as history) to keep startup fast.
+    // Arc<Mutex<..>> because the octoweb-fav custom protocol handlers (overlay +
+    // address bar webviews) read it from WKWebView's own callback context.
     const FAVICON_CAP: usize = 500;
-    let mut favicon_cache: HashMap<String, String> = HashMap::new();
+    let favicon_cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut favicon_order: VecDeque<String> = VecDeque::new();
     {
         let p = proxy.clone();
@@ -937,6 +939,13 @@ fn main() {
                 .header("Access-Control-Allow-Origin", "*")
                 .body(data.to_vec().into())
                 .unwrap()
+        })
+        .with_custom_protocol("octoweb-fav".into(), {
+            let cache = Arc::clone(&favicon_cache);
+            move |_wv_id, request| {
+                let domain = request.uri().host().unwrap_or("");
+                webview_utils::favicon_protocol_response(domain, &cache.lock().unwrap())
+            }
         })
         .with_ipc_handler({
             let p = proxy.clone();
@@ -1420,6 +1429,13 @@ fn main() {
                     .unwrap()
             }
         })
+        .with_custom_protocol("octoweb-fav".into(), {
+            let cache = Arc::clone(&favicon_cache);
+            move |_wv_id, request| {
+                let domain = request.uri().host().unwrap_or("");
+                webview_utils::favicon_protocol_response(domain, &cache.lock().unwrap())
+            }
+        })
         .build_as_child(&*browser_win)
         .expect("Failed to create address bar WebView");
     // Initialize address bar with the active tab's URL, title, and favicon from session.
@@ -1435,7 +1451,8 @@ fn main() {
         let _ = address_bar_wv.evaluate_script(&format!(
             "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, 0, 0)"
         ));
-        if let Some(fav) = webview_utils::cached_favicon(&url, &favicon_cache) {
+        let fc = favicon_cache.lock().unwrap();
+        if let Some(fav) = webview_utils::cached_favicon(&url, &fc) {
             let escaped_fav = webview_utils::escape_js_template(fav);
             let _ = address_bar_wv.evaluate_script(&format!(
                 "window.__setFavicon && window.__setFavicon(`{escaped_fav}`)"
@@ -1590,6 +1607,7 @@ fn main() {
 
     // ── Debounced history persistence: save 60 s after first mutation ─────
     let mut history_save_at: Option<std::time::Instant> = None;
+    let mut favicon_save_at: Option<std::time::Instant> = None;
 
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
     // Complementary to the reactive hibernation (which only fires under pressure).
@@ -2344,7 +2362,12 @@ fn main() {
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> =
                         pending_tabs.keys().copied().collect();
-                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
+                    webview_utils::build_items_json(
+                        tm.tabs(),
+                        tm.history(),
+                        &favicon_cache.lock().unwrap(),
+                        &hib,
+                    )
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
                     "window.__refreshItems && window.__refreshItems({json})"
@@ -2359,12 +2382,6 @@ fn main() {
             let u = &$url;
             let secure = u.starts_with("https://");
             let escaped_url = webview_utils::escape_js_template(u);
-            let suggest_json = {
-                let mut tm = tabs.lock().unwrap();
-                tm.ensure_contiguous();
-                let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
-                webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
-            };
             let tm = tabs.lock().unwrap();
             let tab = tm.tabs().iter().find(|t| t.url == *u || t.id == active_wv_id);
             let raw_title = tab.map(|t| t.title.clone()).unwrap_or_default();
@@ -2374,14 +2391,13 @@ fn main() {
             let _ = address_bar_wv.evaluate_script(&format!(
                 "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, {pb}, {pt})"
             ));
-            // Push the full history+tabs snapshot now too so the URL-edit
-            // autocomplete is always primed — no IPC round-trip needed when the
-            // user clicks the pencil / hits ⌘E.
-            let _ = address_bar_wv.evaluate_script(&format!(
-                "window.__setSuggestions && window.__setSuggestions({suggest_json})"
-            ));
+            // Suggestions are NOT pushed here: this macro fires on every
+            // navigation / SPA route change / tab switch, and the snapshot is
+            // still ~200 items. Edit-open requests a fresh one via
+            // `url_edit_open` → PushAddressHistory instead.
             // Push cached favicon for this URL's domain
-            if let Some(fav) = webview_utils::cached_favicon(u, &favicon_cache) {
+            let fc = favicon_cache.lock().unwrap();
+            if let Some(fav) = webview_utils::cached_favicon(u, &fc) {
                 let escaped_fav = webview_utils::escape_js_template(fav);
                 let _ = address_bar_wv.evaluate_script(&format!(
                     "window.__setFavicon && window.__setFavicon(`{escaped_fav}`)"
@@ -2434,6 +2450,9 @@ fn main() {
             sys_stats_next_at
         };
         if let Some(save_at) = history_save_at {
+            next_wake = next_wake.min(save_at);
+        }
+        if let Some(save_at) = favicon_save_at {
             next_wake = next_wake.min(save_at);
         }
         if let Some(swap_at) = pending_swap_at {
@@ -2572,6 +2591,16 @@ fn main() {
                     tm.history().to_vec()
                 };
                 std::thread::spawn(move || config::save_history(&snapshot));
+            }
+        }
+
+        // ── Debounced favicon save (same pattern as history — the full-cache
+        // JSON serialize + fs::write is multi-MB and must stay off this thread) ──
+        if let Some(save_at) = favicon_save_at {
+            if now >= save_at {
+                favicon_save_at = None;
+                let snapshot = favicon_cache.lock().unwrap().clone();
+                std::thread::spawn(move || config::save_favicons(&snapshot));
             }
         }
 
@@ -4353,7 +4382,12 @@ fn main() {
                     let mut tm = tabs.lock().unwrap();
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
-                    webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
+                    webview_utils::build_items_json(
+                        tm.tabs(),
+                        tm.history(),
+                        &favicon_cache.lock().unwrap(),
+                        &hib,
+                    )
                 };
                 let _ = address_bar_wv.evaluate_script(&format!(
                     "window.__setSuggestions && window.__setSuggestions({json})"
@@ -4530,7 +4564,12 @@ fn main() {
                         let mut tm = tabs.lock().unwrap();
                         tm.ensure_contiguous();
                         let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
-                        webview_utils::build_items_json(tm.tabs(), tm.history(), &favicon_cache, &hib)
+                        webview_utils::build_items_json(
+                            tm.tabs(),
+                            tm.history(),
+                            &favicon_cache.lock().unwrap(),
+                            &hib,
+                        )
                     };
                     let se = webview_utils::escape_js_template(&search_engine);
                     let _ = overlay_wv.evaluate_script(&format!(
@@ -5447,7 +5486,7 @@ fn main() {
                         quick_slots[slot] = None;
                     } else {
                         // Save current page into the slot
-                        let favicon = webview_utils::cached_favicon(&url, &favicon_cache)
+                        let favicon = webview_utils::cached_favicon(&url, &favicon_cache.lock().unwrap())
                             .map(String::from);
                         quick_slots[slot] = Some(quickslots::QuickSlot {
                             url,
@@ -5486,7 +5525,7 @@ fn main() {
                         if let Some(slot) = existing {
                             quick_slots[slot] = None;
                         } else if let Some(slot) = quick_slots.iter().position(|s| s.is_none()) {
-                            let favicon = webview_utils::cached_favicon(&url, &favicon_cache)
+                            let favicon = webview_utils::cached_favicon(&url, &favicon_cache.lock().unwrap())
                                 .map(String::from);
                             quick_slots[slot] = Some(quickslots::QuickSlot {
                                 url,
@@ -5791,20 +5830,24 @@ fn main() {
             // Only update + save when we get a new/changed entry (avoids redundant writes).
             // FIFO eviction at FAVICON_CAP keeps memory bounded.
             Event::UserEvent(AppEvent::FaviconFetched(domain, data_uri)) => {
-                if favicon_cache.get(&domain).map(|s| s.as_str()) != Some(&data_uri) {
-                    let is_new = !favicon_cache.contains_key(&domain);
+                let mut fc = favicon_cache.lock().unwrap();
+                if fc.get(&domain).map(|s| s.as_str()) != Some(&data_uri) {
+                    let is_new = !fc.contains_key(&domain);
                     if is_new && favicon_order.len() >= FAVICON_CAP {
                         // Evict oldest entry to stay within cap.
                         if let Some(oldest) = favicon_order.pop_front() {
-                            favicon_cache.remove(&oldest);
+                            fc.remove(&oldest);
                         }
                     }
-                    favicon_cache.insert(domain.clone(), data_uri.clone());
+                    fc.insert(domain.clone(), data_uri.clone());
                     if is_new {
                         favicon_order.push_back(domain.clone());
                     }
-                    config::save_favicons(&favicon_cache);
+                    favicon_save_at.get_or_insert(
+                        std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    );
                 }
+                drop(fc);
                 // Push to address bar ONLY if this domain matches the active tab's domain
                 let active_url = tabs.lock().unwrap().tabs().iter()
                     .find(|t| t.id == active_wv_id)
@@ -6282,18 +6325,19 @@ fn main() {
 
             // ── Favicon cache loaded from disk (background thread) ──────────────
             Event::UserEvent(AppEvent::FaviconCacheLoaded(cache)) => {
+                let mut fc = favicon_cache.lock().unwrap();
                 for (domain, data) in cache {
-                    favicon_cache.entry(domain.clone()).or_insert_with(|| {
+                    fc.entry(domain.clone()).or_insert_with(|| {
                         favicon_order.push_back(domain);
                         data
                     });
                 }
                 while favicon_order.len() > FAVICON_CAP {
                     if let Some(oldest) = favicon_order.pop_front() {
-                        favicon_cache.remove(&oldest);
+                        fc.remove(&oldest);
                     }
                 }
-                tracing::debug!(count = favicon_cache.len(), "favicon cache loaded from disk");
+                tracing::debug!(count = fc.len(), "favicon cache loaded from disk");
             }
 
             // ── Media playing state changed ───────────────────────────────────
@@ -6499,23 +6543,39 @@ fn capture_tab_snapshot(
             if image.is_null() {
                 return;
             }
-            unsafe {
-                let png_data = nsimage_to_png_data(image);
-                if png_data.is_null() {
-                    return;
-                }
-                // Use NSData's built-in base64 encoder (no extra crate needed).
-                let b64_nsstr: *mut objc2::runtime::AnyObject =
-                    objc2::msg_send![&*png_data, base64EncodedStringWithOptions: 0u64];
-                if b64_nsstr.is_null() {
-                    return;
-                }
-                let utf8: *const u8 = objc2::msg_send![&*b64_nsstr, UTF8String];
-                let cstr = std::ffi::CStr::from_ptr(utf8 as *const std::ffi::c_char);
-                let b64 = cstr.to_string_lossy();
-                let data_uri = format!("data:image/png;base64,{b64}");
-                let _ = proxy.send_event(AppEvent::SnapshotCaptured(tab_id, data_uri));
-            }
+            // WebKit delivers this handler on the main queue; PNG-encoding a
+            // window-sized image there stalls every tab switch. Retain the
+            // NSImage (nothing else references it) and encode on a background
+            // thread instead. Raw usize smuggles the non-Send pointer across.
+            let Some(img) = (unsafe { objc2::rc::Retained::retain(image) }) else {
+                return;
+            };
+            let img_ptr = objc2::rc::Retained::into_raw(img) as usize;
+            let proxy = proxy.clone();
+            std::thread::spawn(move || {
+                let image = img_ptr as *mut objc2::runtime::AnyObject;
+                // Reclaim ownership — dropping at thread end releases the image.
+                let _owned = unsafe { objc2::rc::Retained::from_raw(image) };
+                // Non-main threads have no autorelease pool; the encode path
+                // returns autoreleased objects.
+                objc2::rc::autoreleasepool(|_| unsafe {
+                    let png_data = nsimage_to_png_data(image);
+                    if png_data.is_null() {
+                        return;
+                    }
+                    // Use NSData's built-in base64 encoder (no extra crate needed).
+                    let b64_nsstr: *mut objc2::runtime::AnyObject =
+                        objc2::msg_send![&*png_data, base64EncodedStringWithOptions: 0u64];
+                    if b64_nsstr.is_null() {
+                        return;
+                    }
+                    let utf8: *const u8 = objc2::msg_send![&*b64_nsstr, UTF8String];
+                    let cstr = std::ffi::CStr::from_ptr(utf8 as *const std::ffi::c_char);
+                    let b64 = cstr.to_string_lossy();
+                    let data_uri = format!("data:image/png;base64,{b64}");
+                    let _ = proxy.send_event(AppEvent::SnapshotCaptured(tab_id, data_uri));
+                });
+            });
         },
     );
 
@@ -7167,7 +7227,7 @@ fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize)
 #[allow(clippy::too_many_arguments)]
 fn save_and_exit(
     tabs: &Arc<Mutex<browser::TabManager>>,
-    favicon_cache: &std::collections::HashMap<String, String>,
+    favicon_cache: &Arc<Mutex<std::collections::HashMap<String, String>>>,
     prompt_history: &[String],
     ai_prompt_history: &[String],
     acp_sessions: &[AcpSession],
@@ -7192,7 +7252,7 @@ fn save_and_exit(
         .to_string();
     tm.ensure_contiguous();
     config::save_session(&session_tabs, &active_url);
-    config::save_favicons(favicon_cache);
+    config::save_favicons(&favicon_cache.lock().unwrap());
     config::save_history(tm.history());
     config::save_prompt_history(prompt_history);
     config::save_ai_prompt_history(ai_prompt_history);
