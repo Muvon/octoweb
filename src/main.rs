@@ -799,6 +799,10 @@ fn main() {
     // When pending_swap was set — drives the watchdog in the tick loop that
     // force-completes a swap whose completion events never arrive.
     let mut pending_swap_at: Option<std::time::Instant> = None;
+    // Next run of the visibility reconciler — the 1s self-healing sweep that
+    // re-asserts "the active tab's webview is the one on screen" whenever no
+    // swap is in flight.
+    let mut visibility_reconcile_next_at = std::time::Instant::now();
     const PENDING_SWAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
@@ -2230,6 +2234,42 @@ fn main() {
         }};
     }
 
+    /// Reality-based visibility commit: make `target` the ONE visible tab WebView.
+    ///
+    /// Every deferred-swap completion path used to hide only the bookkept
+    /// old_id — if bookkeeping had drifted from what was actually on screen,
+    /// the target stayed hidden behind a stale view and the session was
+    /// poisoned until restart (clicks misclassified as background opens,
+    /// palette navigations landing invisibly). Hiding all non-target tab
+    /// webviews is idempotent and immune to that drift.
+    macro_rules! commit_tab_visibility {
+        ($target:expr) => {{
+            let target = $target;
+            for (&tid, wv) in &tab_webviews {
+                if tid != target {
+                    let _ = wv.set_visible(false);
+                }
+            }
+            if let Some(wv) = tab_webviews.get(&target) {
+                // Re-pin bounds on every show — a tab created for a previous
+                // window size keeps stale bounds otherwise.
+                let sz = browser_win.inner_size();
+                let _ = wv.set_bounds(wry::Rect {
+                    position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                    size: tao::dpi::PhysicalSize::new(
+                        sz.width,
+                        sz.height.saturating_sub(address_bar_h + footer_h),
+                    )
+                    .into(),
+                });
+                let _ = wv.set_visible(true);
+            }
+            active_wv_id = target;
+            pending_swap = None;
+            pending_swap_at = None;
+        }};
+    }
+
     /// Switch visibility from the current active tab to `target`, handling pending_swap.
     /// Also handles lazy loading: creates WebView on first access if tab was pending.
     macro_rules! switch_visible_tab {
@@ -2246,43 +2286,13 @@ fn main() {
             // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
             ensure_webview!(target);
             tabs.lock().unwrap().switch(target);
-            pending_swap_at = None;
-            if let Some((old_id, new_id)) = pending_swap.take() {
-                if let Some(wv) = tab_webviews.get(&old_id) {
-                    let _ = wv.set_visible(false);
-                }
-                if new_id != target {
-                    if let Some(wv) = tab_webviews.get(&new_id) {
-                        let _ = wv.set_visible(false);
-                    }
-                }
-            } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
-                let _ = wv.set_visible(false);
-            }
-            if let Some(wv) = tab_webviews.get(&target) {
-                // Re-apply bounds on every show: a tab created/sized for a
-                // previous window size keeps stale bounds, which would leave a
-                // gap above — or let the footer paint over — the page. Pin it
-                // to the content area [address bar .. footer] so the quick-slots
-                // bar never covers the viewport.
-                let sz = browser_win.inner_size();
-                let _ = wv.set_bounds(wry::Rect {
-                    position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
-                    size: tao::dpi::PhysicalSize::new(
-                        sz.width,
-                        sz.height.saturating_sub(address_bar_h + footer_h),
-                    )
-                    .into(),
-                });
-                let _ = wv.set_visible(true);
-            }
+            commit_tab_visibility!(target);
             // Hide progress bar when switching away from a loading tab
             if progress_visible {
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
             }
-            active_wv_id = target;
             // Update address bar with the new tab's URL
             let url = tabs
                 .lock()
@@ -2450,14 +2460,7 @@ fn main() {
             if std::time::Instant::now() >= swap_at + PENDING_SWAP_TIMEOUT {
                 if let Some((old_id, new_id)) = pending_swap.take() {
                     tracing::warn!(old_id, new_id, "pending_swap watchdog fired — forcing swap");
-                    if let Some(wv) = tab_webviews.get(&new_id) {
-                        let _ = wv.set_visible(true);
-                    }
-                    if old_id != new_id {
-                        if let Some(wv) = tab_webviews.get(&old_id) {
-                            let _ = wv.set_visible(false);
-                        }
-                    }
+                    commit_tab_visibility!(new_id);
                 }
                 if progress_visible {
                     let _ = progress_wv.set_visible(false);
@@ -2467,6 +2470,25 @@ fn main() {
                 pending_swap_at = None;
             }
         }
+        // ── Visibility reconciler ────────────────────────────────────────
+        // Companion to the watchdog: any swap-completion interleaving we did
+        // not enumerate must cost the user at most a second, not the session.
+        // When no swap is in flight and the active tab has a live webview,
+        // enforce the single-visible-tab invariant. AppKit setHidden: is a
+        // no-op when the state already matches, so steady state is free.
+        {
+            let now = std::time::Instant::now();
+            if pending_swap.is_none()
+                && now >= visibility_reconcile_next_at
+                && tab_webviews.contains_key(&active_wv_id)
+            {
+                visibility_reconcile_next_at = now + std::time::Duration::from_secs(1);
+                for (&tid, wv) in &tab_webviews {
+                    let _ = wv.set_visible(tid == active_wv_id);
+                }
+            }
+        }
+
         // ── Sample active tab's WebContent process stats ─────────────────
         // Store in atomics for custom protocol polling (avoids evaluate_script leak).
         // JS polls via fetch('octoweb-sys://stats') — no WKWebView JS context leak.
@@ -2678,6 +2700,7 @@ fn main() {
                             .iter()
                             .filter(|t| {
                                 t.id != active_wv_id
+                                    && t.id != visible_tab_id(active_wv_id, pending_swap)
                                     && !t.is_playing_audio
                                     && !media_playing_tabs.contains(&t.id)
                             })
@@ -4719,7 +4742,10 @@ fn main() {
                     // Cancel any pending swap involving this tab
                     if let Some((old_id, new_id)) = pending_swap.take() {
                         if id == new_id {
-                            // Closing the loading tab — old tab is still visible, keep it
+                            // Closing the loading tab — old tab is still visible, keep
+                            // it AND make it selected again: leaving active_wv_id on
+                            // the closed tab poisons every later foreground check.
+                            active_wv_id = old_id;
                             pending_swap_at = None;
                         } else if id == old_id {
                             // Closing the old visible tab — show the new one
@@ -5798,18 +5824,9 @@ fn main() {
                 tab_nav::bump_hard(tab_id);
                 // Deferred swap: first bytes received (didCommitNavigation) — page is rendering,
                 // safe to show it now and hide the old tab.
-                if let Some((old_id, new_id)) = pending_swap {
+                if let Some((_, new_id)) = pending_swap {
                     if tab_id == new_id {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(true);
-                        }
-                        if old_id != new_id {
-                            if let Some(wv) = tab_webviews.get(&old_id) {
-                                let _ = wv.set_visible(false);
-                            }
-                        }
-                        pending_swap = None;
-                        pending_swap_at = None;
+                        commit_tab_visibility!(new_id);
                         // The page just became visible after a keyboard-driven
                         // navigation (palette / address bar). The palette was the
                         // key window; now that it's gone, hand keyboard
@@ -5924,18 +5941,9 @@ fn main() {
                 // deferred swap — visibility only, no error page, since the load
                 // wasn't a real failure.
                 if matches!(error.trim().parse::<i64>().ok(), Some(-999 | 204 | 102)) {
-                    if let Some((old_id, new_id)) = pending_swap {
+                    if let Some((_, new_id)) = pending_swap {
                         if tab_id == new_id {
-                            if let Some(wv) = tab_webviews.get(&new_id) {
-                                let _ = wv.set_visible(true);
-                            }
-                            if old_id != new_id {
-                                if let Some(wv) = tab_webviews.get(&old_id) {
-                                    let _ = wv.set_visible(false);
-                                }
-                            }
-                            pending_swap = None;
-                            pending_swap_at = None;
+                            commit_tab_visibility!(new_id);
                             tracing::warn!(tab_id, %url, %error, "noise nav failure on loading tab — completed deferred swap");
                         }
                     }
@@ -5960,18 +5968,9 @@ fn main() {
                 deferred_nav.remove(&tab_id);
                 restoring_tabs.remove(&tab_id);
                 // Complete deferred swap so the error page is visible
-                if let Some((old_id, new_id)) = pending_swap {
+                if let Some((_, new_id)) = pending_swap {
                     if tab_id == new_id {
-                        if let Some(wv) = tab_webviews.get(&new_id) {
-                            let _ = wv.set_visible(true);
-                        }
-                        if old_id != new_id {
-                            if let Some(wv) = tab_webviews.get(&old_id) {
-                                let _ = wv.set_visible(false);
-                            }
-                        }
-                        pending_swap = None;
-                        pending_swap_at = None;
+                        commit_tab_visibility!(new_id);
                     }
                 }
             }
