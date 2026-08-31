@@ -9,55 +9,15 @@ pub fn html() -> String {
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-    #spinner.active { animation: spin 1.5s linear infinite !important; }
-  }
-
-  :root {
-    --bg: rgba(244, 244, 244, 0.82);
-    --border: rgba(0, 0, 0, 0.08);
-    --text: rgba(0, 0, 0, 0.82);
-    --placeholder: rgba(0, 0, 0, 0.32);
-    --btn-hover: rgba(0, 0, 0, 0.06);
-    --btn-active: rgba(0, 0, 0, 0.10);
-    --icon: rgba(0, 0, 0, 0.50);
-    --sep: rgba(0, 0, 0, 0.08);
-    --shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08),
-              0 6px 18px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(0, 0, 0, 0.05),
-              inset 0 1px 0 rgba(255, 255, 255, 0.55);
-    --spinner: rgba(0, 0, 0, 0.35);
-    --error: rgba(255, 59, 48, 0.8);
-    --ghost: rgba(0, 0, 0, 0.22);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: rgba(44, 44, 46, 0.82);
-      --border: rgba(255, 255, 255, 0.08);
-      --text: rgba(255, 255, 255, 0.82);
-      --placeholder: rgba(255, 255, 255, 0.28);
-      --btn-hover: rgba(255, 255, 255, 0.08);
-      --btn-active: rgba(255, 255, 255, 0.14);
-      --icon: rgba(255, 255, 255, 0.50);
-      --sep: rgba(255, 255, 255, 0.08);
-      --shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.10),
-                0 6px 18px rgba(0, 0, 0, 0.32), 0 1px 4px rgba(0, 0, 0, 0.2),
-                inset 0 1px 0 rgba(255, 255, 255, 0.07);
-      --spinner: rgba(255, 255, 255, 0.35);
-      --error: rgba(255, 69, 58, 0.85);
-      --ghost: rgba(255, 255, 255, 0.18);
-    }
-  }
 
   html, body {
     width: 100%; height: 100%;
     background: transparent;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-family: var(--font-text);
     -webkit-user-select: none; user-select: none;
   }
 
@@ -71,18 +31,25 @@ pub fn html() -> String {
     gap: 1px;
     min-height: 30px;
     padding: 4px 3px 4px 10px;
-    background: var(--bg);
-    backdrop-filter: saturate(180%) blur(20px);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    border-radius: 14px;
-    box-shadow: var(--shadow);
+    border-radius: var(--r-card);
+    animation: editIn var(--t-pop) var(--spring);
+  }
+
+  @keyframes editIn {
+    from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+    to { opacity: 1; transform: none; }
   }
 
   #ghost-wrap {
     position: relative;
     flex: 1;
     min-height: 22px;
+    background: var(--fill);
+    border-radius: var(--r-capsule);
+    transition: background var(--t-fast) var(--ease);
   }
+  #ghost-wrap:hover { background: var(--fill-hover); }
+  #ghost-wrap:focus-within { background: var(--fill-press); }
 
   #input {
     width: 100%;
@@ -91,18 +58,19 @@ pub fn html() -> String {
     border: none;
     outline: none;
     background: transparent;
+    border-radius: var(--r-capsule);
     font-size: 12.5px;
     line-height: 18px;
     letter-spacing: -0.01em;
-    color: var(--text);
+    color: var(--label);
     font-family: inherit;
     resize: none;
     overflow-y: auto;
-    padding: 2px 0;
+    padding: 2px 8px;
     position: relative;
     z-index: 1;
   }
-  #input::placeholder { color: var(--placeholder); }
+  #input::placeholder { color: var(--label-3); }
   #input:disabled { opacity: 0.5; }
 
   #ghost {
@@ -113,9 +81,9 @@ pub fn html() -> String {
     line-height: 18px;
     letter-spacing: -0.01em;
     font-family: inherit;
-    color: var(--ghost);
+    color: var(--label-3);
     pointer-events: none;
-    padding: 2px 0;
+    padding: 2px 8px;
     white-space: pre-wrap;
     word-wrap: break-word;
     overflow: hidden;
@@ -133,7 +101,7 @@ pub fn html() -> String {
   .sep {
     width: 0.5px;
     height: 16px;
-    background: var(--sep);
+    background: var(--hairline);
     margin: 0 2px;
     flex-shrink: 0;
   }
@@ -143,7 +111,7 @@ pub fn html() -> String {
     width: 14px;
     height: 14px;
     border: 1.5px solid transparent;
-    border-top-color: var(--spinner);
+    border-top-color: var(--label-2);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
     flex-shrink: 0;
@@ -156,7 +124,7 @@ pub fn html() -> String {
   #error-msg {
     display: none;
     font-size: 11px;
-    color: var(--error);
+    color: var(--err);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -168,17 +136,20 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px; height: 24px;
+    min-width: 24px; height: 24px;
     border: none;
-    background: transparent;
-    border-radius: 6px;
+    background: var(--fill);
+    border-radius: var(--r-capsule);
     cursor: pointer;
-    color: var(--icon);
-    padding: 0;
-    transition: background 0.1s;
+    color: var(--label-2);
+    padding: 0 5px;
+    gap: 3px;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
-  button:hover { background: var(--btn-hover); }
-  button:active { background: var(--btn-active); }
+  button:hover { background: var(--fill-hover); color: var(--label); }
+  button:active { background: var(--fill-press); transform: scale(0.96); }
+
+  .submit-hint { margin: 0 2px; flex-shrink: 0; }
 
   button svg {
     width: 9px; height: 9px;
@@ -191,7 +162,7 @@ pub fn html() -> String {
 </style>
 </head>
 <body>
-<div id="bar">
+<div id="bar" class="glass-panel">
   <div id="ghost-wrap">
     <textarea id="input" rows="1" placeholder="How should I edit this?" autocomplete="off" spellcheck="false"></textarea>
     <div id="ghost" aria-hidden="true"></div>
@@ -199,12 +170,14 @@ pub fn html() -> String {
   <div class="controls">
     <div id="spinner"></div>
     <span id="error-msg"></span>
+    <span class="submit-hint kbd" title="Submit">⏎</span>
     <div class="sep"></div>
     <button id="hide" title="Hide (keep processing)" style="display:none">
       <svg viewBox="0 0 10 10"><polyline points="1,4 5,8 9,4"/></svg>
     </button>
     <button id="close" title="Cancel (Esc)">
       <svg viewBox="0 0 10 10"><line x1="2" y1="2" x2="8" y2="8"/><line x1="8" y1="2" x2="2" y2="8"/></svg>
+      <span class="kbd">esc</span>
     </button>
   </div>
 </div>
@@ -302,5 +275,6 @@ pub fn html() -> String {
 })();
 </script>
 </body>
-</html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
+</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
 }

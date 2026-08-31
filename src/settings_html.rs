@@ -1,100 +1,49 @@
 /// Returns the HTML for the settings modal (⌘,).
 /// Frosted-glass panel with form controls for all Config fields.
 /// IPC messages: settings_close, settings_update.
-pub fn html() -> &'static str {
+pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
 
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
     background: transparent;
     -webkit-font-smoothing: antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  }
-
-  :root {
-    --backdrop:    rgba(0, 0, 0, 0.25);
-    --panel-bg:    rgba(246, 246, 246, 0.92);
-    --panel-border: rgba(0, 0, 0, 0.08);
-    --section-bg:  rgba(255, 255, 255, 0.55);
-    --heading:     rgba(0, 0, 0, 0.82);
-    --text:        rgba(0, 0, 0, 0.72);
-    --text-dim:    rgba(0, 0, 0, 0.36);
-    --input-bg:    rgba(255, 255, 255, 0.75);
-    --input-border: rgba(0, 0, 0, 0.10);
-    --divider:     rgba(0, 0, 0, 0.06);
-    --close-hover: rgba(0, 0, 0, 0.06);
-    --toggle-off:  rgba(0, 0, 0, 0.14);
-    --toggle-on:   #007aff;
-    --toggle-knob: #fff;
-    --accent:      #007aff;
-    --focus-ring:  rgba(0, 122, 255, 0.18);
-    --focus-border: rgba(0, 122, 255, 0.6);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --backdrop:    rgba(0, 0, 0, 0.45);
-      --panel-bg:    rgba(40, 40, 40, 0.92);
-      --panel-border: rgba(255, 255, 255, 0.08);
-      --section-bg:  rgba(255, 255, 255, 0.04);
-      --heading:     rgba(255, 255, 255, 0.88);
-      --text:        rgba(255, 255, 255, 0.72);
-      --text-dim:    rgba(255, 255, 255, 0.30);
-      --input-bg:    rgba(255, 255, 255, 0.06);
-      --input-border: rgba(255, 255, 255, 0.10);
-      --divider:     rgba(255, 255, 255, 0.06);
-      --close-hover: rgba(255, 255, 255, 0.08);
-      --toggle-off:  rgba(255, 255, 255, 0.18);
-      --toggle-on:   #0a84ff;
-      --toggle-knob: #fff;
-      --accent:      #0a84ff;
-      --focus-ring:  rgba(10, 132, 255, 0.22);
-      --focus-border: rgba(10, 132, 255, 0.65);
-    }
+    font-family: var(--font-text);
+    color: var(--label);
   }
 
   #backdrop {
     position: fixed; inset: 0;
-    background: var(--backdrop);
+    background: color-mix(in srgb, var(--label) 18%, transparent);
     display: flex;
     align-items: center;
     justify-content: center;
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
-    animation: fadeIn 0.12s ease;
+    animation: fadeIn var(--t-fast) var(--ease);
   }
 
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes scaleIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
 
   #panel {
-    background: var(--panel-bg);
-    border-radius: 16px;
-    box-shadow: 0 0 0 0.5px var(--panel-border),
-                0 24px 80px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08),
-                inset 0 1px 0 rgba(255,255,255,0.5);
+    background: var(--glass-thick);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    border-radius: var(--r-panel);
+    box-shadow: var(--shadow-float), var(--glass-shine);
     padding: 16px 20px;
     width: 420px;
     max-height: 80vh;
     overflow-y: auto;
-    animation: scaleIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  @media (prefers-color-scheme: dark) {
-    #panel {
-      box-shadow: 0 0 0 0.5px var(--panel-border),
-                  0 24px 80px rgba(0,0,0,0.4), 0 2px 12px rgba(0,0,0,0.2),
-                  inset 0 1px 0 rgba(255,255,255,0.07);
-    }
+    animation: scaleIn var(--t-pop) var(--spring);
   }
 
   #header {
@@ -105,9 +54,10 @@ pub fn html() -> &'static str {
   }
 
   #title {
-    font-size: 13px;
+    font-family: var(--font-display);
+    font-size: 15px;
     font-weight: 600;
-    color: var(--heading);
+    color: var(--label);
     letter-spacing: -0.01em;
   }
 
@@ -116,36 +66,49 @@ pub fn html() -> &'static str {
     align-items: center;
     justify-content: center;
     width: 22px; height: 22px;
-    border-radius: 5px;
+    border-radius: var(--r-capsule);
     border: none;
     background: transparent;
     cursor: pointer;
-    color: var(--text-dim);
-    transition: background 0.1s, color 0.1s;
+    color: var(--label-3);
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
   }
-  #close-btn:hover { background: var(--close-hover); color: var(--heading); }
+  #close-btn:hover { background: var(--fill-hover); color: var(--label); }
+  #close-btn:active { background: var(--fill-press); transform: scale(0.9); }
+
+  #dismiss-hint {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    margin-right: 8px;
+    color: var(--label-3);
+    font-size: 10px;
+  }
 
   .section {
-    background: var(--section-bg);
-    box-shadow: 0 0 0 0.5px var(--divider);
-    border-radius: 10px;
+    background: var(--fill);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-card);
     overflow: hidden;
     margin-bottom: 10px;
   }
 
   .section-title {
-    font-size: 11px;
+    font-family: var(--font-display);
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-dim);
+    color: var(--label-2);
     padding: 10px 12px 6px;
   }
 
   code {
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 10.5px;
-    background: var(--input-bg);
-    border: 0.5px solid var(--input-border);
-    border-radius: 3px;
+    background: var(--fill-hover);
+    border: 0.5px solid var(--hairline);
+    border-radius: var(--r-ctl);
     padding: 0 4px;
   }
 
@@ -159,12 +122,12 @@ pub fn html() -> &'static str {
   }
 
   .row + .row {
-    border-top: 0.5px solid var(--divider);
+    box-shadow: 0 0.5px 0 var(--hairline) inset;
   }
 
   .row-label {
     font-size: 12px;
-    color: var(--text);
+    color: var(--label);
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -175,7 +138,7 @@ pub fn html() -> &'static str {
   .row.with-hint .row-label { white-space: normal; }
   .row-hint {
     font-size: 11px;
-    color: var(--text-dim);
+    color: var(--label-2);
     line-height: 1.35;
     max-width: 240px;
   }
@@ -188,52 +151,69 @@ pub fn html() -> &'static str {
     padding: 0 8px;
     font-size: 12px;
     font-family: inherit;
-    color: var(--text);
-    background: var(--input-bg);
+    color: var(--label);
+    background: var(--fill);
     border: none;
-    border-radius: 7px;
-    box-shadow: 0 0 0 0.5px var(--input-border);
+    border-radius: var(--r-ctl);
+    box-shadow: 0 0 0 0.5px var(--hairline);
     outline: none;
     text-align: right;
-    transition: box-shadow 0.12s ease;
+    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
+  .row input[type="text"]:hover,
+  .row input[type="number"]:hover { background: var(--fill-hover); }
   .row input[type="text"]:focus,
   .row input[type="number"]:focus {
-    box-shadow: 0 0 0 0.5px var(--focus-border), 0 0 0 2.5px var(--focus-ring);
+    background: var(--fill-hover);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .row input[type="number"] { width: 70px; flex: none; }
 
   .row select {
     flex: none;
     max-width: 170px;
+    min-height: 24px;
+    padding: 2px 24px 2px 8px;
     font-size: 12px;
     font-family: inherit;
-    color: var(--text);
+    color: var(--label);
+    background-color: var(--fill);
+    border: none;
+    border-radius: var(--r-ctl);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    outline: none;
     accent-color: var(--accent);
+    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
+  .row select:hover { background-color: var(--fill-hover); }
+  .row select:active { background-color: var(--fill-press); }
+  .row select:focus { box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 
   /* Toggle switch */
   .toggle {
     position: relative;
-    width: 34px; height: 20px;
-    background: var(--toggle-off);
-    border-radius: 10px;
+    width: 36px; height: 22px;
+    background: var(--fill-press);
+    border-radius: var(--r-capsule);
     cursor: pointer;
-    transition: background 0.2s;
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--spring);
     flex-shrink: 0;
     border: none;
     padding: 0;
   }
-  .toggle.on { background: var(--toggle-on); }
+  .toggle:hover { background: var(--fill-hover); }
+  .toggle:active { background: var(--fill-press); transform: scale(0.94); }
+  .toggle.on { background: var(--accent); }
+  .toggle.on:hover { background: color-mix(in srgb, var(--accent) 88%, var(--label)); }
   .toggle::after {
     content: '';
     position: absolute;
     top: 2px; left: 2px;
-    width: 16px; height: 16px;
-    background: var(--toggle-knob);
+    width: 18px; height: 18px;
+    background: var(--on-accent);
     border-radius: 50%;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.15);
-    transition: transform 0.2s;
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--label) 18%, transparent);
+    transition: transform var(--t-fast) var(--spring);
   }
   .toggle.on::after { transform: translateX(14px); }
 
@@ -242,9 +222,9 @@ pub fn html() -> &'static str {
     display: flex;
     gap: 3px;
     margin-bottom: 14px;
-    background: var(--section-bg);
-    box-shadow: inset 0 0 0 0.5px var(--divider);
-    border-radius: 10px;
+    background: var(--fill);
+    box-shadow: inset 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-capsule);
     padding: 3px;
   }
   .tab {
@@ -252,37 +232,31 @@ pub fn html() -> &'static str {
     text-align: center;
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-dim);
+    color: var(--label-2);
     padding: 5px 8px;
     border: none;
-    border-radius: 8px;
+    min-height: 26px;
+    border-radius: var(--r-capsule);
     background: transparent;
     cursor: pointer;
-    transition: background 0.12s, color 0.12s;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
   }
+  .tab:hover { background: var(--fill-hover); color: var(--label); }
+  .tab:active { background: var(--fill-press); transform: scale(0.98); }
   .tab.active {
-    background: var(--input-bg);
-    color: var(--heading);
-    box-shadow: 0 0 0 0.5px var(--divider), 0 1px 3px rgba(0, 0, 0, 0.08);
+    background: var(--glass-thin);
+    color: var(--label);
+    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
   }
   .tab-pane { display: none; }
   .tab-pane.active { display: block; }
 
   /* Keybindings */
   .keys { display: inline-flex; align-items: center; gap: 2px; }
-  kbd {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 16px; height: 16px;
-    padding: 0 3px;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--text);
-    background: var(--input-bg);
-    border: 0.5px solid var(--input-border);
-    border-radius: 4px;
+  kbd.kbd {
+    min-width: 17px;
+    min-height: 17px;
     white-space: nowrap;
     user-select: none;
   }
@@ -292,58 +266,66 @@ pub fn html() -> &'static str {
     align-items: center;
     min-height: 22px;
     padding: 2px 6px;
-    background: transparent;
-    border: 0.5px solid var(--input-border);
-    border-radius: 6px;
+    background: var(--fill);
+    border: none;
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-ctl);
     cursor: pointer;
-    transition: border-color 0.12s, box-shadow 0.12s;
+    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
   }
-  .kb-bind:hover { border-color: var(--focus-border); }
+  .kb-bind:hover { background: var(--fill-hover); }
+  .kb-bind:active { background: var(--fill-press); transform: scale(0.98); }
   .kb-bind.recording {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--focus-ring);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
-  .rec-hint { font-size: 11px; color: var(--toggle-on); }
+  .rec-hint { font-size: 11px; color: var(--accent); }
   .kb-reset {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 20px; height: 20px;
+    width: 22px; height: 22px;
     border: none;
     background: transparent;
-    color: var(--text-dim);
+    color: var(--label-3);
     cursor: pointer;
-    border-radius: 5px;
+    border-radius: var(--r-capsule);
     font-size: 13px;
     line-height: 1;
   }
-  .kb-reset:hover { background: var(--close-hover); color: var(--heading); }
+  .kb-reset:hover { background: var(--fill-hover); color: var(--label); }
+  .kb-reset:active { background: var(--fill-press); transform: scale(0.9); }
   .kb-error {
     display: none;
     font-size: 11px;
-    color: #e5484d;
+    color: var(--err);
     padding: 8px 2px 0;
   }
   .kb-error.show { display: block; }
   .kb-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; }
-  .kb-note { font-size: 11px; color: var(--text-dim); }
+  .kb-note { font-size: 11px; color: var(--label-2); }
   .kb-reset-all {
+    min-height: 24px;
     font-size: 11px;
-    color: var(--text-dim);
-    background: transparent;
-    border: 0.5px solid var(--input-border);
-    border-radius: 6px;
+    font-weight: 600;
+    color: var(--on-accent);
+    background: var(--accent);
+    border: none;
+    border-radius: var(--r-capsule);
     padding: 4px 10px;
     cursor: pointer;
+    transition: filter var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
-  .kb-reset-all:hover { color: var(--heading); border-color: var(--text-dim); }
+  .kb-reset-all:hover { filter: brightness(1.08); }
+  .kb-reset-all:active { filter: brightness(0.92); transform: scale(0.96); }
 </style>
 </head>
 <body>
 <div id="backdrop">
-  <div id="panel">
+  <div id="panel" class="glass-panel">
     <div id="header">
       <span id="title">Settings</span>
+      <span id="dismiss-hint"><span class="kbd">esc</span> close</span>
       <button id="close-btn" title="Close">
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
@@ -612,7 +594,7 @@ pub fn html() -> &'static str {
   }
 
   function kbRow(a) {
-    var keys = a.keys.map(function(k) { return '<kbd>' + esc(k) + '</kbd>'; }).join('');
+    var keys = a.keys.map(function(k) { return '<kbd class="kbd">' + esc(k) + '</kbd>'; }).join('');
     var reset = a.is_default ? '' :
       '<button class="kb-reset" data-reset="' + esc(a.id) + '" title="Reset to default">↺</button>';
     return '<div class="row">' +
@@ -697,4 +679,5 @@ pub fn html() -> &'static str {
 </script>
 </body>
 </html>"#
+    .replace("/*@@THEME@@*/", crate::theme::CSS)
 }

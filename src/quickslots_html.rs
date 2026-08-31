@@ -16,56 +16,15 @@ pub fn html() -> String {
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
 
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
     background: transparent;
     -webkit-font-smoothing: antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  }
-
-  :root {
-    --bar-bg: rgba(255, 255, 255, 0.72);
-    --bar-border: rgba(0, 0, 0, 0.06);
-    --pill-bg: rgba(255, 255, 255, 0.60);
-    --pill-hover: rgba(255, 255, 255, 0.90);
-    --pill-border: rgba(0, 0, 0, 0.06);
-    --text: rgba(0, 0, 0, 0.70);
-    --text-dim: rgba(0, 0, 0, 0.35);
-    --badge-bg: rgba(0, 0, 0, 0.06);
-    --badge-text: rgba(0, 0, 0, 0.40);
-    --close-bg: rgba(0, 0, 0, 0.08);
-    --close-hover: rgba(255, 59, 48, 0.15);
-    --close-color: rgba(0, 0, 0, 0.35);
-    --close-hover-color: #ff3b30;
-    --empty-bg: rgba(0, 0, 0, 0.03);
-    --empty-border: rgba(0, 0, 0, 0.04);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bar-bg: rgba(40, 40, 44, 0.72);
-      --bar-border: rgba(255, 255, 255, 0.06);
-      --pill-bg: rgba(255, 255, 255, 0.07);
-      --pill-hover: rgba(255, 255, 255, 0.14);
-      --pill-border: rgba(255, 255, 255, 0.06);
-      --text: rgba(255, 255, 255, 0.75);
-      --text-dim: rgba(255, 255, 255, 0.30);
-      --badge-bg: rgba(255, 255, 255, 0.08);
-      --badge-text: rgba(255, 255, 255, 0.40);
-      --close-bg: rgba(255, 255, 255, 0.08);
-      --close-hover: rgba(255, 69, 58, 0.20);
-      --close-color: rgba(255, 255, 255, 0.35);
-      --close-hover-color: #ff453a;
-      --empty-bg: rgba(255, 255, 255, 0.03);
-      --empty-border: rgba(255, 255, 255, 0.04);
-    }
+    font-family: var(--font-text);
   }
 
   #bar {
@@ -77,10 +36,11 @@ pub fn html() -> String {
     justify-content: center;
     gap: 4px;
     padding: 0 8px;
-    background: var(--bar-bg);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border-top: 0.5px solid var(--bar-border);
+    background: var(--glass);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border-top: 0.5px solid var(--hairline);
+    box-shadow: var(--glass-shine);
     /* Round bottom corners to match macOS window corner radius (16pt logical).
        Prevents the glass background from painting outside the window frame. */
     border-radius: 0 0 16px 16px;
@@ -93,12 +53,12 @@ pub fn html() -> String {
     gap: 5px;
     height: 24px;
     padding: 0 8px 0 6px;
-    border-radius: 12px;
-    background: var(--pill-bg);
-    box-shadow: 0 0 0 0.5px var(--pill-border), 0 1px 3px rgba(0, 0, 0, 0.04);
+    border-radius: var(--r-capsule);
+    background: var(--fill);
+    box-shadow: 0 0 0 0.5px var(--hairline);
     cursor: pointer;
-    transition: background 0.12s ease, box-shadow 0.15s ease,
-                transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
     max-width: 140px;
     flex-shrink: 1;
     min-width: 0;
@@ -107,39 +67,41 @@ pub fn html() -> String {
   }
 
   .slot:hover {
-    background: var(--pill-hover);
-    box-shadow: 0 0 0 0.5px var(--pill-border), 0 2px 8px rgba(0, 0, 0, 0.08);
+    background: var(--fill-hover);
   }
-  .slot:active { transform: scale(0.97); transition-duration: 0.06s; }
+  .slot:active,
+  .slot.current {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .slot:active { transform: scale(0.97); }
 
   .slot.empty {
-    background: var(--empty-bg);
+    background: transparent;
     box-shadow: none;
-    border: 1px dashed var(--empty-border);
+    border: 1px dashed var(--hairline);
     cursor: pointer;
-    transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.15s ease,
-                transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
   }
 
   .slot.empty:hover {
-    background: var(--pill-hover);
+    background: var(--fill-hover);
     border-color: transparent;
-    box-shadow: 0 0 0 0.5px var(--pill-border), 0 2px 8px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 0 0 0.5px var(--hairline);
   }
 
   .slot.empty:active { transform: scale(0.97); }
 
   .slot .badge {
     flex-shrink: 0;
-    width: 15px; height: 15px;
-    border-radius: 5px;
-    background: var(--badge-bg);
+    width: 17px; height: 17px;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
     font-size: 9px;
     font-weight: 600;
-    color: var(--badge-text);
+    color: var(--label-2);
     font-variant-numeric: tabular-nums;
   }
 
@@ -153,7 +115,7 @@ pub fn html() -> String {
   .slot .label {
     font-size: 11px;
     font-weight: 450;
-    color: var(--text);
+    color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -162,7 +124,7 @@ pub fn html() -> String {
   }
 
   .slot.empty .label {
-    color: var(--text-dim);
+    color: var(--label-3);
     font-weight: 400;
   }
 
@@ -173,18 +135,18 @@ pub fn html() -> String {
     justify-content: center;
     width: 10px; height: 10px;
     opacity: 0.35;
-    transition: opacity 0.12s ease;
-    color: var(--text-dim);
+    transition: opacity var(--t-fast) var(--ease);
+    color: var(--label-3);
   }
   .slot.empty .plus svg { width: 100%; height: 100%; }
   .slot.empty .hint {
     font-size: 10px;
-    color: var(--text-dim);
+    color: var(--label-3);
     opacity: 0;
     max-width: 0;
     overflow: hidden;
     white-space: nowrap;
-    transition: opacity 0.12s ease, max-width 0.16s ease;
+    transition: opacity var(--t-fast) var(--ease), max-width var(--t-fast) var(--ease);
     letter-spacing: 0.01em;
   }
   .slot.empty:hover .plus { opacity: 0; max-width: 0; width: 0; }
@@ -193,18 +155,18 @@ pub fn html() -> String {
   /* Close button — appears on hover, right side */
   .slot .close {
     position: absolute;
-    right: 2px;
+    right: 1px;
     top: 50%;
     transform: translateY(-50%);
-    width: 14px; height: 14px;
-    border-radius: 50%;
-    background: var(--close-bg);
+    width: 22px; height: 22px;
+    border-radius: var(--r-capsule);
+    background: var(--fill);
     display: flex;
     align-items: center;
     justify-content: center;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.1s ease, background 0.1s ease;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
     cursor: pointer;
   }
 
@@ -214,18 +176,19 @@ pub fn html() -> String {
   }
 
   .slot .close:hover {
-    background: var(--close-hover);
+    background: color-mix(in srgb, var(--err) 16%, transparent);
   }
+  .slot .close:active { background: color-mix(in srgb, var(--err) 24%, transparent); transform: translateY(-50%) scale(0.94); }
 
   .slot .close svg {
     width: 8px; height: 8px;
-    stroke: var(--close-color);
+    stroke: var(--label-2);
     stroke-width: 2;
     stroke-linecap: round;
   }
 
   .slot .close:hover svg {
-    stroke: var(--close-hover-color);
+    stroke: var(--err);
   }
 </style>
 </head>
@@ -245,7 +208,7 @@ pub fn html() -> String {
 
       // Number badge: 1-9, then 0
       const badge = document.createElement('div');
-      badge.className = 'badge';
+      badge.className = 'badge kbd';
       badge.textContent = (i + 1) % 10;
       el.appendChild(badge);
 
@@ -314,5 +277,7 @@ pub fn html() -> String {
 </script>
 </body>
 </html>"#;
-    template.replace("@@ICON_PLUS@@", crate::icons::PLUS)
+    template
+        .replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("@@ICON_PLUS@@", crate::icons::PLUS)
 }

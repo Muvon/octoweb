@@ -25,90 +25,46 @@
 ///
 /// **Compactness rule:** related pairs share a row with `/` separator
 /// (e.g. "Scroll ↕" for ⌃D/⌃U). Keeps the panel tight.
-pub fn html() -> &'static str {
+pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
 
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
     background: transparent;
     -webkit-font-smoothing: antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  }
-
-  :root {
-    --backdrop:    rgba(0, 0, 0, 0.25);
-    --panel-bg:    rgba(246, 246, 246, 0.92);
-    --panel-border: rgba(0, 0, 0, 0.08);
-    --section-bg:  rgba(255, 255, 255, 0.65);
-    --heading:     rgba(0, 0, 0, 0.82);
-    --text:        rgba(0, 0, 0, 0.72);
-    --text-dim:    rgba(0, 0, 0, 0.36);
-    --kbd-bg:      rgba(255, 255, 255, 0.85);
-    --kbd-border:  rgba(0, 0, 0, 0.12);
-    --kbd-shadow:  rgba(0, 0, 0, 0.06);
-    --divider:     rgba(0, 0, 0, 0.06);
-    --close-hover: rgba(0, 0, 0, 0.06);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --backdrop:    rgba(0, 0, 0, 0.45);
-      --panel-bg:    rgba(40, 40, 40, 0.92);
-      --panel-border: rgba(255, 255, 255, 0.08);
-      --section-bg:  rgba(255, 255, 255, 0.04);
-      --heading:     rgba(255, 255, 255, 0.88);
-      --text:        rgba(255, 255, 255, 0.72);
-      --text-dim:    rgba(255, 255, 255, 0.30);
-      --kbd-bg:      rgba(255, 255, 255, 0.08);
-      --kbd-border:  rgba(255, 255, 255, 0.10);
-      --kbd-shadow:  rgba(0, 0, 0, 0.25);
-      --divider:     rgba(255, 255, 255, 0.06);
-      --close-hover: rgba(255, 255, 255, 0.08);
-    }
+    font-family: var(--font-text);
   }
 
   #backdrop {
     position: fixed;
     inset: 0;
-    background: var(--backdrop);
+    background: color-mix(in srgb, var(--canvas) 28%, rgba(0, 0, 0, 0.52));
     display: flex;
     align-items: center;
     justify-content: center;
     -webkit-backdrop-filter: blur(8px);
     backdrop-filter: blur(8px);
-    animation: fadeIn 0.12s ease;
+    animation: fadeIn var(--t-fast) var(--ease);
   }
 
   @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes scaleIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: none; } }
 
   #panel {
-    background: var(--panel-bg);
-    border-radius: 16px;
-    box-shadow: 0 0 0 0.5px var(--panel-border),
-                0 24px 80px rgba(0,0,0,0.18), 0 2px 12px rgba(0,0,0,0.08),
-                inset 0 1px 0 rgba(255,255,255,0.5);
+    background: var(--glass-thick);
+    border-radius: var(--r-panel);
+    box-shadow: var(--shadow-float), var(--glass-shine);
     padding: 16px 20px;
     max-height: 88vh;
     overflow-y: auto;
-    animation: scaleIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  @media (prefers-color-scheme: dark) {
-    #panel {
-      box-shadow: 0 0 0 0.5px var(--panel-border),
-                  0 24px 80px rgba(0,0,0,0.4), 0 2px 12px rgba(0,0,0,0.2),
-                  inset 0 1px 0 rgba(255,255,255,0.07);
-    }
+    animation: scaleIn var(--t-pop) var(--spring);
   }
 
   #header {
@@ -119,26 +75,28 @@ pub fn html() -> &'static str {
   }
 
   #title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--heading);
-    letter-spacing: -0.01em;
+    font: 600 14px/1.2 var(--font-display);
+    color: var(--label);
+    letter-spacing: -0.02em;
   }
 
   #close-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
+    min-width: 22px;
     height: 22px;
-    border-radius: 5px;
+    border-radius: var(--r-capsule);
     border: none;
     background: transparent;
     cursor: pointer;
-    color: var(--text-dim);
-    transition: background 0.1s, color 0.1s;
+    color: var(--label-2);
+    gap: 3px;
+    padding: 0 4px;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
-  #close-btn:hover { background: var(--close-hover); color: var(--heading); }
+  #close-btn:hover { background: var(--fill-hover); color: var(--label); }
+  #close-btn:active { background: var(--fill-press); transform: scale(0.96); }
 
   #columns {
     display: flex;
@@ -151,20 +109,19 @@ pub fn html() -> &'static str {
   }
 
   .col + .col {
-    border-left: 0.5px solid var(--divider);
+    border-left: 0.5px solid var(--hairline);
   }
 
   .col-title {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-dim);
+    font: 600 11px/1.2 var(--font-display);
+    color: var(--label-2);
     padding: 0 10px 8px;
   }
 
   .shortcuts {
-    background: var(--section-bg);
-    box-shadow: 0 0 0 0.5px var(--divider);
-    border-radius: 10px;
+    background: var(--glass-thin);
+    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
+    border-radius: var(--r-card);
     overflow: hidden;
     display: flex;
   }
@@ -175,7 +132,7 @@ pub fn html() -> &'static str {
   }
 
   .shortcuts-col + .shortcuts-col {
-    border-left: 0.5px solid var(--divider);
+    border-left: 0.5px solid var(--hairline);
   }
 
   .row {
@@ -188,19 +145,19 @@ pub fn html() -> &'static str {
   }
 
   .row + .row {
-    border-top: 0.5px solid var(--divider);
+    border-top: 0.5px solid var(--hairline);
   }
 
   .row-label {
     font-size: 11px;
-    color: var(--text);
+    color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .row-label.dim {
-    color: var(--text-dim);
+    color: var(--label-3);
   }
 
   .keys {
@@ -210,21 +167,9 @@ pub fn html() -> &'static str {
     flex-shrink: 0;
   }
 
-  kbd {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+  kbd.kbd {
     min-width: 18px;
     height: 18px;
-    padding: 0 4px;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--text);
-    background: var(--kbd-bg);
-    border: 0.5px solid var(--kbd-border);
-    border-radius: 4px;
-    box-shadow: 0 1px 0 var(--kbd-shadow);
     white-space: nowrap;
     user-select: none;
   }
@@ -232,14 +177,15 @@ pub fn html() -> &'static str {
 </head>
 <body>
 <div id="backdrop">
-  <div id="panel">
+  <div id="panel" class="glass-panel">
     <div id="header">
       <span id="title">Keyboard Shortcuts</span>
-      <button id="close-btn" title="Close">
+      <button id="close-btn" title="Close (Esc)">
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
         </svg>
+        <span class="kbd">esc</span>
       </button>
     </div>
     <div id="columns">
@@ -251,29 +197,29 @@ pub fn html() -> &'static str {
         </div>
         <!-- Middle column: Command Palette — shared-key rows aligned to left column -->
         <div class="shortcuts-col">
-          <div class="col-title">Command Palette <span id="cp-trigger" style="opacity:0.5">⌘⇧P</span></div>
-          <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd>⌘</kbd><kbd>W</kbd></span></div>
-          <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd>⌃</kbd><kbd>N</kbd>/<kbd>P</kbd></span></div>
-          <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>
-          <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd>⌘</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
-          <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>
-          <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd>⌃</kbd><kbd>K</kbd>/<kbd>U</kbd></span></div>
+          <div class="col-title">Command Palette <span id="cp-trigger" class="kbd">⌘⇧P</span></div>
+          <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">W</kbd></span></div>
+          <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">N</kbd>/<kbd class="kbd">P</kbd></span></div>
+          <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>
+          <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Close</span><span class="keys"><kbd class="kbd">Esc</kbd></span></div>
+          <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">A</kbd>/<kbd class="kbd">E</kbd></span></div>
+          <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">K</kbd>/<kbd class="kbd">U</kbd></span></div>
         </div>
         <!-- Right column: AI Editor — shared-key rows aligned -->
         <div class="shortcuts-col">
-          <div class="col-title">AI Editor <span id="ie-trigger" style="opacity:0.5">⌘⇧E</span></div>
+          <div class="col-title">AI Editor <span id="ie-trigger" class="kbd">⌘⇧E</span></div>
           <div class="row"><span class="row-label dim">&nbsp;</span></div>
-          <div class="row"><span class="row-label">History older / newer</span><span class="keys"><kbd>⌃</kbd><kbd>P</kbd>/<kbd>N</kbd></span></div>
+          <div class="row"><span class="row-label">History older / newer</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">P</kbd>/<kbd class="kbd">N</kbd></span></div>
           <div class="row"><span class="row-label dim">&nbsp;</span></div>
-          <div class="row"><span class="row-label">Submit</span><span class="keys"><kbd>↵</kbd></span></div>
-          <div class="row"><span class="row-label">Reverse search</span><span class="keys"><kbd>⌃</kbd><kbd>R</kbd></span></div>
-          <div class="row"><span class="row-label">Accept completion</span><span class="keys"><kbd>⌃</kbd><kbd>E</kbd></span></div>
-          <div class="row"><span class="row-label">Close</span><span class="keys"><kbd>Esc</kbd></span></div>
-          <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd>⌃</kbd><kbd>A</kbd>/<kbd>E</kbd></span></div>
-          <div class="row"><span class="row-label">Erase to start</span><span class="keys"><kbd>⌃</kbd><kbd>U</kbd></span></div>
+          <div class="row"><span class="row-label">Submit</span><span class="keys"><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Reverse search</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">R</kbd></span></div>
+          <div class="row"><span class="row-label">Accept completion</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">E</kbd></span></div>
+          <div class="row"><span class="row-label">Close</span><span class="keys"><kbd class="kbd">Esc</kbd></span></div>
+          <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">A</kbd>/<kbd class="kbd">E</kbd></span></div>
+          <div class="row"><span class="row-label">Erase to start</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">U</kbd></span></div>
         </div>
       </div>
     </div>
@@ -298,7 +244,7 @@ pub fn html() -> &'static str {
     });
   }
   function row(label, keys) {
-    var kbds = keys.map(function(k) { return '<kbd>' + esc(k) + '</kbd>'; }).join('');
+    var kbds = keys.map(function(k) { return '<kbd class="kbd">' + esc(k) + '</kbd>'; }).join('');
     return '<div class="row"><span class="row-label">' + esc(label) +
            '</span><span class="keys">' + kbds + '</span></div>';
   }
@@ -310,9 +256,9 @@ pub fn html() -> &'static str {
     if (!list || !data || !data.actions) return;
     var html = data.actions.map(function(a) { return row(a.label, a.keys); }).join('');
     html += '<div class="row"><span class="row-label">Open slot 1–9</span>' +
-            '<span class="keys"><kbd>⌘</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>';
+            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>';
     html += '<div class="row"><span class="row-label">Save to slot 1–9</span>' +
-            '<span class="keys"><kbd>⌘</kbd><kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd></span></div>';
+            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>';
     list.innerHTML = html;
     // Keep the context-column trigger badges in sync with their global chords.
     var find = function(id) {
@@ -326,5 +272,5 @@ pub fn html() -> &'static str {
 })();
 </script>
 </body>
-</html>"#
+</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
 }

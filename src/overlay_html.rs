@@ -2,96 +2,29 @@
 /// The page is injected with `window.__items` (JSON array) before being shown.
 /// Each item: { title, url, kind } where kind = "tab" | "history"
 ///
-/// Tahoe liquid glass design — light/dark adaptive via prefers-color-scheme.
-pub fn html() -> &'static str {
+/// Tahoe liquid glass design — light/dark adaptive via the shared theme tokens.
+pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-    /* #modal rests at opacity 0 and relies on a `forwards` animation to appear */
-    #modal { transform: none !important; opacity: 1 !important; }
-  }
-
-  /* ── Tahoe Liquid Glass tokens ─────────────────────────────────────────── */
-  :root {
-    /* Glass panel — light: frosted white */
-    --glass-bg:        rgba(255, 255, 255, 0.72);
-    --glass-border:    rgba(0, 0, 0, 0.08);
-    --glass-inner:     rgba(255, 255, 255, 0.50);
-    --glass-shadow:    0 24px 80px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
-
-    /* Input */
-    --input-bg:        rgba(255, 255, 255, 0.85);
-    --input-border:    rgba(0, 0, 0, 0.06);
-    --input-focus:     rgba(0, 122, 255, 0.25);
-
-    /* Text */
-    --text-primary:    rgba(0, 0, 0, 0.90);
-    --text-secondary:  rgba(0, 0, 0, 0.55);
-    --text-tertiary:   rgba(0, 0, 0, 0.30);
-
-    /* Items */
-    --item-hover:      rgba(0, 122, 255, 0.08);
-    --item-selected:   rgba(0, 122, 255, 0.14);
-
-    /* Accent */
-    --accent:          #007aff;
-    --accent-hover:    #0066d6;
-
-    /* Section headers */
-    --section-text:    rgba(0, 0, 0, 0.40);
-    --section-border:  rgba(0, 0, 0, 0.06);
-
-    /* Scrollbar */
-    --scrollbar:       rgba(0, 0, 0, 0.12);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --glass-bg:        rgba(28, 28, 32, 0.82);
-      --glass-border:    rgba(255, 255, 255, 0.08);
-      --glass-inner:     rgba(255, 255, 255, 0.04);
-      --glass-shadow:    0 24px 80px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.30);
-
-      --input-bg:        rgba(255, 255, 255, 0.08);
-      --input-border:    rgba(255, 255, 255, 0.10);
-      --input-focus:     rgba(10, 132, 255, 0.30);
-
-      --text-primary:    rgba(255, 255, 255, 0.92);
-      --text-secondary:  rgba(255, 255, 255, 0.55);
-      --text-tertiary:   rgba(255, 255, 255, 0.30);
-
-      --item-hover:      rgba(10, 132, 255, 0.10);
-      --item-selected:   rgba(10, 132, 255, 0.18);
-
-      --accent:          #0a84ff;
-      --accent-hover:    #409cff;
-
-      --section-text:    rgba(255, 255, 255, 0.42);
-      --section-border:  rgba(255, 255, 255, 0.06);
-
-      --scrollbar:       rgba(255, 255, 255, 0.10);
-    }
-  }
 
   html, body {
     width: 100%;
     height: 100%;
     background: transparent;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-family: var(--font-text);
     -webkit-font-smoothing: antialiased;
-    color: var(--text-primary);
+    color: var(--label);
   }
 
   #backdrop {
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at top, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.28));
+    background: radial-gradient(ellipse at top, color-mix(in srgb, var(--label) 8%, transparent), color-mix(in srgb, var(--label) 20%, transparent));
     backdrop-filter: blur(12px) saturate(180%);
     -webkit-backdrop-filter: blur(12px) saturate(180%);
     display: flex;
@@ -102,37 +35,39 @@ pub fn html() -> &'static str {
 
   #modal {
     width: min(680px, calc(100vw - 32px));
-    background: var(--glass-bg);
-    backdrop-filter: blur(48px) saturate(200%);
-    -webkit-backdrop-filter: blur(48px) saturate(200%);
-    border-radius: 18px;
-    box-shadow: 0 0 0 0.5px var(--glass-border), var(--glass-shadow),
-                inset 0 1px 0 var(--glass-inner);
+    background: var(--glass);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border-radius: 24px;
+    box-shadow: var(--shadow-float), var(--glass-shine);
     overflow: hidden;
-    transform: translateY(-12px) scale(0.97);
-    opacity: 0;
-    animation: reveal 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    animation: reveal var(--t-pop) var(--spring);
   }
 
   @keyframes reveal {
-    to {
-      transform: translateY(0) scale(1);
-      opacity: 1;
-    }
+    from { transform: translateY(-12px) scale(0.97); opacity: 0; }
+    to { transform: translateY(0) scale(1); opacity: 1; }
   }
 
   #search-row {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--section-border);
+    gap: 11px;
+    min-height: 48px;
+    margin: 12px 12px 6px;
+    padding: 8px 12px;
+    background: var(--fill);
+    border-radius: var(--r-capsule);
+    box-shadow: inset 0 0 0 0.5px var(--hairline);
+    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
+  #search-row:hover { background: var(--fill-hover); }
+  #search-row:focus-within { box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 
   #search-icon {
     width: 18px;
     height: 18px;
-    color: var(--text-tertiary);
+    color: var(--label-3);
     flex-shrink: 0;
   }
 
@@ -141,7 +76,7 @@ pub fn html() -> &'static str {
     background: transparent;
     border: none;
     outline: none;
-    color: var(--text-primary);
+    color: var(--label);
     font-size: 16px;
     font-weight: 400;
     letter-spacing: -0.01em;
@@ -149,17 +84,18 @@ pub fn html() -> &'static str {
   }
 
   #query::placeholder {
-    color: var(--text-tertiary);
+    color: var(--label-3);
   }
 
   #action-badge {
     padding: 5px 11px;
-    border-radius: 999px;
-    background: var(--input-bg);
-    box-shadow: 0 0 0 0.5px var(--input-border);
+    min-height: 24px;
+    border-radius: var(--r-capsule);
+    background: var(--fill-hover);
+    box-shadow: 0 0 0 0.5px var(--hairline);
     font-size: 11px;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--label-2);
     letter-spacing: 0.01em;
     white-space: nowrap;
   }
@@ -179,28 +115,32 @@ pub fn html() -> &'static str {
   }
 
   #results::-webkit-scrollbar-thumb {
-    background: var(--scrollbar);
-    border-radius: 3px;
+    background: var(--label-4);
+    border-radius: var(--r-capsule);
   }
 
   .item {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-height: 40px;
     padding: 8px 10px;
-    border-radius: 8px;
+    border-radius: var(--r-ctl);
     cursor: default;
-    transition: background 80ms ease;
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
 
+  .item:hover { background: var(--fill-hover); }
+  .item:active { background: var(--fill-press); transform: scale(0.995); }
   .item.selected {
-    background: var(--item-selected);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
+  .item.selected:active { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
   .item-icon {
     width: 18px;
     height: 18px;
-    color: var(--text-secondary);
+    color: var(--label-2);
     flex-shrink: 0;
   }
 
@@ -210,7 +150,7 @@ pub fn html() -> &'static str {
     flex-shrink: 0;
     border-radius: 4px;
     object-fit: contain;
-    background: var(--glass-bg);
+    background: var(--glass-thin);
   }
 
   /* Hibernated-tab indicator — small dim dot on the favicon corner */
@@ -224,8 +164,8 @@ pub fn html() -> &'static str {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: rgba(255, 159, 10, 0.85);
-    box-shadow: 0 0 0 1.5px var(--glass-solid, rgba(245, 245, 247, 0.95));
+    background: var(--warn);
+    box-shadow: 0 0 0 1.5px var(--glass-thick);
   }
 
   .item-text {
@@ -236,7 +176,7 @@ pub fn html() -> &'static str {
   .item-title {
     font-size: 13px;
     font-weight: 500;
-    color: var(--text-primary);
+    color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -250,8 +190,8 @@ pub fn html() -> &'static str {
   .item-url {
     margin-top: 1px;
     font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    color: var(--label-3);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -267,25 +207,26 @@ pub fn html() -> &'static str {
   .kind-pill {
     font-size: 10px;
     font-weight: 500;
-    color: var(--text-secondary);
-    background: var(--input-bg);
-    box-shadow: 0 0 0 0.5px var(--input-border);
-    border-radius: 999px;
+    color: var(--label-2);
+    background: var(--fill);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-capsule);
     padding: 2px 7px;
   }
 
   .close-btn {
-    width: 18px;
-    height: 18px;
+    width: 22px;
+    height: 22px;
     border: 0;
     border-radius: 50%;
     background: transparent;
-    color: var(--text-tertiary);
+    color: var(--label-3);
     font-size: 14px;
-    line-height: 18px;
+    line-height: 22px;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
+                color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
 
   .item.selected .close-btn {
@@ -293,45 +234,40 @@ pub fn html() -> &'static str {
   }
 
   .close-btn:hover {
-    background: rgba(255, 59, 48, 0.12);
-    color: #ff3b30;
+    background: color-mix(in srgb, var(--err) 14%, transparent);
+    color: var(--err);
   }
+  .close-btn:active { background: color-mix(in srgb, var(--err) 22%, transparent); transform: scale(0.9); }
 
   .shortcut-badge {
     font-size: 10px;
     font-weight: 500;
     font-family: inherit;
-    color: var(--text-tertiary);
-    box-shadow: 0 0 0 0.5px var(--input-border);
-    border-radius: 5px;
+    color: var(--label-3);
+    background: var(--fill);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-capsule);
     padding: 1px 5px;
     letter-spacing: 0.02em;
   }
 
   #hint {
-    border-top: 1px solid var(--section-border);
+    box-shadow: 0 -0.5px 0 var(--hairline);
     padding: 10px 14px;
     text-align: center;
     font-size: 11px;
-    color: var(--text-tertiary);
+    color: var(--label-3);
     letter-spacing: 0.01em;
   }
 
-  #hint kbd {
-    display: inline-block;
-    padding: 2px 5px;
+  #hint .kbd {
     margin: 0 2px;
-    font-family: inherit;
-    font-size: 10px;
-    background: var(--input-bg);
-    box-shadow: 0 0 0 0.5px var(--input-border);
-    border-radius: 5px;
   }
 </style>
 </head>
 <body>
 <div id="backdrop">
-  <div id="modal">
+  <div id="modal" class="glass-panel">
     <div id="search-row">
       <svg id="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
@@ -340,7 +276,7 @@ pub fn html() -> &'static str {
       <div id="action-badge">↵ Open</div>
     </div>
     <div id="results"></div>
-    <div id="hint"><kbd>↑↓</kbd> navigate · <kbd>⌘1</kbd>–<kbd>⌘0</kbd> jump · <kbd>↵</kbd> confirm · <kbd>⌘↵</kbd> open/search · <kbd>⌘⇧↵</kbd> ask AI · <kbd>Esc</kbd> close · <kbd>⌘W</kbd> close tab</div>
+    <div id="hint"><span class="kbd">↑↓</span> navigate · <span class="kbd">⏎</span> open · <span class="kbd">esc</span> dismiss</div>
   </div>
 </div>
 
@@ -743,7 +679,7 @@ pub fn html() -> &'static str {
     resultsEl.innerHTML = '';
 
     if (filtered.length === 0) {
-      resultsEl.innerHTML = '<div style="padding:24px;color:var(--text-tertiary);font-size:13px;text-align:center;">No matches found</div>';
+      resultsEl.innerHTML = '<div style="padding:24px;color:var(--label-3);font-size:13px;text-align:center;">No matches found</div>';
       return;
     }
 
@@ -941,4 +877,5 @@ pub fn html() -> &'static str {
 </script>
 </body>
 </html>"#
+    .replace("/*@@THEME@@*/", crate::theme::CSS)
 }

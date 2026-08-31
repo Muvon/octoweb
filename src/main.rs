@@ -36,6 +36,7 @@ mod sidebar_html;
 mod snapshot_js;
 mod tab_nav;
 mod tab_stats;
+mod theme;
 mod url;
 mod webview_utils;
 

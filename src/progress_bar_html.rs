@@ -1,25 +1,14 @@
 /// Returns the HTML for a thin top-of-screen progress bar (Safari/Chrome style).
 /// Shown during page load, animated fill then fade out.
 /// Light/dark adaptive via prefers-color-scheme.
-pub fn html() -> &'static str {
+pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  :root {
-    --progress-bg: rgba(0, 122, 255, 0.15);
-    --progress-fill: #007aff;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --progress-bg: rgba(10, 132, 255, 0.12);
-      --progress-fill: #0a84ff;
-    }
-  }
 
   html, body {
     width: 100%;
@@ -34,10 +23,24 @@ pub fn html() -> &'static str {
     left: 0;
     width: 0%;
     height: 3px;
-    background: var(--progress-fill);
-    box-shadow: 0 0 8px var(--progress-fill);
-    transition: width 0.15s ease-out, opacity 0.3s ease-out;
-    border-radius: 16px 1px 1px 16px;
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--accent) 78%, transparent),
+      var(--accent));
+    border-radius: 0 var(--r-capsule) var(--r-capsule) 0;
+    box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 38%, transparent);
+    transition: width var(--t-fast) var(--ease), opacity var(--t-pop) var(--ease);
+  }
+
+  #bar::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 12px;
+    height: 100%;
+    border-radius: var(--r-capsule);
+    background: color-mix(in srgb, var(--accent) 72%, white);
+    box-shadow: 0 0 7px 1px color-mix(in srgb, var(--accent) 62%, transparent);
   }
 
   #bar.complete {
@@ -61,17 +64,17 @@ pub fn html() -> &'static str {
     // Force reflow
     void bar.offsetWidth;
     // Animate to ~70% quickly, then slower
-    bar.style.transition = 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)';
+    bar.style.transition = 'width var(--t-pop) var(--spring)';
     bar.style.width = '70%';
   };
 
   window.__progress = function(pct) {
-    bar.style.transition = 'width 0.15s ease-out';
+    bar.style.transition = 'width var(--t-fast) var(--ease)';
     bar.style.width = Math.min(95, pct) + '%';
   };
 
   window.__finish = function() {
-    bar.style.transition = 'width 0.2s ease-out, opacity 0.3s ease-out 0.1s';
+    bar.style.transition = 'width var(--t-pop) var(--spring), opacity var(--t-pop) var(--ease) var(--t-fast)';
     bar.style.width = '100%';
     bar.classList.add('complete');
   };
@@ -81,5 +84,5 @@ pub fn html() -> &'static str {
 })();
 </script>
 </body>
-</html>"#
+</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
 }

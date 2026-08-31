@@ -50,7 +50,8 @@ pub fn html(url: &str, error_code: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Page Load Error</title>
-<style>{css}</style>
+<style>/*@@THEME@@*/
+{css}</style>
 </head>
 <body>
 <div class="card">
@@ -81,122 +82,81 @@ document.getElementById('retryBtn').addEventListener('click', function() {{
         safe_code = safe_code,
         json_url = json_url,
     )
+    .replace("/*@@THEME@@*/", crate::theme::CSS)
     .replace("@@OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
 }
 
 // Static CSS kept separate to avoid escaping all braces in format!
-const ERROR_PAGE_CSS: &str = r#"
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
-
-  :root {
-    --bg: #f5f5f7;
-    --card-bg: rgba(255, 255, 255, 0.85);
-    --card-border: rgba(0, 0, 0, 0.08);
-    --card-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
-    --text-primary: rgba(0, 0, 0, 0.85);
-    --text-secondary: rgba(0, 0, 0, 0.50);
-    --accent: #007aff;
-    --accent-hover: #0066d6;
-    --error-color: #ff3b30;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #1c1c1e;
-      --card-bg: rgba(44, 44, 48, 0.90);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --card-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
-      --text-primary: rgba(255, 255, 255, 0.90);
-      --text-secondary: rgba(255, 255, 255, 0.50);
-      --accent: #0a84ff;
-      --accent-hover: #409cff;
-      --error-color: #ff453a;
-    }
-  }
+const ERROR_PAGE_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0; }
 
   html, body {
     width: 100%;
     height: 100%;
-    background: var(--bg);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    background: var(--canvas);
+    font-family: var(--font-text);
     -webkit-font-smoothing: antialiased;
-    color: var(--text-primary);
+    color: var(--label);
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
   .card {
-    background: var(--card-bg);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border-radius: 20px;
-    box-shadow: 0 0 0 0.5px var(--card-border), var(--card-shadow),
-                inset 0 1px 0 rgba(255, 255, 255, 0.5);
     padding: 40px 48px;
     max-width: 420px;
     text-align: center;
+    animation: errorIn var(--t-pop) var(--spring);
   }
-  @media (prefers-color-scheme: dark) {
-    .card {
-      box-shadow: 0 0 0 0.5px var(--card-border), var(--card-shadow),
-                  inset 0 1px 0 rgba(255, 255, 255, 0.07);
-    }
+  @keyframes errorIn {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to { opacity: 1; transform: none; }
   }
-
   .octopus {
     width: 72px;
     height: 72px;
     margin: 0 auto 16px;
-    color: rgba(255, 99, 71, 0.78);
-    animation: float 3s ease-in-out infinite;
+    color: color-mix(in srgb, var(--err) 65%, var(--warn));
+    animation: float 3s var(--ease) infinite;
   }
   .octopus svg { width: 100%; height: 100%; }
-  @media (prefers-color-scheme: dark) {
-    .octopus { color: rgba(255, 122, 99, 0.78); }
-  }
-
   @keyframes float {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-8px); }
   }
 
   h1 {
-    font-size: 22px;
-    font-weight: 600;
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 650;
     margin-bottom: 8px;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.035em;
   }
 
   .message {
     font-size: 15px;
-    color: var(--text-secondary);
+    color: var(--label-2);
     margin-bottom: 24px;
     line-height: 1.5;
   }
 
   .error-code {
     font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: var(--text-secondary);
-    background: rgba(0, 0, 0, 0.04);
+    font-family: var(--font-mono);
+    color: var(--label-2);
+    background: var(--fill);
     padding: 6px 12px;
-    border-radius: 6px;
+    border-radius: var(--r-ctl);
     margin-bottom: 8px;
     word-break: break-all;
   }
 
   .error-detail {
     font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: var(--error-color);
-    background: rgba(255, 59, 48, 0.08);
+    font-family: var(--font-mono);
+    color: var(--err);
+    background: color-mix(in srgb, var(--err) 9%, transparent);
     padding: 4px 10px;
-    border-radius: 4px;
+    border-radius: var(--r-ctl);
     margin-bottom: 20px;
   }
 
@@ -204,26 +164,28 @@ const ERROR_PAGE_CSS: &str = r#"
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    background: linear-gradient(180deg, #2e9bff 0%, var(--accent) 55%, #0070e8 100%);
-    color: white;
+    min-height: 36px;
+    background: var(--accent);
+    color: var(--on-accent);
     border: none;
-    border-radius: 14px;
+    border-radius: var(--r-capsule);
     padding: 12px 24px;
     font-size: 15px;
     font-weight: 500;
     cursor: pointer;
-    box-shadow: 0 2px 10px rgba(0, 122, 255, 0.35),
-                inset 0 1px 0 rgba(255, 255, 255, 0.3);
-    transition: box-shadow 0.15s ease,
-                transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, white 30%, transparent),
+                0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease),
+                box-shadow var(--t-fast) var(--ease);
   }
 
   .retry-btn:hover {
-    box-shadow: 0 4px 16px rgba(0, 122, 255, 0.45),
-                inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    background: color-mix(in srgb, var(--accent) 92%, var(--fill-hover));
+    box-shadow: inset 0 1px 0 color-mix(in srgb, white 32%, transparent),
+                0 6px 18px color-mix(in srgb, var(--accent) 42%, transparent);
     transform: translateY(-1px);
   }
-  .retry-btn:active { transform: scale(0.97); transition-duration: 0.08s; }
+  .retry-btn:active { background: color-mix(in srgb, var(--accent) 86%, var(--fill-press)); transform: scale(0.97); }
   .retry-btn svg { width: 16px; height: 16px; }
 "#;
 

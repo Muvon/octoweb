@@ -22,10 +22,12 @@ pub fn html() -> String {
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
+  :root {
+    --lock-secure: var(--ok);
+    --lock-insecure: var(--warn);
   }
 
   html, body {
@@ -33,37 +35,8 @@ pub fn html() -> String {
     overflow: hidden;
     background: transparent;
     -webkit-font-smoothing: antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  }
-
-  :root {
-    --text-title:  rgba(0, 0, 0, 0.82);
-    --text-url:    rgba(0, 0, 0, 0.42);
-    --text-host:   rgba(0, 0, 0, 0.55);
-    --text-dim:    rgba(0, 0, 0, 0.28);
-    --hover-bg:    rgba(0, 0, 0, 0.05);
-    --copied-bg:   rgba(0, 0, 0, 0.06);
-    --copied-text: rgba(0, 0, 0, 0.38);
-    --lock-secure:   rgba(0, 180, 80, 0.70);
-    --lock-insecure: rgba(255, 149, 0, 0.70);
-    --btn-bg:    rgba(0, 0, 0, 0.04);
-    --btn-hover: rgba(0, 0, 0, 0.08);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --text-title:  rgba(255, 255, 255, 0.82);
-      --text-url:    rgba(255, 255, 255, 0.38);
-      --text-host:   rgba(255, 255, 255, 0.52);
-      --text-dim:    rgba(255, 255, 255, 0.22);
-      --hover-bg:    rgba(255, 255, 255, 0.07);
-      --copied-bg:   rgba(255, 255, 255, 0.10);
-      --copied-text: rgba(255, 255, 255, 0.32);
-      --lock-secure:   rgba(48, 209, 88, 0.75);
-      --lock-insecure: rgba(255, 159, 10, 0.75);
-      --btn-bg:    rgba(255, 255, 255, 0.06);
-      --btn-hover: rgba(255, 255, 255, 0.12);
-    }
+    font-family: var(--font-text);
+    color: var(--label);
   }
 
   #bar {
@@ -116,20 +89,22 @@ pub fn html() -> String {
     align-items: center;
     gap: 3px;
     cursor: pointer;
-    border-radius: 6px;
+    min-height: 22px;
+    border-radius: var(--r-ctl);
     padding: 2px 5px;
     flex: 0 0 38%;
     min-width: 0;
     overflow: hidden;
-    transition: background 0.12s ease;
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
-  #title-row:hover  { background: var(--hover-bg); }
-  #title-row.copied { background: var(--copied-bg); }
+  #title-row:hover  { background: var(--fill-hover); }
+  #title-row:active { background: var(--fill-press); }
+  #title-row.copied { background: var(--fill); }
 
   #page-title {
     font-size: 11px;
     font-weight: 500;
-    color: var(--text-title);
+    color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -139,7 +114,7 @@ pub fn html() -> String {
   /* Separator between title and url */
   #sep {
     font-size: 10px;
-    color: var(--text-dim);
+    color: var(--label-3);
     flex-shrink: 0;
     padding: 0 1px;
     opacity: 0.5;
@@ -151,14 +126,15 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     gap: 3px;
-    border-radius: 6px;
+    min-height: 22px;
+    border-radius: var(--r-ctl);
     padding: 2px 5px;
     flex: 0 0 calc(62% - 14px); /* subtract sep width so total stays 100% */
     min-width: 0;
     overflow: visible; /* let the suggestion dropdown escape this row */
-    transition: background 0.12s ease;
+    transition: background var(--t-fast) var(--ease);
   }
-  #url-row.copied { background: var(--copied-bg); }
+  #url-row.copied { background: var(--fill); }
 
   /* The copyable text portion is its own hover target so the pencil doesn't
      paint the whole row on hover. */
@@ -170,57 +146,58 @@ pub fn html() -> String {
     min-width: 0;
     overflow: hidden;
     cursor: pointer;
-    border-radius: 5px;
+    min-height: 22px;
+    border-radius: var(--r-ctl);
     padding: 0 2px;
-    transition: background 0.12s ease;
+    transition: background var(--t-fast) var(--ease);
   }
-  #url-copy:hover { background: var(--hover-bg); }
+  #url-copy:hover { background: var(--fill-hover); }
+  #url-copy:active { background: var(--fill-press); }
 
   /* Pencil edit button — small, dim at rest, brightens on hover. */
   #url-edit-btn {
     flex-shrink: 0;
-    width: 16px;
-    height: 16px;
+    width: 22px;
+    height: 22px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     border: none;
     background: transparent;
-    border-radius: 3px;
+    border-radius: var(--r-ctl);
     cursor: pointer;
-    color: var(--text-dim);
+    color: var(--label-3);
     opacity: 0.55;
     line-height: 0;
-    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
+                color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
     padding: 0;
   }
-  #url-edit-btn:hover  { opacity: 1; background: var(--hover-bg); color: var(--text-title); }
-  #url-edit-btn:active { transform: scale(0.9); }
+  #url-edit-btn:hover  { opacity: 1; background: var(--fill-hover); color: var(--label); }
+  #url-edit-btn:active { background: var(--fill-press); transform: scale(0.92); }
   #url-edit-btn svg { width: 10px; height: 10px; }
 
   /* URL input — shown only while editing; replaces the copyable URL display. */
   #url-input {
     flex: 1;
     min-width: 0;
-    height: 19px;
-    padding: 0 6px;
+    height: 22px;
+    padding: 0 9px;
     font: inherit;
     font-size: 10.5px;
-    color: var(--text-title);
-    background: rgba(0, 0, 0, 0.04);
+    color: var(--label);
+    background: var(--fill);
     border: none;
-    border-radius: 7px;
-    box-shadow: 0 0 0 1.5px rgba(0, 122, 255, 0.45);
+    border-radius: var(--r-capsule);
+    box-shadow: 0 0 0 0.5px var(--hairline), 0 0 0 2.5px color-mix(in srgb, var(--accent) 28%, transparent);
     outline: none;
     display: none;
     letter-spacing: -0.1px;
+    caret-color: var(--accent);
+    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
-  @media (prefers-color-scheme: dark) {
-    #url-input {
-      background: rgba(255, 255, 255, 0.07);
-      box-shadow: 0 0 0 1.5px rgba(10, 132, 255, 0.5);
-    }
-  }
+  #url-input:hover { background: var(--fill-hover); }
+  #url-input:focus { box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent); }
   #url-row.editing #url-input { display: block; }
   #url-row.editing #url-copy  { display: none; }
   #url-row.editing #lock      { display: none; }
@@ -231,30 +208,20 @@ pub fn html() -> String {
   #url-suggest {
     position: absolute;
     z-index: 200;
-    background: rgba(245, 245, 247, 0.96);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    backdrop-filter: blur(28px) saturate(180%);
-    border-radius: 14px;
-    box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08),
-                0 16px 40px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06),
-                inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    background: var(--glass);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+    border-radius: var(--r-panel);
+    box-shadow: var(--shadow-float), var(--glass-shine);
     overflow: hidden;
     display: none;
     max-height: 320px;
     overflow-y: auto;
     padding: 5px;
   }
-  @media (prefers-color-scheme: dark) {
-    #url-suggest {
-      background: rgba(40, 40, 44, 0.96);
-      box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12),
-                  0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3),
-                  inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    }
-  }
   #url-suggest.show {
     display: block;
-    animation: suggest-pop 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: suggest-pop var(--t-pop) var(--spring);
   }
   @keyframes suggest-pop {
     from { opacity: 0; transform: translateY(-4px) scale(0.98); }
@@ -265,36 +232,36 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 9px;
-    border-radius: 9px;
+    padding: 6px 9px;
+    min-height: 32px;
+    border-radius: var(--r-ctl);
     cursor: pointer;
     min-width: 0;
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
-  .sg-item.active { background: rgba(0, 122, 255, 0.14); }
-  .sg-item:hover  { background: rgba(0, 0, 0, 0.05); }
-  @media (prefers-color-scheme: dark) {
-    .sg-item.active { background: rgba(10, 132, 255, 0.22); }
-    .sg-item:hover  { background: rgba(255, 255, 255, 0.06); }
-  }
+  .sg-item:hover  { background: var(--fill-hover); }
+  .sg-item:active { background: var(--fill-press); transform: scale(0.99); }
+  .sg-item.active { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  .sg-item.active:active { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sg-fav {
     flex-shrink: 0;
     width: 13px;
     height: 13px;
     border-radius: 3px;
     object-fit: contain;
-    background: rgba(0, 0, 0, 0.04);
+    background: var(--fill);
   }
   .sg-fav-fallback {
     flex-shrink: 0;
     width: 13px;
     height: 13px;
     border-radius: 3px;
-    background: rgba(0, 0, 0, 0.06);
+    background: var(--fill);
   }
   .sg-text { flex: 1; min-width: 0; overflow: hidden; }
   .sg-title {
     font-size: 11px;
-    color: var(--text-title);
+    color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -302,7 +269,7 @@ pub fn html() -> String {
   }
   .sg-url {
     font-size: 10px;
-    color: var(--text-url);
+    color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -313,13 +280,21 @@ pub fn html() -> String {
     flex-shrink: 0;
     font-size: 9.5px;
     font-weight: 500;
-    color: var(--text-dim);
+    color: var(--label-3);
     padding: 1px 6px;
-    border-radius: 5px;
-    background: rgba(0, 0, 0, 0.04);
+    border-radius: var(--r-capsule);
+    background: var(--fill);
   }
-  @media (prefers-color-scheme: dark) {
-    .sg-kind { background: rgba(255, 255, 255, 0.06); }
+  .sg-hint {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    min-height: 24px;
+    padding: 4px 7px 1px;
+    color: var(--label-3);
+    font-size: 9.5px;
+    box-shadow: 0 -0.5px 0 var(--hairline);
   }
 
   #lock {
@@ -344,48 +319,42 @@ pub fn html() -> String {
     top: calc(100% + 6px);
     left: 50%;
     transform: translate(-50%, -2px);
-    background: rgba(20, 20, 22, 0.92);
-    color: rgba(255, 255, 255, 0.92);
+    background: var(--glass-thick);
+    color: var(--label);
     font-size: 10.5px;
     font-weight: 500;
     letter-spacing: 0.01em;
     white-space: nowrap;
     padding: 4px 7px;
-    border-radius: 5px;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(255,255,255,0.08) inset;
+    border-radius: var(--r-ctl);
+    box-shadow: var(--shadow-float), var(--glass-shine);
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.12s ease 0.25s, transform 0.12s ease 0.25s;
+    transition: opacity var(--t-fast) var(--ease) 0.25s, transform var(--t-fast) var(--ease) 0.25s;
     z-index: 100;
   }
   .bar-btn[data-tip]:hover::after {
     opacity: 1;
     transform: translate(-50%, 0);
   }
-  @media (prefers-color-scheme: dark) {
-    .bar-btn[data-tip]::after {
-      background: rgba(240, 240, 242, 0.95);
-      color: rgba(0, 0, 0, 0.88);
-      box-shadow: 0 4px 14px rgba(0,0,0,0.32), 0 0 0 0.5px rgba(0,0,0,0.08) inset;
-    }
-  }
-
   #url {
     font-size: 10px;
-    color: var(--text-url);
+    color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     letter-spacing: -0.1px;
   }
-  #url .host { color: var(--text-host); }
+  #url .host { color: var(--label-2); }
 
   /* Shared "Copied" flash label */
   .copied-label {
     font-size: 9px;
-    color: var(--copied-text);
+    color: var(--label-3);
     opacity: 0;
-    transition: opacity 0.12s ease;
+    transition: opacity var(--t-fast) var(--ease);
     flex-shrink: 0;
   }
   .copied-label.show { opacity: 1; }
@@ -396,7 +365,7 @@ pub fn html() -> String {
     align-items: center;
     gap: 4px;
     font-size: 10px;
-    color: var(--text-dim);
+    color: var(--label-3);
     flex-shrink: 0;
     margin-left: 12px;
     margin-right: 8px;
@@ -416,7 +385,7 @@ pub fn html() -> String {
     align-items: center;
     gap: 5px;
     font-size: 10px;
-    color: var(--text-dim);
+    color: var(--label-3);
     flex-shrink: 0;
     margin-left: 4px;
     margin-right: 4px;
@@ -424,7 +393,7 @@ pub fn html() -> String {
     font-variant-numeric: tabular-nums;
     visibility: hidden;
     opacity: 0;
-    transition: opacity 0.3s ease;
+    transition: opacity var(--t-pop) var(--ease);
   }
   #sys-stats.visible {
     visibility: visible;
@@ -456,27 +425,28 @@ pub fn html() -> String {
     justify-content: center;
     width: 26px;
     height: 26px;
-    border-radius: 7px;
+    border-radius: var(--r-capsule);
     border: none;
     background: transparent;
     cursor: pointer;
     flex-shrink: 0;
-    color: var(--text-dim);
-    transition: background 0.15s ease, color 0.15s ease, transform 0.12s ease;
+    color: var(--label-3);
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--spring);
   }
-  .bar-btn:hover  { background: var(--btn-hover); color: var(--text-title); }
-  .bar-btn:active { transform: scale(0.90); transition-duration: 0.06s; }
+  .bar-btn:hover  { background: var(--fill-hover); color: var(--label); }
+  .bar-btn:active { background: var(--fill-press); transform: scale(0.90); }
 
   #ai-btn {
     background: transparent;
-    color: var(--text-dim);
+    color: var(--label-3);
     width: 28px;
     height: 28px;
     border-radius: 50%;
     border: none;
   }
-  #ai-btn:hover  { color: var(--text-title); transform: scale(1.12); }
-  #ai-btn:active { transform: scale(0.92); }
+  #ai-btn:hover  { background: var(--fill-hover); color: var(--label); transform: scale(1.08); }
+  #ai-btn:active { background: var(--fill-press); transform: scale(0.92); }
   .ai-icon { display: inline-flex; width: 16px; height: 16px; line-height: 0; }
   .ai-icon svg { width: 100%; height: 100%; }
 
@@ -486,18 +456,15 @@ pub fn html() -> String {
     top: 1px; right: 1px;
     width: 8px; height: 8px;
     border-radius: 50%;
-    background: #ff3b30;
-    border: 1.5px solid rgba(255,255,255,0.9);
-    box-shadow: 0 1px 4px rgba(255,59,48,0.45);
+    background: var(--err);
+    border: 1.5px solid var(--glass-thick);
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--err) 45%, transparent);
     opacity: 0;
     transform: scale(0);
-    transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.34,1.56,0.64,1);
+    transition: opacity var(--t-fast) var(--ease), transform var(--t-pop) var(--spring);
     pointer-events: none;
   }
   .badge.show { opacity: 1; transform: scale(1); }
-  @media (prefers-color-scheme: dark) {
-    .badge { border-color: rgba(0,0,0,0.5); box-shadow: 0 1px 6px rgba(255,59,48,0.55); }
-  }
 </style>
 </head>
 <body>
@@ -558,7 +525,7 @@ pub fn html() -> String {
     <span id="badge" class="badge"></span>
   </button>
 </div>
-<div id="url-suggest"></div>
+<div id="url-suggest" class="glass-panel"></div>
 <script>
 (function() {
   const titleEl      = document.getElementById('page-title');
@@ -817,7 +784,7 @@ pub fn html() -> String {
             + '<span class="sg-kind">' + kind + '</span>'
             + '</div>';
     }
-    urlSuggest.innerHTML = html;
+    urlSuggest.innerHTML = html + '<div class="sg-hint"><span class="kbd">esc</span> dismiss</div>';
     positionSuggest();
     urlSuggest.classList.add('show');
   }
@@ -1050,6 +1017,7 @@ pub fn html() -> String {
 </body>
 </html>"#;
     template
+        .replace("/*@@THEME@@*/", crate::theme::CSS)
         .replace("@@ICON_DOWNLOAD@@", crate::icons::DOWNLOAD)
         .replace("@@ICON_CLOCK@@", crate::icons::CLOCK)
         .replace("@@ICON_ACTIVITY@@", crate::icons::ACTIVITY)

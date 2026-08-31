@@ -42,11 +42,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
 
   /* ── Tahoe Liquid Glass tokens ─────────────────────────────────────────── */
   :root {
@@ -56,8 +53,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     --glass-inner:     rgba(255, 255, 255, 0.38);
     --glass-shadow:    0 8px 40px rgba(0,0,0,0.13), 0 1.5px 6px rgba(0,0,0,0.07);
 
-    --user-bg:         rgba(0, 122, 255, 0.11);
-    --user-border:     rgba(0, 122, 255, 0.22);
+    --user-bg:         color-mix(in srgb, var(--accent) 11%, transparent);
+    --user-border:     color-mix(in srgb, var(--accent) 22%, transparent);
     --agent-bg:        rgba(255, 255, 255, 0.46);
     --agent-border:    rgba(0, 0, 0, 0.07);
     --error-bg:        rgba(255, 59, 48, 0.09);
@@ -66,19 +63,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
     --input-bg:        rgba(255, 255, 255, 0.60);
     --input-border:    rgba(0, 0, 0, 0.10);
-    --input-focus-border: rgba(0, 122, 255, 0.55);
+    --input-focus-border: color-mix(in srgb, var(--accent) 55%, transparent);
     --input-shadow:    inset 0 1px 3px rgba(0,0,0,0.05);
 
-    --text-primary:    rgba(0, 0, 0, 0.86);
-    --text-secondary:  rgba(0, 0, 0, 0.44);
-    --text-tertiary:   rgba(0, 0, 0, 0.28);
+    --text-primary:    var(--label);
+    --text-secondary:  var(--label-2);
+    --text-tertiary:   var(--label-3);
 
-    --accent:          #007aff;
-    --accent-hover:    #0066d6;
+    --accent-hover:    color-mix(in srgb, var(--accent) 85%, #000);
 
-    --dot-ok:          #28cd41;
-    --dot-wait:        #ff9500;
-    --dot-err:         #ff3b30;
+    --dot-ok:          var(--ok);
+    --dot-wait:        var(--warn);
+    --dot-err:         var(--err);
 
     --divider:         rgba(0, 0, 0, 0.07);
     --scrollbar:       rgba(0, 0, 0, 0.13);
@@ -90,13 +86,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     --rim-lo:          rgba(255, 255, 255, 0.20);
     --card-hi:         rgba(255, 255, 255, 0.50);
     --float-shadow:    0 8px 24px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.05);
-    --spring:          cubic-bezier(0.34, 1.56, 0.64, 1);
 
     /* Markdown content tokens */
     --md-code-bg:      rgba(0, 0, 0, 0.055);
     --md-code-border:  rgba(0, 0, 0, 0.08);
     --md-pre-bg:       rgba(0, 0, 0, 0.04);
-    --md-blockquote:   rgba(0, 122, 255, 0.18);
+    --md-blockquote:   color-mix(in srgb, var(--accent) 18%, transparent);
     --md-hr:           rgba(0, 0, 0, 0.09);
     --md-table-border: rgba(0, 0, 0, 0.09);
     --md-table-head:   rgba(0, 0, 0, 0.04);
@@ -110,8 +105,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       --glass-inner:     rgba(255, 255, 255, 0.05);
       --glass-shadow:    0 8px 48px rgba(0,0,0,0.55), 0 1.5px 6px rgba(0,0,0,0.30);
 
-      --user-bg:         rgba(10, 132, 255, 0.16);
-      --user-border:     rgba(10, 132, 255, 0.28);
+      --user-bg:         color-mix(in srgb, var(--accent) 16%, transparent);
+      --user-border:     color-mix(in srgb, var(--accent) 28%, transparent);
       --agent-bg:        rgba(255, 255, 255, 0.07);
       --agent-border:    rgba(255, 255, 255, 0.09);
       --error-bg:        rgba(255, 69, 58, 0.13);
@@ -120,19 +115,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
       --input-bg:        rgba(255, 255, 255, 0.08);
       --input-border:    rgba(255, 255, 255, 0.12);
-      --input-focus-border: rgba(10, 132, 255, 0.60);
+      --input-focus-border: color-mix(in srgb, var(--accent) 60%, transparent);
       --input-shadow:    inset 0 1px 3px rgba(0,0,0,0.25);
 
-      --text-primary:    rgba(255, 255, 255, 0.90);
-      --text-secondary:  rgba(255, 255, 255, 0.44);
-      --text-tertiary:   rgba(255, 255, 255, 0.26);
-
-      --accent:          #0a84ff;
-      --accent-hover:    #409cff;
-
-      --dot-ok:          #30d158;
-      --dot-wait:        #ff9f0a;
-      --dot-err:         #ff453a;
+      --accent-hover:    color-mix(in srgb, var(--accent) 80%, #fff);
 
       --divider:         rgba(255, 255, 255, 0.07);
       --scrollbar:       rgba(255, 255, 255, 0.13);
@@ -146,7 +132,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       --md-code-bg:      rgba(255, 255, 255, 0.08);
       --md-code-border:  rgba(255, 255, 255, 0.10);
       --md-pre-bg:       rgba(0, 0, 0, 0.28);
-      --md-blockquote:   rgba(10, 132, 255, 0.22);
+      --md-blockquote:   color-mix(in srgb, var(--accent) 22%, transparent);
       --md-hr:           rgba(255, 255, 255, 0.10);
       --md-table-border: rgba(255, 255, 255, 0.10);
       --md-table-head:   rgba(255, 255, 255, 0.05);
@@ -6035,7 +6021,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
 </script>
 </body>
-</html>"#.replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
+</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
         .replace("/* MAX_SESSIONS */", &crate::MAX_SESSIONS.to_string())
         .replace(
             "/* MAX_PROMPT_HISTORY */",

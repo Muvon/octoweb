@@ -11,17 +11,14 @@
 /// IPC messages sent to Rust:
 ///   { type: "open_sidebar" }  — user clicked the notification
 ///   { type: "dismiss_notification" }  — user clicked the X button
-pub fn html() -> &'static str {
+pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
+/*@@THEME@@*/
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
-  }
 
   html, body {
     width: 100%; height: 100%;
@@ -38,23 +35,14 @@ pub fn html() -> &'static str {
     transform: translateY(-120%);
     width: 340px;
     padding: 10px 14px;
-    border-radius: 14px;
+    border-radius: var(--r-card);
     cursor: pointer;
     user-select: none;
 
-    /* Glass — macOS Tahoe style */
-    background: rgba(255, 255, 255, 0.88);
-    backdrop-filter: blur(24px) saturate(180%);
-    -webkit-backdrop-filter: blur(24px) saturate(180%);
-    box-shadow:
-      0 0 0 0.5px rgba(0, 0, 0, 0.07),
-      0 8px 32px rgba(0, 0, 0, 0.14),
-      0 2px 8px rgba(0, 0, 0, 0.06),
-      inset 0 1px 0 rgba(255, 255, 255, 0.6);
-
     opacity: 0;
-    transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
-                opacity 0.25s ease;
+    transition: transform var(--t-pop) var(--spring),
+                opacity var(--t-pop) var(--ease),
+                background var(--t-fast) var(--ease);
     pointer-events: none;
   }
 
@@ -68,17 +56,6 @@ pub fn html() -> &'static str {
     transform: translateY(-120%);
     opacity: 0;
     pointer-events: none;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    #toast {
-      background: rgba(44, 44, 46, 0.92);
-      box-shadow:
-        0 0 0 0.5px rgba(255, 255, 255, 0.10),
-        0 8px 32px rgba(0, 0, 0, 0.45),
-        0 2px 8px rgba(0, 0, 0, 0.25),
-        inset 0 1px 0 rgba(255, 255, 255, 0.07);
-    }
   }
 
   /* ── Layout ──────────────────────────────────────────────────────── */
@@ -97,25 +74,21 @@ pub fn html() -> &'static str {
   .content {
     flex: 1;
     min-width: 0;
+    padding-right: 38px;
   }
 
   .title {
-    font: 600 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif;
-    color: rgba(0, 0, 0, 0.85);
+    font: 600 12px/1.3 var(--font-text);
+    color: var(--label);
     margin-bottom: 2px;
   }
 
   .preview {
-    font: 400 12px/1.35 -apple-system, BlinkMacSystemFont, sans-serif;
-    color: rgba(0, 0, 0, 0.55);
+    font: 400 12px/1.35 var(--font-text);
+    color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .title  { color: rgba(255, 255, 255, 0.92); }
-    .preview { color: rgba(255, 255, 255, 0.50); }
   }
 
   /* ── Close button ─────────────────────────────────────────────────── */
@@ -123,74 +96,55 @@ pub fn html() -> &'static str {
     position: absolute;
     top: 6px;
     right: 6px;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: rgba(0, 0, 0, 0.06);
+    min-width: 22px;
+    height: 22px;
+    border-radius: var(--r-capsule);
+    background: var(--fill);
     border: none;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    opacity: 0;
-    transition: opacity 0.15s ease, background 0.15s ease;
-  }
-
-  #toast:hover .close-btn {
-    opacity: 1;
+    gap: 3px;
+    padding: 0 4px;
+    color: var(--label-2);
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
 
   .close-btn:hover {
-    background: rgba(0, 0, 0, 0.12);
+    background: var(--fill-hover);
+    color: var(--label);
   }
 
   .close-btn:active {
-    background: rgba(0, 0, 0, 0.18);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .close-btn {
-      background: rgba(255, 255, 255, 0.08);
-    }
-    .close-btn:hover {
-      background: rgba(255, 255, 255, 0.15);
-    }
-    .close-btn:active {
-      background: rgba(255, 255, 255, 0.22);
-    }
+    background: var(--fill-press);
+    transform: scale(0.96);
   }
 
   .close-btn svg {
     width: 10px;
     height: 10px;
-    stroke: rgba(0, 0, 0, 0.5);
+    stroke: currentColor;
     stroke-width: 1.5;
     fill: none;
   }
 
-  @media (prefers-color-scheme: dark) {
-    .close-btn svg {
-      stroke: rgba(255, 255, 255, 0.6);
-    }
-  }
-
   /* Hover feedback for toast */
   #toast:hover {
-    background: rgba(255, 255, 255, 0.95);
+    background: color-mix(in srgb, var(--glass-thick) 90%, var(--fill-hover));
   }
-  @media (prefers-color-scheme: dark) {
-    #toast:hover {
-      background: rgba(54, 54, 56, 0.95);
-    }
+  #toast:active {
+    background: color-mix(in srgb, var(--glass-thick) 86%, var(--fill-press));
   }
 </style>
 </head>
 <body>
-<div id="toast">
-  <button class="close-btn" title="Dismiss">
+<div id="toast" class="glass-panel">
+  <button class="close-btn" title="Dismiss (Esc)">
     <svg viewBox="0 0 10 10">
       <path d="M2 2L8 8M8 2L2 8" />
     </svg>
+    <span class="kbd">esc</span>
   </button>
   <div class="row" id="content">
     <span class="app-icon" id="icon">🐙</span>
@@ -256,5 +210,5 @@ pub fn html() -> &'static str {
 })();
 </script>
 </body>
-</html>"#
+</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
 }
