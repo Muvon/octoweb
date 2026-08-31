@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.11.0] - 2026-08-31
+
+### 📋 Release Summary
+
+This release expands command result rendering and MCP capabilities, including browser overlay dismissal, action expectations, scoped snapshots, download tracking/reporting, and trusted native input/effect tracking (f8275a05, 4693510b, 1a7baf80, aea1f105, dd563342). UI responsiveness and consistency were improved through optimized snapshot and favicon handling, with browser features and settings documented (a55925ec, a54c34a7). Several fixes improve hidden-tab loading, tab visibility and switching, navigation stability, sidebar processing, and session message handling (4696ffa3, 6bd4738b, d5a14a9d, 498a23c2, 84dbf957, b8d5e5e7, de9ebec5, f04742b1).
+
+
+### ✨ New Features & Enhancements
+
+- **sidebar**: expand command result rendering `f8275a05`
+- **mcp**: implement browser overlay dismissal `4693510b`
+- **mcp**: implement action expectations and scoped snapshots `1a7baf80`
+- **download**: implement download tracking and reporting `aea1f105`
+- **mcp**: implement trusted native input and effect tracking `dd563342`
+
+### 🔧 Improvements & Optimizations
+
+- **ui**: optimize snapshot and favicon handling `a55925ec`
+- **ui**: centralize shared view themes `faa39249`
+- **agent**: share event and bubble handling `3c3765e6`
+- **main**: group native action parameters into NativeActionCtx `9cff5bb9`
+- **main**: update string splitting and add clippy allow `72dc40f2`
+- **main**: update OpenInNewTab to support background opening `696aa5c7`
+- **script**: resolve target directory dynamically `3db6b624`
+- **main**: use is_some_and for slot check `9cf669e6`
+
+### 🐛 Bug Fixes & Stability
+
+- **webview**: avoid stalling hidden tab loads `4696ffa3`
+- **tabs**: restore active tab visibility `6bd4738b`
+- **tabs**: render successor after selected close `d5a14a9d`
+- **nav**: keep foreground during tab swap `498a23c2`
+- **main**: implement watchdog for deferred tab swaps `84dbf957`
+- **nav**: ignore WebKitErrorPlugInWillHandleLoad error `b8d5e5e7`
+- **sidebar**: unlock processing cards on turn end `de9ebec5`
+- **session**: split agent messages after tool calls `f04742b1`
+
+### 📚 Documentation & Examples
+
+- **readme**: document browser features and settings `a54c34a7`
+
 ## [0.10.0] - 2026-08-17
 
 ### 📋 Release Summary
