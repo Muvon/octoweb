@@ -1662,9 +1662,19 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     text-transform: none;
   }
   /* Generic fallback table — flat, no borders */
-  .cmd-output-table { width: 100%; border-collapse: collapse; }
+  .cmd-output-table { width: 100%; border-collapse: collapse; margin: 0; }
   .cmd-output-table tr { border-bottom: 1px solid var(--divider); }
   .cmd-output-table tr:last-child { border-bottom: none; }
+  .msg.agent .msg-bubble .cmd-output-table td {
+    border: none;
+    border-bottom: 0;
+  }
+  .msg.agent .msg-bubble .cmd-output-table .cmd-output-key {
+    padding: 3px 10px 3px 0;
+  }
+  .msg.agent .msg-bubble .cmd-output-table .cmd-output-val {
+    padding: 3px 0;
+  }
   .cmd-output-key {
     padding: 3px 10px 3px 0;
     color: var(--text-tertiary);
@@ -1688,7 +1698,24 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     padding: 2px 0 2px 8px;
     border-left: 1px solid var(--divider);
     font-size: 11px;
+    min-width: 0;
   }
+  .cmd-output-pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+    color: inherit;
+  }
+  .cmd-records { display: flex; flex-direction: column; }
+  .cmd-record {
+    min-width: 0;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--divider);
+  }
+  .cmd-record:last-child { border-bottom: none; }
+  .cmd-record > .cmd-output-table { margin: 0; }
+  .cmd-record > .cmd-output-table > tbody > tr:last-child { border-bottom: none; }
   .cmd-output-list { margin: 0; padding-left: 16px; }
   .cmd-output-list li { margin: 1px 0; font-size: 11.5px; }
   .cmd-output-single-list { display: flex; flex-direction: column; gap: 2px; }
@@ -1757,21 +1784,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   /* Stats — inline strip with vertical hairline separators */
   .cmd-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0;
-    align-items: stretch;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     margin: 2px 0;
   }
   .cmd-stat {
     display: flex;
     flex-direction: column;
-    padding: 2px 12px;
-    border-right: 1px solid var(--divider);
+    justify-content: center;
+    padding: 5px 8px;
     min-width: 0;
   }
-  .cmd-stat:first-child { padding-left: 0; }
-  .cmd-stat:last-child { border-right: none; padding-right: 0; }
+  .cmd-stat:nth-child(odd) {
+    padding-left: 0;
+    border-right: 1px solid var(--divider);
+  }
+  .cmd-stat:nth-child(even) { padding-right: 0; }
+  .cmd-stat:only-child { border: none; padding-left: 0; }
   .cmd-stat-label {
     font-size: 10.5px;
     font-weight: 500;
@@ -1787,9 +1816,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
     line-height: 1.3;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
     overflow: hidden;
-    text-overflow: ellipsis;
   }
   .cmd-stat.accent .cmd-stat-val { color: var(--accent); }
   .cmd-stat.success .cmd-stat-val { color: #34c759; }
@@ -1867,6 +1896,61 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     color: var(--text-tertiary);
   }
 
+  /* Agent runs — dense enough for the sidebar, with stable aligned columns. */
+  .cmd-agent-row { padding: 6px 0; }
+  .cmd-agent-row .cmd-item-head { align-items: center; }
+  .cmd-agent-id {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: 9.5px 'SF Mono', Monaco, monospace;
+    color: var(--text-tertiary);
+  }
+  .cmd-agent-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .cmd-agent-path, .cmd-agent-action {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 10px;
+    color: var(--text-tertiary);
+  }
+  .cmd-agent-action { color: var(--text-secondary); }
+  .cmd-agent-action::before { content: '↳ '; color: var(--text-tertiary); }
+
+  /* Quota rows used by /usage. */
+  .cmd-quotas { display: flex; flex-direction: column; gap: 7px; }
+  .cmd-quota-head {
+    display: grid;
+    grid-template-columns: minmax(62px, 1fr) auto;
+    gap: 8px;
+    align-items: baseline;
+    margin-bottom: 3px;
+    font-size: 10.5px;
+  }
+  .cmd-quota-name { color: var(--text-secondary); font-weight: 600; }
+  .cmd-quota-value { color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+  .cmd-quota-track {
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--divider);
+  }
+  .cmd-quota-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+  }
+  .cmd-quota-fill.warn { background: #ff9500; }
+  .cmd-quota-fill.err { background: #ff3b30; }
+
   /* Badges — small, flat */
   .cmd-badge {
     display: inline-block;
@@ -1907,6 +1991,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .cmd-toast-icon svg { width: 100%; height: 100%; }
   .cmd-toast.err .cmd-toast-icon { color: #ff3b30; }
+  .cmd-error-text { color: #c1271d; }
+  @media (prefers-color-scheme: dark) {
+    .cmd-error-text { color: #ff6961; }
+  }
 
   /* Empty state — quiet hairline note */
   .cmd-empty {
@@ -1953,6 +2041,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     padding: 3px 6px;
     border-bottom: 1px solid var(--divider);
     text-align: left;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+  }
+  .msg.agent .msg-bubble .cmd-md th,
+  .msg.agent .msg-bubble .cmd-md td {
+    border: none;
+    border-bottom: 1px solid var(--divider);
   }
   .cmd-md th {
     color: var(--text-secondary);
@@ -3196,7 +3291,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (val === null || val === undefined) return '<span class="null">none</span>';
     if (typeof val === 'boolean') return '<span class="bool-' + val + '">' + val + '</span>';
     if (typeof val === 'number') return '<span class="number">' + val + '</span>';
-    if (typeof val === 'string') return escapeHtml(val);
+    if (typeof val === 'string') {
+      var escaped = escapeHtml(val);
+      return val.indexOf('\n') >= 0 ? '<pre class="cmd-output-pre">' + escaped + '</pre>' : escaped;
+    }
     if (Array.isArray(val)) {
       if (val.length === 0) return '<span class="null">none</span>';
       if (val.every(function(v) { return typeof v === 'string' || typeof v === 'number'; })) {
@@ -3204,7 +3302,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         for (var i = 0; i < val.length; i++) ul += '<li>' + escapeHtml(String(val[i])) + '</li>';
         return ul + '</ul>';
       }
-      return '<div class="cmd-output-nested">' + escapeHtml(JSON.stringify(val, null, 2)) + '</div>';
+      var records = '<div class="cmd-records">';
+      for (var j = 0; j < val.length; j++) {
+        records += '<div class="cmd-record">' + renderCommandValue(val[j]) + '</div>';
+      }
+      return records + '</div>';
     }
     if (typeof val === 'object') {
       return '<div class="cmd-output-nested">' + renderCommandTable(val) + '</div>';
@@ -3213,6 +3315,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   function renderCommandTable(obj) {
+    if (!obj || Object.keys(obj).length === 0) return '<span class="null">none</span>';
     var html = '<table class="cmd-output-table">';
     for (var key in obj) {
       if (!obj.hasOwnProperty(key)) continue;
@@ -3246,6 +3349,79 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (v < 60000) return (v / 1000).toFixed(1) + 's';
     if (v < 3600000) return Math.floor(v / 60000) + 'm ' + Math.floor((v % 60000) / 1000) + 's';
     return Math.floor(v / 3600000) + 'h ' + Math.floor((v % 3600000) / 60000) + 'm';
+  }
+  function fmtSeconds(seconds) {
+    var v = Math.max(0, Number(seconds) || 0);
+    if (v < 60) return Math.floor(v) + 's';
+    if (v < 3600) return Math.floor(v / 60) + 'm ' + Math.floor(v % 60) + 's';
+    if (v < 86400) return Math.floor(v / 3600) + 'h ' + Math.floor((v % 3600) / 60) + 'm';
+    return Math.floor(v / 86400) + 'd ' + Math.floor((v % 86400) / 3600) + 'h';
+  }
+  function fmtAgo(seconds) {
+    if (seconds === null || seconds === undefined) return '';
+    return fmtSeconds(seconds) + ' ago';
+  }
+  function statusKind(status) {
+    var s = String(status || '').toLowerCase();
+    if (s === 'done' || s === 'completed' || s === 'running' || s === 'active' || s === 'ok') return 'ok';
+    if (s === 'failed' || s === 'error' || s === 'dead' || s === 'unreachable') return 'err';
+    if (s === 'cancelled' || s === 'canceled' || s === 'inactive' || s === 'off') return 'muted';
+    return 'warn';
+  }
+  function statusBadge(status) {
+    var label = String(status || 'unknown');
+    return '<span class="cmd-badge ' + statusKind(label) + '">' + escapeHtml(label) + '</span>';
+  }
+  function messageBlock(message, isError) {
+    var text = String(message || '');
+    if (!text) return emptyState(isError ? 'Command failed' : 'No output');
+    var cls = 'cmd-output-pre' + (isError ? ' cmd-error-text' : '');
+    return '<pre class="' + cls + '">' + escapeHtml(text) + '</pre>';
+  }
+  function agentFacts(a) {
+    var facts = [];
+    if (a.model) facts.push(String(a.model));
+    if (a.tokens_input != null || a.tokens_output != null) {
+      facts.push(fmtTokens(a.tokens_input) + ' in');
+      facts.push(fmtTokens(a.tokens_output) + ' out');
+    }
+    if (Number(a.tokens_cached) > 0) facts.push(fmtTokens(a.tokens_cached) + ' cached');
+    if (a.cost != null) facts.push(fmtCost(a.cost));
+    if (a.tool_calls != null) facts.push(String(a.tool_calls) + ' tools');
+    return facts;
+  }
+  function agentRow(a, running) {
+    a = a || {};
+    var status = String(a.status || (running ? 'running' : 'unknown'));
+    var when = running ? fmtSeconds(a.elapsed_secs) : fmtAgo(a.ago_secs);
+    var html = '<div class="cmd-item-row stack cmd-agent-row"><div class="cmd-item-head">' +
+      statusBadge(status) +
+      '<span class="cmd-item-name">' + escapeHtml(String(a.role || 'agent')) + '</span>' +
+      (when ? '<span class="cmd-item-meta">' + escapeHtml(when) + '</span>' : '') +
+      '</div>';
+    if (a.id) html += '<div class="cmd-agent-id">' + escapeHtml(String(a.id)) + '</div>';
+    var facts = agentFacts(a);
+    if (facts.length) {
+      html += '<div class="cmd-agent-facts">';
+      for (var i = 0; i < facts.length; i++) html += '<span>' + escapeHtml(facts[i]) + '</span>';
+      html += '</div>';
+    }
+    if (a.workdir) html += '<div class="cmd-agent-path">' + escapeHtml(String(a.workdir)) + '</div>';
+    if (a.last_action) html += '<div class="cmd-agent-action">' + escapeHtml(String(a.last_action)) + '</div>';
+    return html + '</div>';
+  }
+  function quotaRow(label, used, cap, suffix) {
+    var spent = Math.max(0, Number(used) || 0);
+    var limit = Math.max(0, Number(cap) || 0);
+    var pct = limit > 0 ? Math.min(100, spent / limit * 100) : 0;
+    var cls = pct >= 100 ? ' err' : (pct >= 80 ? ' warn' : '');
+    var value = suffix === 'GB'
+      ? spent.toFixed(2) + ' / ' + limit.toFixed(2) + ' GB'
+      : fmtCost(spent) + ' / ' + fmtCost(limit);
+    return '<div class="cmd-quota"><div class="cmd-quota-head">' +
+      '<span class="cmd-quota-name">' + escapeHtml(String(label)) + '</span>' +
+      '<span class="cmd-quota-value">' + escapeHtml(value) + '</span></div>' +
+      '<div class="cmd-quota-track"><span class="cmd-quota-fill' + cls + '" style="width:' + pct.toFixed(1) + '%"></span></div></div>';
   }
   function statTile(label, val, opts) {
     opts = opts || {};
@@ -3283,7 +3459,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   var CMD_RENDERERS = {
     model: function(o) {
-      return switchCard('Model', o.old_model, o.new_model, !!o.changed, 'M');
+      var html = switchCard('Model', o.old_model, o.new_model, !!o.changed, 'M');
+      if (o.save_error) html += '<div class="cmd-section-title">Warning</div>' + messageBlock(o.save_error, true);
+      return html;
     },
     role: function(o) {
       var html = switchCard('Role', o.old_role, o.new_role || o.current_role, !!o.changed, 'R');
@@ -3297,10 +3475,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         }
         html += '</div>';
       }
+      if (o.save_error) html += '<div class="cmd-section-title">Warning</div>' + messageBlock(o.save_error, true);
       return html;
     },
     effort: function(o) {
-      return switchCard('Effort', o.old_effort, o.new_effort, !!o.changed, 'E');
+      var html = switchCard('Effort', o.old_effort, o.new_effort, !!o.changed, 'E');
+      if (o.save_error) html += '<div class="cmd-section-title">Warning</div>' + messageBlock(o.save_error, true);
+      return html;
     },
     loglevel: function(o) {
       var html = switchCard('Log level', o.old_level, o.new_level || o.current_level, !!o.changed, 'L');
@@ -3317,10 +3498,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return html;
     },
     info: function(o) {
+      var totalTokens = Number(o.tokens_used || 0) + Number(o.tokens_cached || 0) +
+        Number(o.tokens_cache_write || 0) + Number(o.tokens_reasoning || 0);
       var stats = '<div class="cmd-stats">';
       stats += statTile('Model', o.model || '—', { cls: 'accent' });
       stats += statTile('Role', o.role || '—');
-      stats += statTile('Total tokens', fmtTokens(o.tokens_used), { cls: 'accent' });
+      stats += statTile('Total tokens', fmtTokens(totalTokens), { cls: 'accent' });
       stats += statTile('Cost', fmtCost(o.total_cost), { cls: 'success' });
       stats += statTile('Input', fmtTokens(o.tokens_input));
       stats += statTile('Output', fmtTokens(o.tokens_output));
@@ -3336,17 +3519,81 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (o.cache_markers_system != null) meta += statTile('Sys markers', String(o.cache_markers_system));
       if (o.cache_markers_tool != null) meta += statTile('Tool markers', String(o.cache_markers_tool));
       if (o.cache_markers_content != null) meta += statTile('Content markers', String(o.cache_markers_content));
+      if (o.cache_non_cached_tokens != null) meta += statTile('Non-cached', fmtTokens(o.cache_non_cached_tokens));
       meta += '</div>';
+      if (o.timing && (o.timing.requests || o.timing.completed_turns)) {
+        meta += '<div class="cmd-section-title">Timing</div><div class="cmd-stats">';
+        meta += statTile('Requests', o.timing.requests || 0);
+        meta += statTile('Avg request', fmtMs(o.timing.avg_request_time_ms));
+        meta += statTile('Turns', o.timing.completed_turns || 0);
+        meta += statTile('Avg turn', fmtMs(o.timing.avg_turn_time_ms));
+        meta += '</div>';
+      }
+      var averages = [];
+      if (o.avg_tokens_per_compression) averages.push(['Per compression', fmtTokens(o.avg_tokens_per_compression)]);
+      if (o.avg_tokens_per_tool) averages.push(['Per tool', fmtTokens(o.avg_tokens_per_tool)]);
+      if (o.avg_tokens_per_response) averages.push(['Per response', fmtTokens(o.avg_tokens_per_response)]);
+      if (o.avg_input_tokens) averages.push(['Input/request', fmtTokens(o.avg_input_tokens)]);
+      if (averages.length) {
+        meta += '<div class="cmd-section-title">Averages</div><div class="cmd-stats">';
+        for (var ai = 0; ai < averages.length; ai++) meta += statTile(averages[ai][0], averages[ai][1]);
+        meta += '</div>';
+      }
+      var detailSections = [
+        ['Compression', o.compression_stats],
+        ['Agents', o.agents_stats],
+        ['Supervisor', o.supervisor_stats],
+        ['Learning', o.learning_stats]
+      ];
+      for (var ds = 0; ds < detailSections.length; ds++) {
+        var detail = detailSections[ds][1];
+        if (detail && typeof detail === 'object' && Object.keys(detail).length) {
+          meta += '<div class="cmd-section-title">' + detailSections[ds][0] + '</div>' + renderCommandTable(detail);
+        }
+      }
       return stats + meta;
     },
     copy: function(o) {
       if (!o.copied) return toast('Nothing to copy', true);
       return toast('Copied ' + (o.length || 0) + ' chars to clipboard');
     },
+    clear: function(o) {
+      return toast(o.message || (o.success ? 'Conversation cleared' : 'Unable to clear'), !o.success);
+    },
+    done: function(o) {
+      if (!o.done) return toast('Task was not finalized', true);
+      var html = toast('Task finalized');
+      var states = [
+        ['Memory', o.memorized],
+        ['Summary', o.summarized],
+        ['Session', o.saved]
+      ];
+      html += '<div class="cmd-section-title">Completion</div><div class="cmd-chips">';
+      for (var i = 0; i < states.length; i++) {
+        if (states[i][1] == null) continue;
+        html += '<span class="cmd-chip' + (states[i][1] ? ' active' : '') + '">' +
+          escapeHtml(states[i][0]) + ' ' + (states[i][1] ? '✓' : '—') + '</span>';
+      }
+      return html + '</div>';
+    },
+    image: function(o) {
+      if (o.error) return toast(o.error, true);
+      return toast(o.image_attached ? 'Image attached: ' + (o.path || '') : 'No image attached', !o.image_attached);
+    },
+    video: function(o) {
+      if (o.error) return toast(o.error, true);
+      return toast(o.video_attached ? 'Video attached: ' + (o.path || '') : 'No video attached', !o.video_attached);
+    },
+    rename: function(o) {
+      return toast(o.title ? 'Renamed to ' + o.title : 'Session title cleared');
+    },
     schedule: function(o) {
       var d = o.data || {};
       var msg = String(d.message || '');
-      if (d.is_error) return toast(msg, true);
+      if (d.is_error || d.subcommand === 'error') return toast(msg || 'Schedule command failed', true);
+      if (!msg && d.subcommand === 'help') {
+        return messageBlock('/schedule [list|add|remove|edit] [id] [when=...] [message=...]', false);
+      }
       var lines = msg.split('\n').map(escapeHtml).join('<br>');
       return '<div class="cmd-toast"><span class="cmd-toast-icon" style="color:var(--accent)">⏱</span><span>' + lines + '</span></div>';
     },
@@ -3363,14 +3610,45 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     },
     list: function(o) {
       var md = String(o.plain_text || '');
-      var html = '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(md) : escapeHtml(md)) + '</div>';
-      if (o.page) html += '<div class="cmd-stat-sub">Page ' + escapeHtml(String(o.page)) + '</div>';
+      var html = '';
+      if (md) {
+        html = '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(md) : escapeHtml(md)) + '</div>';
+      } else {
+        var sessions = Array.isArray(o.sessions) ? o.sessions : [];
+        html = '<div class="cmd-stats">' +
+          statTile('Sessions', o.total_sessions != null ? o.total_sessions : sessions.length, { cls: 'accent' }) +
+          statTile('Page', (o.page || 1) + ' / ' + (o.total_pages || 1)) + '</div>';
+        if (!sessions.length) return html + emptyState('No sessions found');
+        html += '<div class="cmd-items">';
+        for (var si = 0; si < sessions.length; si++) {
+          var se = sessions[si] || {};
+          html += '<div class="cmd-item-row stack"><div class="cmd-item-head">' +
+            '<span class="cmd-item-name">' + escapeHtml(String(se.name || '?')) + '</span>' +
+            (se.is_current ? '<span class="cmd-badge ok">current</span>' : '') +
+            '</div><div class="cmd-agent-facts">' +
+            '<span>' + escapeHtml(String(se.created || '')) + '</span>' +
+            '<span>' + escapeHtml(String(se.model || '')) + '</span>' +
+            '<span>' + escapeHtml(fmtTokens(se.tokens)) + '</span>' +
+            '<span>' + escapeHtml(fmtCost(se.cost)) + '</span></div>' +
+            (se.title ? '<div class="cmd-item-desc">' + escapeHtml(String(se.title)) + '</div>' : '') + '</div>';
+        }
+        html += '</div>';
+      }
       return html;
     },
     run: function(o) {
       var d = o.data || {};
       if (o.command_executed) {
-        return toast('Ran command: ' + o.command_executed);
+        if (d.success === false) {
+          var failed = toast(d.error || ('Command failed: ' + o.command_executed), true);
+          if (Array.isArray(d.available_commands) && d.available_commands.length) {
+            failed += '<div class="cmd-section-title">Available commands</div>' + renderCommandValue(d.available_commands);
+          }
+          return failed;
+        }
+        var ran = toast('Ran command: ' + o.command_executed);
+        if (d.result != null) ran += '<div class="cmd-section-title">Result</div>' + renderCommandValue(d.result);
+        return ran;
       }
       var cmds = Array.isArray(d.commands) ? d.commands : [];
       var html = '<div class="cmd-section-title">' + escapeHtml(d.message || 'Available') + '</div>';
@@ -3403,13 +3681,50 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     },
     mcp: function(o) {
       var d = o.data || {};
+      if (d.message && (!d.servers || (Array.isArray(d.servers) && !d.servers.length))) {
+        return messageBlock(d.message, d.subcommand === 'error' || d.is_error);
+      }
+      var html = '';
+
+      // `/mcp list` groups tool names under server keys.
+      if (d.servers && !Array.isArray(d.servers) && typeof d.servers === 'object') {
+        var names = Object.keys(d.servers).sort();
+        html += '<div class="cmd-stats">' +
+          statTile('Servers', names.length, { cls: 'accent' }) +
+          statTile('Tools', d.total_tools != null ? d.total_tools : 0) + '</div>';
+        if (!names.length) return html + emptyState('No MCP servers configured');
+        html += '<div class="cmd-section-title">Servers</div><div class="cmd-items">';
+        for (var n = 0; n < names.length; n++) {
+          var groupedTools = Array.isArray(d.servers[names[n]]) ? d.servers[names[n]] : [];
+          html += '<div class="cmd-item-row stack"><div class="cmd-item-head">' +
+            '<span class="cmd-item-name">' + escapeHtml(names[n]) + '</span>' +
+            '<span class="cmd-item-meta">' + groupedTools.length + ' tools</span></div>';
+          if (groupedTools.length) {
+            html += '<div class="cmd-tools-inline">';
+            for (var gt = 0; gt < groupedTools.length; gt++) {
+              html += '<span class="cmd-tool-tag">' + escapeHtml(String(groupedTools[gt])) + '</span>';
+            }
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+        return html + '</div>';
+      }
+
+      // `/mcp info|full|health` returns one structured record per server.
       var srv = Array.isArray(d.servers) ? d.servers : [];
-      if (!srv.length) return emptyState('No MCP servers configured');
-      var html = '<div class="cmd-section-title">' + srv.length + ' servers</div>';
+      if (!srv.length) {
+        var rest = {};
+        for (var dk in d) if (dk !== 'subcommand') rest[dk] = d[dk];
+        return Object.keys(rest).length ? renderCommandTable(rest) : emptyState('No MCP servers configured');
+      }
+      html += '<div class="cmd-stats">' +
+        statTile('Servers', srv.length, { cls: 'accent' }) +
+        statTile('Tools', d.total_tools != null ? d.total_tools : 0) + '</div>';
+      html += '<div class="cmd-section-title">Servers</div>';
       html += '<div class="cmd-items">';
       for (var i = 0; i < srv.length; i++) {
         var s = srv[i];
-        var hKind = (s.health === 'running' ? 'ok' : (s.health === 'failed' || s.health === 'error' ? 'err' : 'warn'));
         var tools = Array.isArray(s.tools) ? s.tools : [];
         var meta = [];
         if (s.connection_type) meta.push(s.connection_type);
@@ -3418,7 +3733,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         html += '<div class="cmd-item-row stack">' +
           '<div class="cmd-item-head">' +
             '<span class="cmd-item-name">' + escapeHtml(s.name || '?') + '</span>' +
-            '<span class="cmd-badge ' + hKind + '">' + escapeHtml(s.health || 'unknown') + '</span>' +
+            statusBadge(s.health || 'unknown') +
             (meta.length ? '<span class="cmd-item-meta">' + escapeHtml(meta.join(' · ')) + '</span>' : '') +
           '</div>';
         if (tools.length) {
@@ -3435,15 +3750,35 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     },
     plan: function(o) {
       if (!o.has_plan) {
-        return '<div class="cmd-empty">' + escapeHtml(o.display || 'No active plan') + '</div>';
+        var empty = '<div class="cmd-empty">' + escapeHtml(o.display || 'No active plan') + '</div>';
+        if (Array.isArray(o.knowledge) && o.knowledge.length) {
+          empty += '<div class="cmd-section-title">Knowledge</div>' + renderCommandValue(o.knowledge);
+        }
+        return empty;
       }
-      var planText = '';
-      if (typeof o.plan === 'string') planText = o.plan;
-      else if (o.plan) planText = JSON.stringify(o.plan, null, 2);
-      return '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(planText) : escapeHtml(planText)) + '</div>';
+      var planText = typeof o.display === 'string' ? o.display : '';
+      var html = planText
+        ? '<div class="cmd-md">' + (typeof marked !== 'undefined' ? marked.parse(planText) : escapeHtml(planText)) + '</div>'
+        : renderCommandValue(o.plan);
+      if (Array.isArray(o.knowledge) && o.knowledge.length) {
+        html += '<div class="cmd-section-title">Knowledge</div>' + renderCommandValue(o.knowledge);
+      }
+      return html;
     },
     prompt: function(o) {
       var d = o.data || {};
+      if (d.action === 'execute') {
+        if (d.success === false) {
+          var failed = toast(d.error || 'Prompt template failed', true);
+          if (Array.isArray(d.available_prompts) && d.available_prompts.length) {
+            failed += '<div class="cmd-section-title">Available prompts</div>' + renderCommandValue(d.available_prompts);
+          }
+          return failed;
+        }
+        var executed = toast('Started prompt: ' + (d.prompt_name || 'template'));
+        if (d.prompt_content) executed += '<div class="cmd-section-title">Prompt</div>' + messageBlock(d.prompt_content, false);
+        return executed;
+      }
       var prompts = Array.isArray(d.prompts) ? d.prompts : [];
       if (!prompts.length) return emptyState('No prompts available');
       var html = '<div class="cmd-section-title">' + prompts.length + ' prompt templates</div>';
@@ -3460,9 +3795,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     },
     skill: function(o) {
       var d = o.data || {};
+      if (d.subcommand === 'error') return toast(d.message || 'Skill command failed', true);
+      if (d.subcommand === 'use') return toast('Enabled skill: ' + (d.name || ''));
+      if (d.subcommand === 'forget') return toast('Disabled skill: ' + (d.name || ''));
       var skills = Array.isArray(d.skills) ? d.skills : [];
       var html = '<div class="cmd-stats">';
-      html += statTile('Total', skills.length, { cls: 'accent' });
+      html += statTile('Total', d.total != null ? d.total : skills.length, { cls: 'accent' });
       if (d.active_count != null) html += statTile('Active', d.active_count, { cls: 'success' });
       if (d.page) html += statTile('Page', d.page);
       if (d.pattern) html += statTile('Filter', d.pattern);
@@ -3485,6 +3823,125 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       html += '</div>';
       return html;
     },
+    monitor: function(o) {
+      var d = o.data || {};
+      var failed = d.is_error || d.subcommand === 'error';
+      return messageBlock(d.message || (failed ? 'Monitor command failed' : 'No running monitors'), failed);
+    },
+    learning: function(o) {
+      var d = o.data || {};
+      if (d.subcommand === 'error') return toast(d.message || 'Learning command failed', true);
+      if (d.subcommand === 'list' || Array.isArray(d.lessons)) {
+        var lessons = Array.isArray(d.lessons) ? d.lessons : [];
+        var html = '<div class="cmd-stats">' +
+          statTile('Lessons', d.total != null ? d.total : lessons.length, { cls: 'accent' }) +
+          statTile('Role', d.role || '—') +
+          statTile('Project', d.project || '—') +
+          statTile('Page', (d.page || 1) + ' / ' + (d.total_pages || 0)) + '</div>';
+        if (!lessons.length) return html + emptyState('No lessons stored');
+        html += '<div class="cmd-section-title">Lessons</div><div class="cmd-items">';
+        for (var i = 0; i < lessons.length; i++) {
+          var l = lessons[i] || {};
+          var title = l.title || l.content || ('Lesson ' + (l.index || i + 1));
+          var preview = String(l.content || '');
+          if (title === l.content) preview = '';
+          if (preview.length > 240) preview = preview.slice(0, 240) + '…';
+          html += '<div class="cmd-item-row stack"><div class="cmd-item-head">' +
+            '<span class="cmd-item-name">' + escapeHtml(String(l.index || i + 1)) + '</span>' +
+            (l.memory_type ? '<span class="cmd-badge info">' + escapeHtml(String(l.memory_type)) + '</span>' : '') +
+            (l.scope ? '<span class="cmd-item-meta">' + escapeHtml(String(l.scope)) + '</span>' : '') +
+            (l.outcome ? statusBadge(l.outcome) : '') + '</div>' +
+            '<div class="cmd-item-desc">' + escapeHtml(String(title)) + '</div>' +
+            (preview ? '<div class="cmd-item-desc">' + escapeHtml(preview) + '</div>' : '');
+          if (Array.isArray(l.tags) && l.tags.length) {
+            html += '<div class="cmd-tools-inline">';
+            for (var j = 0; j < l.tags.length; j++) html += '<span class="cmd-tool-tag">' + escapeHtml(String(l.tags[j])) + '</span>';
+            html += '</div>';
+          }
+          html += '</div>';
+        }
+        return html + '</div>';
+      }
+      if (d.subcommand === 'show') {
+        var shown = '<div class="cmd-section-title">' + escapeHtml(String(d.title || d.id || 'Lesson')) + '</div>' +
+          messageBlock(d.content || '', false);
+        var details = {};
+        for (var key in d) if (key !== 'subcommand' && key !== 'title' && key !== 'content') details[key] = d[key];
+        return shown + '<div class="cmd-section-title">Details</div>' + renderCommandTable(details);
+      }
+      if (d.message) return messageBlock(d.message, false);
+      var learningRest = {};
+      for (var lk in d) if (lk !== 'subcommand') learningRest[lk] = d[lk];
+      return renderCommandTable(learningRest);
+    },
+    agents: function(o) {
+      if (o.detail) {
+        var detail = o.detail;
+        var html = agentRow(detail, String(detail.status) === 'running');
+        if (!detail.last_action) html += emptyState('No activity yet');
+        return html;
+      }
+      var running = Array.isArray(o.running) ? o.running : [];
+      var finished = Array.isArray(o.finished) ? o.finished : [];
+      var html = '<div class="cmd-stats">' +
+        statTile('Total', o.total != null ? o.total : running.length + finished.length, { cls: 'accent' }) +
+        statTile('Running', running.length, running.length ? { cls: 'success' } : {}) +
+        statTile('Finished', finished.length) + '</div>';
+      if (!running.length && !finished.length) return html + emptyState('No agents offloaded in this session');
+      if (running.length) {
+        html += '<div class="cmd-section-title">Running</div><div class="cmd-items">';
+        for (var i = 0; i < running.length; i++) html += agentRow(running[i], true);
+        html += '</div>';
+      }
+      if (finished.length) {
+        html += '<div class="cmd-section-title">Recent</div><div class="cmd-items">';
+        for (var j = 0; j < finished.length; j++) html += agentRow(finished[j], false);
+        html += '</div>';
+      }
+      return html;
+    },
+    usage: function(o) {
+      if (!o.signed_in) return emptyState('Sign in to view account usage');
+      var html = '<div class="cmd-stats">' +
+        statTile('Account', o.account || 'Signed in', { cls: 'accent' }) +
+        statTile('Balance', fmtCost(o.balance_usd), { cls: 'success' }) + '</div>';
+      var windows = Array.isArray(o.windows) ? o.windows : [];
+      if (windows.length) {
+        html += '<div class="cmd-section-title">Spend limits</div><div class="cmd-quotas">';
+        for (var i = 0; i < windows.length; i++) {
+          var w = windows[i] || {};
+          var committed = Number(w.spent_usd || 0) + Number(w.reserved_usd || 0);
+          html += quotaRow(w.label || 'Window', committed, w.cap_usd, 'USD');
+        }
+        html += '</div>';
+      }
+      if (o.storage_quota_gb != null || o.network_included_gb != null) {
+        html += '<div class="cmd-section-title">Cloud resources</div><div class="cmd-quotas">';
+        if (o.storage_quota_gb != null) html += quotaRow('Storage', o.storage_gb, o.storage_quota_gb, 'GB');
+        if (o.network_included_gb != null) html += quotaRow('Network', o.network_used_gb, o.network_included_gb, 'GB');
+        html += '</div>';
+      }
+      return html;
+    },
+    login: function(o) {
+      if (o.already_signed_in) return toast('Already signed in' + (o.account ? ' as ' + o.account : ''));
+      var html = toast('Sign-in started');
+      if (o.user_code) html += '<div class="cmd-section-title">Verification code</div><span class="cmd-pill accent">' + escapeHtml(String(o.user_code)) + '</span>';
+      if (o.verification_url) html += '<div class="cmd-section-title">Open in browser</div><div class="cmd-agent-path">' + escapeHtml(String(o.verification_url)) + '</div>';
+      return html;
+    },
+    share: function(o) {
+      var html = toast('Session shared');
+      if (o.url) html += '<div class="cmd-section-title">Share URL</div><div class="cmd-agent-path">' + escapeHtml(String(o.url)) + '</div>';
+      if (o.id) html += '<div class="cmd-stat-sub">ID ' + escapeHtml(String(o.id)) + '</div>';
+      return html;
+    },
+    analyze: function(o) {
+      var html = toast('Session viewer ready');
+      if (o.url) html += '<div class="cmd-section-title">Local viewer</div><div class="cmd-agent-path">' + escapeHtml(String(o.url)) + '</div>';
+      if (o.port != null) html += '<div class="cmd-stat-sub">Port ' + escapeHtml(String(o.port)) + '</div>';
+      return html;
+    },
     report: function(o) {
       var t = o.totals || {};
       var html = '<div class="cmd-stats">';
@@ -3500,17 +3957,31 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         html += '<div class="cmd-items">';
         for (var i = 0; i < entries.length; i++) {
           var e = entries[i];
-          var name = e.tool || e.name || e.command || ('entry ' + (i + 1));
+          var name = e.user_request || e.tool || e.name || e.command || ('Request ' + (i + 1));
+          name = String(name).replace(/\s+/g, ' ').trim();
+          if (name.length > 180) name = name.slice(0, 180) + '…';
           var meta = [];
-          if (e.calls != null) meta.push(e.calls + ' calls');
-          if (e.cost != null) meta.push(fmtCost(e.cost));
-          if (e.ai_time_ms != null) meta.push(fmtMs(e.ai_time_ms));
-          html += '<div class="cmd-item-row">' +
-            '<span class="cmd-item-name">' + escapeHtml(String(name)) + '</span>' +
-            '<span class="cmd-item-desc">' + escapeHtml(meta.join(' · ')) + '</span>' +
-          '</div>';
+          var calls = e.tool_calls != null ? e.tool_calls : e.calls;
+          if (calls != null) meta.push(calls + ' tools');
+          if (e.cost != null) meta.push(typeof e.cost === 'string' ? e.cost : fmtCost(e.cost));
+          if (e.task_time) meta.push('task ' + e.task_time);
+          if (e.ai_time) meta.push('AI ' + e.ai_time);
+          if (e.processing_time) meta.push('processing ' + e.processing_time);
+          if (e.ai_time_ms != null) meta.push('AI ' + fmtMs(e.ai_time_ms));
+          html += '<div class="cmd-item-row stack">' +
+            '<div class="cmd-item-head"><span class="cmd-item-name">' + (i + 1) + '</span>' +
+            '<span class="cmd-item-meta">' + escapeHtml(meta.join(' · ')) + '</span></div>' +
+            '<div class="cmd-item-desc">' + escapeHtml(name) + '</div>';
+          if (Array.isArray(e.tools_used) && e.tools_used.length) {
+            html += '<div class="cmd-tools-inline">';
+            for (var j = 0; j < e.tools_used.length; j++) html += '<span class="cmd-tool-tag">' + escapeHtml(String(e.tools_used[j])) + '</span>';
+            html += '</div>';
+          }
+          html += '</div>';
         }
         html += '</div>';
+      } else {
+        html += emptyState('No requests recorded yet');
       }
       return html;
     },
@@ -3537,6 +4008,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         html += '<div class="cmd-stat-sub" style="margin-top:4px">… and ' + (msgs.length - 50) + ' more</div>';
       }
       html += '</div>';
+      return html;
+    },
+    error: function(o) {
+      var html = toast(o.error || 'Command failed', true);
+      if (o.context && typeof o.context === 'object' && Object.keys(o.context).length) {
+        html += '<div class="cmd-section-title">Details</div>' + renderCommandTable(o.context);
+      }
       return html;
     },
   };
