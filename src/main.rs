@@ -3928,11 +3928,9 @@ fn main() {
                                             }
                                         });
                                     } else {
-                                        mcp_eval_err_watchdog!(response, 5000, format!(
-                                            "browser_get_page_content callback was discarded twice — the page \
+                                        mcp_eval_err_watchdog!(response, 5000, "browser_get_page_content callback was discarded twice — the page \
                                              keeps tearing down its JS context. Verify with browser_get_tabs \
-                                             once the page is settled, then retry."
-                                        ));
+                                             once the page is settled, then retry.".to_string());
                                     }
                                 }
                                 Err(e) => {
@@ -4302,12 +4300,10 @@ fn main() {
                                             }
                                         });
                                     } else {
-                                        mcp_eval_err_watchdog!(response, 5000, format!(
-                                            "browser_snapshot callback was discarded twice — the page keeps \
+                                        mcp_eval_err_watchdog!(response, 5000, "browser_snapshot callback was discarded twice — the page keeps \
                                              tearing down its JS context (heavy SPA re-renders, navigation \
                                              loop). Call browser_get_tabs to confirm the tab is settled, then \
-                                             retry once the page is quiet."
-                                        ));
+                                             retry once the page is quiet.".to_string());
                                     }
                                 }
                                 Err(e) => {
