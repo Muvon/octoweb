@@ -127,6 +127,7 @@ enum AppEvent {
     ToggleWorkspaces,               // ⌘⇧O — toggle workspace switcher popover
     HideWorkspaces,                 // JS Esc / backdrop click in workspace switcher
     SwitchWorkspace(String),        // (workspace_id) — switch active workspace
+    SwitchWorkspaceByIndex(usize),  // ⌘1–⌘0 while the popover is open
     CreateWorkspace,                // "+ New Workspace" row
     RenameWorkspace(String, String), // (workspace_id, name)
     DeleteWorkspace(String),        // (workspace_id)
@@ -1294,7 +1295,9 @@ fn main() {
         })
         .build(&*workspace_switcher_win)
         .expect("Failed to create workspace switcher WebView");
-    let mut workspace_switcher_visible = false;
+    // Shared with the global key monitor, which re-targets ⌘1–⌘0 from
+    // quickslots to workspace switching while the popover is open.
+    let workspace_switcher_visible = Arc::new(AtomicBool::new(false));
 
     // ── Sidebar WebView (child of browser_win, right-edge panel) ──────────
     // Hidden by default; shown/hidden via ToggleSidebar.
@@ -2135,6 +2138,7 @@ fn main() {
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
         let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
         let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
+        let workspaces_state = Arc::clone(&workspace_switcher_visible);
 
         let handler = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
             if event.is_null() {
@@ -2190,9 +2194,14 @@ fn main() {
             }
 
             // Fixed fallback: ⌘ + digit opens a quickslot, ⌘⇧ + digit saves one.
+            // While the workspace popover is open the digit row is re-targeted
+            // to workspace switching — it's a modal context, same as the command
+            // palette owning ⌘1–⌘0 for its own jump list.
             if cmd && !overlay_state.load(Ordering::Relaxed) {
                 if let Some(slot) = DIGIT_KEYCODES.iter().position(|&k| k == keycode) {
-                    let _ = p.send_event(if shift {
+                    let _ = p.send_event(if workspaces_state.load(Ordering::Relaxed) {
+                        AppEvent::SwitchWorkspaceByIndex(slot)
+                    } else if shift {
                         AppEvent::QuickSlotSave(slot)
                     } else {
                         AppEvent::QuickSlotOpen(slot)
@@ -4843,9 +4852,9 @@ fn main() {
 
             // ── Workspace switcher popover (⌘⇧O) ─────────────────────────
             Event::UserEvent(AppEvent::ToggleWorkspaces) => {
-                if workspace_switcher_visible {
+                if workspace_switcher_visible.load(Ordering::Relaxed) {
                     workspace_switcher_win.set_visible(false);
-                    workspace_switcher_visible = false;
+                    workspace_switcher_visible.store(false, Ordering::Relaxed);
                 } else {
                     let sz = browser_win.inner_size();
                     workspace_switcher_win
@@ -4856,17 +4865,25 @@ fn main() {
                     refresh_workspace_switcher!();
                     workspace_switcher_win.set_visible(true);
                     workspace_switcher_win.set_focus();
-                    workspace_switcher_visible = true;
+                    workspace_switcher_visible.store(true, Ordering::Relaxed);
                 }
             }
             Event::UserEvent(AppEvent::HideWorkspaces) => {
                 workspace_switcher_win.set_visible(false);
-                workspace_switcher_visible = false;
+                workspace_switcher_visible.store(false, Ordering::Relaxed);
+            }
+            Event::UserEvent(AppEvent::SwitchWorkspaceByIndex(idx)) => {
+                // Resolve here, then re-enter the normal switch path — the key
+                // monitor has no view of the workspace list.
+                if let Some(ws) = workspace_manager.list().get(idx) {
+                    let id = ws.id.clone();
+                    let _ = proxy.send_event(AppEvent::SwitchWorkspace(id));
+                }
             }
             Event::UserEvent(AppEvent::SwitchWorkspace(id)) => {
                 if id == workspace_manager.active().id {
                     workspace_switcher_win.set_visible(false);
-                    workspace_switcher_visible = false;
+                    workspace_switcher_visible.store(false, Ordering::Relaxed);
                     return;
                 }
                 // Hide the outgoing workspace's currently-visible webview —
@@ -4907,7 +4924,7 @@ fn main() {
                 push_acp_sessions_to_sidebar!();
                 sync_quickslots_ui!();
                 workspace_switcher_win.set_visible(false);
-                workspace_switcher_visible = false;
+                workspace_switcher_visible.store(false, Ordering::Relaxed);
                 focus_active_webview!();
             }
             Event::UserEvent(AppEvent::CreateWorkspace) => {
@@ -4964,7 +4981,7 @@ fn main() {
                 sync_quickslots_ui!();
                 refresh_workspace_switcher!();
                 workspace_switcher_win.set_visible(false);
-                workspace_switcher_visible = false;
+                workspace_switcher_visible.store(false, Ordering::Relaxed);
                 focus_active_webview!();
             }
             Event::UserEvent(AppEvent::RenameWorkspace(id, name)) => {
@@ -5032,7 +5049,7 @@ fn main() {
                     sync_quickslots_ui!();
                     refresh_workspace_switcher!();
                     workspace_switcher_win.set_visible(false);
-                    workspace_switcher_visible = false;
+                    workspace_switcher_visible.store(false, Ordering::Relaxed);
                     focus_active_webview!();
                 } else {
                     // Non-active workspace — not mounted in the sidebar DOM
@@ -7001,7 +7018,7 @@ fn main() {
                         settings_win.set_visible(false);
                         settings_visible = false;
                         workspace_switcher_win.set_visible(false);
-                        workspace_switcher_visible = false;
+                        workspace_switcher_visible.store(false, Ordering::Relaxed);
                     }
                 }
 
@@ -7024,7 +7041,7 @@ fn main() {
                     if settings_visible {
                         settings_win.set_inner_size(*sz);
                     }
-                    if workspace_switcher_visible {
+                    if workspace_switcher_visible.load(Ordering::Relaxed) {
                         workspace_switcher_win.set_inner_size(*sz);
                     }
                     // Resize sidebar to track window height and stay at right edge

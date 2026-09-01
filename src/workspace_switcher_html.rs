@@ -29,7 +29,7 @@ pub fn html() -> String {
     position: absolute;
     top: 50px;
     right: 12px;
-    width: 260px;
+    width: 300px;
     /* This popover floats in its own transparent window, so backdrop-filter has
        nothing to sample — the page behind belongs to a different WebView. The
        thin --glass fill alone left the panel see-through, and how much showed
@@ -104,6 +104,19 @@ pub fn html() -> String {
     color: var(--label-3);
     flex-shrink: 0;
   }
+
+  .ws-kbd {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--label-3);
+    background: var(--fill);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    border-radius: var(--r-capsule);
+    padding: 1px 5px;
+    letter-spacing: 0.02em;
+    flex-shrink: 0;
+  }
+  .ws-kbd-spacer { width: 26px; flex-shrink: 0; }
 
   .ws-check {
     display: inline-flex;
@@ -222,7 +235,7 @@ pub fn html() -> String {
     input.addEventListener('click', function(e) { e.stopPropagation(); });
   }
 
-  function wsRow(ws, onlyOne) {
+  function wsRow(ws, idx, onlyOne) {
     var row = document.createElement('div');
     row.className = 'ws-row';
 
@@ -240,6 +253,17 @@ pub fn html() -> String {
     count.className = 'ws-count';
     count.textContent = ws.tab_count;
     row.appendChild(count);
+
+    // ⌘1–⌘9 then ⌘0, matching the command palette's jump list. Rust re-targets
+    // the digit row to workspace switching while this popover is open.
+    var kbd = document.createElement('span');
+    if (idx < 10) {
+      kbd.className = 'ws-kbd';
+      kbd.textContent = '⌘' + (idx === 9 ? '0' : idx + 1);
+    } else {
+      kbd.className = 'ws-kbd-spacer';
+    }
+    row.appendChild(kbd);
 
     var check = document.createElement('span');
     check.className = ws.active ? 'ws-check' : 'ws-check-spacer';
@@ -281,8 +305,8 @@ pub fn html() -> String {
     var list = document.getElementById('ws-list');
     list.innerHTML = '';
     var onlyOne = data.length <= 1;
-    data.forEach(function(ws) {
-      list.appendChild(wsRow(ws, onlyOne));
+    data.forEach(function(ws, idx) {
+      list.appendChild(wsRow(ws, idx, onlyOne));
     });
   }
 
