@@ -1246,6 +1246,10 @@ fn main() {
         use objc2::runtime::AnyObject;
         let ns_win: *mut AnyObject = workspace_switcher_win.ns_window() as *mut AnyObject;
         let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+        // The window spans the whole browser frame but paints only a 260px popover,
+        // so AppKit's window shadow traces the frame, not the panel. The panel
+        // carries its own shadow via `.glass-panel`.
+        let _: () = msg_send![ns_win, setHasShadow: false];
     }
     let workspace_switcher_win = Arc::new(workspace_switcher_win);
     let workspace_switcher_wv = WebViewBuilder::new()

@@ -52,7 +52,8 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px;
+    min-height: 32px;
+    padding: 0 8px;
     border-radius: var(--r-ctl);
     cursor: pointer;
     transition: background var(--t-fast) var(--ease);
@@ -107,8 +108,10 @@ pub fn html() -> String {
   .ws-check svg { width: 100%; height: 100%; }
   .ws-check-spacer { width: 14px; flex-shrink: 0; }
 
+  /* Space is reserved whether or not the row is hovered — only opacity changes,
+     so hovering never reflows the row or the rows under it. */
   .ws-icon-btn {
-    display: none;
+    display: flex;
     align-items: center;
     justify-content: center;
     width: 20px; height: 20px;
@@ -118,11 +121,14 @@ pub fn html() -> String {
     cursor: pointer;
     border-radius: var(--r-ctl);
     flex-shrink: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
   }
-  .ws-row:hover .ws-icon-btn { display: flex; }
+  .ws-row:hover .ws-icon-btn { opacity: 1; pointer-events: auto; }
   .ws-icon-btn:hover { background: var(--fill-press); color: var(--label); }
   .ws-icon-btn svg { width: 12px; height: 12px; }
-  .ws-icon-btn.ws-delete[disabled] { display: none !important; }
+  .ws-icon-btn.ws-delete[disabled] { opacity: 0 !important; pointer-events: none !important; }
 
   .ws-sep {
     height: 0.5px;
@@ -134,7 +140,8 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 8px;
+    min-height: 32px;
+    padding: 0 8px;
     border-radius: var(--r-ctl);
     cursor: pointer;
     color: var(--accent);
