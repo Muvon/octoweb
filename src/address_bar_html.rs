@@ -507,7 +507,7 @@ pub fn html() -> String {
     <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
     <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
-  <button id="workspace-btn" class="bar-btn" data-tip="Workspaces  ⌘⇧O" title="Workspaces (⌘⇧O)">
+  <button id="workspace-btn" class="bar-btn" data-tip="Workspaces  ⌘⇧O">
     <span class="ws-icon">@@ICON_LAYERS@@</span>
     <span class="ws-dot" id="ws-dot"></span>
   </button>

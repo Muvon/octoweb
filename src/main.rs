@@ -403,30 +403,35 @@ fn main() {
     crash_report::log_startup();
 
     let mut cfg = Config::load();
-    // Loaded once, early, so the (single, for now) workspace's persisted
-    // identity — id/name/color/data_store_id — is known before any WebView
-    // is built. The tab URLs themselves are consumed later, at the point
-    // the original session-restore loop used to call load_session().
+    // Loaded once, early, so every persisted workspace's identity —
+    // id/name/color/data_store_id — is known before any WebView is built.
+    // The tab URLs themselves are consumed later, at the point the original
+    // session-restore loop used to call load_session().
     let session = config::load_session();
     // Owned directly (not behind Arc<Mutex<..>> at this level) — it's moved
     // by value into `event_loop.run(move |...| {...})` below, the same way
     // the flat `tab_webviews: HashMap<..>` local it replaces used to be.
     // Every call site that used to read `tabs`/`tab_webviews` now goes
     // through `workspace_manager.active()` / `.active_mut()`.
-    let mut workspace_manager = match session.as_ref().and_then(|s| s.workspaces.first()) {
-        Some(ws) => WorkspaceManager::from_workspaces(
-            vec![workspace::Workspace::new(
-                ws.id.clone(),
-                ws.name.clone(),
-                ws.color.clone(),
-                ws.data_store_id,
-                cfg.max_history,
-            )],
-            &ws.id,
+    let mut workspace_manager = match session.as_ref() {
+        Some(s) if !s.workspaces.is_empty() => WorkspaceManager::from_workspaces(
+            s.workspaces
+                .iter()
+                .map(|ws| {
+                    workspace::Workspace::new(
+                        ws.id.clone(),
+                        ws.name.clone(),
+                        ws.color.clone(),
+                        ws.data_store_id,
+                        cfg.max_history,
+                    )
+                })
+                .collect(),
+            &s.active_workspace_id,
             cfg.max_history,
             cfg.home_page.clone(),
         ),
-        None => WorkspaceManager::new_default(cfg.max_history, cfg.home_page.clone()),
+        _ => WorkspaceManager::new_default(cfg.max_history, cfg.home_page.clone()),
     };
 
     // Restore browsing history in a background thread so startup isn't blocked
@@ -937,18 +942,20 @@ fn main() {
 
     // Restore previous session if available, otherwise open home page.
     // `session` was already loaded above (before the workspace was built) —
-    // reused here for the tab list of the (only, for now) active workspace.
-    let session_tabs: Vec<config::SessionTab> =
-        match session.as_ref().and_then(|s| s.workspaces.first()) {
-            Some(ws) if !ws.tabs.is_empty() => ws.tabs.clone(),
-            _ => vec![config::SessionTab {
-                url: home.clone(),
-                title: String::new(),
-            }],
-        };
-    let active_url = session
+    // reused here for every workspace's own tab list, not just the overall
+    // active one. Only the OVERALL active workspace's own active tab gets an
+    // eager WebView (`make_webview`, same as before); every other tab —
+    // including a non-active workspace's own "active" tab — goes into
+    // `pending_tabs` (lazy, global map, safe since tab ids are globally
+    // unique via `NEXT_TAB_ID`).
+    let overall_active_workspace_id = workspace_manager.active().id.clone();
+    let overall_active_url = session
         .as_ref()
-        .and_then(|s| s.workspaces.first())
+        .and_then(|s| {
+            s.workspaces
+                .iter()
+                .find(|ws| ws.id == overall_active_workspace_id)
+        })
         .map(|ws| ws.active_tab_url.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(&home)
@@ -956,61 +963,71 @@ fn main() {
 
     let mut first_id: Option<usize> = None;
     let mut restored_active_id: Option<usize> = None;
-    for st in &session_tabs {
-        let tab_id = if st.title.is_empty() {
-            workspace_manager
-                .active()
-                .tabs
-                .lock()
-                .unwrap()
-                .open(st.url.clone())
-        } else {
-            workspace_manager
-                .active()
-                .tabs
-                .lock()
-                .unwrap()
-                .open_with_title(st.url.clone(), st.title.clone())
-        };
-        // Lazy loading: only create WebView for the active tab.
-        // Other tabs are stored in pending_tabs and loaded on demand.
-        if st.url == active_url {
-            // Active tab — create WebView immediately
-            let wv = make_webview(tab_id, &st.url, workspace_manager.active().data_store_id);
-            if st.url == "about:blank" {
-                let html = newtab_html::html(&quickslots::to_json(&quick_slots));
-                let _ = wv.load_html(&html);
+    for ws in workspace_manager.list_mut() {
+        let is_overall_active_ws = ws.id == overall_active_workspace_id;
+        let session_tabs: Vec<config::SessionTab> = session
+            .as_ref()
+            .and_then(|s| s.workspaces.iter().find(|sw| sw.id == ws.id))
+            .filter(|sw| !sw.tabs.is_empty())
+            .map(|sw| sw.tabs.clone())
+            .unwrap_or_else(|| {
+                vec![config::SessionTab {
+                    url: home.clone(),
+                    title: String::new(),
+                }]
+            });
+        for st in &session_tabs {
+            let tab_id = if st.title.is_empty() {
+                ws.tabs.lock().unwrap().open(st.url.clone())
+            } else {
+                ws.tabs
+                    .lock()
+                    .unwrap()
+                    .open_with_title(st.url.clone(), st.title.clone())
+            };
+            // Lazy loading: only create WebView for the overall active tab.
+            // Every other tab — this workspace's own background tabs, and
+            // every tab of every non-active workspace — is stored in
+            // pending_tabs and loaded on demand.
+            if is_overall_active_ws && st.url == overall_active_url {
+                // Active tab — create WebView immediately
+                let wv = make_webview(tab_id, &st.url, ws.data_store_id);
+                if st.url == "about:blank" {
+                    let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                    let _ = wv.load_html(&html);
+                }
+                let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                nav_error_patch::inject_from_webview(wv_ptr);
+                download_patch::inject_from_webview(wv_ptr);
+                dialog_patch::inject_from_webview(wv_ptr);
+                let p = proxy.clone();
+                nav_error_patch::register(wv_ptr, move |url, code| {
+                    let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
+                });
+                let pt = proxy.clone();
+                nav_error_patch::register_termination(wv_ptr, move || {
+                    let _ = pt.send_event(AppEvent::WebContentTerminated(tab_id));
+                });
+                let pd = proxy.clone();
+                dialog_patch::register(wv_ptr, tab_id, move |info| {
+                    let _ = pd.send_event(AppEvent::JsDialog(info));
+                });
+                let _ = wv.set_visible(true);
+                ws.webviews.insert(tab_id, wv);
+                restored_active_id = Some(tab_id);
+            } else {
+                // Background tab — defer WebView creation until user switches to it
+                pending_tabs.insert(tab_id, st.url.clone());
             }
-            let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-            nav_error_patch::inject_from_webview(wv_ptr);
-            download_patch::inject_from_webview(wv_ptr);
-            dialog_patch::inject_from_webview(wv_ptr);
-            let p = proxy.clone();
-            nav_error_patch::register(wv_ptr, move |url, code| {
-                let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
-            });
-            let pt = proxy.clone();
-            nav_error_patch::register_termination(wv_ptr, move || {
-                let _ = pt.send_event(AppEvent::WebContentTerminated(tab_id));
-            });
-            let pd = proxy.clone();
-            dialog_patch::register(wv_ptr, tab_id, move |info| {
-                let _ = pd.send_event(AppEvent::JsDialog(info));
-            });
-            let _ = wv.set_visible(true);
-            workspace_manager.active_mut().webviews.insert(tab_id, wv);
-            restored_active_id = Some(tab_id);
-        } else {
-            // Background tab — defer WebView creation until user switches to it
-            pending_tabs.insert(tab_id, st.url.clone());
-        }
-        workspace_manager.active_mut().mru.push(tab_id);
-        if first_id.is_none() {
-            first_id = Some(tab_id);
+            ws.mru.push(tab_id);
+            if is_overall_active_ws && first_id.is_none() {
+                first_id = Some(tab_id);
+            }
         }
     }
 
-    // Active tab is the one we just created (or first if no match)
+    // Active tab is the one we just created (or first if no match) —
+    // scoped to the overall active workspace only.
     active_wv_id = restored_active_id.or(first_id).unwrap();
     workspace_manager
         .active()
