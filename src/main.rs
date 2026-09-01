@@ -280,10 +280,6 @@ struct AcpSession {
     /// `AgentEvent::Chunk` and flushed into `messages` on Done / Cancelled /
     /// Error so the persisted log only contains finalized turns.
     agent_buf: String,
-    /// Source label for an autonomous response triggered by an injected inbox
-    /// message. While set, streamed agent chunks belong to that specialist
-    /// turn and must not be persisted or replayed as Octopus output.
-    agent_source: Option<String>,
     /// Tool runs of the in-flight turn. Mirrors what the live feed shows;
     /// flushed into the agent message alongside `agent_buf` so the steps
     /// group survives restarts.
@@ -1795,7 +1791,6 @@ fn main() {
                     acp_session_id: snap.acp_session_id,
                     messages: snap.messages,
                     agent_buf: String::new(),
-                    agent_source: None,
                     tool_buf: Vec::new(),
                     tool_starts: HashMap::new(),
                     tool_since_text: false,
@@ -1828,7 +1823,6 @@ fn main() {
                 acp_session_id: None,
                 messages: Vec::new(),
                 agent_buf: String::new(),
-                agent_source: None,
                 tool_buf: Vec::new(),
                 tool_starts: HashMap::new(),
                 tool_since_text: false,
@@ -2860,14 +2854,14 @@ fn main() {
                     }
                     acp::AgentEvent::Injected(text) => {
                         // Specialist/inbox reply injected by the agent runtime. The
-                        // agent turn it triggers streams with no terminal Done (no
-                        // prompt in flight), so first commit whatever is still
-                        // buffered as its own agent message, then record the
-                        // injected text as a separate "specialist" entry.
+                        // autonomous main-agent turn it triggers streams with no
+                        // terminal Done (no prompt in flight), so first commit
+                        // whatever is still buffered as its own agent message,
+                        // then record the injected text as a separate "specialist"
+                        // entry.
                         if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
                             flush_agent_turn(s, cfg.max_acp_session_messages);
                             push_acp_msg(s, "specialist", text.clone(), cfg.max_acp_session_messages);
-                            s.agent_source = Some(injected_source_label(&text));
                             s.turn_started = Some(std::time::Instant::now());
                         }
                         let escaped = webview_utils::escape_js_template(&text);
@@ -5057,9 +5051,6 @@ fn main() {
                     if flush_agent_turn(s, cfg.max_acp_session_messages) {
                         should_persist = true;
                     }
-                    // This prompt is a real top-level Octopus turn. Any injected
-                    // source with no response is now superseded.
-                    s.agent_source = None;
                     // New turn starts now — anchors `turn_ms` on the flush.
                     s.turn_started = Some(std::time::Instant::now());
                     if !text.is_empty() {
@@ -5256,7 +5247,6 @@ fn main() {
                         acp_session_id: None,
                         messages: Vec::new(),
                         agent_buf: String::new(),
-                        agent_source: None,
                         tool_buf: Vec::new(),
                         tool_starts: HashMap::new(),
                         tool_since_text: false,
@@ -7054,22 +7044,11 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Extract the sender label carried by Octomind's injected-message envelope.
-/// The wire payload is currently textual (`[source label] body`), so keep the
-/// parsing narrow and fall back to the generic label for foreign ACP agents.
-fn injected_source_label(text: &str) -> String {
-    text.strip_prefix('[')
-        .and_then(|rest| rest.split_once(']'))
-        .map(|(label, _)| label.trim())
-        .filter(|label| !label.is_empty())
-        .unwrap_or("Specialist")
-        .to_string()
-}
-
 /// Flush the in-flight response (streamed text + tool runs) into the
-/// persisted log. Injected turns retain their specialist source; ordinary
-/// prompt turns remain agent messages. Returns true if anything was committed.
-/// Tool-only turns are kept so the sidebar can replay their steps group.
+/// persisted log. All streamed responses belong to the main agent, including
+/// autonomous replies triggered by specialist injections. Returns true if
+/// anything was committed. Tool-only turns are kept so the sidebar can replay
+/// their steps group.
 fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     let text = std::mem::take(&mut s.agent_buf);
     let tools = std::mem::take(&mut s.tool_buf);
@@ -7082,13 +7061,8 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
     if text.is_empty() && tools.is_empty() {
         return false;
     }
-    let source = s.agent_source.take();
-    let (role, text) = match source {
-        Some(source) => ("specialist".to_string(), format!("[{source}] {text}")),
-        None => ("agent".to_string(), text),
-    };
     let msg = config::AcpMessage {
-        role,
+        role: "agent".to_string(),
         text,
         ts: epoch_ms(),
         a2ui: None,
@@ -7101,12 +7075,10 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
 
 /// Commit the streamed text so far as its own finalized message, mid-turn.
 /// Called when a text chunk arrives after a tool call started — that boundary
-/// begins a new LLM message. Keeps the injected source and turn clock alive
-/// so the next segment stays labelled and timed.
+/// begins a new LLM message. Resets the turn clock so the next segment is timed
+/// independently.
 fn split_agent_segment(s: &mut AcpSession, max_msgs: usize) {
-    let source = s.agent_source.clone();
     flush_agent_turn(s, max_msgs);
-    s.agent_source = source;
     s.turn_started = Some(std::time::Instant::now());
 }
 
@@ -7116,16 +7088,9 @@ fn split_agent_segment(s: &mut AcpSession, max_msgs: usize) {
 fn acp_messages_snapshot(s: &AcpSession, max_msgs: usize) -> Vec<config::AcpMessage> {
     let mut messages = s.messages.clone();
     if !s.agent_buf.is_empty() || !s.tool_buf.is_empty() {
-        let (role, text) = match s.agent_source.as_deref() {
-            Some(source) => (
-                "specialist".to_string(),
-                format!("[{source}] {}", s.agent_buf),
-            ),
-            None => ("agent".to_string(), s.agent_buf.clone()),
-        };
         messages.push(config::AcpMessage {
-            role,
-            text,
+            role: "agent".to_string(),
+            text: s.agent_buf.clone(),
             ts: epoch_ms(),
             a2ui: None,
             tools: s.tool_buf.clone(),
@@ -7480,7 +7445,6 @@ mod injected_turn_tests {
             acp_session_id: None,
             messages: Vec::new(),
             agent_buf: String::new(),
-            agent_source: None,
             tool_buf: Vec::new(),
             tool_starts: HashMap::new(),
             tool_since_text: false,
@@ -7492,42 +7456,34 @@ mod injected_turn_tests {
     }
 
     #[test]
-    fn parses_injected_source_labels_defensively() {
-        assert_eq!(
-            injected_source_label("[tap-run tap-editor-123 (content:editor)] draft"),
-            "tap-run tap-editor-123 (content:editor)"
-        );
-        assert_eq!(injected_source_label("unlabelled payload"), "Specialist");
-        assert_eq!(injected_source_label("[] empty label"), "Specialist");
-    }
-
-    #[test]
-    fn injected_response_is_persisted_as_specialist() {
+    fn injected_message_and_autonomous_response_keep_distinct_roles() {
         let mut s = session();
-        s.agent_source = Some("tap-run tap-editor-123 (content:editor)".into());
+        push_acp_msg(
+            &mut s,
+            "specialist",
+            "[content:editor] source payload".into(),
+            10,
+        );
         s.agent_buf = "Edited draft".into();
 
         assert!(flush_agent_turn(&mut s, 10));
-        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages.len(), 2);
         assert_eq!(s.messages[0].role, "specialist");
-        assert_eq!(
-            s.messages[0].text,
-            "[tap-run tap-editor-123 (content:editor)] Edited draft"
-        );
-        assert!(s.agent_source.is_none());
+        assert_eq!(s.messages[0].text, "[content:editor] source payload");
+        assert_eq!(s.messages[1].role, "agent");
+        assert_eq!(s.messages[1].text, "Edited draft");
     }
 
     #[test]
-    fn empty_late_terminal_does_not_erase_injected_origin() {
+    fn empty_late_terminal_does_not_block_later_agent_response() {
         let mut s = session();
-        s.agent_source = Some("content:editor".into());
 
         assert!(!flush_agent_turn(&mut s, 10));
-        assert_eq!(s.agent_source.as_deref(), Some("content:editor"));
 
         s.agent_buf = "Arrived after Done".into();
         assert!(flush_agent_turn(&mut s, 10));
-        assert_eq!(s.messages[0].role, "specialist");
+        assert_eq!(s.messages[0].role, "agent");
+        assert_eq!(s.messages[0].text, "Arrived after Done");
     }
 
     #[test]
@@ -7541,20 +7497,20 @@ mod injected_turn_tests {
     }
 
     #[test]
-    fn split_keeps_source_and_turn_clock_for_next_segment() {
+    fn split_resets_turn_clock_for_next_agent_segment() {
         let mut s = session();
-        s.agent_source = Some("content:editor".into());
         s.agent_buf = "first message".into();
 
         split_agent_segment(&mut s, 10);
         assert_eq!(s.messages.len(), 1);
-        assert_eq!(s.messages[0].text, "[content:editor] first message");
-        assert_eq!(s.agent_source.as_deref(), Some("content:editor"));
+        assert_eq!(s.messages[0].role, "agent");
+        assert_eq!(s.messages[0].text, "first message");
         assert!(s.turn_started.is_some());
 
         s.agent_buf = "second message".into();
         assert!(flush_agent_turn(&mut s, 10));
-        assert_eq!(s.messages[1].text, "[content:editor] second message");
+        assert_eq!(s.messages[1].role, "agent");
+        assert_eq!(s.messages[1].text, "second message");
     }
 
     #[test]
@@ -7566,13 +7522,12 @@ mod injected_turn_tests {
             "[content:editor] source payload".into(),
             10,
         );
-        s.agent_source = Some("content:editor".into());
         s.agent_buf = "response without Done".into();
 
         let messages = acp_messages_snapshot(&s, 10);
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].role, "specialist");
-        assert_eq!(messages[1].text, "[content:editor] response without Done");
+        assert_eq!(messages[1].role, "agent");
+        assert_eq!(messages[1].text, "response without Done");
         assert_eq!(s.messages.len(), 1, "snapshot must not mutate live history");
     }
 }

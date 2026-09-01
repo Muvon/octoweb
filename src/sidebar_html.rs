@@ -1566,6 +1566,104 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   .tool-group.expanded .tool-group-list { display: flex; }
 
+  /* ── Specialist reports — quiet native disclosure, collapsed by default ─ */
+  .specialist-report {
+    align-self: flex-start;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .specialist-report-details {
+    width: 100%;
+    max-width: 100%;
+  }
+  .specialist-report-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 3px 10px 3px 6px;
+    border-radius: 11px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    font-size: 11px;
+    list-style: none;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.12s, color 0.12s;
+  }
+  .specialist-report-summary::-webkit-details-marker { display: none; }
+  .specialist-report-summary:hover {
+    color: var(--text-secondary);
+    background: var(--hover-bg);
+  }
+  .specialist-report-chevron {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform 0.3s var(--spring);
+  }
+  .specialist-report-details[open] .specialist-report-chevron { transform: rotate(90deg); }
+  .specialist-report-who {
+    flex-shrink: 0;
+    color: var(--dot-ok);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    opacity: 0.85;
+  }
+  .specialist-report-title {
+    flex-shrink: 0;
+    font-weight: 500;
+  }
+  .specialist-report-details.failed .specialist-report-status { color: var(--error-text); }
+  .specialist-report-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-tertiary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .specialist-report-time {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--text-tertiary);
+    font-size: 9.5px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    opacity: 0.7;
+  }
+  .msg.agent .msg-bubble.specialist-report-body {
+    margin-top: 3px;
+    padding: 8px 11px;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  .specialist-report-input {
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+  }
+  .specialist-report-input > summary {
+    color: var(--text-tertiary);
+    cursor: pointer;
+    font-size: 10.5px;
+    font-weight: 500;
+  }
+  .specialist-report-input-text {
+    margin-top: 4px;
+    padding: 6px 8px;
+    border: 1px solid var(--md-code-border);
+    border-radius: 8px;
+    background: var(--md-pre-bg);
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   /* ── Input area ─────────────────────────────────────────────────────────── */
   #input-area {
     flex-shrink: 0;
@@ -2642,9 +2740,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // A tool call started after the last text chunk — the next chunk
       // begins a new message and must open its own bubble.
       toolSinceText: false,
-      // Non-null while AgentMessageChunk output is causally owned by an
-      // injected specialist/inbox turn rather than the top-level Octopus.
-      agentWho: null,
       // `busy` = agent is processing a prompt right now (set on dispatch,
       // cleared on Done/Cancelled/Error). Drives queue logic and the stop
       // button. NOT the same as `isThinking` (the activity spinner UI),
@@ -2655,6 +2750,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       toolCount: 0,
       toolDetails: [],
       toolRows: {},
+      tapRunPrompts: new Map(),
       // count of tools still running — keeps the live feed visible when a
       // tool starts after text already began streaming.
       runningTools: 0,
@@ -2934,7 +3030,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     active.thinking.innerHTML = '';
     active.currentAgentBubble = null;
     active.currentAgentRaw = '';
-    active.agentWho = null;
     active.isThinking = false;
     active.runningTools = 0;
     // Clearing the session restarts the agent on Rust side — drop busy and any
@@ -2967,7 +3062,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.thinking.innerHTML = '';
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
-    s.agentWho = null;
     s.availableCommands = [];
     s.inputDraft = '';
     s.inputSelectionStart = 0;
@@ -4075,17 +4169,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     });
   }
 
-  // whoOverride labels a specialist bubble (appendSpecialistMsg); live agent
-  // bubbles omit it and fall back to the session's current source or Octopus.
+  // whoOverride labels a specialist bubble (appendSpecialistMsg); live main
+  // agent bubbles omit it and are always labelled Octopus.
   function startAgentBubble(s, whoOverride) {
     if (!s) return;
     const wrap   = document.createElement('div');
-    wrap.className = 'msg agent' + (whoOverride || s.agentWho ? ' specialist' : '');
+    wrap.className = 'msg agent' + (whoOverride ? ' specialist' : '');
     const label  = document.createElement('div');
     label.className = 'msg-label';
     const who = document.createElement('span');
     who.className = 'msg-who';
-    who.textContent = whoOverride || s.agentWho || 'Octopus';
+    who.textContent = whoOverride || 'Octopus';
     const time = document.createElement('span');
     time.className = 'msg-time';
     time.textContent = fmtTime(new Date());
@@ -4137,8 +4231,67 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     let who = 'Specialist', body = text;
     const m = text.match(/^\[([^\]\n]+)\]\s*/);
     if (m) { who = m[1]; body = text.slice(m[0].length); }
-    const tap = who.match(/^tap-run \S+ \((.+)\)$/);
-    if (tap) who = tap[1];
+    let report = body.match(/^\[Tap-run '([^'\n]+)' \(([^)\n]+)\) (completed|cancelled|failed)\]\s*/);
+    if (report) {
+      body = body.slice(report[0].length);
+    } else {
+      report = who.match(/^Tap-run '([^'\n]+)' \(([^)\n]+)\) (completed|cancelled|failed)$/);
+    }
+    if (report) {
+      who = report[2];
+    } else if (/^tap-run \S+ \(.+\)$/.test(who)) {
+      // Tap-run envelope but no handback report body: tap-runs only inject
+      // completion reports, so this is a main-agent reply that old builds
+      // persisted under the specialist's label. Render it as Octopus.
+      const bubble = startAgentBubble(s);
+      if (!bubble) return who;
+      bubble.innerHTML = renderMd(body);
+      finishAgentBubble(s, bubble, body, 0, [], 0);
+      if (s.sid === activeSid) scrollToBottom();
+      return who;
+    }
+    if (report) {
+      let preview = '';
+      for (const line of body.split(/\r?\n/)) {
+        if (line.trim()) { preview = line.trim(); break; }
+      }
+      const wrap = document.createElement('div');
+      wrap.className = 'msg agent specialist specialist-report';
+      const details = document.createElement('details');
+      details.className = 'specialist-report-details' + (report[3] === 'failed' ? ' failed' : '');
+      const summary = document.createElement('summary');
+      summary.className = 'specialist-report-summary';
+      summary.innerHTML =
+        '<span class="specialist-report-chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+        '<span class="specialist-report-who">' + escapeHtml(who) + '</span>' +
+        '<span class="specialist-report-title">report · <span class="specialist-report-status">' + report[3] + '</span></span>' +
+        (preview ? '<span class="specialist-report-preview">' + escapeHtml(preview) + '</span>' : '') +
+        '<span class="specialist-report-time">' + escapeHtml(fmtTime(new Date())) + '</span>';
+      const content = document.createElement('div');
+      content.className = 'msg-bubble specialist-report-body';
+      if (s.tapRunPrompts.has(report[1])) {
+        const input = document.createElement('details');
+        input.className = 'specialist-report-input';
+        const inputSummary = document.createElement('summary');
+        inputSummary.textContent = 'Input';
+        const inputText = document.createElement('div');
+        inputText.className = 'specialist-report-input-text';
+        inputText.innerHTML = escapeHtml(s.tapRunPrompts.get(report[1]));
+        input.appendChild(inputSummary);
+        input.appendChild(inputText);
+        content.appendChild(input);
+      }
+      const reportBody = document.createElement('div');
+      reportBody.className = 'specialist-report-content';
+      reportBody.innerHTML = renderMd(body);
+      content.appendChild(reportBody);
+      details.appendChild(summary);
+      details.appendChild(content);
+      wrap.appendChild(details);
+      s.container.insertBefore(wrap, s.thinking);
+      if (s.sid === activeSid) scrollToBottom();
+      return who;
+    }
     const bubble = startAgentBubble(s, who);
     if (!bubble) return who;
     bubble.innerHTML = renderMd(body);
@@ -4156,10 +4309,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     finishLiveTurn(s);
     s.isThinking = false;
     syncFeed(s);
-    // The autonomous response produced from this injected input has no ACP
-    // Done event. Retain the source until another injection or real prompt
-    // closes the turn, so subsequent chunks are not mislabeled as Octopus.
-    s.agentWho = appendSpecialistMsg(s, text);
+    // The injected message keeps its specialist label, but the autonomous
+    // response it triggers belongs to the main agent and must remain Octopus.
+    appendSpecialistMsg(s, text);
   };
 
   window.__appendImage = function(sid, mimeType, b64data) {
@@ -4197,6 +4349,29 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.thinking.innerHTML = '';
     for (const k in s.toolRows) delete s.toolRows[k];
     s.runningTools = 0;
+  }
+
+  function toolDataObject(value) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value !== 'string') return null;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function registerTapRunPrompt(s, title, rawInput, rawOutput) {
+    if (!s || title !== 'tap') return;
+    const input = toolDataObject(rawInput);
+    if (!input || input.action !== 'run' || typeof input.prompt !== 'string') return;
+    let runId = typeof input.session === 'string' ? input.session.trim() : '';
+    if (!runId) {
+      const output = toolDataObject(rawOutput);
+      runId = output && typeof output.id === 'string' ? output.id.trim() : '';
+    }
+    if (runId) s.tapRunPrompts.set(runId, input.prompt);
   }
 
   function formatJson(val) {
@@ -4291,6 +4466,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   window.__toolStart = function(sid, id, title, kind, rawInput, locations) {
     const s = sessions.get(sid);
     if (!s) return;
+    registerTapRunPrompt(s, title, rawInput, null);
     s.toolSinceText = true;
     if (isRenderUiTool(title)) {
       s.suppressedToolIds = s.suppressedToolIds || new Set();
@@ -4298,7 +4474,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       return;
     }
     s.toolCount++;
-    const d = { id, kind, title, status: 'running', duration: 0, rawInput, locations, rawOutput: null };
+    const d = { id, kind, title, toolName: title, status: 'running', duration: 0, rawInput, locations, rawOutput: null };
     s.toolDetails.push(d);
     const item = document.createElement('div');
     item.className = 'tool-item';
@@ -4342,6 +4518,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (rawOutput !== undefined && rawOutput !== null) {
       d.rawOutput = rawOutput;
     }
+    registerTapRunPrompt(s, d.toolName, d.rawInput, d.rawOutput);
     if ((status === 'completed' || status === 'failed') && !t.finished) {
       t.finished = true;
       s.runningTools = Math.max(0, s.runningTools - 1);
@@ -4405,7 +4582,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // response. Finalize its bubble before resetting live-turn state; the
       // old behavior dropped the reference and left it without copy/steps.
       finishLiveTurn(s);
-      s.agentWho = null;
       s.activityStart = Date.now();
       const hdr = document.createElement('div');
       hdr.className = 'activity-header';
@@ -4423,7 +4599,6 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       s.busy = false;
       finishLiveTurn(s);
       syncFeed(s);
-      s.agentWho = null;
       // A2UI: a click optimistically locks its card into "Processing…" and
       // waits for the agent's next envelope to lift it. Turn end (Done /
       // Cancelled / Error) means no envelope is coming and every render_ui
@@ -4480,6 +4655,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           locations: Array.isArray(t.locations) ? t.locations : [],
           rawOutput: t.raw_output != null ? t.raw_output : null
         })) : [];
+        for (const t of tools) registerTapRunPrompt(s, t.title, t.rawInput, t.rawOutput);
         finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0);
       } else if (role === 'ui' && m && m.a2ui) {
         // Rebuild the A2UI bubble from the persisted envelope body. Replays

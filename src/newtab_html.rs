@@ -119,12 +119,16 @@ const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0;
     font-family: var(--font-text);
     -webkit-font-smoothing: antialiased;
     color: var(--label);
-    display: flex;
-    align-items: center;
-    justify-content: center;
   }
 
+  /* Overflow-safe centering: margin:auto centers when the content fits but
+     top-aligns and scrolls when it's taller than the window — align-items:
+     center would push the container's top out of reach (page appears stuck
+     at the bottom). */
+  body { display: flex; overflow-y: auto; }
+
   .container {
+    margin: auto;
     text-align: center;
     max-width: 600px;
     padding: 40px 24px;
