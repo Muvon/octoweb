@@ -611,13 +611,13 @@ fn main() {
         let proxy = proxy.clone();
         let bar_h = address_bar_h;
         let ft_h = footer_h;
-        // Every WebView built by this closure belongs to the workspace active
-        // at closure-creation time (a momentary read, done before
-        // `workspace_manager` moves into `event_loop.run` below) — fine while
-        // there's no switcher UI (stage 1), but stage 2 must re-derive this
-        // per active workspace at call time.
-        let data_store_id = workspace_manager.active().data_store_id;
-        move |tab_id: usize, url: &str| -> WebView {
+        // `data_store_id` is NOT captured here — it must be re-derived from
+        // whichever workspace is active at CALL time (an earlier version
+        // captured it once at closure-creation time, before the switcher UI
+        // existed; every webview created afterward — in any workspace,
+        // including brand new ones — silently reused that stale startup-time
+        // value, defeating per-workspace cookie/localStorage isolation).
+        move |tab_id: usize, url: &str, data_store_id: Option<[u8; 16]>| -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
             let p3 = proxy.clone();
@@ -976,7 +976,7 @@ fn main() {
         // Other tabs are stored in pending_tabs and loaded on demand.
         if st.url == active_url {
             // Active tab — create WebView immediately
-            let wv = make_webview(tab_id, &st.url);
+            let wv = make_webview(tab_id, &st.url, workspace_manager.active().data_store_id);
             if st.url == "about:blank" {
                 let html = newtab_html::html(&quickslots::to_json(&quick_slots));
                 let _ = wv.load_html(&html);
@@ -2252,7 +2252,7 @@ fn main() {
     macro_rules! spawn_tab_webview {
         ($tab_id:expr, $url:expr) => {{
             let id = $tab_id;
-            let wv = make_webview(id, $url);
+            let wv = make_webview(id, $url, workspace_manager.active().data_store_id);
             let _ = wv.set_visible(false);
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             let p = proxy.clone();
@@ -2289,7 +2289,7 @@ fn main() {
                 if let Some(url) = pending_tabs.remove(&target) {
                     let has_snapshot = tab_snapshots.contains_key(&target);
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
-                    let wv = make_webview(target, load_url);
+                    let wv = make_webview(target, load_url, workspace_manager.active().data_store_id);
                     if !has_snapshot && url == "about:blank" {
                         let html = newtab_html::html(&quickslots::to_json(&quick_slots));
                         let _ = wv.load_html(&html);
