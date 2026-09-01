@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,12 +15,16 @@ pub struct QuickSlot {
 /// 10 slots indexed 0–9, mapped to keys 1–9,0.
 pub type QuickSlots = [Option<QuickSlot>; 10];
 
-pub fn save(slots: &QuickSlots) {
+/// Every workspace's slots, keyed by workspace id. Pins belong to the
+/// workspace they were saved in, like tabs and cookies.
+pub type AllQuickSlots = HashMap<String, QuickSlots>;
+
+pub fn save_all(all: &AllQuickSlots) {
     let path = slots_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    match serde_json::to_string(slots) {
+    match serde_json::to_string(all) {
         Ok(s) => {
             let _ = fs::write(&path, s);
         }
@@ -27,12 +32,22 @@ pub fn save(slots: &QuickSlots) {
     }
 }
 
-pub fn load() -> QuickSlots {
-    let path = slots_path();
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+pub fn load_all() -> AllQuickSlots {
+    let Ok(raw) = fs::read_to_string(slots_path()) else {
+        return AllQuickSlots::new();
+    };
+    if let Ok(all) = serde_json::from_str::<AllQuickSlots>(&raw) {
+        return all;
+    }
+    // Pre-workspaces format: a bare 10-slot array. Anything in it was pinned
+    // before workspaces existed, so it belongs to "default".
+    match serde_json::from_str::<QuickSlots>(&raw) {
+        Ok(slots) => AllQuickSlots::from([("default".to_string(), slots)]),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse quickslots");
+            AllQuickSlots::new()
+        }
+    }
 }
 
 /// Build JSON array for the footer/newtab UI.

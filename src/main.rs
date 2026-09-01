@@ -938,7 +938,7 @@ fn main() {
             tokio::sync::oneshot::Sender<Result<mcp::NavigateOutcome, String>>,
         ),
     > = HashMap::new();
-    let mut quick_slots = quickslots::load();
+    let mut all_quick_slots = quickslots::load_all();
 
     // Restore previous session if available, otherwise open home page.
     // `session` was already loaded above (before the workspace was built) —
@@ -964,6 +964,7 @@ fn main() {
     let mut first_id: Option<usize> = None;
     let mut restored_active_id: Option<usize> = None;
     for ws in workspace_manager.list_mut() {
+        ws.quick_slots = all_quick_slots.remove(&ws.id).unwrap_or_default();
         let is_overall_active_ws = ws.id == overall_active_workspace_id;
         let session_tabs: Vec<config::SessionTab> = session
             .as_ref()
@@ -993,7 +994,7 @@ fn main() {
                 // Active tab — create WebView immediately
                 let wv = make_webview(tab_id, &st.url, ws.data_store_id);
                 if st.url == "about:blank" {
-                    let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                    let html = newtab_html::html(&quickslots::to_json(&ws.quick_slots));
                     let _ = wv.load_html(&html);
                 }
                 let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -1905,7 +1906,7 @@ fn main() {
         .expect("Failed to create quickslots footer WebView");
     // Initialize footer with saved slots
     {
-        let json = quickslots::to_json(&quick_slots);
+        let json = quickslots::to_json(&workspace_manager.active().quick_slots);
         let _ = footer_wv.evaluate_script(&format!(
             "window.__updateSlots && window.__updateSlots({json})"
         ));
@@ -2312,7 +2313,8 @@ fn main() {
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
                     let wv = make_webview(target, load_url, workspace_manager.active().data_store_id);
                     if !has_snapshot && url == "about:blank" {
-                        let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                        let html =
+                            newtab_html::html(&quickslots::to_json(&workspace_manager.active().quick_slots));
                         let _ = wv.load_html(&html);
                     }
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -2802,10 +2804,25 @@ fn main() {
         }};
     }
 
+    /// Persist every workspace's pins. The file holds all of them keyed by
+    /// workspace id, so it is always rewritten from the live workspace list —
+    /// that also drops entries for workspaces the user deleted.
+    macro_rules! save_quickslots {
+        () => {{
+            quickslots::save_all(
+                &workspace_manager
+                    .list()
+                    .iter()
+                    .map(|w| (w.id.clone(), w.quick_slots.clone()))
+                    .collect(),
+            );
+        }};
+    }
+
     /// Sync quick-slot UI: footer bar + any about:blank newtab pages.
     macro_rules! sync_quickslots_ui {
         () => {{
-            let json = quickslots::to_json(&quick_slots);
+            let json = quickslots::to_json(&workspace_manager.active().quick_slots);
             let _ = footer_wv.evaluate_script(&format!(
                 "window.__updateSlots && window.__updateSlots({json})"
             ));
@@ -2820,7 +2837,9 @@ fn main() {
                     .find(|t| t.id == tid)
                     .map(|t| t.url.clone());
                 if tab_url.as_deref() == Some("about:blank") {
-                    let html = newtab_html::html(&quickslots::to_json(&quick_slots));
+                    let html = newtab_html::html(&quickslots::to_json(
+                        &workspace_manager.active().quick_slots,
+                    ));
                     let _ = wv.load_html(&html);
                 }
             }
@@ -4886,6 +4905,7 @@ fn main() {
                 push_workspace_dot!();
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
+                sync_quickslots_ui!();
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible = false;
                 focus_active_webview!();
@@ -4941,6 +4961,7 @@ fn main() {
                 push_workspace_dot!();
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
+                sync_quickslots_ui!();
                 refresh_workspace_switcher!();
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible = false;
@@ -5007,6 +5028,8 @@ fn main() {
                     push_workspace_dot!();
                     reset_sys_stats!();
                     push_acp_sessions_to_sidebar!();
+                    save_quickslots!();
+                    sync_quickslots_ui!();
                     refresh_workspace_switcher!();
                     workspace_switcher_win.set_visible(false);
                     workspace_switcher_visible = false;
@@ -5030,6 +5053,7 @@ fn main() {
                     // (WKWebViews/XPC processes) via Drop. No visible webview
                     // transition needed; just refresh the panel list.
                     workspace_manager.remove(&id);
+                    save_quickslots!();
                     refresh_workspace_switcher!();
                 }
             }
@@ -6025,8 +6049,10 @@ fn main() {
             // If a tab with this URL is already open → switch to it.
             // Otherwise → open in a new tab (preserves current tab, e.g. music).
             Event::UserEvent(AppEvent::QuickSlotOpen(slot)) => {
-                if let Some(ref qs) = quick_slots[slot] {
-                    let url = qs.url.clone();
+                let saved = workspace_manager.active().quick_slots[slot]
+                    .as_ref()
+                    .map(|qs| qs.url.clone());
+                if let Some(url) = saved {
                     let existing_tab = {
                         let tm = workspace_manager.active().tabs.lock().unwrap();
                         let normalized = url.trim_end_matches('/');
@@ -6051,26 +6077,27 @@ fn main() {
                 if let Some((url, title)) = info {
                     if url == "about:blank" || url.is_empty() {
                         // On blank page: remove the slot
-                        quick_slots[slot] = None;
+                        workspace_manager.active_mut().quick_slots[slot] = None;
                     } else {
                         // Save current page into the slot
                         let favicon = webview_utils::cached_favicon(&url, &favicon_cache.lock().unwrap())
                             .map(String::from);
-                        quick_slots[slot] = Some(quickslots::QuickSlot {
-                            url,
-                            title,
-                            favicon,
-                        });
+                        workspace_manager.active_mut().quick_slots[slot] =
+                            Some(quickslots::QuickSlot {
+                                url,
+                                title,
+                                favicon,
+                            });
                     }
-                    quickslots::save(&quick_slots);
+                    save_quickslots!();
                     sync_quickslots_ui!();
                 }
             }
 
             // ── Quick-slot: remove slot ───────────────────────────────────
             Event::UserEvent(AppEvent::QuickSlotRemove(slot)) => {
-                quick_slots[slot] = None;
-                quickslots::save(&quick_slots);
+                workspace_manager.active_mut().quick_slots[slot] = None;
+                save_quickslots!();
                 sync_quickslots_ui!();
             }
 
@@ -6087,21 +6114,24 @@ fn main() {
                         // Nothing to pin from a blank page
                     } else {
                         let normalized = url.trim_end_matches('/');
-                        let existing = quick_slots.iter().position(|qs| {
+                        let slots = &workspace_manager.active().quick_slots;
+                        let existing = slots.iter().position(|qs| {
                             qs.as_ref().is_some_and(|q| q.url.trim_end_matches('/') == normalized)
                         });
+                        let first_empty = slots.iter().position(|s| s.is_none());
                         if let Some(slot) = existing {
-                            quick_slots[slot] = None;
-                        } else if let Some(slot) = quick_slots.iter().position(|s| s.is_none()) {
+                            workspace_manager.active_mut().quick_slots[slot] = None;
+                        } else if let Some(slot) = first_empty {
                             let favicon = webview_utils::cached_favicon(&url, &favicon_cache.lock().unwrap())
                                 .map(String::from);
-                            quick_slots[slot] = Some(quickslots::QuickSlot {
-                                url,
-                                title,
-                                favicon,
-                            });
+                            workspace_manager.active_mut().quick_slots[slot] =
+                                Some(quickslots::QuickSlot {
+                                    url,
+                                    title,
+                                    favicon,
+                                });
                         }
-                        quickslots::save(&quick_slots);
+                        save_quickslots!();
                         sync_quickslots_ui!();
                     }
                 }

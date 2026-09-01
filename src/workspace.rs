@@ -12,6 +12,7 @@
 //! `WorkspaceManager::active()` until stage 2 added switching.
 
 use crate::browser::TabManager;
+use crate::quickslots::QuickSlots;
 use crate::AcpSession;
 use std::collections::HashMap;
 use std::io::Read;
@@ -44,6 +45,9 @@ pub struct Workspace {
     /// to be active when each was pushed, picking the "previous" tab from
     /// the wrong workspace.
     pub mru: Vec<usize>,
+    /// Pinned quick-slots (⌘1–⌘0) for this workspace. Seeded by main.rs at
+    /// startup from `quickslots::load_all()`.
+    pub quick_slots: QuickSlots,
 }
 
 impl Workspace {
@@ -64,6 +68,7 @@ impl Workspace {
             acp_sessions: Vec::new(),
             acp_active_session_id: 0,
             mru: Vec::new(),
+            quick_slots: Default::default(),
         }
     }
 }

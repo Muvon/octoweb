@@ -30,6 +30,12 @@ pub fn html() -> String {
     top: 50px;
     right: 12px;
     width: 260px;
+    /* This popover floats in its own transparent window, so backdrop-filter has
+       nothing to sample — the page behind belongs to a different WebView. The
+       thin --glass fill alone left the panel see-through, and how much showed
+       through varied with WebKit's compositing. --glass-thick is opaque enough
+       to be deterministic. */
+    background: var(--glass-thick);
     max-height: 70vh;
     overflow-y: auto;
     padding: 8px;
