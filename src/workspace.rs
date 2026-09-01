@@ -37,6 +37,13 @@ pub struct Workspace {
     pub acp_sessions: Vec<AcpSession>,
     /// Which of `acp_sessions` is foreground in the sidebar tab strip.
     pub acp_active_session_id: u64,
+    /// Most-recently-used tab id order for this workspace, walked by
+    /// Ctrl+P/Ctrl+N (`PrevTab`/`NextTab`). Per-workspace, not just
+    /// per-workspace-unique-id-safe: unlike a keyed map, a shared list's
+    /// neighboring entries would mix tabs from whichever workspace happened
+    /// to be active when each was pushed, picking the "previous" tab from
+    /// the wrong workspace.
+    pub mru: Vec<usize>,
 }
 
 impl Workspace {
@@ -56,6 +63,7 @@ impl Workspace {
             webviews: HashMap::new(),
             acp_sessions: Vec::new(),
             acp_active_session_id: 0,
+            mru: Vec::new(),
         }
     }
 }

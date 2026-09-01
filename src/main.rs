@@ -883,7 +883,6 @@ fn main() {
     // Key = tab_id, Value = URL to load when user switches to it.
     let mut pending_tabs: HashMap<usize, String> = HashMap::new();
     let mut active_wv_id;
-    let mut mru: Vec<usize> = Vec::new();
     // Deferred tab swap: (old_visible_tab, new_loading_tab).
     // Old tab stays visible while new one loads behind it (Safari-style).
     let mut pending_swap: Option<(usize, usize)> = None;
@@ -1005,7 +1004,7 @@ fn main() {
             // Background tab — defer WebView creation until user switches to it
             pending_tabs.insert(tab_id, st.url.clone());
         }
-        mru.push(tab_id);
+        workspace_manager.active_mut().mru.push(tab_id);
         if first_id.is_none() {
             first_id = Some(tab_id);
         }
@@ -1019,7 +1018,7 @@ fn main() {
         .lock()
         .unwrap()
         .switch(active_wv_id);
-    macos::mru_push(&mut mru, active_wv_id);
+    macos::mru_push(&mut workspace_manager.active_mut().mru, active_wv_id);
 
     // ── Overlay WebView ───────────────────────────────────────────────────
     let overlay_wv = WebViewBuilder::new()
@@ -2995,7 +2994,7 @@ fn main() {
                         &workspace_manager.active().webviews,
                         &pending_tabs,
                         pending_swap,
-                        &mru,
+                        &workspace_manager.active().mru,
                         active_wv_id,
                         &media_playing_tabs,
                         pressure,
@@ -4851,7 +4850,7 @@ fn main() {
                 };
                 ensure_webview!(new_active_tab_id);
                 commit_tab_visibility!(new_active_tab_id);
-                macos::mru_push(&mut mru, new_active_tab_id);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, new_active_tab_id);
                 let url = workspace_manager
                     .active()
                     .tabs
@@ -4893,7 +4892,7 @@ fn main() {
                 // for it yet, unlike ensure_webview!'s hibernated-tab case.
                 spawn_tab_webview!(new_tab_id, &new_tab_url);
                 commit_tab_visibility!(new_tab_id);
-                macos::mru_push(&mut mru, new_tab_id);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, new_tab_id);
                 update_address_bar_url!(new_tab_url);
                 // Fresh default session for the new workspace — not eagerly
                 // connected, matching every other from-scratch workspace.
@@ -4971,7 +4970,7 @@ fn main() {
                     if let Some(new_active_tab_id) = new_active_tab_id {
                         ensure_webview!(new_active_tab_id);
                         commit_tab_visibility!(new_active_tab_id);
-                        macos::mru_push(&mut mru, new_active_tab_id);
+                        macos::mru_push(&mut workspace_manager.active_mut().mru, new_active_tab_id);
                         let url = workspace_manager
                             .active()
                             .tabs
@@ -5228,7 +5227,7 @@ fn main() {
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
-                        mru.retain(|&x| x != orphan);
+                        workspace_manager.active_mut().mru.retain(|&x| x != orphan);
                         tracing::debug!(orphan, "NavigateTo: cleaned up orphaned tab");
                     }
                     old
@@ -5245,7 +5244,7 @@ fn main() {
                 update_address_bar_url!(url);
                 browser_win.set_title(&url);
                 tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
-                macos::mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
                 // Show progress bar immediately — PageLoadStarted fires on didCommitNavigation
                 // (after server responds), so we'd miss the DNS/TCP/request phase entirely.
@@ -5297,7 +5296,7 @@ fn main() {
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
-                        mru.retain(|&x| x != orphan);
+                        workspace_manager.active_mut().mru.retain(|&x| x != orphan);
                         tracing::debug!(orphan, "OpenInNewTab: cleaned up orphaned tab");
                     }
                     old
@@ -5310,7 +5309,7 @@ fn main() {
                 pending_swap_at = Some(std::time::Instant::now());
                 update_address_bar_url!(url);
                 browser_win.set_title(&url);
-                macos::mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
             }
 
@@ -5344,7 +5343,7 @@ fn main() {
                     return;
                 }
                 switch_visible_tab!(tab_id);
-                macos::mru_push(&mut mru, tab_id);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 // Reset stats so first sample after switch starts fresh (no stale CPU delta)
                 sys_stats_last = None;
                 sys_stats_cpu.store(0, Ordering::Relaxed);
@@ -5403,7 +5402,7 @@ fn main() {
                     if let Some((_, response)) = mcp_nav_pending.remove(&id) {
                         let _ = response.send(Err("Tab closed".into()));
                     }
-                    mru.retain(|&x| x != id);
+                    workspace_manager.active_mut().mru.retain(|&x| x != id);
                     // Render a successor when closing either the visible tab or
                     // the selected loading tab. Closing an unrelated background
                     // tab must not re-switch tabs or steal the user's focus.
@@ -5421,7 +5420,7 @@ fn main() {
                         let successor = if selected_survives {
                             Some(selected_id)
                         } else {
-                            mru.first().copied()
+                            workspace_manager.active().mru.first().copied()
                         };
                         match successor {
                             Some(next) => {
@@ -5463,11 +5462,11 @@ fn main() {
                     return;
                 }
                 // Find current position in MRU, go to next older tab
-                if mru.len() < 2 {
+                if workspace_manager.active().mru.len() < 2 {
                     return;
                 }
-                let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
-                let target = mru[(pos + 1) % mru.len()];
+                let pos = workspace_manager.active().mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
+                let target = workspace_manager.active().mru[(pos + 1) % workspace_manager.active().mru.len()];
                 switch_visible_tab!(target);
                 browser_win.set_focus();
             }
@@ -5478,11 +5477,11 @@ fn main() {
                     return;
                 }
                 // Find current position in MRU, go to next newer tab (wrap to end)
-                if mru.len() < 2 {
+                if workspace_manager.active().mru.len() < 2 {
                     return;
                 }
-                let pos = mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
-                let target = if pos == 0 { *mru.last().unwrap() } else { mru[pos - 1] };
+                let pos = workspace_manager.active().mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
+                let target = if pos == 0 { *workspace_manager.active().mru.last().unwrap() } else { workspace_manager.active().mru[pos - 1] };
                 switch_visible_tab!(target);
                 browser_win.set_focus();
             }
