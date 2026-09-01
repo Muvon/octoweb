@@ -9,18 +9,43 @@ pub struct SessionTab {
     pub title: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionData {
+/// One workspace's persisted tabs + identity. `data_store_id` is `None` for
+/// the default workspace (WebKit's default persistent data store — keeps
+/// existing user cookies across upgrade) and `Some([u8; 16])` for every
+/// workspace created afterward (its own `WKWebsiteDataStore`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSession {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    #[serde(default)]
+    pub data_store_id: Option<[u8; 16]>,
     /// Tabs — accepts both new `[{url, title}]` and legacy `["url"]` formats.
     #[serde(deserialize_with = "deserialize_tabs")]
     pub tabs: Vec<SessionTab>,
-    pub active_url: String,
+    #[serde(default)]
+    pub active_tab_url: String,
 }
 
-pub fn save_session(tabs: &[SessionTab], active_url: &str) {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionData {
+    pub workspaces: Vec<WorkspaceSession>,
+    pub active_workspace_id: String,
+}
+
+/// Pre-workspaces flat shape — only used to detect and migrate old session
+/// files (no `workspaces` key) into a single "Default" workspace.
+#[derive(Debug, Deserialize)]
+struct LegacySessionData {
+    #[serde(deserialize_with = "deserialize_tabs")]
+    tabs: Vec<SessionTab>,
+    active_url: String,
+}
+
+pub fn save_session(workspaces: &[WorkspaceSession], active_workspace_id: &str) {
     let data = SessionData {
-        tabs: tabs.to_vec(),
-        active_url: active_url.to_string(),
+        workspaces: workspaces.to_vec(),
+        active_workspace_id: active_workspace_id.to_string(),
     };
     let path = session_path();
     if let Some(parent) = path.parent() {
@@ -62,7 +87,25 @@ where
 pub fn load_session() -> Option<SessionData> {
     let path = session_path();
     let raw = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&raw).ok()
+    if let Ok(data) = serde_json::from_str::<SessionData>(&raw) {
+        return Some(data);
+    }
+    // Migration: old flat `{tabs, active_url}` shape has no `workspaces` key
+    // and fails the parse above — wrap it into a single "Default" workspace
+    // on the default persistent data store. Only migrates in memory; the
+    // file itself is rewritten in the new shape on the next save_session().
+    let legacy: LegacySessionData = serde_json::from_str(&raw).ok()?;
+    Some(SessionData {
+        workspaces: vec![WorkspaceSession {
+            id: "default".to_string(),
+            name: "Default".to_string(),
+            color: "#7C5CFF".to_string(),
+            data_store_id: None,
+            tabs: legacy.tabs,
+            active_tab_url: legacy.active_url,
+        }],
+        active_workspace_id: "default".to_string(),
+    })
 }
 
 /// Base directory for all persisted state (config, session, history, ...).
@@ -282,12 +325,30 @@ pub struct AcpSessionSnapshot {
     pub messages: Vec<AcpMessage>,
 }
 
+/// One workspace's ACP session history — session list + which one was
+/// foreground, restored verbatim when that workspace becomes active again.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AcpHistory {
+pub struct WorkspaceAcpHistory {
     pub sessions: Vec<AcpSessionSnapshot>,
     /// Last-active session id. Restored as the foreground session.
     #[serde(default)]
     pub active_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcpHistory {
+    /// Keyed by `Workspace::id`.
+    pub workspaces: std::collections::HashMap<String, WorkspaceAcpHistory>,
+}
+
+/// Pre-workspaces flat shape — only used to detect and migrate old
+/// `acp_history.json` files (no `workspaces` key) into a single "default"
+/// workspace slot, mirroring `config::load_session`'s migration.
+#[derive(Debug, Deserialize)]
+struct LegacyAcpHistory {
+    sessions: Vec<AcpSessionSnapshot>,
+    #[serde(default)]
+    active_id: u64,
 }
 
 pub fn save_acp_history(history: &AcpHistory) {
@@ -313,7 +374,22 @@ pub fn save_acp_history(history: &AcpHistory) {
 pub fn load_acp_history() -> Option<AcpHistory> {
     let path = acp_history_path();
     let raw = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&raw).ok()
+    if let Ok(h) = serde_json::from_str::<AcpHistory>(&raw) {
+        return Some(h);
+    }
+    // Migration: old flat `{sessions, active_id}` shape has no `workspaces`
+    // key and fails the parse above — wrap it under the "default" workspace.
+    // Only migrates in memory; rewritten in the new shape on next save.
+    let legacy: LegacyAcpHistory = serde_json::from_str(&raw).ok()?;
+    let mut workspaces = std::collections::HashMap::new();
+    workspaces.insert(
+        "default".to_string(),
+        WorkspaceAcpHistory {
+            sessions: legacy.sessions,
+            active_id: legacy.active_id,
+        },
+    );
+    Some(AcpHistory { workspaces })
 }
 
 fn acp_history_path() -> PathBuf {

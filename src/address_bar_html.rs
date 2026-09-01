@@ -437,6 +437,17 @@ pub fn html() -> String {
   .bar-btn:hover  { background: var(--fill-hover); color: var(--label); }
   .bar-btn:active { background: var(--fill-press); transform: scale(0.90); }
 
+  #workspace-btn { position: relative; }
+  .ws-icon { display: inline-flex; width: 13px; height: 13px; line-height: 0; }
+  .ws-icon svg { width: 100%; height: 100%; }
+  .ws-dot {
+    position: absolute;
+    bottom: 3px; right: 3px;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 1.5px var(--glass-thick);
+  }
+
   #ai-btn {
     background: transparent;
     color: var(--label-3);
@@ -496,6 +507,10 @@ pub fn html() -> String {
     <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
     <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
+  <button id="workspace-btn" class="bar-btn" data-tip="Workspaces  ⌘⇧O" title="Workspaces (⌘⇧O)">
+    <span class="ws-icon">@@ICON_LAYERS@@</span>
+    <span class="ws-dot" id="ws-dot"></span>
+  </button>
   <button id="settings-btn" class="bar-btn" data-tip="Settings  ⌘," title="Settings (⌘,)">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.6 1.2h2.8l.4 1.9.5.2 1.7-.9 2 2-.9 1.7.2.5 1.9.4v2.8l-1.9.4-.2.5.9 1.7-2 2-1.7-.9-.5.2-.4 1.9H6.6l-.4-1.9-.5-.2-1.7.9-2-2 .9-1.7-.2-.5L.8 9.2V6.4l1.9-.4.2-.5-.9-1.7 2-2 1.7.9.5-.2.4-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
@@ -979,6 +994,20 @@ pub fn html() -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_overlay' }));
   });
 
+  // Workspaces
+  document.getElementById('workspace-btn').addEventListener('click', function() {
+    window.ipc.postMessage(JSON.stringify({ type: 'toggle_workspaces' }));
+  });
+
+  // Active workspace color dot — pushed by Rust on switch/create/rename/delete
+  // and once at startup.
+  window.__setWorkspace = function(color, name) {
+    var dot = document.getElementById('ws-dot');
+    if (dot) dot.style.background = color;
+    var btn = document.getElementById('workspace-btn');
+    if (btn) btn.title = 'Workspaces (⌘⇧O) — ' + name;
+  };
+
   // Settings
   document.getElementById('settings-btn').addEventListener('click', function() {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_settings' }));
@@ -1026,4 +1055,5 @@ pub fn html() -> String {
         .replace("@@ICON_LOCK@@", crate::icons::LOCK)
         .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
         .replace("@@ICON_PENCIL@@", crate::icons::PENCIL)
+        .replace("@@ICON_LAYERS@@", crate::icons::LAYERS)
 }

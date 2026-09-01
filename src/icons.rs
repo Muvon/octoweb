@@ -116,6 +116,26 @@ pub const LOCK: &str = concat!(
     "</svg>"
 );
 
+/// `layers` — workspace switcher toolbar button.
+pub const LAYERS: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/>"#,
+    r#"<path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/>"#,
+    r#"<path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>"#,
+    "</svg>"
+);
+
+/// `trash-2` — delete-workspace affordance in the workspace switcher.
+pub const TRASH: &str = concat!(
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+    r#"<path d="M10 11v6"/>"#,
+    r#"<path d="M14 11v6"/>"#,
+    r#"<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>"#,
+    r#"<path d="M3 6h18"/>"#,
+    r#"<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>"#,
+    "</svg>"
+);
+
 /// `shield-alert` — insecure-site indicator (replaces ⚠️).
 pub const SHIELD_ALERT: &str = concat!(
     r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,

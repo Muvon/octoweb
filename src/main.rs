@@ -39,6 +39,8 @@ mod tab_stats;
 mod theme;
 mod url;
 mod webview_utils;
+mod workspace;
+mod workspace_switcher_html;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
@@ -54,11 +56,14 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::http::Response;
-use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewExtMacOS};
+use wry::{
+    BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewBuilderExtDarwin, WebViewExtMacOS,
+};
 
 use browser::TabManager;
 use config::Config;
 use mcp::{interpret_dom_result, HistoryInfo, McpCommand, PageInfo, TabInfo};
+use workspace::WorkspaceManager;
 
 #[derive(Debug)]
 enum AppEvent {
@@ -119,6 +124,12 @@ enum AppEvent {
     ToggleSettings,                 // ⌘, — toggle settings modal
     HideSettings,                   // JS Esc / backdrop click in settings modal
     UpdateConfig(String, String),   // (key, value) — config field changed in settings UI
+    ToggleWorkspaces,               // ⌘⇧O — toggle workspace switcher popover
+    HideWorkspaces,                 // JS Esc / backdrop click in workspace switcher
+    SwitchWorkspace(String),        // (workspace_id) — switch active workspace
+    CreateWorkspace,                // "+ New Workspace" row
+    RenameWorkspace(String, String), // (workspace_id, name)
+    DeleteWorkspace(String),        // (workspace_id)
     ToggleShortcuts,                // ⌘/ — toggle keyboard shortcuts overlay
     HideShortcuts,                  // JS Esc / backdrop click in shortcuts overlay
     ToggleFindBar,                  // ⌘F — toggle find-in-page bar
@@ -200,6 +211,7 @@ fn keybind_to_event(
         A::DevTools => AppEvent::ToggleDevTools,
         A::Settings => AppEvent::ToggleSettings,
         A::Shortcuts => AppEvent::ToggleShortcuts,
+        A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
         A::Quit => AppEvent::Quit,
         A::SidebarFullscreen if !overlay && !inline => AppEvent::ToggleSidebarFullscreen,
         A::Fullscreen if !overlay && !inline && !find => AppEvent::ToggleFullscreen,
@@ -249,7 +261,7 @@ fn keybind_to_event(
 /// dedicated subprocess via `AcpHandle`. The sidebar UI shows a tab strip; events
 /// from each handle are tagged with `id` before being forwarded to the sidebar JS,
 /// which keeps a separate DOM message log per session.
-struct AcpSession {
+pub(crate) struct AcpSession {
     /// Stable monotonic local id (not the ACP protocol session id).
     id: u64,
     /// User-visible label shown in the header strip.
@@ -314,6 +326,49 @@ struct AcpSession {
 /// memory footprint.
 pub const MAX_SESSIONS: usize = 10;
 
+/// Colors cycled through for workspaces created via the "+ New Workspace" row —
+/// distinct from `workspace::DEFAULT_COLOR` (#7C5CFF, reserved for the migrated
+/// default workspace) and chosen to read clearly as small dots in both themes.
+const WORKSPACE_PALETTE: &[&str] = &[
+    "#06B6D4", "#F97316", "#EC4899", "#22C55E", "#EAB308", "#3B82F6", "#EF4444", "#6366F1",
+];
+
+/// Process-wide ACP session-id source, shared across every workspace's
+/// `acp_sessions` (mirrors `browser::NEXT_TAB_ID`). Deliberately global rather
+/// than per-workspace: `login_pollers` (below) is a flat `HashMap<u64, ..>`
+/// keyed by bare session id with no workspace scoping, so two workspaces each
+/// minting their own id=1 could collide there if both had a `/login` flow in
+/// flight at once. A single counter avoids that category of bug entirely.
+static NEXT_ACP_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_acp_session_id() -> u64 {
+    NEXT_ACP_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// SIGTERM (then SIGKILL after a bounded wait) every given octomind pid.
+/// Shared by `save_and_exit` (every workspace, on quit) and `DeleteWorkspace`
+/// (just the workspace being torn down, mid-session) — without this, deleting
+/// a workspace whose sessions were ever connected (i.e. it was the active
+/// workspace at some point this run) would leak the subprocess: nothing else
+/// ever reaches it again once its `Workspace` is dropped.
+fn terminate_octomind_pids(pids: &[u32]) {
+    for &pid in pids {
+        unsafe { libc::kill(pid as libc::c_int, libc::SIGTERM) };
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    for &pid in pids {
+        while unsafe { libc::kill(pid as libc::c_int, 0) } == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if unsafe { libc::kill(pid as libc::c_int, 0) } == 0 {
+            tracing::warn!(pid, "octomind did not exit on SIGTERM — killing");
+            unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
+        }
+    }
+}
+
 fn main() {
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
     tracing_subscriber::fmt()
@@ -348,14 +403,38 @@ fn main() {
     crash_report::log_startup();
 
     let mut cfg = Config::load();
-    let tabs = Arc::new(Mutex::new(TabManager::new(cfg.max_history)));
+    // Loaded once, early, so the (single, for now) workspace's persisted
+    // identity — id/name/color/data_store_id — is known before any WebView
+    // is built. The tab URLs themselves are consumed later, at the point
+    // the original session-restore loop used to call load_session().
+    let session = config::load_session();
+    // Owned directly (not behind Arc<Mutex<..>> at this level) — it's moved
+    // by value into `event_loop.run(move |...| {...})` below, the same way
+    // the flat `tab_webviews: HashMap<..>` local it replaces used to be.
+    // Every call site that used to read `tabs`/`tab_webviews` now goes
+    // through `workspace_manager.active()` / `.active_mut()`.
+    let mut workspace_manager = match session.as_ref().and_then(|s| s.workspaces.first()) {
+        Some(ws) => WorkspaceManager::from_workspaces(
+            vec![workspace::Workspace::new(
+                ws.id.clone(),
+                ws.name.clone(),
+                ws.color.clone(),
+                ws.data_store_id,
+                cfg.max_history,
+            )],
+            &ws.id,
+            cfg.max_history,
+            cfg.home_page.clone(),
+        ),
+        None => WorkspaceManager::new_default(cfg.max_history, cfg.home_page.clone()),
+    };
 
     // Restore browsing history in a background thread so startup isn't blocked
     // by JSON deserialization of up to 1000 history entries. The thread finishes
     // in <50ms on typical hardware; history is available well before the user
     // can open the overlay (Cmd+Shift+P) for the first time.
     {
-        let tabs_for_history = Arc::clone(&tabs);
+        let tabs_for_history = Arc::clone(&workspace_manager.active().tabs);
         std::thread::spawn(move || {
             let persisted = config::load_history();
             if !persisted.is_empty() {
@@ -532,6 +611,12 @@ fn main() {
         let proxy = proxy.clone();
         let bar_h = address_bar_h;
         let ft_h = footer_h;
+        // Every WebView built by this closure belongs to the workspace active
+        // at closure-creation time (a momentary read, done before
+        // `workspace_manager` moves into `event_loop.run` below) — fine while
+        // there's no switcher UI (stage 1), but stage 2 must re-derive this
+        // per active workspace at call time.
+        let data_store_id = workspace_manager.active().data_store_id;
         move |tab_id: usize, url: &str| -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
@@ -717,7 +802,15 @@ fn main() {
                         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                         .unwrap_or_default();
                     let _ = p6.send_event(AppEvent::DownloadCompleted(filename, success));
-                })
+                });
+            // Per-workspace cookie/localStorage/cache isolation. `None` (the
+            // default workspace) omits the call entirely — WebKit falls back
+            // to its default persistent data store.
+            let wv = match data_store_id {
+                Some(id) => wv.with_data_store_identifier(id),
+                None => wv,
+            };
+            let wv = wv
                 .build_as_child(&*browser_win)
                 .expect("Failed to create tab WebView");
             // Apply compiled content rules to this WebView. If the async
@@ -786,7 +879,6 @@ fn main() {
         }
     };
 
-    let mut tab_webviews: HashMap<usize, WebView> = HashMap::new();
     // Tabs restored from session but not yet loaded (lazy loading).
     // Key = tab_id, Value = URL to load when user switches to it.
     let mut pending_tabs: HashMap<usize, String> = HashMap::new();
@@ -845,17 +937,21 @@ fn main() {
     let mut quick_slots = quickslots::load();
 
     // Restore previous session if available, otherwise open home page.
-    let session = config::load_session();
-    let session_tabs: Vec<config::SessionTab> = match &session {
-        Some(s) if !s.tabs.is_empty() => s.tabs.clone(),
-        _ => vec![config::SessionTab {
-            url: home.clone(),
-            title: String::new(),
-        }],
-    };
+    // `session` was already loaded above (before the workspace was built) —
+    // reused here for the tab list of the (only, for now) active workspace.
+    let session_tabs: Vec<config::SessionTab> =
+        match session.as_ref().and_then(|s| s.workspaces.first()) {
+            Some(ws) if !ws.tabs.is_empty() => ws.tabs.clone(),
+            _ => vec![config::SessionTab {
+                url: home.clone(),
+                title: String::new(),
+            }],
+        };
     let active_url = session
         .as_ref()
-        .map(|s| s.active_url.as_str())
+        .and_then(|s| s.workspaces.first())
+        .map(|ws| ws.active_tab_url.as_str())
+        .filter(|s| !s.is_empty())
         .unwrap_or(&home)
         .to_string();
 
@@ -863,9 +959,17 @@ fn main() {
     let mut restored_active_id: Option<usize> = None;
     for st in &session_tabs {
         let tab_id = if st.title.is_empty() {
-            tabs.lock().unwrap().open(st.url.clone())
+            workspace_manager
+                .active()
+                .tabs
+                .lock()
+                .unwrap()
+                .open(st.url.clone())
         } else {
-            tabs.lock()
+            workspace_manager
+                .active()
+                .tabs
+                .lock()
                 .unwrap()
                 .open_with_title(st.url.clone(), st.title.clone())
         };
@@ -895,7 +999,7 @@ fn main() {
                 let _ = pd.send_event(AppEvent::JsDialog(info));
             });
             let _ = wv.set_visible(true);
-            tab_webviews.insert(tab_id, wv);
+            workspace_manager.active_mut().webviews.insert(tab_id, wv);
             restored_active_id = Some(tab_id);
         } else {
             // Background tab — defer WebView creation until user switches to it
@@ -909,7 +1013,12 @@ fn main() {
 
     // Active tab is the one we just created (or first if no match)
     active_wv_id = restored_active_id.or(first_id).unwrap();
-    tabs.lock().unwrap().switch(active_wv_id);
+    workspace_manager
+        .active()
+        .tabs
+        .lock()
+        .unwrap()
+        .switch(active_wv_id);
     macos::mru_push(&mut mru, active_wv_id);
 
     // ── Overlay WebView ───────────────────────────────────────────────────
@@ -1105,6 +1214,66 @@ fn main() {
         .build(&*settings_win)
         .expect("Failed to create settings WebView");
     let mut settings_visible = false;
+
+    // ── Workspace switcher popover (⌘⇧O) ───────────────────────────────────
+    let workspace_switcher_win = WindowBuilder::new()
+        .with_title("")
+        .with_inner_size(LogicalSize::new(cfg.window_width, cfg.window_height))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_visible(false)
+        .build(&event_loop)
+        .expect("Failed to create workspace switcher window");
+    unsafe {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ns_win: *mut AnyObject = workspace_switcher_win.ns_window() as *mut AnyObject;
+        let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+    }
+    let workspace_switcher_win = Arc::new(workspace_switcher_win);
+    let workspace_switcher_wv = WebViewBuilder::new()
+        .with_html(workspace_switcher_html::html())
+        .with_transparent(true)
+        .with_ipc_handler({
+            let p = proxy.clone();
+            let ww = Arc::clone(&workspace_switcher_win);
+            move |msg| {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
+                    match v["type"].as_str() {
+                        Some("workspace_close") => {
+                            ww.set_visible(false);
+                            let _ = p.send_event(AppEvent::HideWorkspaces);
+                        }
+                        Some("workspace_switch") => {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = p.send_event(AppEvent::SwitchWorkspace(id.to_string()));
+                            }
+                        }
+                        Some("workspace_create") => {
+                            let _ = p.send_event(AppEvent::CreateWorkspace);
+                        }
+                        Some("workspace_rename") => {
+                            if let (Some(id), Some(name)) = (v["id"].as_str(), v["name"].as_str()) {
+                                let _ = p.send_event(AppEvent::RenameWorkspace(
+                                    id.to_string(),
+                                    name.to_string(),
+                                ));
+                            }
+                        }
+                        Some("workspace_delete") => {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = p.send_event(AppEvent::DeleteWorkspace(id.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .build(&*workspace_switcher_win)
+        .expect("Failed to create workspace switcher WebView");
+    let mut workspace_switcher_visible = false;
 
     // ── Sidebar WebView (child of browser_win, right-edge panel) ──────────
     // Hidden by default; shown/hidden via ToggleSidebar.
@@ -1387,6 +1556,9 @@ fn main() {
                         Some("toggle_settings") => {
                             let _ = p.send_event(AppEvent::ToggleSettings);
                         }
+                        Some("toggle_workspaces") => {
+                            let _ = p.send_event(AppEvent::ToggleWorkspaces);
+                        }
                         Some("toggle_shortcuts") => {
                             let _ = p.send_event(AppEvent::ToggleShortcuts);
                         }
@@ -1436,7 +1608,7 @@ fn main() {
         .expect("Failed to create address bar WebView");
     // Initialize address bar with the active tab's URL, title, and favicon from session.
     {
-        let tm = tabs.lock().unwrap();
+        let tm = workspace_manager.active().tabs.lock().unwrap();
         let tab = tm.tabs().iter().find(|t| t.id == active_wv_id);
         let url = tab.map(|t| t.url.clone()).unwrap_or_default();
         let title = tab.map(|t| t.title.clone()).unwrap_or_default();
@@ -1458,6 +1630,12 @@ fn main() {
         if !title.is_empty() {
             browser_win.set_title(&title);
         }
+        let ws = workspace_manager.active();
+        let escaped_ws_name = webview_utils::escape_js_template(&ws.name);
+        let _ = address_bar_wv.evaluate_script(&format!(
+            "window.__setWorkspace && window.__setWorkspace(`{}`, `{escaped_ws_name}`)",
+            ws.color
+        ));
     }
 
     // ── Progress bar WebView (thin bar at bottom edge of address bar) ─────
@@ -1745,51 +1923,108 @@ fn main() {
             a2ui_render_ui::prune_old(&a2ui_render_ui::queue_dir(), 86_400);
         });
     }
-    // Restore persisted ACP history (sessions + per-session message log) if
-    // present, else start with a fresh default Assistant session. `--resume`
-    // is passed when an `acp_session_id` was captured before — the agent then
-    // restores its in-memory conversation context, matching what the user
-    // sees in the replayed message log.
+    // Restore persisted ACP history (sessions + per-session message log) per
+    // workspace. `--resume` is passed when an `acp_session_id` was captured
+    // before — the agent then restores its in-memory conversation context,
+    // matching what the user sees in the replayed message log. Only the
+    // session that was foreground in whichever workspace is active at
+    // cold-start gets eagerly connected — every other session, in that
+    // workspace or any other, starts fully lazy (no subprocess spawned until
+    // the user actually switches to it) — keeps cold-start fast and baseline
+    // CPU/RAM low, and matches stage 3's "assistant sticks to the workspace"
+    // requirement (a background workspace shouldn't be running agents).
     let persisted_acp = config::load_acp_history();
-    let (mut sessions, mut next_session_id, mut active_session_id) = match persisted_acp {
-        Some(h) if !h.sessions.is_empty() => {
-            let mut sessions: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
-            let mut max_id: u64 = 0;
-            let cap = cfg.max_acp_session_messages;
-            // Only spawn the active session's subprocess at startup. Others
-            // connect lazily on first switch — keeps cold-start fast and
-            // baseline CPU/RAM low when many sessions are persisted.
-            let active_target = h.active_id;
-            for mut snap in h.sessions.into_iter() {
-                if snap.id > max_id {
-                    max_id = snap.id;
-                }
-                // Defensive cap on load — if the file was hand-edited or the
-                // cap was lowered between runs, we don't want to bring oversized
-                // history back into memory. FIFO drop matches push_acp_msg.
-                if snap.messages.len() > cap {
-                    let drop = snap.messages.len() - cap;
-                    snap.messages.drain(..drop);
-                }
-                let handle = if snap.id == active_target {
-                    let cmd = match &snap.acp_session_id {
-                        Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
-                        None => format!("octomind acp {}", snap.tag),
+    // Session ids are minted from a single process-wide counter (not
+    // per-workspace — see `next_acp_session_id`'s doc comment), so it must
+    // start past the highest id used ANYWHERE in the persisted file, not
+    // just in the workspace being restored right now.
+    let global_max_persisted_acp_id: u64 = persisted_acp
+        .as_ref()
+        .map(|h| {
+            h.workspaces
+                .values()
+                .flat_map(|w| w.sessions.iter().map(|s| s.id))
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    NEXT_ACP_SESSION_ID.fetch_max(global_max_persisted_acp_id + 1, Ordering::Relaxed);
+
+    let startup_active_workspace_id = workspace_manager.active().id.clone();
+    for ws in workspace_manager.list_mut() {
+        let is_startup_active_ws = ws.id == startup_active_workspace_id;
+        let persisted = persisted_acp
+            .as_ref()
+            .and_then(|h| h.workspaces.get(&ws.id));
+        let (built_sessions, active_id) = match persisted {
+            Some(h) if !h.sessions.is_empty() => {
+                let cap = cfg.max_acp_session_messages;
+                let mut built: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
+                for mut snap in h.sessions.iter().cloned() {
+                    // Defensive cap on load — if the file was hand-edited or
+                    // the cap was lowered between runs, we don't want to
+                    // bring oversized history back into memory. FIFO drop
+                    // matches push_acp_msg.
+                    if snap.messages.len() > cap {
+                        let drop = snap.messages.len() - cap;
+                        snap.messages.drain(..drop);
+                    }
+                    let handle = if is_startup_active_ws && snap.id == h.active_id {
+                        let cmd = match &snap.acp_session_id {
+                            Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
+                            None => format!("octomind acp {}", snap.tag),
+                        };
+                        acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok()
+                    } else {
+                        None // lazy: connect on AcpSessionSwitch / workspace switch
                     };
-                    acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok()
+                    built.push(AcpSession {
+                        id: snap.id,
+                        title: snap.title,
+                        tag: snap.tag,
+                        handle,
+                        retry_count: 0,
+                        reconnect_gen: 0,
+                        last_cancel_at: None,
+                        acp_session_id: snap.acp_session_id,
+                        messages: snap.messages,
+                        agent_buf: String::new(),
+                        tool_buf: Vec::new(),
+                        tool_starts: HashMap::new(),
+                        tool_since_text: false,
+                        turn_started: None,
+                        available_commands_json: None,
+                        account_json: None,
+                        octomind_pid: None,
+                    });
+                }
+                let active = if built.iter().any(|s| s.id == h.active_id) {
+                    h.active_id
                 } else {
-                    None // lazy: connect on AcpSessionSwitch
+                    built[0].id
                 };
-                sessions.push(AcpSession {
-                    id: snap.id,
-                    title: snap.title,
-                    tag: snap.tag,
-                    handle,
+                (built, active)
+            }
+            _ => {
+                let id = next_acp_session_id();
+                let default_session = AcpSession {
+                    id,
+                    title: "Assistant".to_string(),
+                    tag: "octoweb:assistant".to_string(),
+                    handle: if is_startup_active_ws {
+                        acp::AcpHandle::connect(
+                            "octomind acp octoweb:assistant",
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok()
+                    } else {
+                        None
+                    },
                     retry_count: 0,
                     reconnect_gen: 0,
                     last_cancel_at: None,
-                    acp_session_id: snap.acp_session_id,
-                    messages: snap.messages,
+                    acp_session_id: None,
+                    messages: Vec::new(),
                     agent_buf: String::new(),
                     tool_buf: Vec::new(),
                     tool_starts: HashMap::new(),
@@ -1798,42 +2033,13 @@ fn main() {
                     available_commands_json: None,
                     account_json: None,
                     octomind_pid: None,
-                });
+                };
+                (vec![default_session], id)
             }
-            let active = if sessions.iter().any(|s| s.id == h.active_id) {
-                h.active_id
-            } else {
-                sessions[0].id
-            };
-            (sessions, max_id + 1, active)
-        }
-        _ => {
-            let default_session = AcpSession {
-                id: 1,
-                title: "Assistant".to_string(),
-                tag: "octoweb:assistant".to_string(),
-                handle: acp::AcpHandle::connect(
-                    "octomind acp octoweb:assistant",
-                    make_wake(acp_proxy.clone()),
-                )
-                .ok(),
-                retry_count: 0,
-                reconnect_gen: 0,
-                last_cancel_at: None,
-                acp_session_id: None,
-                messages: Vec::new(),
-                agent_buf: String::new(),
-                tool_buf: Vec::new(),
-                tool_starts: HashMap::new(),
-                tool_since_text: false,
-                turn_started: None,
-                available_commands_json: None,
-                account_json: None,
-                octomind_pid: None,
-            };
-            (vec![default_session], 2u64, 1u64)
-        }
-    };
+        };
+        ws.acp_sessions = built_sessions;
+        ws.acp_active_session_id = active_id;
+    }
 
     // ACP reconnection backoff bounds (shared across all sessions — backoff state
     // itself lives per-session in `AcpSession::retry_count` / `reconnect_gen`).
@@ -2062,9 +2268,9 @@ fn main() {
             dialog_patch::register(wv_ptr, id, move |info| {
                 let _ = pd.send_event(AppEvent::JsDialog(info));
             });
-            tab_webviews.insert(id, wv);
+            workspace_manager.active_mut().webviews.insert(id, wv);
             if zoom_level != 1.0 {
-                if let Some(wv) = tab_webviews.get(&id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                     let _ = wv.zoom(zoom_level);
                 }
             }
@@ -2080,7 +2286,7 @@ fn main() {
     macro_rules! ensure_webview {
         ($target:expr) => {{
             let target = $target;
-            if !tab_webviews.contains_key(&target) {
+            if !workspace_manager.active().webviews.contains_key(&target) {
                 if let Some(url) = pending_tabs.remove(&target) {
                     let has_snapshot = tab_snapshots.contains_key(&target);
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
@@ -2118,7 +2324,7 @@ fn main() {
                         restoring_tabs.insert(target);
                     }
                     let _ = wv.set_visible(false);
-                    tab_webviews.insert(target, wv);
+                    workspace_manager.active_mut().webviews.insert(target, wv);
                 }
             }
         }};
@@ -2166,7 +2372,7 @@ fn main() {
     macro_rules! mcp_nav_watchdog {
         ($arc:expr, $delay_ms:expr, $tab_id:expr, $gen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
-            let tabs_wd = tabs.clone();
+            let tabs_wd = workspace_manager.active().tabs.clone();
             let (tab_wd, gen_wd) = ($tab_id, $gen0);
             let on_nav = $on_nav;
             let msg: String = $timeout_msg;
@@ -2204,7 +2410,7 @@ fn main() {
     macro_rules! mcp_nav_watchdog_hard {
         ($arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
-            let tabs_wd = tabs.clone();
+            let tabs_wd = workspace_manager.active().tabs.clone();
             let (tab_wd, hgen_wd) = ($tab_id, $hgen0);
             let on_nav = $on_nav;
             let msg: String = $timeout_msg;
@@ -2241,7 +2447,14 @@ fn main() {
     macro_rules! mcp_ensure_tab {
         ($target:expr) => {{
             let t = $target;
-            let known = tabs.lock().unwrap().tabs().iter().any(|tab| tab.id == t);
+            let known = workspace_manager
+                .active()
+                .tabs
+                .lock()
+                .unwrap()
+                .tabs()
+                .iter()
+                .any(|tab| tab.id == t);
             if known {
                 ensure_webview!(t);
             }
@@ -2260,12 +2473,12 @@ fn main() {
     macro_rules! commit_tab_visibility {
         ($target:expr) => {{
             let target = $target;
-            for (&tid, wv) in &tab_webviews {
+            for (&tid, wv) in workspace_manager.active().webviews.iter() {
                 if tid != target {
                     let _ = wv.set_visible(false);
                 }
             }
-            if let Some(wv) = tab_webviews.get(&target) {
+            if let Some(wv) = workspace_manager.active().webviews.get(&target) {
                 // Re-pin bounds on every show — a tab created for a previous
                 // window size keeps stale bounds otherwise.
                 let sz = browser_win.inner_size();
@@ -2293,14 +2506,19 @@ fn main() {
             // Capture a frozen snapshot of the outgoing tab (async — fires callback later).
             // Only for live WebViews that aren't about:blank / newtab / error pages.
             if active_wv_id != target {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     capture_tab_snapshot(wv_ptr, active_wv_id, proxy.clone());
                 }
             }
             // Lazy load: create WebView if this tab was pending (hibernated or session-restored).
             ensure_webview!(target);
-            tabs.lock().unwrap().switch(target);
+            workspace_manager
+                .active()
+                .tabs
+                .lock()
+                .unwrap()
+                .switch(target);
             commit_tab_visibility!(target);
             // Hide progress bar when switching away from a loading tab
             if progress_visible {
@@ -2309,7 +2527,9 @@ fn main() {
                 progress_hide_at = None;
             }
             // Update address bar with the new tab's URL
-            let url = tabs
+            let url = workspace_manager
+                .active()
+                .tabs
                 .lock()
                 .unwrap()
                 .tabs()
@@ -2340,7 +2560,7 @@ fn main() {
                 && !sidebar_owns_key.load(Ordering::Relaxed)
             {
                 browser_win.set_focus();
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.focus();
                 }
             }
@@ -2352,7 +2572,7 @@ fn main() {
         () => {
             if overlay_visible {
                 let json = {
-                    let mut tm = tabs.lock().unwrap();
+                    let mut tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> =
                         pending_tabs.keys().copied().collect();
@@ -2376,7 +2596,7 @@ fn main() {
             let u = &$url;
             let secure = u.starts_with("https://");
             let escaped_url = webview_utils::escape_js_template(u);
-            let tm = tabs.lock().unwrap();
+            let tm = workspace_manager.active().tabs.lock().unwrap();
             let tab = tm.tabs().iter().find(|t| t.url == *u || t.id == active_wv_id);
             let raw_title = tab.map(|t| t.title.clone()).unwrap_or_default();
             let (pb, pt) = tab.map(|t| (t.page_bytes, t.page_time_ms)).unwrap_or((0, 0));
@@ -2404,6 +2624,164 @@ fn main() {
         }};
     }
 
+    /// Push the current workspace list into the switcher popover.
+    macro_rules! refresh_workspace_switcher {
+        () => {{
+            let active_id = workspace_manager.active().id.clone();
+            let list: Vec<serde_json::Value> = workspace_manager
+                .list()
+                .iter()
+                .map(|ws| {
+                    serde_json::json!({
+                        "id": ws.id,
+                        "name": ws.name,
+                        "color": ws.color,
+                        "tab_count": ws.tabs.lock().unwrap().tabs().len(),
+                        "active": ws.id == active_id,
+                    })
+                })
+                .collect();
+            let json = serde_json::to_string(&list).unwrap_or_default();
+            let _ = workspace_switcher_wv.evaluate_script(&format!(
+                "window.__setWorkspaces && window.__setWorkspaces({json})"
+            ));
+        }};
+    }
+
+    /// Push the active workspace's color/name to the toolbar dot.
+    macro_rules! push_workspace_dot {
+        () => {{
+            let ws = workspace_manager.active();
+            let escaped_name = webview_utils::escape_js_template(&ws.name);
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__setWorkspace && window.__setWorkspace(`{}`, `{escaped_name}`)",
+                ws.color
+            ));
+        }};
+    }
+
+    /// Reset per-tab UI state that doesn't carry across a workspace switch
+    /// (command palette, find bar highlights, inline edit modal, progress
+    /// bar) — mirrors what `SwitchTab` already resets for an in-workspace
+    /// tab change. Used by `SwitchWorkspace`/`CreateWorkspace`/`DeleteWorkspace`.
+    macro_rules! reset_cross_workspace_ui_state {
+        () => {{
+            overlay_visible = false;
+            overlay_hotkey_visible.store(false, Ordering::Relaxed);
+            if find_bar_visible {
+                let _ = find_bar_wv.set_visible(false);
+                let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
+                find_bar_visible = false;
+                find_bar_hotkey_visible.store(false, Ordering::Relaxed);
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
+                }
+            }
+            if inline_edit_visible || inline_edit_pending {
+                let _ = inline_edit_wv.set_visible(false);
+                let _ = inline_edit_wv.evaluate_script("window.__clear && window.__clear()");
+                inline_edit_visible = false;
+                inline_edit_pending = false;
+                inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
+                if let Some(ref h) = inline_edit_acp {
+                    h.cancel();
+                }
+                inline_edit_acp = None;
+                inline_edit_response.clear();
+            }
+            if progress_visible {
+                let _ = progress_wv.set_visible(false);
+                progress_visible = false;
+                progress_hide_at = None;
+            }
+        }};
+    }
+
+    /// Reset sys-stats sampling after a workspace switch/create/delete moves
+    /// `active_wv_id` to a different tab — mirrors what `SwitchTab` does.
+    macro_rules! reset_sys_stats {
+        () => {{
+            sys_stats_last = None;
+            sys_stats_cpu.store(0, Ordering::Relaxed);
+            sys_stats_mem.store(0, Ordering::Relaxed);
+            sys_stats_next_at = std::time::Instant::now();
+            let _ = address_bar_wv
+                .evaluate_script("window.__sysStats && window.__sysStats(null, null)");
+        }};
+    }
+
+    /// Mount the active workspace's ACP sessions into the sidebar's tab strip
+    /// + per-session message logs, then switch to its active one. The sidebar
+    /// WKWebView is a single long-lived instance that does NOT reset itself
+    /// on a workspace switch, so this re-push is how its DOM catches up.
+    /// Reused by `SidebarReady` (first boot — which additionally reconciles
+    /// the sid=1 JS placeholder, not handled here) and every workspace
+    /// switch/create/delete.
+    macro_rules! push_acp_sessions_to_sidebar {
+        () => {{
+            for s in workspace_manager.active().acp_sessions.iter() {
+                let sid = s.id;
+                let etitle = webview_utils::escape_js_template(&s.title);
+                let etag = webview_utils::escape_js_template(&s.tag);
+                let status = if s.handle.is_some() && s.acp_session_id.is_some() {
+                    "ready"
+                } else if s.handle.is_some() {
+                    "connecting"
+                } else {
+                    "ready" // lazy — not yet spawned, will connect on switch
+                };
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'{status}')"
+                ));
+                if let Some(ref json) = s.available_commands_json {
+                    let escaped = webview_utils::escape_js_template(json);
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
+                    ));
+                }
+                if let Some(ref json) = s.account_json {
+                    let escaped = webview_utils::escape_js_template(json);
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setAccount && window.__setAccount({sid},`{escaped}`)"
+                    ));
+                }
+                if !s.messages.is_empty() {
+                    if let Ok(msgs_json) = serde_json::to_string(&s.messages) {
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
+                        ));
+                    }
+                }
+            }
+            let active = workspace_manager.active().acp_active_session_id;
+            let _ = sidebar_wv.evaluate_script(&format!(
+                "window.__switchSession && window.__switchSession({active})"
+            ));
+        }};
+    }
+
+    /// Unmount the given workspace's ACP sessions from the sidebar's tab
+    /// strip before switching away — the counterpart to
+    /// `push_acp_sessions_to_sidebar!`. Takes a `&Workspace` (the OUTGOING
+    /// one) rather than reading `workspace_manager.active()` itself, since
+    /// callers invoke this BEFORE `workspace_manager.switch()`/`.create()`/
+    /// `.remove()` changes which workspace is active.
+    macro_rules! teardown_acp_sessions_from_sidebar {
+        ($ws:expr) => {{
+            // Unconditional, matching `push_acp_sessions_to_sidebar!` — the
+            // sidebar WKWebView keeps its DOM/JS state while hidden, so
+            // skipping this when `!sidebar_visible` would leave the outgoing
+            // workspace's tabs mounted forever (ToggleSidebar's open path
+            // doesn't rebuild the strip, only `SidebarReady`/these macros do).
+            for s in $ws.acp_sessions.iter() {
+                let sid = s.id;
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__removeSession && window.__removeSession({sid})"
+                ));
+            }
+        }};
+    }
+
     /// Sync quick-slot UI: footer bar + any about:blank newtab pages.
     macro_rules! sync_quickslots_ui {
         () => {{
@@ -2411,8 +2789,10 @@ fn main() {
             let _ = footer_wv.evaluate_script(&format!(
                 "window.__updateSlots && window.__updateSlots({json})"
             ));
-            for (&tid, wv) in &tab_webviews {
-                let tab_url = tabs
+            for (&tid, wv) in workspace_manager.active().webviews.iter() {
+                let tab_url = workspace_manager
+                    .active()
+                    .tabs
                     .lock()
                     .unwrap()
                     .tabs()
@@ -2496,10 +2876,10 @@ fn main() {
             let now = std::time::Instant::now();
             if pending_swap.is_none()
                 && now >= visibility_reconcile_next_at
-                && tab_webviews.contains_key(&active_wv_id)
+                && workspace_manager.active().webviews.contains_key(&active_wv_id)
             {
                 visibility_reconcile_next_at = now + std::time::Duration::from_secs(1);
-                for (&tid, wv) in &tab_webviews {
+                for (&tid, wv) in workspace_manager.active().webviews.iter() {
                     let _ = wv.set_visible(tid == active_wv_id);
                 }
             }
@@ -2513,7 +2893,7 @@ fn main() {
             let media_active = media_playing_tabs.contains(&active_wv_id);
             let interval = if media_active { 5 } else { 2 };
             sys_stats_next_at = now + std::time::Duration::from_secs(interval);
-            if let Some(wv) = tab_webviews.get(&active_wv_id) {
+            if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                 let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                 if let Some(pid) = tab_stats::webview_pid(wv_ptr) {
                     if let Some((rss, cpu_ns)) = tab_stats::sample_pid(pid) {
@@ -2560,7 +2940,7 @@ fn main() {
                 hibernation::MemoryPressure::Critical => "critical",
             };
             let (tab_count, active_url) = {
-                let tm = tabs.lock().unwrap();
+                let tm = workspace_manager.active().tabs.lock().unwrap();
                 let count = tm.tabs().len();
                 let url = tm.active_tab().map(|t| t.url.clone()).unwrap_or_default();
                 (count, url)
@@ -2580,7 +2960,7 @@ fn main() {
             if now >= save_at {
                 history_save_at = None;
                 let snapshot: Vec<browser::HistoryEntry> = {
-                    let mut tm = tabs.lock().unwrap();
+                    let mut tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.ensure_contiguous();
                     tm.history().to_vec()
                 };
@@ -2609,10 +2989,10 @@ fn main() {
             let pressure = cached_pressure;
             if pressure != hibernation::MemoryPressure::Normal {
                 let victims = {
-                    let tm = tabs.lock().unwrap();
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
                     hibernation::pick_victims(
                         tm.tabs(),
-                        &tab_webviews,
+                        &workspace_manager.active().webviews,
                         &pending_tabs,
                         pending_swap,
                         &mru,
@@ -2623,7 +3003,7 @@ fn main() {
                 };
                 for victim_id in victims {
                     // Save URL so switch_visible_tab! can restore later
-                    let url = tabs.lock().unwrap()
+                    let url = workspace_manager.active().tabs.lock().unwrap()
                         .tabs()
                         .iter()
                         .find(|t| t.id == victim_id)
@@ -2633,13 +3013,13 @@ fn main() {
                         continue;
                     }
                     // Unregister nav error callbacks before destroying WebView
-                    if let Some(wv) = tab_webviews.get(&victim_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&victim_id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }
-                    tab_webviews.remove(&victim_id); // WebView dropped → XPC process freed
+                    workspace_manager.active_mut().webviews.remove(&victim_id); // WebView dropped → XPC process freed
                     media_playing_tabs.remove(&victim_id);  // Clean up stale media state
                     pending_tabs.insert(victim_id, url.clone());
                     tracing::debug!(
@@ -2678,10 +3058,10 @@ fn main() {
         if now >= proactive_hiber_next_at {
             proactive_hiber_next_at = now + std::time::Duration::from_secs(60);
             let victims = {
-                let tm = tabs.lock().unwrap();
+                let tm = workspace_manager.active().tabs.lock().unwrap();
                 hibernation::pick_proactive_victims(
                     tm.tabs(),
-                    &tab_webviews,
+                    &workspace_manager.active().webviews,
                     &pending_tabs,
                     pending_swap,
                     active_wv_id,
@@ -2690,7 +3070,7 @@ fn main() {
                 )
             };
             for victim_id in victims {
-                let url = tabs.lock().unwrap()
+                let url = workspace_manager.active().tabs.lock().unwrap()
                     .tabs()
                     .iter()
                     .find(|t| t.id == victim_id)
@@ -2699,12 +3079,12 @@ fn main() {
                 if url.is_empty() {
                     continue;
                 }
-                if let Some(wv) = tab_webviews.get(&victim_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&victim_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
                     nav_error_patch::unregister_termination(wv_ptr);
                 }
-                tab_webviews.remove(&victim_id);
+                workspace_manager.active_mut().webviews.remove(&victim_id);
                 media_playing_tabs.remove(&victim_id);
                 pending_tabs.insert(victim_id, url.clone());
                 tracing::debug!(tab_id = victim_id, url = %url, "proactively hibernated idle tab");
@@ -2716,7 +3096,7 @@ fn main() {
             // cleaned up in one place.
             if cfg.max_tabs > 0 {
                 let victims: Vec<usize> = {
-                    let tm = tabs.lock().unwrap();
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
                     let over = tm.tabs().len().saturating_sub(cfg.max_tabs);
                     if over == 0 {
                         Vec::new()
@@ -2765,7 +3145,9 @@ fn main() {
         // We collect (session_id, events) into an owned Vec first so the immutable
         // borrow of `sessions` is released before we mutate it (e.g. on Error we
         // drop a session's handle).
-        let drained: Vec<(u64, Vec<acp::AgentEvent>)> = sessions
+        let drained: Vec<(u64, Vec<acp::AgentEvent>)> = workspace_manager
+            .active_mut()
+            .acp_sessions
             .iter_mut()
             .map(|s| (s.id, s.handle.as_mut().map(|h| h.poll()).unwrap_or_default()))
             .collect();
@@ -2775,7 +3157,7 @@ fn main() {
                     acp::AgentEvent::Connected(acp_sid) => {
                         let mut should_persist = false;
                         let mut resume_failed = false;
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.retry_count = 0;
                             if let Some(old) = s.acp_session_id.as_deref() {
                                 if old != acp_sid.as_str() {
@@ -2804,11 +3186,11 @@ fn main() {
                             ));
                         }
                         if should_persist {
-                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                            persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                         }
                     }
                     acp::AgentEvent::ProcessPid(pid) => {
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.octomind_pid = Some(pid);
                         }
                     }
@@ -2821,7 +3203,7 @@ fn main() {
                         // Accumulate the in-flight agent response so we can
                         // commit one finalized "agent" message to the persisted
                         // log on Done/Cancelled — no save during streaming.
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             // Text resuming after a tool call is a new LLM
                             // message — commit the previous one on its own.
                             if s.tool_since_text {
@@ -2859,7 +3241,7 @@ fn main() {
                         // whatever is still buffered as its own agent message,
                         // then record the injected text as a separate "specialist"
                         // entry.
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             flush_agent_turn(s, cfg.max_acp_session_messages);
                             push_acp_msg(s, "specialist", text.clone(), cfg.max_acp_session_messages);
                             s.turn_started = Some(std::time::Instant::now());
@@ -2868,14 +3250,14 @@ fn main() {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__appendSpecialist && window.__appendSpecialist({sid},`{escaped}`)"
                         ));
-                        persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                        persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                     }
                     acp::AgentEvent::ToolStart { id, title, kind, raw_input, locations } => {
                         // Record for persistence so the steps group survives a
                         // restart. `render_ui` is skipped: it renders as an A2UI
                         // bubble (persisted separately) and the sidebar suppresses
                         // its tool row — a record here would replay as a phantom step.
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             // Any tool call ends the current text segment — the
                             // next text chunk starts a separate message.
                             s.tool_since_text = true;
@@ -2905,7 +3287,7 @@ fn main() {
                         ));
                     }
                     acp::AgentEvent::ToolUpdate { id, title, status, raw_output } => {
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             if let Some(&(idx, started)) = s.tool_starts.get(&id) {
                                 if let Some(rec) = s.tool_buf.get_mut(idx) {
                                     if let Some(t) = title.as_deref() {
@@ -2942,7 +3324,7 @@ fn main() {
                         // Cache so we can re-push to JS on `sidebar_ready` —
                         // the agent only emits commands once on connect, but
                         // the sidebar may not be open yet at that moment.
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.available_commands_json = Some(json_str.clone());
                         }
                         let escaped = webview_utils::escape_js_template(&json_str);
@@ -2952,7 +3334,7 @@ fn main() {
                     }
                     acp::AgentEvent::Done | acp::AgentEvent::Cancelled => {
                         let mut should_persist = false;
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
                             // Flush the streamed response + tool runs into the
                             // persisted log as a single "agent" message so the
@@ -2972,20 +3354,20 @@ fn main() {
                             );
                         }
                         if should_persist {
-                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                            persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                         }
                     }
                     acp::AgentEvent::Error(err) => {
                         tracing::warn!(session_id = sid, error = %err, "ACP connection error");
                         // Mutate session state in an inner scope so the &mut borrow
                         // is released before we call evaluate_script + persist (both
-                        // read &sessions). Decision drives the post-borrow JS calls.
+                        // read &workspace_manager.active().acp_sessions). Decision drives the post-borrow JS calls.
                         enum Decision { Reconnect(u64, u64), MaxExceeded }
                         let decision: Option<Decision>;
                         let mut should_persist = false;
                         let mut user_facing_err: Option<String> = None;
                         {
-                            let Some(s) = sessions.iter_mut().find(|s| s.id == sid) else { continue };
+                            let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) else { continue };
                             // Drop dead handle immediately so prompts aren't silently lost.
                             s.handle = None;
                             s.octomind_pid = None; // pid is now stale — next spawn fills it
@@ -3066,7 +3448,7 @@ fn main() {
                             None => {}
                         }
                         if should_persist {
-                            persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                            persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                         }
                     }
                     acp::AgentEvent::Account { signed_in, account, over_quota, summary } => {
@@ -3077,7 +3459,7 @@ fn main() {
                             "summary": summary,
                         });
                         let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
-                        if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                        if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.account_json = Some(json_str.clone());
                         }
                         let escaped = webview_utils::escape_js_template(&json_str);
@@ -3091,7 +3473,7 @@ fn main() {
                         if signed_in {
                             if let Some(stop) = login_pollers.remove(&sid) {
                                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                                     s.retry_count = 0;
                                     s.reconnect_gen += 1;
                                     let cmd = match &s.acp_session_id {
@@ -3161,7 +3543,7 @@ fn main() {
                     };
 
                     // Replace text in the original tab + reset cursor
-                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&inline_edit_tab_id) {
                         let escaped = webview_utils::escape_js_template(&result);
                         let _ = wv.evaluate_script(&format!(
                             "window.__inlineEditReplace && window.__inlineEditReplace(`{escaped}`)"
@@ -3183,7 +3565,7 @@ fn main() {
                 acp::AgentEvent::Error(err) => {
                     tracing::warn!(error = %err, "inline edit ACP error");
                     // Reset cursor on target tab
-                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&inline_edit_tab_id) {
                         let _ = wv.evaluate_script(
                             "document.documentElement.style.cursor=''"
                         );
@@ -3206,7 +3588,7 @@ fn main() {
                     // Schedule next run immediately so we don't re-trigger
                     learning_next_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(cfg.learning_interval_min * 60));
                     // Extract active tab's readable text, then fire LearningReady
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let lp = proxy.clone();
                         let _ = wv.evaluate_script_with_callback(
                             &webview_utils::well_formed_js("document.body ? document.body.innerText : ''"),
@@ -3268,7 +3650,7 @@ fn main() {
                     _ => None,
                 };
                 if let Some(id) = touch_id.or(Some(active_wv_id)) {
-                    tabs.lock().unwrap().touch(id);
+                    workspace_manager.active().tabs.lock().unwrap().touch(id);
                 }
 
                 match cmd {
@@ -3305,7 +3687,7 @@ fn main() {
                         // browser_switch_tab to show a tab to the user.
                         let in_place = match tab_id {
                             Some(id) => {
-                                let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
+                                let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
                                 if !exists {
                                     let _ = response.send(Err(format!(
                                         "Tab {id} not found — omit tab_id to open a new background tab"
@@ -3322,9 +3704,9 @@ fn main() {
                             Some(target_id) => {
                                 // Auto-restore if the tab was hibernated.
                                 let _ = mcp_ensure_tab!(target_id);
-                                if let Some(wv) = tab_webviews.get(&target_id) {
+                                if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                                     let _ = wv.load_url(&resolved);
-                                    if tabs.lock().unwrap().update_url(target_id, resolved) {
+                                    if workspace_manager.active().tabs.lock().unwrap().update_url(target_id, resolved) {
                                         history_save_at.get_or_insert(
                                             std::time::Instant::now() + std::time::Duration::from_secs(60),
                                         );
@@ -3345,7 +3727,7 @@ fn main() {
                                 }
                             }
                             None => {
-                                let new_id = tabs.lock().unwrap().open_background(resolved.clone());
+                                let new_id = workspace_manager.active().tabs.lock().unwrap().open_background(resolved.clone());
                                 spawn_tab_webview!(new_id, &resolved);
 
                                 if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
@@ -3358,7 +3740,7 @@ fn main() {
                     McpCommand::GetTabs { limit, query, response } => {
                         tracing::debug!(limit, ?query, "MCP get_tabs");
 
-                        let tm = tabs.lock().unwrap();
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
                         let active = tm.active_id();
                         let q = query.map(|q| q.to_lowercase()).filter(|q| !q.is_empty());
                         let mut matched: Vec<&browser::Tab> = tm.tabs().iter().filter(|t| match &q {
@@ -3389,13 +3771,13 @@ fn main() {
 
                         // Validate before firing — the event handler silently no-ops
                         // on an unknown id, which would otherwise report a bogus success.
-                        let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
                         if exists {
                             // Update tab state synchronously so an immediate
                             // browser_get_tabs / get_current_tab sees the new
                             // active tab; the event does the visual swap and
                             // re-runs switch() idempotently.
-                            tabs.lock().unwrap().switch(tab_id);
+                            workspace_manager.active().tabs.lock().unwrap().switch(tab_id);
                             let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
                             let _ = response.send(Ok(()));
                         } else {
@@ -3407,12 +3789,12 @@ fn main() {
 
                         // Validate before firing. Also guards against tab_id=0, which the
                         // internal event treats as "close the active tab" — never an MCP intent.
-                        let exists = tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
                         if exists {
                             // Remove from TabManager synchronously so an immediate
                             // browser_get_tabs no longer lists it; the event tears
                             // down the WebView (its close() re-run is a no-op).
-                            tabs.lock().unwrap().close(tab_id);
+                            workspace_manager.active().tabs.lock().unwrap().close(tab_id);
                             tab_nav::forget(tab_id);
                             let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
                             let _ = response.send(Ok(()));
@@ -3421,7 +3803,7 @@ fn main() {
                         }
                     }
                     McpCommand::GetPageInfo { tab_id, response, is_retry } => {
-                        let tm = tabs.lock().unwrap();
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
                         let target_id = tab_id.or(tm.active_id());
                         let base_info = target_id.and_then(|id| {
                             tm.tabs().iter().find(|t| t.id == id).map(|t| (id, t.title.clone(), t.url.clone()))
@@ -3431,7 +3813,7 @@ fn main() {
                             Some((id, title, url)) => {
                                 // Auto-restore if the tab was hibernated
                                 let _ = mcp_ensure_tab!(id);
-                                if let Some(wv) = tab_webviews.get(&id) {
+                                if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                     let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                     let response_cb = response.clone();
                                     let cb_title = title.clone();
@@ -3500,14 +3882,14 @@ fn main() {
                                 continue;
                             }
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 // Wrap sender so we can reclaim it if the callback never fires.
                                 // eval_async_expr awaits Promises, so scripts returning one
                                 // (fetch chains, waits) resolve to their settled value.
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
-                                let tabs_cb = tabs.clone();
+                                let tabs_cb = workspace_manager.active().tabs.clone();
                                 async_eval::eval_async_expr(wv, &script, move |res| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         let _ = tx.send(res.map_err(|e| {
@@ -3548,7 +3930,7 @@ fn main() {
                                 continue;
                             }
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 // Phase 1 (JS): resolve, scroll, stabilise, occlusion-check, arm
                                 // effect capture, return the centre point (or a status:
                                 // stale / missing / detached / occluded:<what> / disabled).
@@ -3559,7 +3941,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = tabs.clone();
+                                let tabs_cb = workspace_manager.active().tabs.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -3623,7 +4005,7 @@ fn main() {
                                 continue;
                             }
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 // Same three phases as Click; the native event is a mouse move,
                                 // which is what real CSS :hover and JS hover menus react to.
                                 let script = dom_actions::hover_locate_script(&selector);
@@ -3631,7 +4013,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = tabs.clone();
+                                let tabs_cb = workspace_manager.active().tabs.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -3692,7 +4074,7 @@ fn main() {
                                 continue;
                             }
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 let script = dom_actions::type_script(&selector, &text, expect.as_deref());
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
@@ -3723,7 +4105,7 @@ fn main() {
                         }
                     }
                     McpCommand::GetCurrentTab { response } => {
-                        let tm = tabs.lock().unwrap();
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
                         let result = tm.active_tab().map(|t| {
                             TabInfo::from_tab(t, true)
                         }).ok_or("No active tab".to_string());
@@ -3733,7 +4115,7 @@ fn main() {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 match wv.evaluate_script("history.back()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
                                     Err(e) => { let _ = response.send(Err(format!("GoBack failed: {e}"))); }
@@ -3749,7 +4131,7 @@ fn main() {
                         let target_id = tab_id.or(Some(active_wv_id));
                         if let Some(id) = target_id {
                             let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = tab_webviews.get(&id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                                 match wv.evaluate_script("history.forward()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
                                     Err(e) => { let _ = response.send(Err(format!("GoForward failed: {e}"))); }
@@ -3762,7 +4144,7 @@ fn main() {
                         }
                     }
                     McpCommand::GetHistory { limit, response } => {
-                        let mut tm = tabs.lock().unwrap();
+                        let mut tm = workspace_manager.active().tabs.lock().unwrap();
                         tm.ensure_contiguous();
                         let history = tm.history();
                         let limit = limit.unwrap_or(50);
@@ -3773,7 +4155,7 @@ fn main() {
                         let _ = response.send(Ok(entries));
                     }
                     McpCommand::GetPlayingTabs { response } => {
-                        let tm = tabs.lock().unwrap();
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
                         let active = tm.active_id();
                         let playing: Vec<TabInfo> = tm.tabs().iter()
                             .filter(|t| t.is_playing_audio)
@@ -3784,7 +4166,7 @@ fn main() {
                     McpCommand::Reload { tab_id, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let _ = wv.reload();
                             let _ = response.send(Ok(()));
                         } else {
@@ -3794,7 +4176,7 @@ fn main() {
                     McpCommand::Screenshot { tab_id, full_page, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
 
@@ -3900,7 +4282,7 @@ fn main() {
                     McpCommand::GetPageContent { tab_id, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             match wv.evaluate_script_with_callback(
@@ -3946,7 +4328,7 @@ fn main() {
                     McpCommand::Scroll { tab_id, direction, pixels, selector, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             if !matches!(direction.as_str(), "up" | "down" | "top" | "bottom") {
                                 let _ = response.send(Err(format!("Invalid direction: {direction}. Use up, down, top, or bottom.")));
                                 continue;
@@ -4013,7 +4395,7 @@ fn main() {
                             }
                         }
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             // Phase 1 (JS): focus the target (or keep the current focus) and arm
                             // effect capture. Phase 2 (native): trusted key down/up — native
                             // default actions apply (Enter submits, Space activates, Tab moves
@@ -4025,7 +4407,7 @@ fn main() {
                             let sel_for_msg = sel_for_err.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = tabs.clone();
+                            let tabs_cb = workspace_manager.active().tabs.clone();
                             let key_label = if modifiers.is_empty() {
                                 key.clone()
                             } else {
@@ -4081,7 +4463,7 @@ fn main() {
                     McpCommand::Wait { tab_id, event, timeout_ms, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let script = match event.as_str() {
                                 "load" => format!(
                                     "new Promise(r => {{ if (document.readyState === 'complete') r('ready'); else {{ const t = setTimeout(() => r('timeout'), {timeout_ms}); window.addEventListener('load', () => {{ clearTimeout(t); r('ready'); }}, {{once: true}}); }} }})"
@@ -4120,7 +4502,7 @@ fn main() {
                             // the callback was discarded — give the script timeout_ms + 5s.
                             let wd_ms = timeout_ms.saturating_add(5000);
                             let gen0 = tab_nav::get(target_id);
-                            let tabs_cb = tabs.clone();
+                            let tabs_cb = workspace_manager.active().tabs.clone();
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
                                     // Only a real navigation (nav generation moved) is reported
@@ -4157,7 +4539,7 @@ fn main() {
                             continue;
                         }
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             // Returns: "true" | "stale" | "missing" | "detached" | "not-select" | "no-such-option"
                             let script = dom_actions::select_option_script(&selector, &value, expect.as_deref());
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -4196,13 +4578,13 @@ fn main() {
                     McpCommand::DismissOverlay { tab_id, response } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let script = dom_actions::dismiss_overlay_script();
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = tabs.clone();
+                            let tabs_cb = workspace_manager.active().tabs.clone();
                             let zoom = zoom_level;
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 let val = match res {
@@ -4265,7 +4647,7 @@ fn main() {
                     McpCommand::Snapshot { tab_id, within, diff, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(active_wv_id);
                         let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = tab_webviews.get(&target_id) {
+                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let script = snapshot_js::snapshot_script(within.as_deref(), diff);
@@ -4369,7 +4751,7 @@ fn main() {
             // ── Address bar URL edit: push history+tabs snapshot for autocomplete ─
             Event::UserEvent(AppEvent::PushAddressHistory) => {
                 let json = {
-                    let mut tm = tabs.lock().unwrap();
+                    let mut tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
                     webview_utils::build_items_json(
@@ -4419,6 +4801,219 @@ fn main() {
                 settings_visible = false;
                 keybind_capturing.store(false, Ordering::Relaxed);
             }
+
+            // ── Workspace switcher popover (⌘⇧O) ─────────────────────────
+            Event::UserEvent(AppEvent::ToggleWorkspaces) => {
+                if workspace_switcher_visible {
+                    workspace_switcher_win.set_visible(false);
+                    workspace_switcher_visible = false;
+                } else {
+                    let sz = browser_win.inner_size();
+                    workspace_switcher_win
+                        .set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
+                    if let Ok(pos) = browser_win.outer_position() {
+                        workspace_switcher_win.set_outer_position(pos);
+                    }
+                    refresh_workspace_switcher!();
+                    workspace_switcher_win.set_visible(true);
+                    workspace_switcher_win.set_focus();
+                    workspace_switcher_visible = true;
+                }
+            }
+            Event::UserEvent(AppEvent::HideWorkspaces) => {
+                workspace_switcher_win.set_visible(false);
+                workspace_switcher_visible = false;
+            }
+            Event::UserEvent(AppEvent::SwitchWorkspace(id)) => {
+                if id == workspace_manager.active().id {
+                    workspace_switcher_win.set_visible(false);
+                    workspace_switcher_visible = false;
+                    return;
+                }
+                // Hide the outgoing workspace's currently-visible webview —
+                // `commit_tab_visibility!` below only reaches webviews of
+                // whichever workspace is active, so it can't hide this one
+                // once we've switched.
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                    let _ = wv.set_visible(false);
+                }
+                teardown_acp_sessions_from_sidebar!(workspace_manager.active());
+                reset_cross_workspace_ui_state!();
+                if !workspace_manager.switch(&id) {
+                    return; // unknown id
+                }
+                let new_active_tab_id = {
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
+                    tm.active_id().or_else(|| tm.tabs().first().map(|t| t.id))
+                };
+                let Some(new_active_tab_id) = new_active_tab_id else {
+                    return; // shouldn't happen — every workspace always has >=1 tab
+                };
+                ensure_webview!(new_active_tab_id);
+                commit_tab_visibility!(new_active_tab_id);
+                macos::mru_push(&mut mru, new_active_tab_id);
+                let url = workspace_manager
+                    .active()
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .tabs()
+                    .iter()
+                    .find(|t| t.id == new_active_tab_id)
+                    .map(|t| t.url.clone())
+                    .unwrap_or_default();
+                update_address_bar_url!(url);
+                push_workspace_dot!();
+                reset_sys_stats!();
+                push_acp_sessions_to_sidebar!();
+                workspace_switcher_win.set_visible(false);
+                workspace_switcher_visible = false;
+                focus_active_webview!();
+            }
+            Event::UserEvent(AppEvent::CreateWorkspace) => {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                    let _ = wv.set_visible(false);
+                }
+                teardown_acp_sessions_from_sidebar!(workspace_manager.active());
+                reset_cross_workspace_ui_state!();
+                let name = format!("Workspace {}", workspace_manager.list().len() + 1);
+                let color =
+                    WORKSPACE_PALETTE[workspace_manager.list().len() % WORKSPACE_PALETTE.len()]
+                        .to_string();
+                // Seeds one tab (metadata only) and makes the new workspace active.
+                workspace_manager.create(name, color);
+                let (new_tab_id, new_tab_url) = {
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
+                    let t = tm
+                        .active_tab()
+                        .expect("create() always seeds one active tab");
+                    (t.id, t.url.clone())
+                };
+                // create() only opens the tab in TabManager — no WebView exists
+                // for it yet, unlike ensure_webview!'s hibernated-tab case.
+                spawn_tab_webview!(new_tab_id, &new_tab_url);
+                commit_tab_visibility!(new_tab_id);
+                macos::mru_push(&mut mru, new_tab_id);
+                update_address_bar_url!(new_tab_url);
+                // Fresh default session for the new workspace — not eagerly
+                // connected, matching every other from-scratch workspace.
+                let default_sid = next_acp_session_id();
+                workspace_manager.active_mut().acp_sessions.push(AcpSession {
+                    id: default_sid,
+                    title: "Assistant".to_string(),
+                    tag: "octoweb:assistant".to_string(),
+                    handle: None,
+                    retry_count: 0,
+                    reconnect_gen: 0,
+                    last_cancel_at: None,
+                    acp_session_id: None,
+                    messages: Vec::new(),
+                    agent_buf: String::new(),
+                    tool_buf: Vec::new(),
+                    tool_starts: HashMap::new(),
+                    tool_since_text: false,
+                    turn_started: None,
+                    available_commands_json: None,
+                    account_json: None,
+                    octomind_pid: None,
+                });
+                workspace_manager.active_mut().acp_active_session_id = default_sid;
+                push_workspace_dot!();
+                reset_sys_stats!();
+                push_acp_sessions_to_sidebar!();
+                refresh_workspace_switcher!();
+                workspace_switcher_win.set_visible(false);
+                workspace_switcher_visible = false;
+                focus_active_webview!();
+            }
+            Event::UserEvent(AppEvent::RenameWorkspace(id, name)) => {
+                let is_active = id == workspace_manager.active().id;
+                workspace_manager.rename(&id, name);
+                refresh_workspace_switcher!();
+                if is_active {
+                    push_workspace_dot!();
+                }
+            }
+            Event::UserEvent(AppEvent::DeleteWorkspace(id)) => {
+                if workspace_manager.list().len() <= 1 {
+                    return; // refuse to remove the last workspace
+                }
+                if id == workspace_manager.active().id {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                        let _ = wv.set_visible(false);
+                    }
+                    teardown_acp_sessions_from_sidebar!(workspace_manager.active());
+                    reset_cross_workspace_ui_state!();
+                    // Kill any live octomind subprocesses for this workspace
+                    // before dropping it — Drop alone doesn't terminate them
+                    // (no Drop impl on AcpHandle), so a session that was ever
+                    // connected (this workspace was active at some point) would
+                    // otherwise leak until quit. Backgrounded: terminate_octomind_pids
+                    // can block up to 3s (SIGTERM wait), and this is a live user
+                    // action, not app exit — must not freeze the UI.
+                    let dying_pids: Vec<u32> = workspace_manager
+                        .active()
+                        .acp_sessions
+                        .iter()
+                        .filter_map(|s| s.octomind_pid)
+                        .collect();
+                    if !dying_pids.is_empty() {
+                        std::thread::spawn(move || terminate_octomind_pids(&dying_pids));
+                    }
+                    if !workspace_manager.remove(&id) {
+                        return;
+                    }
+                    // remove() already reassigned active_index to a surviving workspace.
+                    let new_active_tab_id = {
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        tm.active_id().or_else(|| tm.tabs().first().map(|t| t.id))
+                    };
+                    if let Some(new_active_tab_id) = new_active_tab_id {
+                        ensure_webview!(new_active_tab_id);
+                        commit_tab_visibility!(new_active_tab_id);
+                        macos::mru_push(&mut mru, new_active_tab_id);
+                        let url = workspace_manager
+                            .active()
+                            .tabs
+                            .lock()
+                            .unwrap()
+                            .tabs()
+                            .iter()
+                            .find(|t| t.id == new_active_tab_id)
+                            .map(|t| t.url.clone())
+                            .unwrap_or_default();
+                        update_address_bar_url!(url);
+                    }
+                    push_workspace_dot!();
+                    reset_sys_stats!();
+                    push_acp_sessions_to_sidebar!();
+                    refresh_workspace_switcher!();
+                    workspace_switcher_win.set_visible(false);
+                    workspace_switcher_visible = false;
+                    focus_active_webview!();
+                } else {
+                    // Non-active workspace — not mounted in the sidebar DOM
+                    // (only the active workspace's sessions ever are), so no
+                    // __removeSession calls needed. But it may hold live
+                    // octomind subprocesses if it was active earlier this run
+                    // — kill those before dropping it, same reasoning as above.
+                    let dying_pids: Vec<u32> = workspace_manager
+                        .list()
+                        .iter()
+                        .find(|ws| ws.id == id)
+                        .map(|ws| ws.acp_sessions.iter().filter_map(|s| s.octomind_pid).collect())
+                        .unwrap_or_default();
+                    if !dying_pids.is_empty() {
+                        std::thread::spawn(move || terminate_octomind_pids(&dying_pids));
+                    }
+                    // Dropping the workspace tears down its WebViews
+                    // (WKWebViews/XPC processes) via Drop. No visible webview
+                    // transition needed; just refresh the panel list.
+                    workspace_manager.remove(&id);
+                    refresh_workspace_switcher!();
+                }
+            }
+
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
@@ -4551,7 +5146,7 @@ fn main() {
                         overlay_win.set_outer_position(pos);
                     }
                     let json = {
-                        let mut tm = tabs.lock().unwrap();
+                        let mut tm = workspace_manager.active().tabs.lock().unwrap();
                         tm.ensure_contiguous();
                         let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
                         webview_utils::build_items_json(
@@ -4574,9 +5169,9 @@ fn main() {
 
                     // Prefetch DNS for top visited domains — macOS DNS cache is
                     // system-wide, so resolving here benefits subsequent tab navigations.
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let domains: Vec<String> = {
-                            let tm = tabs.lock().unwrap();
+                            let tm = workspace_manager.active().tabs.lock().unwrap();
                             let mut seen = std::collections::HashSet::new();
                             tm.history()
                                 .iter()
@@ -4618,20 +5213,20 @@ fn main() {
                     return;
                 }
                 let url = url::resolve_url(&raw, &search_engine);
-                let tab_id = tabs.lock().unwrap().open(url.clone());
+                let tab_id = workspace_manager.active().tabs.lock().unwrap().open(url.clone());
                 // Keep the currently *visible* tab on screen while new one loads.
                 // If a swap is already pending, the visible tab is the old one from that swap;
                 // the old new_id tab is now orphaned — clean it up.
                 let visible_id = if let Some((old, orphan)) = pending_swap.take() {
                     // Orphaned tab: was loading but superseded by this new navigation.
                     if orphan != old {
-                        tabs.lock().unwrap().close(orphan);
-                        if let Some(wv) = tab_webviews.get(&orphan) {
+                        workspace_manager.active().tabs.lock().unwrap().close(orphan);
+                        if let Some(wv) = workspace_manager.active().webviews.get(&orphan) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             nav_error_patch::unregister(wv_ptr);
                             nav_error_patch::unregister_termination(wv_ptr);
                         }
-                        tab_webviews.remove(&orphan);
+                        workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
                         mru.retain(|&x| x != orphan);
                         tracing::debug!(orphan, "NavigateTo: cleaned up orphaned tab");
@@ -4683,24 +5278,24 @@ fn main() {
                 if !foreground {
                     // Silent background open — mirrors MCP background navigate:
                     // no active-tab switch, no pending_swap, no set_focus.
-                    let new_id = tabs.lock().unwrap().open_background(url.clone());
+                    let new_id = workspace_manager.active().tabs.lock().unwrap().open_background(url.clone());
                     spawn_tab_webview!(new_id, &url);
                     tracing::debug!(new_id, ?source, "OpenInNewTab kept in background (agent-driven source)");
                     return;
                 }
 
-                let tab_id = tabs.lock().unwrap().open(url.clone());
+                let tab_id = workspace_manager.active().tabs.lock().unwrap().open(url.clone());
                 // Keep the currently visible tab on screen while new one loads.
                 // Clean up orphaned tab if a swap was already pending.
                 let visible_id = if let Some((old, orphan)) = pending_swap.take() {
                     if orphan != old {
-                        tabs.lock().unwrap().close(orphan);
-                        if let Some(wv) = tab_webviews.get(&orphan) {
+                        workspace_manager.active().tabs.lock().unwrap().close(orphan);
+                        if let Some(wv) = workspace_manager.active().webviews.get(&orphan) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             nav_error_patch::unregister(wv_ptr);
                             nav_error_patch::unregister_termination(wv_ptr);
                         }
-                        tab_webviews.remove(&orphan);
+                        workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
                         mru.retain(|&x| x != orphan);
                         tracing::debug!(orphan, "OpenInNewTab: cleaned up orphaned tab");
@@ -4729,7 +5324,7 @@ fn main() {
                     let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
                     find_bar_visible = false;
                     find_bar_hotkey_visible.store(false, Ordering::Relaxed);
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
                     }
                 }
@@ -4762,7 +5357,7 @@ fn main() {
             // ── Close tab ─────────────────────────────────────────────────
             Event::UserEvent(AppEvent::CloseTab(tab_id)) => {
                 let id = {
-                    let tm = tabs.lock().unwrap();
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
                     if tab_id == 0 {
                         tm.active_id()
                     } else {
@@ -4782,7 +5377,7 @@ fn main() {
                             pending_swap_at = None;
                         } else if id == old_id {
                             // Closing the old visible tab — show the new one
-                            if let Some(wv) = tab_webviews.get(&new_id) {
+                            if let Some(wv) = workspace_manager.active().webviews.get(&new_id) {
                                 let _ = wv.set_visible(true);
                             }
                             pending_swap_at = None;
@@ -4791,15 +5386,15 @@ fn main() {
                             pending_swap = Some((old_id, new_id));
                         }
                     }
-                    tabs.lock().unwrap().close(id);
+                    workspace_manager.active().tabs.lock().unwrap().close(id);
                     tab_nav::forget(id);
-                    if let Some(wv) = tab_webviews.get(&id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }
-                    tab_webviews.remove(&id);
+                    workspace_manager.active_mut().webviews.remove(&id);
                     media_playing_tabs.remove(&id);  // Clean up stale media state
                     pending_tabs.remove(&id);  // Also remove if it was pending lazy load
                     tab_snapshots.remove(&id);
@@ -4817,7 +5412,7 @@ fn main() {
                         // swap, keep the already-selected loading tab. Otherwise
                         // fall back to the most-recently-used surviving tab.
                         let selected_survives = id != selected_id
-                            && tabs
+                            && workspace_manager.active().tabs
                                 .lock()
                                 .unwrap()
                                 .tabs()
@@ -4830,7 +5425,7 @@ fn main() {
                         };
                         match successor {
                             Some(next) => {
-                                tabs.lock().unwrap().switch(next);
+                                workspace_manager.active().tabs.lock().unwrap().switch(next);
                                 // switch_visible_tab! handles lazy loading (pending_tabs) and
                                 // sets active_wv_id + updates address bar — covers both loaded
                                 // and not-yet-loaded tabs.
@@ -4845,7 +5440,7 @@ fn main() {
                             }
                             None => *control_flow = ControlFlow::Exit,
                         }
-                    } else if tabs.lock().unwrap().tabs().is_empty() {
+                    } else if workspace_manager.active().tabs.lock().unwrap().tabs().is_empty() {
                         *control_flow = ControlFlow::Exit;
                     }
                     // Refresh overlay if it's open so the closed tab disappears
@@ -4855,7 +5450,7 @@ fn main() {
 
             // ── Remove history entry (from overlay × button) ────────────────
             Event::UserEvent(AppEvent::RemoveHistory(url)) => {
-                if tabs.lock().unwrap().remove_history(&url) {
+                if workspace_manager.active().tabs.lock().unwrap().remove_history(&url) {
                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 }
                 // Refresh overlay so the removed entry disappears
@@ -4952,7 +5547,7 @@ fn main() {
                     );
                     // Reconnect any session whose handle has died (e.g. after
                     // max retries exceeded — manual sidebar open re-arms it).
-                    for s in sessions.iter_mut() {
+                    for s in workspace_manager.active_mut().acp_sessions.iter_mut() {
                         if s.handle.is_none() {
                             s.retry_count = 0;
                             s.reconnect_gen += 1; // invalidate any pending backoff timers
@@ -5018,7 +5613,7 @@ fn main() {
 
             // ── Toggle DevTools (Cmd+Shift+I) ────────────────────────────────────
             Event::UserEvent(AppEvent::ToggleDevTools) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     if wv.is_devtools_open() {
                         wv.close_devtools();
                     } else {
@@ -5041,7 +5636,7 @@ fn main() {
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
                 let mut should_persist = false;
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Inbox-driven turns stream with no terminal Done — commit any
                     // response still buffered so it lands before this user message.
                     if flush_agent_turn(s, cfg.max_acp_session_messages) {
@@ -5079,7 +5674,7 @@ fn main() {
                     }
                 }
                 if should_persist {
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -5090,18 +5685,18 @@ fn main() {
             // the agent ignores `CancelNotification` (e.g. wedged on a syscall).
             Event::UserEvent(AppEvent::AcpSignIn(sid)) => {
                 // Kick off `/login`; the LoginStarted event opens the browser tab.
-                if let Some(h) = sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
+                if let Some(h) = workspace_manager.active().acp_sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
                     let _ = h.send_command("/login".to_string());
                 }
             }
             Event::UserEvent(AppEvent::AcpRefreshAccount(sid)) => {
-                if let Some(h) = sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
+                if let Some(h) = workspace_manager.active().acp_sessions.iter().find(|s| s.id == sid).and_then(|s| s.handle.as_ref()) {
                     let _ = h.send_command("/usage".to_string());
                 }
             }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     let now = std::time::Instant::now();
                     let recent = s
                         .last_cancel_at
@@ -5145,14 +5740,14 @@ fn main() {
                     }
                 }
                 if should_persist {
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
             // ── ACP set agent for an existing session (kills + respawns its handle) ──
             Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
                 let mut should_persist = false;
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
@@ -5180,14 +5775,14 @@ fn main() {
                     ));
                 }
                 if should_persist {
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
             // ── ACP clear session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
                 let mut should_persist = false;
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
                     s.acp_session_id = None; // explicit fresh chat
@@ -5209,7 +5804,7 @@ fn main() {
                     ));
                 }
                 if should_persist {
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -5222,17 +5817,16 @@ fn main() {
 
             // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
             Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
-                if sessions.len() >= MAX_SESSIONS {
+                if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
                     tracing::warn!(max = MAX_SESSIONS, "session create rejected — cap reached");
                 } else {
-                    let sid = next_session_id;
-                    next_session_id += 1;
+                    let sid = next_acp_session_id();
                     let handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
-                    sessions.push(AcpSession {
+                    workspace_manager.active_mut().acp_sessions.push(AcpSession {
                         id: sid,
                         title: title.clone(),
                         tag: tag.clone(),
@@ -5248,10 +5842,10 @@ fn main() {
                         tool_since_text: false,
                         turn_started: None,
                         available_commands_json: None,
-                    account_json: None,
+                        account_json: None,
                         octomind_pid: None,
                     });
-                    active_session_id = sid; // auto-switch to new session
+                    workspace_manager.active_mut().acp_active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
                     let etag = webview_utils::escape_js_template(&tag);
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -5260,26 +5854,26 @@ fn main() {
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__switchSession && window.__switchSession({sid})"
                     ));
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
             // ── ⌘W in sidebar — close currently active session ─────────────────────
             Event::UserEvent(AppEvent::AcpSessionCloseActive) => {
-                let sid = active_session_id;
+                let sid = workspace_manager.active().acp_active_session_id;
                 let _ = proxy.send_event(AppEvent::AcpSessionClose(sid));
             }
 
             // ── ACP close session (refused if it's the only one) ───────────────────
             Event::UserEvent(AppEvent::AcpSessionClose(sid)) => {
-                if sessions.len() <= 1 {
+                if workspace_manager.active().acp_sessions.len() <= 1 {
                     tracing::debug!(session_id = sid, "session close ignored — last session");
-                } else if let Some(pos) = sessions.iter().position(|s| s.id == sid) {
-                    let _removed = sessions.remove(pos); // drop kills subprocess
+                } else if let Some(pos) = workspace_manager.active().acp_sessions.iter().position(|s| s.id == sid) {
+                    let _removed = workspace_manager.active_mut().acp_sessions.remove(pos); // drop kills subprocess
                     // If we closed the active session, fall back to the first one.
-                    if active_session_id == sid {
-                        active_session_id = sessions[0].id;
-                        let new_active = active_session_id;
+                    if workspace_manager.active().acp_active_session_id == sid {
+                        workspace_manager.active_mut().acp_active_session_id = workspace_manager.active().acp_sessions[0].id;
+                        let new_active = workspace_manager.active().acp_active_session_id;
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__switchSession && window.__switchSession({new_active})"
                         ));
@@ -5287,18 +5881,18 @@ fn main() {
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__removeSession && window.__removeSession({sid})"
                     ));
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
             // ── ACP switch active session ──────────────────────────────────────────
             Event::UserEvent(AppEvent::AcpSessionSwitch(sid))
-                if sessions.iter().any(|s| s.id == sid) =>
+                if workspace_manager.active().acp_sessions.iter().any(|s| s.id == sid) =>
             {
-                active_session_id = sid;
+                workspace_manager.active_mut().acp_active_session_id = sid;
                 // Lazy-spawn: if this session has no live handle (persisted
                 // but not yet connected this run), bring it up now.
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     if s.handle.is_none() {
                         let cmd = match &s.acp_session_id {
                             Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
@@ -5319,13 +5913,13 @@ fn main() {
                 let _ = sidebar_wv.evaluate_script(&format!(
                     "window.__switchSession && window.__switchSession({sid})"
                 ));
-                persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
             }
 
             // ── ACP rename session (title only) ────────────────────────────────────
             Event::UserEvent(AppEvent::AcpSessionRename(sid, title)) => {
                 let mut should_persist = false;
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.title = title.clone();
                     should_persist = true;
                     let etitle = webview_utils::escape_js_template(&title);
@@ -5334,7 +5928,7 @@ fn main() {
                     ));
                 }
                 if should_persist {
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
 
@@ -5344,59 +5938,31 @@ fn main() {
             // add any extra persisted sessions, replay messages, restore the
             // last-active session, and re-broadcast cached available_commands.
             Event::UserEvent(AppEvent::SidebarReady) => {
-                let rust_has_sid1 = sessions.iter().any(|s| s.id == 1);
-                for s in sessions.iter() {
-                    let sid = s.id;
+                let rust_has_sid1 = workspace_manager.active().acp_sessions.iter().any(|s| s.id == 1);
+                push_acp_sessions_to_sidebar!();
+                // Reconcile the JS-side placeholder session (sid=1, added by
+                // initDefault before Rust ever pushed anything) with the real
+                // persisted title/tag/status — startup-only special case, not
+                // part of the generic push macro above.
+                if let Some(s) = workspace_manager.active().acp_sessions.iter().find(|s| s.id == 1) {
                     let etitle = webview_utils::escape_js_template(&s.title);
                     let etag = webview_utils::escape_js_template(&s.tag);
-                    // Status mirrors the live handle state. Lazy sessions
-                    // (handle=None, no error) appear 'ready' — they connect
-                    // on first switch. Truly errored sessions don't survive
-                    // restart because we drop the handle on connection error.
                     let status = if s.handle.is_some() && s.acp_session_id.is_some() {
                         "ready"
                     } else if s.handle.is_some() {
                         "connecting"
                     } else {
-                        "ready" // lazy — not yet spawned, will connect on switch
+                        "ready"
                     };
-                    // No-op if the session is already in the JS map (e.g. sid=1
-                    // from initDefault). Title/tag/status are pushed below.
                     let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'{status}')"
+                        "window.__renameSession && window.__renameSession(1,`{etitle}`)"
                     ));
-                    // Override the JS placeholder values for sid=1 (it was added
-                    // before we knew the persisted title/tag).
-                    if sid == 1 {
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__renameSession && window.__renameSession({sid},`{etitle}`)"
-                        ));
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__updateSessionTag && window.__updateSessionTag({sid},`{etag}`)"
-                        ));
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__setSessionStatus && window.__setSessionStatus({sid},'{status}')"
-                        ));
-                    }
-                    if let Some(ref json) = s.available_commands_json {
-                        let escaped = webview_utils::escape_js_template(json);
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
-                        ));
-                    }
-                    if let Some(ref json) = s.account_json {
-                        let escaped = webview_utils::escape_js_template(json);
-                        let _ = sidebar_wv.evaluate_script(&format!(
-                            "window.__setAccount && window.__setAccount({sid},`{escaped}`)"
-                        ));
-                    }
-                    if !s.messages.is_empty() {
-                        if let Ok(msgs_json) = serde_json::to_string(&s.messages) {
-                            let _ = sidebar_wv.evaluate_script(&format!(
-                                "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
-                            ));
-                        }
-                    }
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__updateSessionTag && window.__updateSessionTag(1,`{etag}`)"
+                    ));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setSessionStatus && window.__setSessionStatus(1,'{status}')"
+                    ));
                 }
                 // Strip the JS placeholder sid=1 if persisted history doesn't
                 // include it (user closed it before quitting last session).
@@ -5405,10 +5971,6 @@ fn main() {
                         "window.__removeSession && window.__removeSession(1)"
                     );
                 }
-                let active = active_session_id;
-                let _ = sidebar_wv.evaluate_script(&format!(
-                    "window.__switchSession && window.__switchSession({active})"
-                ));
             }
 
             // ── Sidebar re-focus after transient app reactivation ─────────
@@ -5446,7 +6008,7 @@ fn main() {
                 if let Some(ref qs) = quick_slots[slot] {
                     let url = qs.url.clone();
                     let existing_tab = {
-                        let tm = tabs.lock().unwrap();
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
                         let normalized = url.trim_end_matches('/');
                         tm.tabs().iter()
                             .find(|t| t.url.trim_end_matches('/') == normalized)
@@ -5463,7 +6025,7 @@ fn main() {
             // ── Quick-slot: save current page to slot ─────────────────────
             Event::UserEvent(AppEvent::QuickSlotSave(slot)) => {
                 let info = {
-                    let tm = tabs.lock().unwrap();
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.active_tab().map(|t| (t.url.clone(), t.title.clone()))
                 };
                 if let Some((url, title)) = info {
@@ -5497,7 +6059,7 @@ fn main() {
             // Otherwise → save to the first empty slot (pin).
             Event::UserEvent(AppEvent::TogglePin) => {
                 let info = {
-                    let tm = tabs.lock().unwrap();
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.active_tab().map(|t| (t.url.clone(), t.title.clone()))
                 };
                 if let Some((url, title)) = info {
@@ -5538,11 +6100,13 @@ fn main() {
                 // $PPID into the envelope on creation. Falls back to the
                 // active session only if no match (e.g. before any session
                 // has registered its pid, or for envelopes from outside).
-                let target_sid = sessions
+                let target_sid = workspace_manager
+                    .active()
+                    .acp_sessions
                     .iter()
                     .find(|s| s.octomind_pid == Some(snap.parent_pid) && snap.parent_pid != 0)
                     .map(|s| s.id)
-                    .unwrap_or(active_session_id);
+                    .unwrap_or(workspace_manager.active().acp_active_session_id);
                 let sid = target_sid;
                 // A surface is "live" only if its render_ui bash subprocess is
                 // still polling — i.e. its parent octomind subprocess matches
@@ -5550,7 +6114,9 @@ fn main() {
                 // file on disk, but no one to receive the resolution. Clicks
                 // on ghost surfaces are suppressed with a toast in the sidebar.
                 let is_live = snap.parent_pid != 0
-                    && sessions
+                    && workspace_manager
+                        .active()
+                        .acp_sessions
                         .iter()
                         .any(|s| s.octomind_pid == Some(snap.parent_pid));
                 let live_js = if is_live { "true" } else { "false" };
@@ -5569,9 +6135,9 @@ fn main() {
                 // Persist the surface alongside the chat log so a cold restart
                 // can rebuild the bubble. Same fileId upserts in place — keeps
                 // pending→resolved transitions to a single bubble.
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     upsert_a2ui_msg(s, &snap.id, snap.body, cfg.max_acp_session_messages);
-                    persist_acp_history(&sessions, active_session_id, cfg.max_acp_session_messages);
+                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
                 }
             }
             // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
@@ -5581,7 +6147,7 @@ fn main() {
             Event::UserEvent(AppEvent::LearningReady(page_text))
                 if learning_handle.is_none() && cfg.proactive_learning =>
             {
-                let mut tm = tabs.lock().unwrap();
+                let mut tm = workspace_manager.active().tabs.lock().unwrap();
                 tm.ensure_contiguous();
                 if let Some(prompt) = build_learning_prompt(&tm, active_wv_id, &page_text) {
                     drop(tm);
@@ -5599,7 +6165,7 @@ fn main() {
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
-                if let Some(s) = sessions.iter_mut().find(|s| s.id == sid) {
+                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Ignore stale timers from a previous error cycle — the user may
                     // have manually reconnected (AcpSetAgent / AcpClearSession) in the
                     // meantime, which already bumped this session's reconnect_gen.
@@ -5642,7 +6208,7 @@ fn main() {
                     let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
                     find_bar_visible = false;
                     find_bar_hotkey_visible.store(false, Ordering::Relaxed);
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
                     }
                     browser_win.set_focus();
@@ -5677,7 +6243,7 @@ fn main() {
                 let _ = find_bar_wv.evaluate_script("window.__clear && window.__clear()");
                 find_bar_visible = false;
                 find_bar_hotkey_visible.store(false, Ordering::Relaxed);
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.__findClear && window.__findClear()");
                 }
                 browser_win.set_focus();
@@ -5685,7 +6251,7 @@ fn main() {
 
             // ── Find bar: search query from input ───────────────────────────
             Event::UserEvent(AppEvent::FindInPage(query)) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let escaped = webview_utils::escape_js_template(&query);
                     let _ = wv.evaluate_script(&format!(
                         "window.__findInPage && window.__findInPage(`{escaped}`)"
@@ -5695,14 +6261,14 @@ fn main() {
 
             // ── Find bar: next match ────────────────────────────────────────
             Event::UserEvent(AppEvent::FindNext) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.__findNext && window.__findNext()");
                 }
             }
 
             // ── Find bar: previous match ────────────────────────────────────
             Event::UserEvent(AppEvent::FindPrev) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.__findPrev && window.__findPrev()");
                 }
             }
@@ -5762,12 +6328,10 @@ fn main() {
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
                 save_and_exit(
-                    &tabs,
+                    &workspace_manager,
                     &favicon_cache,
                     &prompt_history,
                     &ai_prompt_history,
-                    &sessions,
-                    active_session_id,
                     cfg.max_acp_session_messages,
                     learning_pid,
                     control_flow,
@@ -5776,7 +6340,7 @@ fn main() {
 
             // ── Title update ──────────────────────────────────────────────
             Event::UserEvent(AppEvent::TitleChanged(tab_id, title)) => {
-                if tabs.lock().unwrap().update_title(tab_id, title.clone()) {
+                if workspace_manager.active().tabs.lock().unwrap().update_title(tab_id, title.clone()) {
                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 }
                 if tab_id == active_wv_id {
@@ -5802,7 +6366,7 @@ fn main() {
                     // deferred_nav consumed → real URL is now loading, stop suppressing
                     restoring_tabs.remove(&tab_id);
                 }
-                if tabs.lock().unwrap().update_url(tab_id, url.clone()) {
+                if workspace_manager.active().tabs.lock().unwrap().update_url(tab_id, url.clone()) {
                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 }
                 if tab_id == active_wv_id {
@@ -5835,7 +6399,7 @@ fn main() {
                 }
                 drop(fc);
                 // Push to address bar ONLY if this domain matches the active tab's domain
-                let active_url = tabs.lock().unwrap().tabs().iter()
+                let active_url = workspace_manager.active().tabs.lock().unwrap().tabs().iter()
                     .find(|t| t.id == active_wv_id)
                     .map(|t| t.url.clone())
                     .unwrap_or_default();
@@ -5888,7 +6452,7 @@ fn main() {
                     // input is preserved. Real dismissal still happens on user-driven
                     // close (Esc/✕), tab switch, and `NavigateTo` from the address bar.
                     // Check if this is about:blank — skip progress bar for instant pages
-                    let url = tabs.lock().unwrap().tabs().iter()
+                    let url = workspace_manager.active().tabs.lock().unwrap().tabs().iter()
                         .find(|t| t.id == tab_id)
                         .map(|t| t.url.clone())
                         .unwrap_or_default();
@@ -5918,7 +6482,7 @@ fn main() {
                 // Deferred navigation: snapshot HTML just rendered — now load the real URL.
                 // The snapshot stays visible (WebKit paint-holding) until the real page paints.
                 if let Some(url) = deferred_nav.remove(&tab_id) {
-                    if let Some(wv) = tab_webviews.get(&tab_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                         let _ = wv.load_url(&url);
                     }
                     // Don't hide progress bar yet — the real page load will fire its own events.
@@ -5932,7 +6496,7 @@ fn main() {
                 // MCP navigate: page finished loading — wait for DOM stability
                 // (SPA frameworks render in microtasks/rAF after load).
                 if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
-                    if let Some(wv) = tab_webviews.get(&tab_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                         let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                         let response_cb = response.clone();
                         let result_id = tab_id;
@@ -5993,7 +6557,7 @@ fn main() {
                     progress_hide_at = None;
                 }
                 // Load error page directly into the failing browser WebView
-                if let Some(wv) = tab_webviews.get(&tab_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                     let error_html = error_page_html::html(&url, &error);
                     let _ = wv.load_html(&error_html);
                 }
@@ -6018,7 +6582,7 @@ fn main() {
                 // since the latter may transiently hold "about:blank".
                 let url = deferred_nav.remove(&tab_id)
                     .or_else(|| {
-                        tabs.lock().unwrap().tabs().iter()
+                        workspace_manager.active().tabs.lock().unwrap().tabs().iter()
                             .find(|t| t.id == tab_id)
                             .map(|t| t.url.clone())
                     })
@@ -6026,7 +6590,7 @@ fn main() {
                 restoring_tabs.remove(&tab_id);
                 tracing::warn!(tab_id, %url, "WebContent process terminated — reloading");
                 // Log to crash.log for post-mortem analysis.
-                let (pid, rss_mb) = tab_webviews.get(&tab_id)
+                let (pid, rss_mb) = workspace_manager.active().webviews.get(&tab_id)
                     .map(|wv| {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         let pid = tab_stats::webview_pid(wv_ptr);
@@ -6038,7 +6602,7 @@ fn main() {
                     })
                     .unwrap_or((None, 0));
                 crash_report::log_webcontent_terminated(tab_id, &url, pid, rss_mb);
-                if let Some(wv) = tab_webviews.get(&tab_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                     if url.is_empty() || url == "about:blank" {
                         let _ = wv.load_url("about:blank");
                     } else {
@@ -6049,22 +6613,22 @@ fn main() {
 
             // ── Page scroll (⌃D / ⌃U / ⌃T / ⌃B) ─────────────────────────────
             Event::UserEvent(AppEvent::ScrollDown) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollBy({top:window.innerHeight,behavior:'smooth'})");
                 }
             }
             Event::UserEvent(AppEvent::ScrollUp) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollBy({top:-window.innerHeight,behavior:'smooth'})");
                 }
             }
             Event::UserEvent(AppEvent::ScrollTop) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollTo({top:0,behavior:'smooth'})");
                 }
             }
             Event::UserEvent(AppEvent::ScrollBottom) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})");
                 }
             }
@@ -6072,19 +6636,19 @@ fn main() {
             // ── Zoom in / out (⌘= / ⌘-) ────────────────────────────────────
             Event::UserEvent(AppEvent::ZoomIn) => {
                 zoom_level = (zoom_level + 0.1).min(3.0);
-                for wv in tab_webviews.values() {
+                for wv in workspace_manager.active().webviews.values() {
                     let _ = wv.zoom(zoom_level);
                 }
             }
             Event::UserEvent(AppEvent::ZoomOut) => {
                 zoom_level = (zoom_level - 0.1).max(0.5);
-                for wv in tab_webviews.values() {
+                for wv in workspace_manager.active().webviews.values() {
                     let _ = wv.zoom(zoom_level);
                 }
             }
             Event::UserEvent(AppEvent::ZoomReset) => {
                 zoom_level = 1.0;
-                for wv in tab_webviews.values() {
+                for wv in workspace_manager.active().webviews.values() {
                     let _ = wv.zoom(zoom_level);
                 }
             }
@@ -6108,7 +6672,7 @@ fn main() {
                     // soon-to-arrive `InlineEditReady` doesn't get toggled-closed
                     // by what the user perceives as a single keypress.
                     tracing::debug!("InlineEditRequest ignored: capture already pending");
-                } else if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                } else if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     inline_edit_pending = true;
                     // Lock the keyboard guard now, not after the async capture
                     // returns — this prevents any racing Ctrl+P/N/etc. shortcuts
@@ -6222,7 +6786,7 @@ fn main() {
                     inline_edit_visible = false;
                     inline_edit_pending = false;
                     inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
-                    if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&inline_edit_tab_id) {
                         let _ = wv.evaluate_script(
                             "document.documentElement.style.cursor='wait'"
                         );
@@ -6236,7 +6800,7 @@ fn main() {
                 inline_edit_pending = false;
                 inline_edit_hotkey_visible.store(false, Ordering::Relaxed);
                 // Set loading cursor on the target tab while processing continues
-                if let Some(wv) = tab_webviews.get(&inline_edit_tab_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&inline_edit_tab_id) {
                     let _ = wv.evaluate_script(
                         "document.documentElement.style.cursor='wait'"
                     );
@@ -6271,7 +6835,7 @@ fn main() {
 
             // ── Reload current page ───────────────────────────────────────────
             Event::UserEvent(AppEvent::Reload) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     // If mid-snapshot-restore, skip the snapshot and load the real URL directly.
                     if let Some(url) = deferred_nav.remove(&active_wv_id) {
                         restoring_tabs.remove(&active_wv_id);
@@ -6284,7 +6848,7 @@ fn main() {
 
             // ── Screenshot (⌘S) — viewport → clipboard ─────────────────────
             Event::UserEvent(AppEvent::Screenshot) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     let ns_win_ptr = browser_win.ns_window() as usize;
                     screenshot_to_clipboard(wv_ptr, ns_win_ptr);
@@ -6293,7 +6857,7 @@ fn main() {
 
             // ── Full page screenshot (⌘⇧S) — full page → clipboard ──────────
             Event::UserEvent(AppEvent::ScreenshotFullPage) => {
-                if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     let ns_win_ptr = browser_win.ns_window() as usize;
                     screenshot_full_page_to_clipboard(wv_ptr, ns_win_ptr);
@@ -6328,7 +6892,7 @@ fn main() {
 
             // ── Media playing state changed ───────────────────────────────────
             Event::UserEvent(AppEvent::MediaPlaying(tab_id, is_playing)) => {
-                tabs.lock().unwrap().set_playing_audio(tab_id, is_playing);
+                workspace_manager.active().tabs.lock().unwrap().set_playing_audio(tab_id, is_playing);
                 if is_playing {
                     media_playing_tabs.insert(tab_id);
                 } else {
@@ -6338,7 +6902,7 @@ fn main() {
 
             // ── Page info (size + load time) from injected script ─────────────
             Event::UserEvent(AppEvent::PageInfo(tab_id, bytes, ms)) => {
-                tabs.lock().unwrap().set_page_info(tab_id, bytes, ms);
+                workspace_manager.active().tabs.lock().unwrap().set_page_info(tab_id, bytes, ms);
                 if tab_id == active_wv_id {
                     let _ = address_bar_wv.evaluate_script(&format!(
                         "window.__stats && window.__stats({bytes}, {ms})"
@@ -6367,12 +6931,10 @@ fn main() {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
                         save_and_exit(
-                            &tabs,
+                            &workspace_manager,
                             &favicon_cache,
                             &prompt_history,
                             &ai_prompt_history,
-                            &sessions,
-                            active_session_id,
                             cfg.max_acp_session_messages,
                             learning_pid,
                             control_flow,
@@ -6388,6 +6950,8 @@ fn main() {
                         shortcuts_visible = false;
                         settings_win.set_visible(false);
                         settings_visible = false;
+                        workspace_switcher_win.set_visible(false);
+                        workspace_switcher_visible = false;
                     }
                 }
 
@@ -6409,6 +6973,9 @@ fn main() {
                     }
                     if settings_visible {
                         settings_win.set_inner_size(*sz);
+                    }
+                    if workspace_switcher_visible {
+                        workspace_switcher_win.set_inner_size(*sz);
                     }
                     // Resize sidebar to track window height and stay at right edge
                     // (or full-width when sidebar_fullscreen is set).
@@ -6461,7 +7028,7 @@ fn main() {
                         position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
                         size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(address_bar_h + footer_h)).into(),
                     };
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let _ = wv.set_bounds(bounds);
                     }
                     // Resize footer bar to full width (pinned to bottom)
@@ -6494,7 +7061,7 @@ fn main() {
                         return;
                     }
                     let cmd = modifiers.super_key();
-                    if let Some(wv) = tab_webviews.get(&active_wv_id) {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         match key_event.physical_key {
                             KeyCode::BracketLeft if cmd => {
                                 let _ = wv.evaluate_script("history.back()");
@@ -7162,11 +7729,23 @@ fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, m
     }
 }
 
+/// Serializes concurrent `persist_acp_history` calls (one workspace's turn
+/// finishing right as another's starts, e.g. just after a workspace switch)
+/// so their read-modify-write of the shared `acp_history.json` can't race
+/// and silently drop one workspace's update.
+static ACP_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Snapshot every ACP session into `AcpHistory` and dispatch the JSON write
 /// on a background thread. Mirrors `save_ai_prompt_history` — fire-and-forget,
 /// errors are logged but never block the event loop. Caps each session's
 /// message log at `max_msgs` (oldest dropped first).
-fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize) {
+fn persist_acp_history(
+    workspace_id: &str,
+    sessions: &[AcpSession],
+    active_id: u64,
+    max_msgs: usize,
+) {
+    let workspace_id = workspace_id.to_string();
     let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions
         .iter()
         .map(|s| config::AcpSessionSnapshot {
@@ -7177,90 +7756,118 @@ fn persist_acp_history(sessions: &[AcpSession], active_id: u64, max_msgs: usize)
             messages: acp_messages_snapshot(s, max_msgs),
         })
         .collect();
-    let history = config::AcpHistory {
-        sessions: snap_sessions,
-        active_id,
-    };
-    std::thread::spawn(move || config::save_acp_history(&history));
+    // Read-modify-write: other workspaces' slots must survive this save,
+    // not just the one that changed. Locked so two concurrent calls (e.g.
+    // outgoing and incoming workspace both persisting right after a switch)
+    // can't race and drop each other's update.
+    std::thread::spawn(move || {
+        let _guard = ACP_HISTORY_WRITE_LOCK.lock().unwrap();
+        let mut history = config::load_acp_history().unwrap_or_default();
+        history.workspaces.insert(
+            workspace_id,
+            config::WorkspaceAcpHistory {
+                sessions: snap_sessions,
+                active_id,
+            },
+        );
+        config::save_acp_history(&history);
+    });
 }
 
 /// Save session state and exit the event loop.
 #[allow(clippy::too_many_arguments)]
 fn save_and_exit(
-    tabs: &Arc<Mutex<browser::TabManager>>,
+    workspace_manager: &WorkspaceManager,
     favicon_cache: &Arc<Mutex<std::collections::HashMap<String, String>>>,
     prompt_history: &[String],
     ai_prompt_history: &[String],
-    acp_sessions: &[AcpSession],
-    acp_active_id: u64,
     max_acp_session_messages: usize,
     learning_pid: Option<u32>,
     control_flow: &mut ControlFlow,
 ) {
-    let mut tm = tabs.lock().unwrap();
-    let session_tabs: Vec<config::SessionTab> = tm
-        .tabs()
+    // Persists every workspace, not just the active one — `WorkspaceManager`
+    // being genuinely live for the whole program (see its construction in
+    // `main`) means this can iterate `list()` directly instead of carrying
+    // flat id/name/color/data_store_id params.
+    let workspaces: Vec<config::WorkspaceSession> = workspace_manager
+        .list()
         .iter()
-        .map(|t| config::SessionTab {
-            url: t.url.clone(),
-            title: t.title.clone(),
+        .map(|ws| {
+            let mut tm = ws.tabs.lock().unwrap();
+            let session_tabs: Vec<config::SessionTab> = tm
+                .tabs()
+                .iter()
+                .map(|t| config::SessionTab {
+                    url: t.url.clone(),
+                    title: t.title.clone(),
+                })
+                .collect();
+            let active_tab_url = tm
+                .active_tab()
+                .map(|t| t.url.as_str())
+                .unwrap_or("")
+                .to_string();
+            tm.ensure_contiguous();
+            config::WorkspaceSession {
+                id: ws.id.clone(),
+                name: ws.name.clone(),
+                color: ws.color.clone(),
+                data_store_id: ws.data_store_id,
+                tabs: session_tabs,
+                active_tab_url,
+            }
         })
         .collect();
-    let active_url = tm
-        .active_tab()
-        .map(|t| t.url.as_str())
-        .unwrap_or("")
-        .to_string();
-    tm.ensure_contiguous();
-    config::save_session(&session_tabs, &active_url);
+    config::save_session(&workspaces, &workspace_manager.active().id);
     config::save_favicons(&favicon_cache.lock().unwrap());
-    config::save_history(tm.history());
+    // History has never been per-workspace (one history.json for the whole
+    // app) — keep persisting the active workspace's, matching prior behavior.
+    config::save_history(workspace_manager.active().tabs.lock().unwrap().history());
     config::save_prompt_history(prompt_history);
     config::save_ai_prompt_history(ai_prompt_history);
     // Synchronous final save so the ACP log is durable across cold restart
-    // even if the OS reaps background threads on app exit.
-    let acp_history = config::AcpHistory {
-        sessions: acp_sessions
+    // even if the OS reaps background threads on app exit. Every workspace's
+    // sessions are persisted under its own slot, not just the active one.
+    let acp_workspaces: std::collections::HashMap<String, config::WorkspaceAcpHistory> =
+        workspace_manager
+            .list()
             .iter()
-            .map(|s| config::AcpSessionSnapshot {
-                id: s.id,
-                title: s.title.clone(),
-                tag: s.tag.clone(),
-                acp_session_id: s.acp_session_id.clone(),
-                messages: acp_messages_snapshot(s, max_acp_session_messages),
+            .map(|ws| {
+                let snapshot = config::WorkspaceAcpHistory {
+                    sessions: ws
+                        .acp_sessions
+                        .iter()
+                        .map(|s| config::AcpSessionSnapshot {
+                            id: s.id,
+                            title: s.title.clone(),
+                            tag: s.tag.clone(),
+                            acp_session_id: s.acp_session_id.clone(),
+                            messages: acp_messages_snapshot(s, max_acp_session_messages),
+                        })
+                        .collect(),
+                    active_id: ws.acp_active_session_id,
+                };
+                (ws.id.clone(), snapshot)
             })
-            .collect(),
-        active_id: acp_active_id,
-    };
-    config::save_acp_history(&acp_history);
-    drop(tm);
+            .collect();
+    config::save_acp_history(&config::AcpHistory {
+        workspaces: acp_workspaces,
+    });
     // Terminate agent subprocesses before exiting. ControlFlow::Exit ends the
     // process via std::process::exit — destructors (and tokio's kill_on_drop)
     // never run, so octomind children would outlive us as orphans. An orphan
     // still flushing its session file makes the next launch's `--resume` race
     // it and silently mint a fresh session — that's how agent context got
     // lost across restarts. SIGTERM lets octomind save; bounded wait, then
-    // SIGKILL stragglers.
-    let pids: Vec<u32> = acp_sessions
+    // SIGKILL stragglers. Covers every workspace's sessions, not just the
+    // active one — a background workspace can still hold live handles.
+    let pids: Vec<u32> = workspace_manager
+        .list()
         .iter()
-        .filter_map(|s| s.octomind_pid)
+        .flat_map(|ws| ws.acp_sessions.iter().filter_map(|s| s.octomind_pid))
         .chain(learning_pid)
         .collect();
-    for &pid in &pids {
-        unsafe { libc::kill(pid as libc::c_int, libc::SIGTERM) };
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    for &pid in &pids {
-        while unsafe { libc::kill(pid as libc::c_int, 0) } == 0
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if unsafe { libc::kill(pid as libc::c_int, 0) } == 0 {
-            tracing::warn!(pid, "octomind did not exit on SIGTERM — killing");
-            unsafe { libc::kill(pid as libc::c_int, libc::SIGKILL) };
-        }
-    }
+    terminate_octomind_pids(&pids);
     crash_report::log_clean_shutdown();
     *control_flow = ControlFlow::Exit;
 }

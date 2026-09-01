@@ -58,6 +58,7 @@ pub enum Action {
     Find,
     Fullscreen,
     TogglePin,
+    ToggleWorkspaces,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -213,6 +214,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Pin/unpin tab",
         "Tabs & Navigation",
         "cmd+shift+n",
+    ),
+    (
+        Action::ToggleWorkspaces,
+        "toggle_workspaces",
+        "Workspaces",
+        "Tabs & Navigation",
+        "cmd+shift+o",
     ),
 ];
 

@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// Process-wide tab-id source shared by every `TabManager` instance (one per
+/// workspace). Ids must be globally unique, not just unique within a single
+/// workspace — several main.rs maps (`pending_tabs`, `mru`, snapshot/deferred
+/// nav trackers, etc.) are still keyed by bare tab id across the whole app.
+static NEXT_TAB_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn next_tab_id() -> usize {
+    NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// A single browser tab (metadata only — the WebView is owned separately)
 #[derive(Debug, Clone)]
@@ -37,7 +48,6 @@ pub struct TabManager {
     active_id: Option<usize>,
     history: VecDeque<HistoryEntry>,
     max_history: usize,
-    next_id: usize,
 }
 
 impl TabManager {
@@ -47,14 +57,12 @@ impl TabManager {
             active_id: None,
             history: VecDeque::new(),
             max_history,
-            next_id: 1,
         }
     }
 
     /// Register a new tab with the given URL, returns its id.
     pub fn open(&mut self, url: String) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_tab_id();
         self.tabs.push(Tab {
             id,
             title: String::new(),
@@ -71,8 +79,7 @@ impl TabManager {
     /// never change which tab the user sees (is_active stays truthful for
     /// browser_get_tabs / browser_get_current_tab and the sidebar highlight).
     pub fn open_background(&mut self, url: String) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_tab_id();
         self.tabs.push(Tab {
             id,
             title: String::new(),
@@ -91,8 +98,7 @@ impl TabManager {
 
     /// Register a new tab with a pre-filled title (used for session restore).
     pub fn open_with_title(&mut self, url: String, title: String) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_tab_id();
         self.tabs.push(Tab {
             id,
             title,
@@ -291,4 +297,33 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two independent `TabManager`s (one per workspace) must never hand out
+    /// the same tab id — several main.rs maps are still keyed by bare tab id
+    /// at global scope, so a collision would silently corrupt state once a
+    /// second workspace exists.
+    #[test]
+    fn tab_ids_are_unique_across_tab_managers() {
+        let mut a = TabManager::new(100);
+        let mut b = TabManager::new(100);
+        let a1 = a.open("https://a1".into());
+        let b1 = b.open("https://b1".into());
+        let a2 = a.open_background("https://a2".into());
+        let b2 = b.open_with_title("https://b2".into(), "b2".into());
+        let ids = [a1, b1, a2, b2];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(
+                    ids[i], ids[j],
+                    "duplicate tab id {} across workspaces",
+                    ids[i]
+                );
+            }
+        }
+    }
 }
