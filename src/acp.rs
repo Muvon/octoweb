@@ -208,13 +208,13 @@ impl AcpHandle {
     ///
     /// `wake` is called from the ACP thread whenever an event is pushed — use it to
     /// poke the main event loop out of `ControlFlow::Wait`.
-    /// `mcp_url` points the agent at its own workspace's MCP listener, so its
-    /// browser tools act on that workspace's tabs regardless of which one the
-    /// user is looking at. `None` leaves the agent on whatever its own config
-    /// says.
+    /// `mcp_token` identifies the agent's workspace to octoweb's MCP server, so
+    /// its browser tools act on that workspace's tabs regardless of which one
+    /// the user is looking at. `None` means the agent's tool calls land on the
+    /// first workspace, matching how it behaved before workspaces existed.
     pub fn connect(
         cmd: &str,
-        mcp_url: Option<String>,
+        mcp_token: Option<String>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -250,7 +250,7 @@ impl AcpHandle {
                     prompt_rx,
                     cancel_rx,
                     command_rx,
-                    mcp_url,
+                    mcp_token,
                     program,
                     args,
                 )
@@ -408,7 +408,7 @@ async fn init_session(
     mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
     mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     mut command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-    mcp_url: Option<String>,
+    mcp_token: Option<String>,
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -419,10 +419,11 @@ async fn init_session(
     let _ = std::fs::create_dir_all(&workspace);
 
     let mut child = tokio::process::Command::new(&program);
-    // Per-workspace MCP endpoint. The URL embeds the port and the run's secret
-    // token, so an agent can only reach the workspace it belongs to.
-    if let Some(url) = mcp_url {
-        child.env("OCTOWEB_MCP_URL", url);
+    // The agent's capability manifest forwards this as the
+    // `X-Octoweb-Workspace` header, which is how octoweb's MCP server knows
+    // which workspace the call belongs to. Ephemeral, minted per run.
+    if let Some(token) = mcp_token {
+        child.env("OCTOWEB_MCP_TOKEN", token);
     }
     let mut child = child
         .args(&args)

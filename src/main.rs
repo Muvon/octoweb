@@ -63,7 +63,7 @@ use wry::{
 use browser::TabManager;
 use config::Config;
 use mcp::{interpret_dom_result, HistoryInfo, McpCommand, PageInfo, TabInfo};
-use workspace::WorkspaceManager;
+use workspace::{WorkspaceManager, DEFAULT_WORKSPACE_ID};
 
 #[derive(Debug)]
 enum AppEvent {
@@ -330,6 +330,10 @@ pub const MAX_SESSIONS: usize = 10;
 /// Colors cycled through for workspaces created via the "+ New Workspace" row —
 /// distinct from `workspace::DEFAULT_COLOR` (#7C5CFF, reserved for the migrated
 /// default workspace) and chosen to read clearly as small dots in both themes.
+/// Name the bundled tap registers under. `octomind tap` addresses taps as
+/// `user/repo`, and capability references reach this one as `muvon/<name>`.
+const OCTOMIND_TAP_NAME: &str = "muvon/octoweb";
+
 const WORKSPACE_PALETTE: &[&str] = &[
     "#06B6D4", "#F97316", "#EC4899", "#22C55E", "#EAB308", "#3B82F6", "#EF4444", "#6366F1",
 ];
@@ -396,6 +400,10 @@ fn main() {
 
     // Import user's full shell environment (PATH, API keys, etc.) for .app context.
     macos::init_env();
+
+    // Point octomind at our bundled tap — must follow init_env(), which is what
+    // puts octomind on PATH in the .app context.
+    macos::register_octomind_tap(OCTOMIND_TAP_NAME);
 
     // ── Crash diagnostics (must be early — before anything that can panic) ────
     crash_report::rotate_log();
@@ -1976,8 +1984,14 @@ fn main() {
 
     // ── MCP server — exposes browser control tools on localhost ────────────
     // Must come before the ACP session loop below: every agent is spawned with
-    // its workspace's MCP URL, so the endpoints have to exist first.
-    let mut mcp_handle = Some(mcp::spawn_mcp_server());
+    // its workspace's MCP token, so the tokens have to exist first.
+    // OCTOWEB_MCP_PORT override lets a second instance (e2e tests, isolated
+    // profiles) run beside the daily browser on 3434.
+    let mcp_port: u16 = std::env::var("OCTOWEB_MCP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3434);
+    let mut mcp_handle = Some(mcp::spawn_mcp_server(mcp_port));
     // Cloned sender used by JS-callback watchdogs to re-issue read commands
     // (Snapshot/GetPageContent/GetPageInfo) when wry's
     // `evaluateJavaScript:completionHandler:` block is discarded by WKWebView
@@ -1988,28 +2002,21 @@ fn main() {
         .command_tx
         .clone();
 
-    // One MCP listener per workspace — the port+token an agent is pointed at
-    // is what identifies its workspace to the main loop. The Default workspace
-    // keeps the well-known port so agent configs written before workspaces
-    // existed still resolve; the rest take ephemeral ports.
-    // OCTOWEB_MCP_PORT override lets a second instance (e2e tests, isolated
-    // profiles) run beside the daily browser on 3434.
-    let default_mcp_port: u16 = std::env::var("OCTOWEB_MCP_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3434);
+    // One listener, one port, shared by every workspace — a request's
+    // `X-Octoweb-Workspace` token says which workspace it belongs to. Callers
+    // that send no token (the generic `browser` capability, anything written
+    // before workspaces existed) fall through to the first workspace.
     if let Some(ref handle) = mcp_handle {
         for i in 0..workspace_manager.list().len() {
             let id = workspace_manager.at(i).id.clone();
-            let port = if id == "default" { default_mcp_port } else { 0 };
-            workspace_manager.at_mut(i).mcp_endpoint = handle.start_workspace(&id, port);
+            workspace_manager.at_mut(i).mcp_token = Some(handle.register_workspace(&id));
         }
     }
 
     let startup_active_workspace_id = workspace_manager.active().id.clone();
     for ws in workspace_manager.list_mut() {
         let is_startup_active_ws = ws.id == startup_active_workspace_id;
-        let mcp_url = ws.mcp_endpoint.as_ref().map(|e| e.url());
+        let mcp_token = ws.mcp_token.clone();
         let persisted = persisted_acp
             .as_ref()
             .and_then(|h| h.workspaces.get(&ws.id));
@@ -2031,8 +2038,12 @@ fn main() {
                             Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
                             None => format!("octomind acp {}", snap.tag),
                         };
-                        acp::AcpHandle::connect(&cmd, mcp_url.clone(), make_wake(acp_proxy.clone()))
-                            .ok()
+                        acp::AcpHandle::connect(
+                            &cmd,
+                            mcp_token.clone(),
+                            make_wake(acp_proxy.clone()),
+                        )
+                        .ok()
                     } else {
                         None // lazy: connect on AcpSessionSwitch / workspace switch
                     };
@@ -2072,7 +2083,7 @@ fn main() {
                     handle: if is_startup_active_ws {
                         acp::AcpHandle::connect(
                             "octomind acp octoweb:assistant",
-                            mcp_url.clone(),
+                            mcp_token.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok()
@@ -3562,7 +3573,7 @@ fn main() {
                         if signed_in {
                             if let Some(stop) = login_pollers.remove(&sid) {
                                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                                let mcp_token = workspace_manager.active().mcp_token.clone();
                                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                                     s.retry_count = 0;
                                     s.reconnect_gen += 1;
@@ -3570,7 +3581,7 @@ fn main() {
                                         Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
                                         None => format!("octomind acp {}", s.tag),
                                     };
-                                    s.handle = acp::AcpHandle::connect(&cmd, mcp_url.clone(), make_wake(acp_proxy.clone())).ok();
+                                    s.handle = acp::AcpHandle::connect(&cmd, mcp_token.clone(), make_wake(acp_proxy.clone())).ok();
                                     let _ = sidebar_wv.evaluate_script(&format!(
                                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
                                     ));
@@ -3716,15 +3727,24 @@ fn main() {
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
             while let Some((mcp_ws_id, cmd)) = handle.poll() {
-                tracing::debug!(cmd = ?std::mem::discriminant(&cmd), %mcp_ws_id, "MCP command received");
+                tracing::debug!(cmd = ?std::mem::discriminant(&cmd), ?mcp_ws_id, "MCP command received");
 
-                // Commands act on the workspace whose listener they arrived on,
-                // never on whatever is on screen. If that workspace was deleted
-                // while the call was in flight, dropping `cmd` drops its response
-                // sender and the caller gets an immediate channel error.
-                let Some(ws_idx) = workspace_manager.index_of(&mcp_ws_id) else {
-                    tracing::warn!(%mcp_ws_id, "MCP command for a workspace that no longer exists");
-                    continue;
+                // Commands act on the workspace whose token they carried, never
+                // on whatever is on screen. No token — the generic `browser`
+                // capability, or any pre-workspaces config — means the Default
+                // workspace, falling back to the first one if Default was
+                // deleted. If the workspace was deleted while the call was in
+                // flight, dropping `cmd` drops its response sender and the
+                // caller gets an immediate channel error.
+                let ws_idx = match &mcp_ws_id {
+                    None => workspace_manager.index_of(DEFAULT_WORKSPACE_ID).unwrap_or(0),
+                    Some(id) => match workspace_manager.index_of(id) {
+                        Some(idx) => idx,
+                        None => {
+                            tracing::warn!(%id, "MCP command for a workspace that no longer exists");
+                            continue;
+                        }
+                    },
                 };
                 // That workspace's own foreground tab — the default target when a
                 // tool omits `tab_id`. `active_wv_id` is the tab visible on
@@ -5019,8 +5039,8 @@ fn main() {
                 workspace_manager.create(name, color);
                 if let Some(ref handle) = mcp_handle {
                     let new_ws_id = workspace_manager.active().id.clone();
-                    workspace_manager.active_mut().mcp_endpoint =
-                        handle.start_workspace(&new_ws_id, 0);
+                    workspace_manager.active_mut().mcp_token =
+                        Some(handle.register_workspace(&new_ws_id));
                 }
                 let (new_tab_id, new_tab_url) = {
                     let tm = workspace_manager.active().tabs.lock().unwrap();
@@ -5080,7 +5100,7 @@ fn main() {
                     return; // refuse to remove the last workspace
                 }
                 if let Some(ref handle) = mcp_handle {
-                    handle.stop_workspace(&id);
+                    handle.unregister_workspace(&id);
                 }
                 if id == workspace_manager.active().id {
                     if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
@@ -5694,7 +5714,7 @@ fn main() {
                     );
                     // Reconnect any session whose handle has died (e.g. after
                     // max retries exceeded — manual sidebar open re-arms it).
-                    let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                    let mcp_token = workspace_manager.active().mcp_token.clone();
                     for s in workspace_manager.active_mut().acp_sessions.iter_mut() {
                         if s.handle.is_none() {
                             s.retry_count = 0;
@@ -5709,7 +5729,7 @@ fn main() {
                             };
                             s.handle = acp::AcpHandle::connect(
                                 &cmd,
-                                mcp_url.clone(),
+                                mcp_token.clone(),
                                 make_wake(acp_proxy.clone()),
                             )
                             .ok();
@@ -5785,7 +5805,7 @@ fn main() {
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
                 let mut should_persist = false;
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Inbox-driven turns stream with no terminal Done — commit any
                     // response still buffered so it lands before this user message.
@@ -5807,7 +5827,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
-                            mcp_url.clone(),
+                            mcp_token.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -5847,7 +5867,7 @@ fn main() {
             }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     let now = std::time::Instant::now();
                     let recent = s
@@ -5867,7 +5887,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
-                            mcp_url.clone(),
+                            mcp_token.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -5900,7 +5920,7 @@ fn main() {
             // ── ACP set agent for an existing session (kills + respawns its handle) ──
             Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
                 let mut should_persist = false;
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
                     s.retry_count = 0;
@@ -5909,7 +5929,7 @@ fn main() {
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
-                        mcp_url.clone(),
+                        mcp_token.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -5937,7 +5957,7 @@ fn main() {
             // ── ACP clear session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
                 let mut should_persist = false;
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
@@ -5945,7 +5965,7 @@ fn main() {
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", s.tag),
-                        mcp_url.clone(),
+                        mcp_token.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -5974,14 +5994,14 @@ fn main() {
 
             // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
             Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
                     tracing::warn!(max = MAX_SESSIONS, "session create rejected — cap reached");
                 } else {
                     let sid = next_acp_session_id();
                     let handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
-                        mcp_url.clone(),
+                        mcp_token.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -6051,7 +6071,7 @@ fn main() {
                 workspace_manager.active_mut().acp_active_session_id = sid;
                 // Lazy-spawn: if this session has no live handle (persisted
                 // but not yet connected this run), bring it up now.
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     if s.handle.is_none() {
                         let cmd = match &s.acp_session_id {
@@ -6060,7 +6080,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
-                            mcp_url.clone(),
+                            mcp_token.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -6322,7 +6342,7 @@ fn main() {
                     let lp = proxy.clone();
                     learning_handle = acp::AcpHandle::connect(
                         "octomind acp octoweb:learning",
-                        workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url()),
+                        workspace_manager.active().mcp_token.clone(),
                         move || { let _ = lp.send_event(AppEvent::LearningWake); },
                     ).ok();
                     if let Some(ref h) = learning_handle {
@@ -6333,7 +6353,7 @@ fn main() {
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
-                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
+                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Ignore stale timers from a previous error cycle — the user may
                     // have manually reconnected (AcpSetAgent / AcpClearSession) in the
@@ -6349,7 +6369,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
-                            mcp_url.clone(),
+                            mcp_token.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -6945,7 +6965,7 @@ fn main() {
                 inline_edit_response.clear();
                 inline_edit_acp = acp::AcpHandle::connect(
                     "octomind acp octoweb:editor",
-                    workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url()),
+                    workspace_manager.active().mcp_token.clone(),
                     { let p = acp_proxy.clone(); move || { let _ = p.send_event(AppEvent::AcpWake); } }
                 ).ok();
                 if let Some(ref h) = inline_edit_acp {

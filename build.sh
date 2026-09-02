@@ -92,6 +92,10 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BINARY_SRC"              "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 cp "$ASSETS_DIR/Info.plist"   "$APP_BUNDLE/Contents/Info.plist"
 cp "$ASSETS_DIR/icon.icns"    "$APP_BUNDLE/Contents/Resources/icon.icns"
+# Octomind tap: the octoweb: agents and the octoweb capability. Registered as a
+# local tap at startup, which symlinks straight in here — so shipping a new app
+# ships new agents, and they can never drift from the MCP tools they call.
+cp -R "$SCRIPT_DIR/tap"       "$APP_BUNDLE/Contents/Resources/tap"
 
 # ── Sign ──────────────────────────────────────────────────────────────────────
 if $DEV_BUILD; then

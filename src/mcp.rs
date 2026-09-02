@@ -47,6 +47,8 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 // ─────────────────────────────────────────────────────────────────────
@@ -747,11 +749,14 @@ pub struct SelectOptionRequest {
 /// Shared state for MCP tools to communicate with main event loop.
 #[derive(Clone)]
 pub struct McpState {
-    /// Which workspace this server instance speaks for. Fixed at construction
-    /// — each workspace has its own listener, so it can never be ambiguous.
-    pub workspace_id: String,
+    /// Which workspace this server instance speaks for, resolved per request
+    /// from the `X-Octoweb-Workspace` header in `call_tool`. `None` = the
+    /// caller sent no header; the main loop reads that as the first workspace.
+    pub workspace_id: Option<String>,
+    /// Known workspace tokens, so `call_tool` can turn a header into an id.
+    pub tokens: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// Channel to send commands to main event loop
-    pub command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
+    pub command_tx: mpsc::UnboundedSender<(Option<String>, McpCommand)>,
 }
 
 /// MCP Server that exposes browser control tools.
@@ -795,6 +800,8 @@ impl McpServer {
             .command_tx
             .send((self.state.workspace_id.clone(), build(tx)))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // (workspace_id is stamped by `call_tool`, which resolves the request's
+        // workspace header before dispatching into any of these tools.)
         tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
             .map_err(|_| {
@@ -822,12 +829,13 @@ impl McpServer {
 #[tool_router]
 impl McpServer {
     pub fn new(
-        workspace_id: String,
-        command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
+        tokens: Arc<std::sync::RwLock<HashMap<String, String>>>,
+        command_tx: mpsc::UnboundedSender<(Option<String>, McpCommand)>,
     ) -> Self {
         Self {
             state: McpState {
-                workspace_id,
+                workspace_id: None,
+                tokens,
                 command_tx,
             },
         }
@@ -1506,6 +1514,60 @@ fn sanitize_json_entries(raw: &str, field: &str, scrub: fn(&str) -> String) -> S
 
 #[tool_handler]
 impl ServerHandler for McpServer {
+    /// Resolve the caller's workspace before dispatching, so every tool below
+    /// acts on the workspace that issued the call rather than whatever the user
+    /// happens to be looking at.
+    ///
+    /// `#[tool_handler]` only generates this method when the impl doesn't
+    /// already define it, so overriding here leaves the generated tool routing
+    /// untouched. The header reaches us because the streamable-http transport
+    /// injects `http::request::Parts` into the request extensions.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let header = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.headers.get(WORKSPACE_HEADER))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        let workspace_id =
+            match header {
+                // No header: the main loop falls back to the first workspace.
+                None => None,
+                Some(token) => match self
+                    .state
+                    .tokens
+                    .read()
+                    .ok()
+                    .and_then(|m| m.get(&token).cloned())
+                {
+                    Some(id) => Some(id),
+                    // A token we don't know is never treated as "use the default" —
+                    // silently acting on the wrong workspace is the exact failure
+                    // this header exists to prevent.
+                    None => return Ok(err_result(
+                        "Unknown workspace token — this agent is pointed at a workspace that no \
+                         longer exists. Restart the assistant to pick up the current one."
+                            .to_string(),
+                    )),
+                },
+            };
+
+        let scoped = McpServer {
+            state: McpState {
+                workspace_id,
+                tokens: Arc::clone(&self.state.tokens),
+                command_tx: self.state.command_tx.clone(),
+            },
+        };
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(&scoped, request, context);
+        Self::tool_router().call(tcc).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         tracing::debug!("MCP get_info");
 
@@ -1576,114 +1638,75 @@ impl ServerHandler for McpServer {
 // Server spawning (HTTP JSON-RPC)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Where one workspace's MCP server listens, and the secret that reaches it.
-#[derive(Debug, Clone)]
-pub struct McpEndpoint {
-    pub port: u16,
-    pub token: String,
-}
+/// Request header naming the caller's workspace. Its value is that workspace's
+/// token, minted at registration. Absent → the first workspace, which is what
+/// keeps agent configs written before workspaces existed working unchanged.
+pub const WORKSPACE_HEADER: &str = "x-octoweb-workspace";
 
-impl McpEndpoint {
-    pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/mcp/{}", self.port, self.token)
-    }
-}
-
-/// Control messages to the tokio thread that owns the listeners.
-enum ServerCtl {
-    Start {
-        workspace_id: String,
-        token: String,
-        listener: std::net::TcpListener,
-    },
-    Stop(String),
-}
+/// token → workspace id, shared between the HTTP thread and the main loop.
+type WorkspaceTokens = Arc<std::sync::RwLock<HashMap<String, String>>>;
 
 /// Handle returned from spawn_mcp_server for polling commands.
 ///
-/// Every workspace gets its own listener, so the port+token a request arrives
-/// on *is* the caller's workspace identity — commands come back tagged with
-/// it and the main loop applies them to that workspace rather than to whatever
-/// happens to be on screen.
+/// One listener serves every workspace; the `X-Octoweb-Workspace` header on
+/// each request says which one the caller belongs to. Commands come back
+/// tagged with that workspace so the main loop applies them there rather than
+/// to whatever happens to be on screen.
 pub struct McpHandle {
-    /// Receiver for (workspace_id, command) from MCP tools
-    pub command_rx: mpsc::UnboundedReceiver<(String, McpCommand)>,
+    /// Receiver for (workspace_id, command) from MCP tools.
+    /// `None` = the caller sent no workspace header.
+    pub command_rx: mpsc::UnboundedReceiver<(Option<String>, McpCommand)>,
     /// Sender used by the main loop to re-issue read commands from a
     /// watchdog when the first eval's callback was discarded.
-    pub command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
-    ctl_tx: mpsc::UnboundedSender<ServerCtl>,
+    pub command_tx: mpsc::UnboundedSender<(Option<String>, McpCommand)>,
+    tokens: WorkspaceTokens,
 }
 
-pub fn spawn_mcp_server() -> McpHandle {
-    let (command_tx, command_rx) = mpsc::unbounded_channel::<(String, McpCommand)>();
-    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ServerCtl>();
+pub fn spawn_mcp_server(port: u16) -> McpHandle {
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<(Option<String>, McpCommand)>();
+    let tokens: WorkspaceTokens = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
-    let command_tx_for_servers = command_tx.clone();
+    let command_tx_for_server = command_tx.clone();
     let command_tx_for_handle = command_tx.clone();
+    let tokens_for_server = Arc::clone(&tokens);
     // Spawn tokio runtime in a separate thread
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(async move {
-            let mut shutdowns: std::collections::HashMap<String, oneshot::Sender<()>> =
-                std::collections::HashMap::new();
-            while let Some(ctl) = ctl_rx.recv().await {
-                match ctl {
-                    ServerCtl::Start {
-                        workspace_id,
-                        token,
-                        listener,
-                    } => {
-                        let listener = match tokio::net::TcpListener::from_std(listener) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                tracing::warn!(error = %e, %workspace_id, "MCP listener adopt failed");
-                                continue;
-                            }
-                        };
+            let server_factory = move || {
+                Ok(McpServer::new(
+                    Arc::clone(&tokens_for_server),
+                    command_tx_for_server.clone(),
+                )) as Result<McpServer, std::io::Error>
+            };
 
-                        let ws_id = workspace_id.clone();
-                        let ctx = command_tx_for_servers.clone();
-                        let server_factory = move || {
-                            Ok(McpServer::new(ws_id.clone(), ctx.clone()))
-                                as Result<McpServer, std::io::Error>
-                        };
+            // Stateless JSON-RPC mode: no sessions, plain JSON responses.
+            // Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
+            use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
+            let mut config = StreamableHttpServerConfig::default();
+            config.json_response = true;
+            config.stateful_mode = false;
 
-                        // Stateless JSON-RPC mode: no sessions, plain JSON responses.
-                        // Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
-                        use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
-                        let mut config = StreamableHttpServerConfig::default();
-                        config.json_response = true;
-                        config.stateful_mode = false;
+            let service = StreamableHttpService::new(
+                server_factory,
+                LocalSessionManager::default().into(),
+                config,
+            );
 
-                        let service = StreamableHttpService::new(
-                            server_factory,
-                            LocalSessionManager::default().into(),
-                            config,
-                        );
+            let app = axum::Router::new().nest_service("/mcp", service);
 
-                        // The token is baked into the route, so a request with the
-                        // wrong one 404s in the router — no auth code of our own.
-                        let app = axum::Router::new().nest_service(&format!("/mcp/{token}"), service);
-
-                        let (sd_tx, sd_rx) = oneshot::channel::<()>();
-                        shutdowns.insert(workspace_id.clone(), sd_tx);
-                        tokio::spawn(async move {
-                            let served = axum::serve(listener, app)
-                                .with_graceful_shutdown(async move {
-                                    let _ = sd_rx.await;
-                                })
-                                .await;
-                            if let Err(e) = served {
-                                tracing::error!(error = %e, %workspace_id, "MCP HTTP server error");
-                            }
-                        });
-                    }
-                    ServerCtl::Stop(workspace_id) => {
-                        if let Some(sd) = shutdowns.remove(&workspace_id) {
-                            let _ = sd.send(());
-                        }
-                    }
+            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(error = %e, port, "MCP HTTP server failed to bind");
+                    return;
                 }
+            };
+
+            tracing::info!("MCP HTTP server listening on http://127.0.0.1:{port}/mcp");
+
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!(error = %e, "MCP HTTP server error");
             }
         });
     });
@@ -1691,58 +1714,33 @@ pub fn spawn_mcp_server() -> McpHandle {
     McpHandle {
         command_rx,
         command_tx: command_tx_for_handle,
-        ctl_tx,
+        tokens,
     }
 }
 
 impl McpHandle {
     /// Poll for pending MCP commands (non-blocking).
     /// Returns None if no commands are pending.
-    pub fn poll(&mut self) -> Option<(String, McpCommand)> {
+    pub fn poll(&mut self) -> Option<(Option<String>, McpCommand)> {
         self.command_rx.try_recv().ok()
     }
 
-    /// Bind a listener for `workspace_id` and start serving on it.
-    ///
-    /// The bind happens here, on the caller's thread, so the port is known
-    /// synchronously — the caller needs it immediately to build the agent's
-    /// MCP URL. `preferred_port` is honoured when free (the Default workspace
-    /// keeps 3434 so pre-workspaces agent configs still resolve); everything
-    /// else takes an ephemeral port. Returns `None` if the bind fails.
-    pub fn start_workspace(&self, workspace_id: &str, preferred_port: u16) -> Option<McpEndpoint> {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", preferred_port))
-            .or_else(|e| {
-                if preferred_port != 0 {
-                    tracing::warn!(error = %e, preferred_port, "MCP port busy — falling back to ephemeral");
-                    std::net::TcpListener::bind(("127.0.0.1", 0))
-                } else {
-                    Err(e)
-                }
-            })
-            .map_err(|e| tracing::warn!(error = %e, %workspace_id, "MCP bind failed"))
-            .ok()?;
-        let port = listener.local_addr().ok()?.port();
-        listener.set_nonblocking(true).ok()?;
-
+    /// Mint this workspace's token and start accepting requests for it.
+    /// The token is what the workspace's agents send in `WORKSPACE_HEADER`.
+    pub fn register_workspace(&self, workspace_id: &str) -> String {
         let token = random_token();
-        let endpoint = McpEndpoint {
-            port,
-            token: token.clone(),
-        };
-        self.ctl_tx
-            .send(ServerCtl::Start {
-                workspace_id: workspace_id.to_string(),
-                token,
-                listener,
-            })
-            .ok()?;
-        tracing::info!(%workspace_id, port, "MCP HTTP server listening");
-        Some(endpoint)
+        if let Ok(mut map) = self.tokens.write() {
+            map.insert(token.clone(), workspace_id.to_string());
+        }
+        token
     }
 
-    /// Shut the workspace's listener down — called when a workspace is deleted.
-    pub fn stop_workspace(&self, workspace_id: &str) {
-        let _ = self.ctl_tx.send(ServerCtl::Stop(workspace_id.to_string()));
+    /// Drop the workspace's tokens — called when a workspace is deleted, so a
+    /// still-running agent can't keep driving tabs that no longer exist.
+    pub fn unregister_workspace(&self, workspace_id: &str) {
+        if let Ok(mut map) = self.tokens.write() {
+            map.retain(|_, id| id != workspace_id);
+        }
     }
 }
 

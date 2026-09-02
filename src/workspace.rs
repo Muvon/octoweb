@@ -12,7 +12,6 @@
 //! `WorkspaceManager::active()` until stage 2 added switching.
 
 use crate::browser::TabManager;
-use crate::mcp::McpEndpoint;
 use crate::quickslots::QuickSlots;
 use crate::AcpSession;
 use std::collections::HashMap;
@@ -21,6 +20,10 @@ use std::sync::{Arc, Mutex};
 use wry::WebView;
 
 const DEFAULT_COLOR: &str = "#7C5CFF";
+
+/// Id of the always-present first workspace. Also what an MCP caller that
+/// sends no workspace token is routed to.
+pub const DEFAULT_WORKSPACE_ID: &str = "default";
 
 pub struct Workspace {
     pub id: String,
@@ -49,10 +52,10 @@ pub struct Workspace {
     /// Pinned quick-slots (⌘1–⌘0) for this workspace. Seeded by main.rs at
     /// startup from `quickslots::load_all()`.
     pub quick_slots: QuickSlots,
-    /// This workspace's own MCP listener. The agent processes spawned here are
-    /// pointed at it, so their tool calls act on this workspace's tabs no
-    /// matter which workspace is on screen. `None` if the bind failed.
-    pub mcp_endpoint: Option<McpEndpoint>,
+    /// This workspace's MCP token. Agents spawned here send it in
+    /// `mcp::WORKSPACE_HEADER`, so their tool calls act on this workspace's
+    /// tabs no matter which workspace is on screen.
+    pub mcp_token: Option<String>,
 }
 
 impl Workspace {
@@ -74,7 +77,7 @@ impl Workspace {
             acp_active_session_id: 0,
             mru: Vec::new(),
             quick_slots: Default::default(),
-            mcp_endpoint: None,
+            mcp_token: None,
         }
     }
 }
@@ -93,7 +96,7 @@ impl WorkspaceManager {
     pub fn new_default(max_history: usize, home_page: String) -> Self {
         Self {
             workspaces: vec![Workspace::new(
-                "default".to_string(),
+                DEFAULT_WORKSPACE_ID.to_string(),
                 "Default".to_string(),
                 DEFAULT_COLOR.to_string(),
                 None,

@@ -434,3 +434,49 @@ pub fn setup_edit_menu() {
         app.setMainMenu(Some(&menubar));
     }
 }
+
+/// Path to the bundled octomind tap.
+///
+/// Inside a `.app` it sits in `Contents/Resources/tap`; in a `cargo run` build
+/// the binary is in `target/<profile>/`, so fall back to the repo's `tap/`.
+fn bundled_tap_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // …/Octoweb.app/Contents/MacOS/octoweb → …/Contents/Resources/tap
+    let bundled = exe.parent()?.parent()?.join("Resources").join("tap");
+    if bundled.is_dir() {
+        return Some(bundled);
+    }
+    // …/target/debug/octoweb → …/tap
+    let dev = exe.parent()?.parent()?.parent()?.join("tap");
+    dev.is_dir().then_some(dev)
+}
+
+/// Register the bundled tap with octomind so `octoweb:*` agents resolve.
+///
+/// Re-points every launch instead of registering once: the tap is a symlink
+/// into the app bundle, so it goes stale the moment someone moves the app.
+/// `octomind tap` refuses to re-add an existing name, hence the untap first.
+/// Both calls are best-effort — a missing octomind just means no assistant,
+/// which the sidebar already reports on its own.
+pub fn register_octomind_tap(tap_name: &str) {
+    let Some(dir) = bundled_tap_dir() else {
+        tracing::warn!("bundled octomind tap not found — octoweb: agents will not resolve");
+        return;
+    };
+    let run = |args: &[&str]| {
+        std::process::Command::new("octomind")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+    };
+    let _ = run(&["untap", tap_name]);
+    match run(&["tap", tap_name, &dir.to_string_lossy()]) {
+        Ok(s) if s.success() => {
+            tracing::info!(tap = tap_name, path = %dir.display(), "octomind tap registered")
+        }
+        Ok(s) => tracing::warn!(tap = tap_name, code = ?s.code(), "octomind tap failed"),
+        Err(e) => tracing::warn!(error = %e, "octomind not on PATH — skipping tap registration"),
+    }
+}
