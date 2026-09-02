@@ -250,9 +250,11 @@ impl AcpHandle {
                 match init_session(
                     event_tx.clone(),
                     std::sync::Arc::clone(&wake),
-                    prompt_rx,
-                    cancel_rx,
-                    command_rx,
+                    SessionInbox {
+                        prompt_rx,
+                        cancel_rx,
+                        command_rx,
+                    },
                     mcp_token,
                     program,
                     args,
@@ -405,16 +407,26 @@ async fn run_ext_command(
     }
 }
 
+/// Receiving ends of the `AcpHandle` channels, owned by the ACP thread.
+struct SessionInbox {
+    prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
+    cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
 async fn init_session(
     tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
-    mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
-    mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    mut command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    inbox: SessionInbox,
     mcp_token: Option<String>,
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
+    let SessionInbox {
+        mut prompt_rx,
+        mut cancel_rx,
+        mut command_rx,
+    } = inbox;
     // Run the agent inside octoweb's internal workspace dir (not the user's
     // home). Combined with `--sandbox` (injected in `connect`), this confines
     // all of the agent's filesystem writes to this dir.

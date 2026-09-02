@@ -2795,13 +2795,6 @@ fn main() {
         }};
     }
 
-    /// Mount the active workspace's ACP sessions into the sidebar's tab strip
-    /// + per-session message logs, then switch to its active one. The sidebar
-    /// WKWebView is a single long-lived instance that does NOT reset itself
-    /// on a workspace switch, so this re-push is how its DOM catches up.
-    /// Reused by `SidebarReady` (first boot — which additionally reconciles
-    /// the sid=1 JS placeholder, not handled here) and every workspace
-    /// switch/create/delete.
     /// Mint the MCP token for one chat session's agent process. It names both
     /// the workspace and the session, so `render_ui` lands in the chat that
     /// asked for it rather than whichever one is in front. Replaces whatever
@@ -2849,6 +2842,13 @@ fn main() {
         }};
     }
 
+    /// Mount the active workspace's ACP sessions into the sidebar's tab strip
+    /// and per-session message logs, then switch to its active one. The
+    /// sidebar WKWebView is a single long-lived instance that does NOT reset
+    /// itself on a workspace switch, so this re-push is how its DOM catches up.
+    /// Reused by `SidebarReady` (first boot — which additionally reconciles
+    /// the sid=1 JS placeholder, not handled here) and every workspace
+    /// switch/create/delete.
     macro_rules! push_acp_sessions_to_sidebar {
         () => {{
             for s in workspace_manager.active().acp_sessions.iter() {
