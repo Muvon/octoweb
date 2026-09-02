@@ -891,7 +891,7 @@ impl McpServer {
 
 /// How long `render_ui` blocks waiting for a click before giving the agent a
 /// usable answer back. The surface itself is not torn down — a late click
-/// still reaches the agent through the sidebar's replay path.
+/// still reaches the agent — as a prompt rather than as this call's result.
 const RENDER_UI_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 
 #[tool_router]

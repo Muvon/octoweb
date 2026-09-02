@@ -4886,10 +4886,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       syncFeed(s);
       // A2UI: a click optimistically locks its card into "Processing…" and
       // waits for the agent's next envelope to lift it. Turn end (Done /
-      // Cancelled / Error) means no envelope is coming and no render_ui call
-      // from this turn is still waiting — unlock the cards and drop the stale
-      // poll ids so the next click routes through the ghost path (synthetic
-      // prompt) instead of resolving a call nobody is listening to.
+      // Cancelled / Error) means no envelope is coming — unlock the cards.
+      // Clearing pollFileId only drops the hint about which envelope to
+      // complete; a later click still reaches Rust, which decides whether a
+      // render_ui call is waiting.
       for (const block of a2uiBlocks.values()) {
         if (block.sid !== sid) continue;
         block.pollFileId = null;
@@ -4906,6 +4906,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (!s) return;
     window.__setThinking(sid, false);
     appendMessage(s, 'error', text);
+  };
+
+  // A user turn Rust synthesized — an A2UI click that had no `render_ui` call
+  // waiting on it, so the choice reaches the agent as a prompt. Typed prompts
+  // render their own bubble in dispatchPromptForSession; this is the only path
+  // where Rust owns it. The click handler already set busy/thinking.
+  window.__appendUserMsg = function(sid, text) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    appendMessage(s, 'user', text);
   };
 
   // Replay persisted messages on cold-start. Rust calls this once per session
@@ -5855,6 +5865,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (s.surfaceId != null) block.surfaceId = s.surfaceId;
         if (s.catalogId != null) block.catalogId = s.catalogId;
         if (s.theme != null) block.theme = s.theme;
+        // A2UI v1.0 lets createSurface carry the whole UI in one message.
+        // Accepting it costs nothing and models trained on v1.0 emit it.
+        if (Array.isArray(s.components)) {
+          for (const c of s.components) {
+            if (c && typeof c.id === 'string') block.componentsMap.set(c.id, c);
+          }
+        }
+        if (s.dataModel != null) block.dataModel = s.dataModel;
       } else if (msg.updateComponents) {
         const arr = msg.updateComponents.components || [];
         for (const c of arr) {
@@ -6128,50 +6146,28 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           context,
           dataModel: block.dataModel,
         };
-        if (block.pollFileId) {
-          // A render_ui call is still waiting on this envelope. Send the
-          // resolution to THAT file (not necessarily the latest envelope we
-          // received — fire-and-forget updates don't carry a poll).
-          window.ipc.postMessage(JSON.stringify({
-            type: 'a2ui_resolve',
-            file_id: block.pollFileId,
-            action: actionPayload,
-          }));
-          // Optimistic lock on the bubble.
-          block.resolved = true;
-          a2uiRerender(block);
-          // Mark the SESSION busy too — the agent is about to process this
-          // click and may take time. Without this, the input box stays
-          // enabled, no thinking indicator shows, and the stop button is
-          // missing. Same UX as a typed prompt.
-          const liveSession = sessions.get(block.sid);
-          if (liveSession) {
-            liveSession.busy = true;
-            window.__setThinking(liveSession.sid, true);
-          }
-        } else {
-          // No active poll — either the surface is replayed from history,
-          // OR the agent sent a fire-and-forget update without a new
-          // await_events envelope. Deliver the event by simulating a user
-          // prompt through the normal dispatch path so the user sees a
-          // user bubble + thinking indicator (same as typing a message).
-          const s = sessions.get(block.sid);
-          if (s) {
-            const author = (context && (context.author || context.handle)) || '';
-            const surfaceLabel = block.surfaceId || '(unknown)';
-            const headline = author
-              ? `Clicked ${ev.name} on ${author}`
-              : `Clicked ${ev.name}`;
-            const promptText =
-              headline + '\n\n' +
-              '[A2UI event — out-of-band click on prior surface]\n' +
-              'surfaceId: ' + surfaceLabel + '\n' +
-              'event: ' + ev.name + '\n' +
-              'sourceComponentId: ' + (typeof def.id === 'string' ? def.id : '?') + '\n' +
-              'context: ' + JSON.stringify(context) + '\n\n' +
-              'Do the work this event implies right now (post the tweet, save the draft, advance the wizard…). Then call render_ui again with the SAME surfaceId AND await_events so the next click resolves normally.';
-            dispatchPromptForSession(s, promptText, [], []);
-          }
+        // Every click goes to Rust the same way. Whether a `render_ui` call is
+        // still waiting on this surface is Rust's question — it holds the
+        // pending map. When nothing is waiting it forwards the click to the
+        // agent as a prompt instead, so a click is never silently dropped.
+        // `pollFileId` is only a hint about WHICH envelope to complete.
+        window.ipc.postMessage(JSON.stringify({
+          type: 'a2ui_resolve',
+          file_id: block.pollFileId || block.fileId,
+          sid: block.sid,
+          action: actionPayload,
+        }));
+        // Optimistic lock on the bubble.
+        block.resolved = true;
+        a2uiRerender(block);
+        // Mark the SESSION busy too — the agent is about to process this click
+        // and may take time. Without this the input box stays enabled, no
+        // thinking indicator shows, and the stop button is missing. Same UX as
+        // a typed prompt.
+        const liveSession = sessions.get(block.sid);
+        if (liveSession) {
+          liveSession.busy = true;
+          window.__setThinking(liveSession.sid, true);
         }
       });
       return btn;
@@ -6609,15 +6605,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       dataModel: {},
       awaitEvents: [],
       resolved: false,
-      // The fileId of the envelope whose render_ui call is currently waiting
-      // for a click. `null` if no such envelope (after-restart replay, after
-      // the agent sent a fire-and-forget update without a new poll, or after
-      // the prior poll exhausted). Clicks go via the live `a2ui_resolve` path
-      // when this is set; otherwise they go via the ghost `a2ui_replay_event`
-      // path (synthetic prompt to the agent).
+      // The fileId of the envelope a render_ui call is waiting on, used as the
+      // preferred key when reporting a click. `null` after replay, after a
+      // fire-and-forget update, or once the call completed — the click then
+      // reports this block's own fileId and Rust resolves or forwards it.
       pollFileId: null,
-      // True if the most-recent envelope came from a running agent in this
-      // session. Affects only toast text; click routing uses pollFileId.
+      // True once a live agent produced an envelope for this block (sticky).
+      // Only affects whether a terminal envelope locks the card — click
+      // routing no longer depends on it.
       live: false,
       resolutionLabel: null,
       version: 0,
@@ -6741,8 +6736,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       block.resolved = false;
     }
     // If THIS envelope's poll just exhausted (transitioned to terminal),
-    // clear it so subsequent clicks fall through to the ghost path until
-    // the agent emits a new envelope with await_events.
+    // clear the hint; the next click reports the block's own fileId instead.
     if (isTerminal && block.pollFileId === fileId) {
       block.pollFileId = null;
     }

@@ -83,8 +83,11 @@ enum AppEvent {
     ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
     ToggleFullscreen,        // ⌘Return — toggle native macOS fullscreen on the chrome window
     ToggleSidebarFullscreen, // ⌘⇧Return / icon — sidebar expands to full window width inside chrome
-    AcpPrompt(u64, String, Vec<(String, String)>), // (session_id, text, images) — user prompt + optional images
-    AcpCancel(u64),                                // (session_id) — user clicked stop button
+    /// (session_id, text, images, display) — a prompt for the agent. `display`
+    /// overrides what the chat shows for it; A2UI clicks send the agent a full
+    /// instruction block but show the user a one-liner.
+    AcpPrompt(u64, String, Vec<(String, String)>, Option<String>),
+    AcpCancel(u64),                   // (session_id) — user clicked stop button
     AcpSetAgent(u64, String), // (session_id, tag) — change agent tag and restart that session
     AcpClearSession(u64),     // (session_id) — restart session with same tag (clear chat)
     AcpSessionCreate(String, String), // (title, tag) — create new session (capped at MAX_SESSIONS)
@@ -160,9 +163,10 @@ enum AppEvent {
     LearningWake,                                // background learning agent pokes event loop
     LearningReady(String), // active tab content extracted — build prompt and send
     JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
-    /// The user clicked a button on an A2UI surface: (call_id, action payload).
-    /// Completes the `render_ui` tool call still blocked on that surface.
-    A2uiResolve(String, serde_json::Value),
+    /// The user clicked a button on an A2UI surface: (call_id, session_id,
+    /// action payload). Completes the `render_ui` call blocked on that
+    /// surface, or — when nothing is waiting — reaches the agent as a prompt.
+    A2uiResolve(String, u64, serde_json::Value),
     KeybindRecord(String, String), // (action_id, chord) — remap a global shortcut
     KeybindReset(String),          // (action_id) — restore one action to its default
     KeybindResetAll,               // restore every keybinding to default
@@ -1418,7 +1422,7 @@ fn main() {
                                 }
                             }
                             if !text.is_empty() || !images.is_empty() {
-                                let _ = p.send_event(AppEvent::AcpPrompt(sid, text, images));
+                                let _ = p.send_event(AppEvent::AcpPrompt(sid, text, images, None));
                             }
                         }
                         Some("acp_cancel") => {
@@ -1469,25 +1473,18 @@ fn main() {
                             let _ = p.send_event(AppEvent::SidebarReady);
                         }
                         Some("a2ui_resolve") => {
+                            // Every A2UI click comes through here. Whether a
+                            // `render_ui` call is still waiting is Rust's
+                            // question to answer, not the sidebar's — see the
+                            // A2uiResolve handler.
                             let call_id = v["file_id"].as_str().unwrap_or("").to_string();
-                            if !call_id.is_empty() {
+                            let sid = v["sid"].as_u64().unwrap_or(0);
+                            if !call_id.is_empty() && sid != 0 {
                                 let _ = p.send_event(AppEvent::A2uiResolve(
                                     call_id,
+                                    sid,
                                     v["action"].clone(),
                                 ));
-                            }
-                        }
-                        Some("a2ui_replay_event") => {
-                            // Click on a ghost surface — nothing is blocked on
-                            // it any more (fire-and-forget update, app restart,
-                            // or the call already timed out). Deliver the event
-                            // as a synthetic prompt instead: the agent has the
-                            // surface in chat history and can resume in a fresh
-                            // turn.
-                            let sid = v["sid"].as_u64().unwrap_or(0);
-                            if sid != 0 {
-                                let prompt = a2ui_replay_prompt(&v["action"]);
-                                let _ = p.send_event(AppEvent::AcpPrompt(sid, prompt, vec![]));
                             }
                         }
                         Some("a2ui_open_url") => {
@@ -2818,19 +2815,18 @@ fn main() {
         };
     }
 
-    /// Paint (or repaint) one A2UI surface in the sidebar. `live` marks the
-    /// surface as still wired to a blocked `render_ui` call, which is what
-    /// lets a click resolve it directly instead of going through the replay
-    /// path. Only ever targets the sidebar of the workspace on screen.
+    /// Paint (or repaint) one A2UI surface in the sidebar. Always marked live:
+    /// this macro only ever runs for a surface a running agent just produced.
+    /// Replay from the persisted log passes `live = false` instead. Only ever
+    /// targets the sidebar of the workspace on screen.
     macro_rules! push_a2ui_surface {
-        ($sid:expr, $call_id:expr, $body:expr, $live:expr) => {{
+        ($sid:expr, $call_id:expr, $body:expr) => {{
             let sid = $sid;
             let body_json = serde_json::to_string($body).unwrap_or_else(|_| "{}".into());
             let escaped_id = webview_utils::escape_js_template($call_id);
             let escaped_body = webview_utils::escape_js_template(&body_json);
-            let live_js = if $live { "true" } else { "false" };
             let _ = sidebar_wv.evaluate_script(&format!(
-                "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`),{live_js},0)"
+                "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`),true,0)"
             ));
         }};
     }
@@ -2848,7 +2844,7 @@ fn main() {
                     "status": "pending",
                     "await_events": p.await_events,
                 });
-                push_a2ui_surface!(p.sid, call_id, &body, true);
+                push_a2ui_surface!(p.sid, call_id, &body);
             }
         }};
     }
@@ -4869,7 +4865,7 @@ fn main() {
                         // Otherwise the bubble is rebuilt from the persisted
                         // log (and re-marked live) on workspace switch.
                         if ws_idx == workspace_manager.active_index() {
-                            push_a2ui_surface!(sid, &call_id, &body, awaiting);
+                            push_a2ui_surface!(sid, &call_id, &body);
                         }
                         if let Some(s) = workspace_manager
                             .at_mut(ws_idx)
@@ -5918,10 +5914,15 @@ fn main() {
             }
 
             // ── ACP events ─────────────────────────────────────────────────────
-            Event::UserEvent(AppEvent::AcpPrompt(sid, text, images)) => {
+            Event::UserEvent(AppEvent::AcpPrompt(sid, text, images, display)) => {
+                // What the chat shows. Differs from `text` only for synthesized
+                // prompts (an A2UI click), where the agent needs instructions
+                // the user has no reason to read.
+                let shown = display.unwrap_or_else(|| text.clone());
                 // Record prompt in shared AI history (MRU, dedup) so it persists
-                // across restarts and seeds future sessions.
-                if !text.is_empty() {
+                // across restarts and seeds future sessions. Synthesized prompts
+                // are not something the user typed, so they stay out of it.
+                if !text.is_empty() && shown == text {
                     if let Some(pos) = ai_prompt_history.iter().position(|p| p == &text) {
                         ai_prompt_history.remove(pos);
                     }
@@ -5940,8 +5941,16 @@ fn main() {
                     }
                     // New turn starts now — anchors `turn_ms` on the flush.
                     s.turn_started = Some(std::time::Instant::now());
-                    if !text.is_empty() {
-                        push_acp_msg(s, "user", text.clone(), cfg.max_acp_session_messages);
+                    if !shown.is_empty() {
+                        // A typed prompt already painted its own bubble in the
+                        // sidebar; a synthesized one has no bubble yet.
+                        if shown != text {
+                            let escaped = webview_utils::escape_js_template(&shown);
+                            let _ = sidebar_wv.evaluate_script(&format!(
+                                "window.__appendUserMsg && window.__appendUserMsg({sid},`{escaped}`)"
+                            ));
+                        }
+                        push_acp_msg(s, "user", shown, cfg.max_acp_session_messages);
                         should_persist = true;
                     }
                     // Lazy-spawn safety net: prompts can race ahead of an
@@ -6413,14 +6422,21 @@ fn main() {
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
 
-            // ── A2UI button click → unblock the `render_ui` call waiting on it ─
-            Event::UserEvent(AppEvent::A2uiResolve(call_id, action)) => {
-                // No pending entry means the surface outlived its agent (app
-                // restart, session closed, or the call already timed out). The
-                // sidebar routes those clicks through `a2ui_replay_event`
-                // instead, so there is nothing for us to complete here.
+            // ── A2UI button click ───────────────────────────────────────────
+            // Completes the `render_ui` call blocked on this surface. When
+            // nothing is waiting — the agent sent a fire-and-forget update,
+            // the app restarted, the call timed out — the click still has to
+            // reach the agent, so it goes as a prompt instead. The sidebar
+            // does not try to tell these apart; it always sends the click here.
+            Event::UserEvent(AppEvent::A2uiResolve(call_id, click_sid, action)) => {
                 let Some(pending) = pending_a2ui.remove(&call_id) else {
-                    tracing::debug!(%call_id, "A2UI click with no waiting render_ui call");
+                    tracing::debug!(%call_id, "A2UI click with no waiting render_ui call — sending as a prompt");
+                    let _ = proxy.send_event(AppEvent::AcpPrompt(
+                        click_sid,
+                        a2ui_replay_prompt(&action),
+                        vec![],
+                        Some(a2ui_click_label(&action)),
+                    ));
                     return;
                 };
                 let name = action
@@ -6449,7 +6465,7 @@ fn main() {
                     .and_then(|s| mark_a2ui_resolved(s, &call_id, &resolution));
                 if let Some(body) = updated {
                     if ws_idx == workspace_manager.active_index() {
-                        push_a2ui_surface!(pending.sid, &call_id, &body, true);
+                        push_a2ui_surface!(pending.sid, &call_id, &body);
                     }
                     persist_acp_history(
                         &pending.workspace_id,
@@ -6466,6 +6482,7 @@ fn main() {
                         pending.sid,
                         a2ui_replay_prompt(&resolution),
                         vec![],
+                        Some(a2ui_click_label(&resolution)),
                     ));
                 }
             }
@@ -8022,6 +8039,38 @@ fn cap_tool_json(v: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::String(t)
         }
         _ => v.clone(),
+    }
+}
+
+/// What the chat shows for an A2UI click that had to be sent as a prompt. The
+/// agent gets `a2ui_replay_prompt`'s full instruction block; the user sees one
+/// line, because they clicked a button — they didn't type any of this.
+fn a2ui_click_label(action: &serde_json::Value) -> String {
+    let name = action["name"].as_str().unwrap_or("(unknown)");
+    match action["context"].as_object() {
+        Some(ctx) if !ctx.is_empty() => {
+            let mut fields: Vec<String> = ctx
+                .iter()
+                .filter_map(|(k, v)| {
+                    let text = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Null => return None,
+                        other => other.to_string(),
+                    };
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(format!("{k}: {text}"))
+                })
+                .collect();
+            fields.sort();
+            if fields.is_empty() {
+                format!("Clicked {name}")
+            } else {
+                format!("Clicked {name} — {}", fields.join(", "))
+            }
+        }
+        _ => format!("Clicked {name}"),
     }
 }
 
