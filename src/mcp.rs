@@ -124,6 +124,9 @@ pub enum McpCommand {
         selector: String,
         text: String,
         expect: Option<String>,
+        /// Skip the synthetic paste / editing-command attempts and go straight
+        /// to trusted native keystrokes.
+        keys_only: bool,
         response: oneshot::Sender<Result<String, String>>,
     },
     /// Navigate back in browser history
@@ -286,10 +289,6 @@ pub fn dom_status_error(status: &str, selector: &str) -> String {
             "Element '{selector}' is not a text field — it is not an <input>, <textarea>, or contenteditable. \
              Pick the editable element itself (in browser_snapshot it shows as a 'textbox'/contenteditable @ref); \
              avoid placeholder/label nodes that overlay the real editor"
-        ),
-        "typefailed" => format!(
-            "Could not insert text into '{selector}' — the editor accepted neither a synthetic paste nor an editing command. \
-             It may require a real click to focus first (try browser_click on it, then browser_type), or it is a custom editor that needs key-by-key input"
         ),
         s if s.starts_with("occluded:") => format!(
             "Element '{selector}' is covered by {} — dismiss that overlay (cookie banner, modal, dropdown) first, or scroll it away, then retry",
@@ -605,6 +604,10 @@ pub struct TypeRequest {
     pub selector: String,
     #[schemars(description = "Text to set. Replaces the existing value — does not append.")]
     pub text: String,
+    #[schemars(
+        description = "\"auto\" (default): synthetic paste, then WebKit editing commands, then trusted native keystrokes if the editor accepted neither. \"keys\": type with trusted keystrokes from the start — slower, but what an editor that only reacts to real typing needs (also triggers its typing shortcuts, e.g. markdown-style headings)."
+    )]
+    pub mode: Option<String>,
     #[schemars(
         description = "Optional expected outcome to wait for after the action (up to 6s), reported as ✓/✗ in the result — one call to act AND verify. Forms: \"text:Saved\" (text appears), \"gone:Loading\" (text disappears), \"url:/dashboard\" (URL contains), \"selector:.success\" / \"selector_gone:.spinner\". A bare string is treated as text."
     )]
@@ -1237,18 +1240,28 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Set the value of a text field. Works with <input>, <textarea>, and contenteditable rich editors including model-backed ones (Lexical, DraftJS, ProseMirror) — their internal model updates so submit buttons gated on it enable. REPLACES the existing value — does not append. For inputs it bypasses React's controlled-input cache via the prototype value setter; for rich editors it drives a synthetic paste (falling back to an editing command). Errors clearly if the target is not actually editable (e.g. a placeholder/label node) instead of silently doing nothing. To press Enter / submit afterwards, use browser_press_key, or click the submit button with browser_click. Reports what changed after typing (e.g. a submit button enabling, suggestions appearing). Defaults to the visible tab."
+        description = "Set the value of a text field. Works with <input>, <textarea>, and contenteditable rich editors including model-backed ones (Lexical, DraftJS, ProseMirror) — their internal model updates so submit buttons gated on it enable. REPLACES the existing value — does not append. For inputs it bypasses React's controlled-input cache via the prototype value setter; for rich editors it drives a synthetic paste, then WebKit editing commands, then trusted native keystrokes — so custom editors that only react to real typing still get the text (multi-paragraph text keeps its paragraphs). Pass mode:\"keys\" to type with keystrokes from the start. Errors clearly if the target is not actually editable (e.g. a placeholder/label node) instead of silently doing nothing. To press Enter / submit afterwards, use browser_press_key, or click the submit button with browser_click. Reports what changed after typing (e.g. a submit button enabling, suggestions appearing). Defaults to the visible tab."
     )]
     async fn browser_type(
         &self,
         Parameters(req): Parameters<TypeRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let keys_only = match req.mode.as_deref().unwrap_or("auto") {
+            "auto" => false,
+            "keys" => true,
+            other => {
+                return Ok(err_result(format!(
+                    "mode must be \"auto\" or \"keys\", got \"{other}\""
+                )))
+            }
+        };
         let summary = browser_try!(
             self.send_command(|tx| McpCommand::Type {
                 tab_id: req.tab_id,
                 selector: req.selector.clone(),
                 text: req.text,
                 expect: req.expect.clone(),
+                keys_only,
                 response: tx,
             })
             .await?
@@ -1277,6 +1290,7 @@ impl McpServer {
                     selector: f.selector.clone(),
                     text: f.value.clone(),
                     expect: None,
+                    keys_only: false,
                     response: tx,
                 })
                 .await?;
@@ -1736,8 +1750,10 @@ impl ServerHandler for McpServer {
                 browser_press_key, a hover first), or check browser_console_messages.\n\
                 \n\
                 Typing & submitting: browser_type sets a value (replaces, doesn't append) and fires \
-                input+change. To submit, follow with browser_press_key(key=\"Enter\") — a native Enter \
-                that submits the form. For single keys use browser_press_key, not browser_type.\n\
+                input+change; rich editors get a paste, then editing commands, then trusted keystrokes, \
+                so multi-paragraph text lands as paragraphs (mode:\"keys\" forces real typing). To submit, \
+                follow with browser_press_key(key=\"Enter\") — a native Enter that submits the form. For \
+                single keys use browser_press_key, not browser_type.\n\
                 \n\
                 Waiting: browser_navigate already blocks until the page is idle — no follow-up wait needed. \
                 Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \

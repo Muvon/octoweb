@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Paragraph Editor</title>
+</head>
+<body>
+  <h1>Paragraph Editor Fixture</h1>
+  <!-- Medium-shaped rich editor: ONE editing host holds the title and the body
+       blocks, and a paste handler owns insertion — it splits the pasted text
+       into <p> blocks, so the host's textContent never contains the pasted
+       newlines. Both traits broke browser_type: the literal-substring success
+       check failed on multi-line text (then double-inserted and reported an
+       error), and execCommand('selectAll') wiped the title along with the
+       body. -->
+  <article id="host" contenteditable="true" style="border:1px solid #999;padding:6px">
+    <h3 id="title">Draft title</h3>
+    <p id="body">old body</p>
+  </article>
+  <script>
+    var host = document.getElementById('host');
+    window.__pastes = 0;
+    host.addEventListener('paste', function (e) {
+      e.preventDefault();
+      window.__pastes++;
+      var text = e.clipboardData.getData('text/plain');
+      var sel = document.getSelection();
+      var block = sel.anchorNode || document.getElementById('body');
+      while (block && block.parentNode !== host) block = block.parentNode;
+      if (!block) block = document.getElementById('body');
+      var lines = text.split('\n');
+      block.textContent = lines[0];
+      for (var i = 1; i < lines.length; i++) {
+        var p = document.createElement('p');
+        p.textContent = lines[i];
+        block.parentNode.insertBefore(p, block.nextSibling);
+        block = p;
+      }
+    });
+  </script>
+</body>
+</html>

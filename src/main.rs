@@ -4367,7 +4367,7 @@ fn main() {
                             let _ = response.send(Err("No active tab".to_string()));
                         }
                     }
-                    McpCommand::Type { tab_id, selector, text, expect, response } => {
+                    McpCommand::Type { tab_id, selector, text, expect, keys_only, response } => {
                         let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
@@ -4376,16 +4376,45 @@ fn main() {
                             }
                             let _ = mcp_ensure_tab!(ws_idx, id);
                             if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
-                                let script = dom_actions::type_script(&selector, &text, expect.as_deref());
+                                let script = dom_actions::type_script(&selector, &text, expect.as_deref(), keys_only);
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
                                 let gen0 = tab_nav::get(id);
+                                let wk = wv.webview();
+                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                                 async_eval::eval_async_expr(wv, &script, move |res| {
+                                    let val = match res {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            if let Some(tx) = response_cb.lock().unwrap().take() {
+                                                let _ = tx.send(Err(format!("Type failed: {e}")));
+                                            }
+                                            return;
+                                        }
+                                    };
+                                    // 'keys': the field is focused and cleared but neither the
+                                    // synthetic paste nor the editing commands landed (or keys
+                                    // mode was requested) — type it with trusted keystrokes and
+                                    // let the effect probe report what the editor did with them.
+                                    let inner: String = serde_json::from_str(&val).unwrap_or_else(|_| val.clone());
+                                    if inner.trim() == "keys" {
+                                        finish_native_action(
+                                            wk.clone(),
+                                            &NativeActionCtx {
+                                                tab_id: id,
+                                                gen0,
+                                                tabs: tabs_cb.clone(),
+                                                response: response_cb.clone(),
+                                            },
+                                            format!("Typed into {sel_for_err} with native keystrokes"),
+                                            expect.clone(),
+                                            |ptr| native_input::type_text(ptr, &text),
+                                        );
+                                        return;
+                                    }
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
-                                        let _ = tx.send(res
-                                            .map_err(|e| format!("Type failed: {e}"))
-                                            .and_then(|val| interpret_dom_result(&val, &sel_for_err))
+                                        let _ = tx.send(interpret_dom_result(&val, &sel_for_err)
                                             .map(|effect| format!("Typed into {sel_for_err}{effect}")));
                                     }
                                 });

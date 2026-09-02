@@ -506,70 +506,114 @@ pub fn effect_script(expect: Option<&str>) -> String {
     )
 }
 
-pub fn type_script(selector: &str, text: &str, expect: Option<&str>) -> String {
+pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: bool) -> String {
     // Two paths, both replace (don't append) per the tool contract:
     //
     //  - contenteditable → a fallback chain, because no single primitive works
     //    across editors AND background tabs:
     //      1. Synthetic `paste` (DataTransfer text/plain). Model-backed editors
-    //         (Lexical, DraftJS, ProseMirror) keep their own model and have
-    //         paste handlers that route through it, so the model updates and any
-    //         submit button gated on it enables. This is focus-independent — it
-    //         works even on background tabs, where some sites refuse
-    //         programmatic focus and `execCommand` (which needs document focus)
-    //         silently inserts nothing or, when focus is held, double-inserts
-    //         under such editors.
-    //      2. If paste didn't land (plain contenteditable has no paste handler),
-    //         fall back to `execCommand('insertText')` — WebKit's editing
-    //         command, which plain editors honour.
-    //    Existing content is cleared first (selectAll+delete) for replace
-    //    semantics. We poll briefly between the two so a synchronous framework
-    //    paste is detected before the execCommand fallback fires (no double).
+    //         (Lexical, DraftJS, ProseMirror, Medium) keep their own model and
+    //         have paste handlers that route through it, so the model updates
+    //         and any submit button gated on it enables. Focus-independent, so
+    //         it works on background tabs too.
+    //      2. If the paste didn't land (plain contenteditable has no paste
+    //         handler), WebKit's editing commands — one block per line, so
+    //         paragraphs survive instead of collapsing into one.
+    //      3. If neither landed, resolve `'keys'`: the target is focused and
+    //         cleared, and Rust types the text with trusted native keystrokes
+    //         (native_input::type_text) — the one input every editor accepts.
+    //    "Landed" is judged by the editor's own DOM, not a literal substring:
+    //    rich editors split lines into blocks (textContent loses the `\n`),
+    //    swap spaces for nbsp and re-typeset quotes, so a literal match on the
+    //    pasted text fails on exactly the editors the paste path exists for —
+    //    and a false "failed" would double-insert via the next step.
+    //    Existing content is cleared first with a range scoped to the target:
+    //    `execCommand('selectAll')` would widen it to the whole editing host
+    //    and wipe sibling blocks (a title above the body paragraph).
     //
     //  - <input>/<textarea> → set value via the prototype setter (bypasses
     //    React's controlled-input cache) and fire input+change.
+    //
+    // `keys_only` skips the paste/command attempts: clear, then `'keys'`.
     //
     // Value setter must come from the element's own interface AND window
     // (iframe elements have their own constructors); WebKit brand-checks
     // prototype setters, so HTMLInputElement's setter throws on <textarea>.
     let act = r#"
-    var TXT = __TXT__;
+    var TXT = __TXT__, KEYS_ONLY = __KEYS_ONLY__;
     try { el.focus(); } catch (e) {}
     if (el.isContentEditable) {
-      var doc = el.ownerDocument, root = el.getRootNode();
+      var doc = el.ownerDocument;
+      var host = el;
+      while (host.parentElement && host.parentElement.isContentEditable) host = host.parentElement;
       function selAll() {
         try {
+          var root = el.getRootNode();
           var s = (root.getSelection ? root : doc).getSelection();
           var rg = doc.createRange(); rg.selectNodeContents(el);
           s.removeAllRanges(); s.addRange(rg);
         } catch (e) {}
       }
+      // Letters and digits only: blind to block splitting, nbsp, smart quotes.
+      function norm(s) { return String(s || '').replace(/[^\p{L}\p{N}]+/gu, ''); }
+      var orig = norm(host.textContent);
       selAll();
-      try { doc.execCommand('selectAll', false, null); doc.execCommand('delete', false, null); } catch (e) {}
+      try { doc.execCommand('delete', false, null); } catch (e) {}
+      if (KEYS_ONLY) return __resolve('keys');
+      var want = norm(TXT), probe = want.substring(0, 24);
+      if (TXT === '') return __done('true');
+      var before = norm(host.textContent).length, mutated = 0, mo = null;
+      try {
+        mo = new MutationObserver(function (rs) { mutated += rs.length; });
+        mo.observe(host, { childList: true, subtree: true, characterData: true });
+      } catch (e) {}
+      function landed() {
+        var now = norm(host.textContent);
+        if (probe) return now.indexOf(probe) !== -1 || (mutated > 0 && now !== orig && now.length > before);
+        return mutated > 0;
+      }
+      function finish(ok) {
+        try { if (mo) mo.disconnect(); } catch (e) {}
+        return ok ? __done('true') : __resolve('keys');
+      }
       try {
         var dt = new DataTransfer(); dt.setData('text/plain', TXT);
         el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
       } catch (e) {}
       var tries = 0;
       (function check() {
-        if (el.textContent.indexOf(TXT) !== -1) return __done('true');
-        if (tries++ < 3) return setTimeout(check, 30);
+        if (landed()) return finish(true);
+        if (tries++ < 8) return setTimeout(check, 40);
         selAll();
-        try { doc.execCommand('insertText', false, TXT); } catch (e) {}
-        return __done(el.textContent.indexOf(TXT) !== -1 ? 'true' : 'typefailed');
+        try { doc.execCommand('delete', false, null); } catch (e) {}
+        before = norm(host.textContent).length; mutated = 0;
+        var lines = TXT.replace(/\r\n?/g, '\n').split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          try {
+            if (i > 0) doc.execCommand('insertParagraph', false, null);
+            if (lines[i]) doc.execCommand('insertText', false, lines[i]);
+          } catch (e) {}
+        }
+        setTimeout(function () { finish(landed()); }, 40);
       })();
       return;
     }
     var setter;
     if (el instanceof W.HTMLTextAreaElement) setter = Object.getOwnPropertyDescriptor(W.HTMLTextAreaElement.prototype, 'value').set;
     else if (el instanceof W.HTMLInputElement) setter = Object.getOwnPropertyDescriptor(W.HTMLInputElement.prototype, 'value').set;
-    if (setter) setter.call(el, TXT); else el.value = TXT;
     var IE = W.InputEvent || Event;
+    if (KEYS_ONLY) {
+      if (setter) setter.call(el, ''); else el.value = '';
+      fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+      return __resolve('keys');
+    }
+    if (setter) setter.call(el, TXT); else el.value = TXT;
     fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
     fire(el, new Event('change', { bubbles: true }));
     __done('true');
 "#
-    .replace("__TXT__", &json(text));
+    .replace("__TXT__", &json(text))
+    .replace("__KEYS_ONLY__", if keys_only { "true" } else { "false" });
     build(
         &json(selector),
         GATE_TYPE,
@@ -664,8 +708,9 @@ mod tests {
             hover_locate_script("#a"),
             key_focus_script(None),
             key_focus_script(Some("@2")),
-            type_script("#t", "he\"llo", None),
-            type_script("#t", "x", Some("text:Saved")),
+            type_script("#t", "he\"llo", None, false),
+            type_script("#t", "x", Some("text:Saved"), false),
+            type_script("#t", "a\nb", None, true),
             select_option_script("#s", "v", None),
             scroll_script("#c", "down", Some(10)),
             effect_script(None),

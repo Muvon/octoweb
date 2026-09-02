@@ -197,7 +197,7 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     + '[role=button],[role=link],[role=tab],[role=menuitem],[role=menuitemcheckbox],'
     + '[role=menuitemradio],[role=option],[role=checkbox],[role=radio],[role=switch],'
     + '[role=textbox],[role=combobox],[role=searchbox],[role=slider],[role=spinbutton],'
-    + '[role=treeitem],[onclick],[contenteditable=true]';
+    + '[role=treeitem],[onclick],[contenteditable]:not([contenteditable=false])';
 
   function scan(node) {
     var elements = node.querySelectorAll(SEL);

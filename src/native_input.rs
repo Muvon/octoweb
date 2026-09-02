@@ -293,6 +293,26 @@ pub fn press_key(wk: *mut AnyObject, key: &KeyInfo, modifiers: &[String]) {
     }
 }
 
+/// Type `text` as trusted key presses on the focused element — the one input
+/// path every editor honours, used when synthetic paste and editing commands
+/// both bounced (`browser_type` mode "auto") or on request (mode "keys").
+/// `\n` is Enter (a new paragraph in rich editors, submit in a single-line
+/// input), `\r` is dropped, `\t` is a real Tab.
+/// ponytail: synchronous; chunk across event-loop ticks if long articles stall the UI.
+pub fn type_text(wk: *mut AnyObject, text: &str) {
+    for ch in text.chars() {
+        let key = match ch {
+            '\r' => continue,
+            '\n' => key_info("Enter"),
+            '\t' => key_info("Tab"),
+            c => key_info(c.encode_utf8(&mut [0; 4])),
+        };
+        if let Some(key) = key {
+            press_key(wk, &key, &[]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

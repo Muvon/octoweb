@@ -547,6 +547,46 @@ def controlled_editor_type():
 
 
 @test
+def paragraph_editor_type():
+    """Multi-paragraph text into a Medium-shaped editor (one host, title +
+    body blocks, paste handler that splits lines into <p>): the paste must be
+    recognised as landed (no double insert, no error) and the replace must be
+    scoped to the targeted block — the title survives."""
+    with fixture_tab("paragraph_editor.html") as tab:
+        text = "First paragraph of the post.\n\nSecond paragraph, with \"quotes\" and more."
+        result = tool_text("browser_type", {"tab_id": tab, "selector": "#body", "text": text})
+        expect("keystrokes" not in result,
+               f"paste handler was bypassed — fell through to native typing: {result!r}")
+        host = exec_js(tab, "document.getElementById('host').textContent")
+        expect("First paragraph" in host and "Second paragraph" in host,
+               f"pasted paragraphs missing from editor: {host!r}")
+        expect(host.count("First paragraph") == 1,
+               f"text was inserted twice (paste + editing-command fallback): {host!r}")
+        expect("Draft title" in js_text(tab, "title"),
+               "replace was not scoped to the target block — the title was wiped")
+        paragraphs = exec_js(tab, "document.querySelectorAll('#host p').length")
+        expect("3" in paragraphs, f"expected 3 <p> blocks after paste, got {paragraphs!r}")
+        pastes = exec_js(tab, "window.__pastes")
+        expect("1" in pastes, f"expected exactly one paste event, got {pastes!r}")
+
+
+@test
+def type_keys_mode():
+    """mode=\"keys\" types with trusted native keystrokes: the text lands in a
+    plain contenteditable, and a newline becomes a real Enter (a new block)."""
+    with fixture_tab("contenteditable.html") as tab:
+        result = tool_text("browser_type", {"tab_id": tab, "selector": "#editor",
+                                            "text": "typed by keys\nsecond line", "mode": "keys"})
+        expect("keystrokes" in result, f"expected the native-keystroke path, got: {result!r}")
+        content = js_text(tab, "editor")
+        expect("typed by keys" in content and "second line" in content,
+               f"keystroke typing did not land: {content!r}")
+        blocks = exec_js(tab, "document.getElementById('editor').querySelectorAll('div,p,br').length")
+        expect(blocks.strip('"') not in ("0", ""),
+               f"Enter did not produce a line/block break: {blocks!r}")
+
+
+@test
 def type_rejects_non_editable():
     """browser_type must error (not falsely succeed) when the target is not a
     text field — the false 'success' that masks a wrong selector."""
@@ -555,6 +595,10 @@ def type_rejects_non_editable():
         expect(is_err, f"typing into a non-editable <h1> should error, got success: {text!r}")
         expect("not a text field" in text,
                f"expected a clear 'not a text field' error, got: {text!r}")
+        is_err, _, text = call_tool("browser_type", {"tab_id": tab, "selector": "#editor",
+                                                     "text": "x", "mode": "paste"})
+        expect(is_err and "mode must be" in text,
+               f"unknown mode should be rejected, got: {text!r}")
 
 
 @test
