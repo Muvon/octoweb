@@ -208,7 +208,15 @@ impl AcpHandle {
     ///
     /// `wake` is called from the ACP thread whenever an event is pushed — use it to
     /// poke the main event loop out of `ControlFlow::Wait`.
-    pub fn connect(cmd: &str, wake: impl Fn() + Send + Sync + 'static) -> anyhow::Result<Self> {
+    /// `mcp_url` points the agent at its own workspace's MCP listener, so its
+    /// browser tools act on that workspace's tabs regardless of which one the
+    /// user is looking at. `None` leaves the agent on whatever its own config
+    /// says.
+    pub fn connect(
+        cmd: &str,
+        mcp_url: Option<String>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<PromptMessage>();
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -242,6 +250,7 @@ impl AcpHandle {
                     prompt_rx,
                     cancel_rx,
                     command_rx,
+                    mcp_url,
                     program,
                     args,
                 )
@@ -399,6 +408,7 @@ async fn init_session(
     mut prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
     mut cancel_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     mut command_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mcp_url: Option<String>,
     program: String,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -408,7 +418,13 @@ async fn init_session(
     let workspace = crate::a2ui_render_ui::workspace_dir();
     let _ = std::fs::create_dir_all(&workspace);
 
-    let mut child = tokio::process::Command::new(&program)
+    let mut child = tokio::process::Command::new(&program);
+    // Per-workspace MCP endpoint. The URL embeds the port and the run's secret
+    // token, so an agent can only reach the workspace it belongs to.
+    if let Some(url) = mcp_url {
+        child.env("OCTOWEB_MCP_URL", url);
+    }
+    let mut child = child
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

@@ -1974,9 +1974,42 @@ fn main() {
         .unwrap_or(0);
     NEXT_ACP_SESSION_ID.fetch_max(global_max_persisted_acp_id + 1, Ordering::Relaxed);
 
+    // ── MCP server — exposes browser control tools on localhost ────────────
+    // Must come before the ACP session loop below: every agent is spawned with
+    // its workspace's MCP URL, so the endpoints have to exist first.
+    let mut mcp_handle = Some(mcp::spawn_mcp_server());
+    // Cloned sender used by JS-callback watchdogs to re-issue read commands
+    // (Snapshot/GetPageContent/GetPageInfo) when wry's
+    // `evaluateJavaScript:completionHandler:` block is discarded by WKWebView
+    // mid-eval (SPA navigation, JS-context teardown, parallel evals racing).
+    let mcp_cmd_tx = mcp_handle
+        .as_ref()
+        .expect("mcp_handle just initialized")
+        .command_tx
+        .clone();
+
+    // One MCP listener per workspace — the port+token an agent is pointed at
+    // is what identifies its workspace to the main loop. The Default workspace
+    // keeps the well-known port so agent configs written before workspaces
+    // existed still resolve; the rest take ephemeral ports.
+    // OCTOWEB_MCP_PORT override lets a second instance (e2e tests, isolated
+    // profiles) run beside the daily browser on 3434.
+    let default_mcp_port: u16 = std::env::var("OCTOWEB_MCP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3434);
+    if let Some(ref handle) = mcp_handle {
+        for i in 0..workspace_manager.list().len() {
+            let id = workspace_manager.at(i).id.clone();
+            let port = if id == "default" { default_mcp_port } else { 0 };
+            workspace_manager.at_mut(i).mcp_endpoint = handle.start_workspace(&id, port);
+        }
+    }
+
     let startup_active_workspace_id = workspace_manager.active().id.clone();
     for ws in workspace_manager.list_mut() {
         let is_startup_active_ws = ws.id == startup_active_workspace_id;
+        let mcp_url = ws.mcp_endpoint.as_ref().map(|e| e.url());
         let persisted = persisted_acp
             .as_ref()
             .and_then(|h| h.workspaces.get(&ws.id));
@@ -1998,7 +2031,8 @@ fn main() {
                             Some(id) => format!("octomind acp {} --resume {}", snap.tag, id),
                             None => format!("octomind acp {}", snap.tag),
                         };
-                        acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok()
+                        acp::AcpHandle::connect(&cmd, mcp_url.clone(), make_wake(acp_proxy.clone()))
+                            .ok()
                     } else {
                         None // lazy: connect on AcpSessionSwitch / workspace switch
                     };
@@ -2038,6 +2072,7 @@ fn main() {
                     handle: if is_startup_active_ws {
                         acp::AcpHandle::connect(
                             "octomind acp octoweb:assistant",
+                            mcp_url.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok()
@@ -2083,18 +2118,6 @@ fn main() {
     } else {
         None
     };
-
-    // ── MCP server — exposes browser control tools on localhost:3434 ───────
-    let mut mcp_handle = Some(mcp::spawn_mcp_server());
-    // Cloned sender used by JS-callback watchdogs to re-issue read commands
-    // (Snapshot/GetPageContent/GetPageInfo) when wry's
-    // `evaluateJavaScript:completionHandler:` block is discarded by WKWebView
-    // mid-eval (SPA navigation, JS-context teardown, parallel evals racing).
-    let mcp_cmd_tx = mcp_handle
-        .as_ref()
-        .expect("mcp_handle just initialized")
-        .command_tx
-        .clone();
 
     // ── In-app shortcuts via NSEvent local monitor ───────────────────────
     // Local monitors observe key events delivered to *our* app's run loop
@@ -2281,9 +2304,18 @@ fn main() {
     /// Create a WebView for a new tab, register nav-error callback, insert into map.
     /// Returns the tab_id. The WebView starts hidden (shown on PageLoadFinished).
     macro_rules! spawn_tab_webview {
-        ($tab_id:expr, $url:expr) => {{
+        ($tab_id:expr, $url:expr) => {
+            spawn_tab_webview_at!(workspace_manager.active_index(), $tab_id, $url)
+        };
+    }
+
+    /// As `spawn_tab_webview!`, but for an explicit workspace — MCP commands
+    /// act on the workspace that issued them, which may not be the active one.
+    macro_rules! spawn_tab_webview_at {
+        ($ws:expr, $tab_id:expr, $url:expr) => {{
+            let ws_i = $ws;
             let id = $tab_id;
-            let wv = make_webview(id, $url, workspace_manager.active().data_store_id);
+            let wv = make_webview(id, $url, workspace_manager.at(ws_i).data_store_id);
             let _ = wv.set_visible(false);
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             let p = proxy.clone();
@@ -2298,9 +2330,9 @@ fn main() {
             dialog_patch::register(wv_ptr, id, move |info| {
                 let _ = pd.send_event(AppEvent::JsDialog(info));
             });
-            workspace_manager.active_mut().webviews.insert(id, wv);
+            workspace_manager.at_mut(ws_i).webviews.insert(id, wv);
             if zoom_level != 1.0 {
-                if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                if let Some(wv) = workspace_manager.at(ws_i).webviews.get(&id) {
                     let _ = wv.zoom(zoom_level);
                 }
             }
@@ -2314,16 +2346,24 @@ fn main() {
     /// address bar — caller is responsible for those if needed.
     /// No-op if the WebView already exists or the tab id is unknown.
     macro_rules! ensure_webview {
-        ($target:expr) => {{
+        ($target:expr) => {
+            ensure_webview_at!(workspace_manager.active_index(), $target)
+        };
+    }
+
+    /// As `ensure_webview!`, but for an explicit workspace.
+    macro_rules! ensure_webview_at {
+        ($ws:expr, $target:expr) => {{
+            let ws_i = $ws;
             let target = $target;
-            if !workspace_manager.active().webviews.contains_key(&target) {
+            if !workspace_manager.at(ws_i).webviews.contains_key(&target) {
                 if let Some(url) = pending_tabs.remove(&target) {
                     let has_snapshot = tab_snapshots.contains_key(&target);
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
-                    let wv = make_webview(target, load_url, workspace_manager.active().data_store_id);
+                    let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id);
                     if !has_snapshot && url == "about:blank" {
                         let html =
-                            newtab_html::html(&quickslots::to_json(&workspace_manager.active().quick_slots));
+                            newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots));
                         let _ = wv.load_html(&html);
                     }
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -2355,7 +2395,7 @@ fn main() {
                         restoring_tabs.insert(target);
                     }
                     let _ = wv.set_visible(false);
-                    workspace_manager.active_mut().webviews.insert(target, wv);
+                    workspace_manager.at_mut(ws_i).webviews.insert(target, wv);
                 }
             }
         }};
@@ -2401,9 +2441,9 @@ fn main() {
     /// instead of making the tool call hang until the ceiling — the difference
     /// between an Enter-that-submits reporting promptly and timing out.
     macro_rules! mcp_nav_watchdog {
-        ($arc:expr, $delay_ms:expr, $tab_id:expr, $gen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
+        ($ws:expr, $arc:expr, $delay_ms:expr, $tab_id:expr, $gen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
-            let tabs_wd = workspace_manager.active().tabs.clone();
+            let tabs_wd = workspace_manager.at($ws).tabs.clone();
             let (tab_wd, gen_wd) = ($tab_id, $gen0);
             let on_nav = $on_nav;
             let msg: String = $timeout_msg;
@@ -2439,9 +2479,9 @@ fn main() {
     /// answers them — and can evaluate an `expect: url:#/route`. Used by the
     /// trusted-input actions (click / hover / press_key).
     macro_rules! mcp_nav_watchdog_hard {
-        ($arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
+        ($ws:expr, $arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
-            let tabs_wd = workspace_manager.active().tabs.clone();
+            let tabs_wd = workspace_manager.at($ws).tabs.clone();
             let (tab_wd, hgen_wd) = ($tab_id, $hgen0);
             let on_nav = $on_nav;
             let msg: String = $timeout_msg;
@@ -2476,10 +2516,11 @@ fn main() {
     /// the WebView in-place. Returns true if the tab is known, false if the id is bogus.
     /// MCP handlers should fall through to "Tab not found" only when this returns false.
     macro_rules! mcp_ensure_tab {
-        ($target:expr) => {{
+        ($ws:expr, $target:expr) => {{
+            let ws_i = $ws;
             let t = $target;
             let known = workspace_manager
-                .active()
+                .at(ws_i)
                 .tabs
                 .lock()
                 .unwrap()
@@ -2487,7 +2528,7 @@ fn main() {
                 .iter()
                 .any(|tab| tab.id == t);
             if known {
-                ensure_webview!(t);
+                ensure_webview_at!(ws_i, t);
             }
             known
         }};
@@ -3521,6 +3562,7 @@ fn main() {
                         if signed_in {
                             if let Some(stop) = login_pollers.remove(&sid) {
                                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                                     s.retry_count = 0;
                                     s.reconnect_gen += 1;
@@ -3528,7 +3570,7 @@ fn main() {
                                         Some(id) => format!("octomind acp {} --resume {}", s.tag, id),
                                         None => format!("octomind acp {}", s.tag),
                                     };
-                                    s.handle = acp::AcpHandle::connect(&cmd, make_wake(acp_proxy.clone())).ok();
+                                    s.handle = acp::AcpHandle::connect(&cmd, mcp_url.clone(), make_wake(acp_proxy.clone())).ok();
                                     let _ = sidebar_wv.evaluate_script(&format!(
                                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
                                     ));
@@ -3673,8 +3715,26 @@ fn main() {
 
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
-            while let Some(cmd) = handle.poll() {
-                tracing::debug!(cmd = ?std::mem::discriminant(&cmd), "MCP command received");
+            while let Some((mcp_ws_id, cmd)) = handle.poll() {
+                tracing::debug!(cmd = ?std::mem::discriminant(&cmd), %mcp_ws_id, "MCP command received");
+
+                // Commands act on the workspace whose listener they arrived on,
+                // never on whatever is on screen. If that workspace was deleted
+                // while the call was in flight, dropping `cmd` drops its response
+                // sender and the caller gets an immediate channel error.
+                let Some(ws_idx) = workspace_manager.index_of(&mcp_ws_id) else {
+                    tracing::warn!(%mcp_ws_id, "MCP command for a workspace that no longer exists");
+                    continue;
+                };
+                // That workspace's own foreground tab — the default target when a
+                // tool omits `tab_id`. `active_wv_id` is the tab visible on
+                // screen, which may belong to a different workspace entirely.
+                let mcp_default_tab = {
+                    let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
+                    tm.active_id()
+                        .or_else(|| tm.tabs().first().map(|t| t.id))
+                        .unwrap_or(active_wv_id)
+                };
 
                 // Touch the target tab so hibernation knows it's in use.
                 // Prevents background tabs used by AI from being offloaded.
@@ -3697,8 +3757,8 @@ fn main() {
                     | McpCommand::SelectOption { tab_id, .. } => *tab_id,
                     _ => None,
                 };
-                if let Some(id) = touch_id.or(Some(active_wv_id)) {
-                    workspace_manager.active().tabs.lock().unwrap().touch(id);
+                if let Some(id) = touch_id.or(Some(mcp_default_tab)) {
+                    workspace_manager.at(ws_idx).tabs.lock().unwrap().touch(id);
                 }
 
                 match cmd {
@@ -3715,7 +3775,7 @@ fn main() {
                         if url::is_external_scheme(&url) {
                             let ok = macos::open_external_url(&url);
                             let _ = response.send(if ok {
-                                Ok(mcp::NavigateOutcome { tab_id: active_wv_id, download: None })
+                                Ok(mcp::NavigateOutcome { tab_id: mcp_default_tab, download: None })
                             } else {
                                 Err(format!("No app registered for URL: {url}"))
                             });
@@ -3735,7 +3795,7 @@ fn main() {
                         // browser_switch_tab to show a tab to the user.
                         let in_place = match tab_id {
                             Some(id) => {
-                                let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
+                                let exists = workspace_manager.at(ws_idx).tabs.lock().unwrap().tabs().iter().any(|t| t.id == id);
                                 if !exists {
                                     let _ = response.send(Err(format!(
                                         "Tab {id} not found — omit tab_id to open a new background tab"
@@ -3751,10 +3811,10 @@ fn main() {
                         match in_place {
                             Some(target_id) => {
                                 // Auto-restore if the tab was hibernated.
-                                let _ = mcp_ensure_tab!(target_id);
-                                if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                                let _ = mcp_ensure_tab!(ws_idx, target_id);
+                                if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                                     let _ = wv.load_url(&resolved);
-                                    if workspace_manager.active().tabs.lock().unwrap().update_url(target_id, resolved) {
+                                    if workspace_manager.at(ws_idx).tabs.lock().unwrap().update_url(target_id, resolved) {
                                         history_save_at.get_or_insert(
                                             std::time::Instant::now() + std::time::Duration::from_secs(60),
                                         );
@@ -3775,8 +3835,8 @@ fn main() {
                                 }
                             }
                             None => {
-                                let new_id = workspace_manager.active().tabs.lock().unwrap().open_background(resolved.clone());
-                                spawn_tab_webview!(new_id, &resolved);
+                                let new_id = workspace_manager.at(ws_idx).tabs.lock().unwrap().open_background(resolved.clone());
+                                spawn_tab_webview_at!(ws_idx, new_id, &resolved);
 
                                 if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
                                     let _ = old.send(Err("Superseded by new navigation".into()));
@@ -3788,7 +3848,7 @@ fn main() {
                     McpCommand::GetTabs { limit, query, response } => {
                         tracing::debug!(limit, ?query, "MCP get_tabs");
 
-                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let active = tm.active_id();
                         let q = query.map(|q| q.to_lowercase()).filter(|q| !q.is_empty());
                         let mut matched: Vec<&browser::Tab> = tm.tabs().iter().filter(|t| match &q {
@@ -3819,14 +3879,20 @@ fn main() {
 
                         // Validate before firing — the event handler silently no-ops
                         // on an unknown id, which would otherwise report a bogus success.
-                        let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        let exists = workspace_manager.at(ws_idx).tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
                         if exists {
                             // Update tab state synchronously so an immediate
                             // browser_get_tabs / get_current_tab sees the new
                             // active tab; the event does the visual swap and
                             // re-runs switch() idempotently.
-                            workspace_manager.active().tabs.lock().unwrap().switch(tab_id);
-                            let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                            workspace_manager.at(ws_idx).tabs.lock().unwrap().switch(tab_id);
+                            // The visual swap only applies when this workspace is
+                            // the one on screen; for a background workspace the
+                            // TabManager update above is the whole effect, and it
+                            // takes hold visually when the user switches to it.
+                            if ws_idx == workspace_manager.active_index() {
+                                let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                            }
                             let _ = response.send(Ok(()));
                         } else {
                             let _ = response.send(Err(format!("Tab {tab_id} not found")));
@@ -3837,21 +3903,30 @@ fn main() {
 
                         // Validate before firing. Also guards against tab_id=0, which the
                         // internal event treats as "close the active tab" — never an MCP intent.
-                        let exists = workspace_manager.active().tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
+                        let exists = workspace_manager.at(ws_idx).tabs.lock().unwrap().tabs().iter().any(|t| t.id == tab_id);
                         if exists {
                             // Remove from TabManager synchronously so an immediate
                             // browser_get_tabs no longer lists it; the event tears
                             // down the WebView (its close() re-run is a no-op).
-                            workspace_manager.active().tabs.lock().unwrap().close(tab_id);
+                            workspace_manager.at(ws_idx).tabs.lock().unwrap().close(tab_id);
                             tab_nav::forget(tab_id);
-                            let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
+                            if ws_idx == workspace_manager.active_index() {
+                                let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
+                            } else {
+                                // CloseTab only reaches the active workspace's
+                                // WebViews, so drop this one here or it leaks a
+                                // live WKWebView with no tab behind it.
+                                workspace_manager.at_mut(ws_idx).webviews.remove(&tab_id);
+                                pending_tabs.remove(&tab_id);
+                                workspace_manager.at_mut(ws_idx).mru.retain(|&t| t != tab_id);
+                            }
                             let _ = response.send(Ok(()));
                         } else {
                             let _ = response.send(Err(format!("Tab {tab_id} not found")));
                         }
                     }
                     McpCommand::GetPageInfo { tab_id, response, is_retry } => {
-                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let target_id = tab_id.or(tm.active_id());
                         let base_info = target_id.and_then(|id| {
                             tm.tabs().iter().find(|t| t.id == id).map(|t| (id, t.title.clone(), t.url.clone()))
@@ -3860,8 +3935,8 @@ fn main() {
                         match base_info {
                             Some((id, title, url)) => {
                                 // Auto-restore if the tab was hibernated
-                                let _ = mcp_ensure_tab!(id);
-                                if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                                let _ = mcp_ensure_tab!(ws_idx, id);
+                                if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                     let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                     let response_cb = response.clone();
                                     let cb_title = title.clone();
@@ -3881,14 +3956,15 @@ fn main() {
                                                 // Idempotent read — auto-retry once on watchdog.
                                                 let arc_wd = response.clone();
                                                 let tx_for_retry = mcp_cmd_tx.clone();
+                                                let retry_ws = mcp_ws_id.clone();
                                                 std::thread::spawn(move || {
                                                     std::thread::sleep(std::time::Duration::from_millis(3000));
                                                     if let Some(tx) = arc_wd.lock().unwrap().take() {
-                                                        let _ = tx_for_retry.send(mcp::McpCommand::GetPageInfo {
+                                                        let _ = tx_for_retry.send((retry_ws, mcp::McpCommand::GetPageInfo {
                                                             tab_id: Some(id),
                                                             response: tx,
                                                             is_retry: true,
-                                                        });
+                                                        }));
                                                     }
                                                 });
                                             } else {
@@ -3923,21 +3999,21 @@ fn main() {
                         }
                     }
                     McpCommand::ExecuteJs { tab_id, script, timeout_ms, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
                             if script.trim().is_empty() {
                                 let _ = response.send(Err("script is empty".into()));
                                 continue;
                             }
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 // Wrap sender so we can reclaim it if the callback never fires.
                                 // eval_async_expr awaits Promises, so scripts returning one
                                 // (fetch chains, waits) resolve to their settled value.
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
-                                let tabs_cb = workspace_manager.active().tabs.clone();
+                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                                 async_eval::eval_async_expr(wv, &script, move |res| {
                                     if let Some(tx) = response_cb.lock().unwrap().take() {
                                         let _ = tx.send(res.map_err(|e| {
@@ -3953,7 +4029,7 @@ fn main() {
                                         }));
                                     }
                                 });
-                                mcp_nav_watchdog!(response, timeout_ms, id, gen0,
+                                mcp_nav_watchdog!(ws_idx, response, timeout_ms, id, gen0,
                                     |url: String| Err(format!(
                                         "browser_execute_js was interrupted by a navigation (tab now at {url}); \
                                          the script may have partially run. Re-run it once the page settles if it is idempotent."
@@ -3971,14 +4047,14 @@ fn main() {
                         }
                     }
                     McpCommand::Click { tab_id, selector, expect, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
                                 let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
                                 continue;
                             }
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 // Phase 1 (JS): resolve, scroll, stabilise, occlusion-check, arm
                                 // effect capture, return the centre point (or a status:
                                 // stale / missing / detached / occluded:<what> / disabled).
@@ -3989,7 +4065,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = workspace_manager.active().tabs.clone();
+                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -4030,7 +4106,7 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
+                                mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
                                     move |url: String| Ok(format!("Clicked '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Click on '{selector}' got no answer from the page within {}s and the tab did \
@@ -4046,14 +4122,14 @@ fn main() {
                         }
                     }
                     McpCommand::Hover { tab_id, selector, expect, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
                                 let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
                                 continue;
                             }
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 // Same three phases as Click; the native event is a mouse move,
                                 // which is what real CSS :hover and JS hover menus react to.
                                 let script = dom_actions::hover_locate_script(&selector);
@@ -4061,7 +4137,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = workspace_manager.active().tabs.clone();
+                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -4100,7 +4176,7 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
+                                mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
                                     move |url: String| Ok(format!("Hovered '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Hover on '{selector}' got no answer from the page within {}s and the tab did \
@@ -4115,14 +4191,14 @@ fn main() {
                         }
                     }
                     McpCommand::Type { tab_id, selector, text, expect, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
                             if selector.trim().is_empty() {
                                 let _ = response.send(Err("selector is empty — pass a CSS selector or @ref from browser_snapshot".into()));
                                 continue;
                             }
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 let script = dom_actions::type_script(&selector, &text, expect.as_deref());
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
@@ -4137,7 +4213,7 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, id, gen0,
+                                mcp_nav_watchdog!(ws_idx, response, dom_actions::WATCHDOG_MS, id, gen0,
                                     move |url: String| Ok(format!("Typed into '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Type into '{selector}' got no answer from the page within {}s and the tab did \
@@ -4153,17 +4229,17 @@ fn main() {
                         }
                     }
                     McpCommand::GetCurrentTab { response } => {
-                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let result = tm.active_tab().map(|t| {
                             TabInfo::from_tab(t, true)
                         }).ok_or("No active tab".to_string());
                         let _ = response.send(result);
                     }
                     McpCommand::GoBack { tab_id, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 match wv.evaluate_script("history.back()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
                                     Err(e) => { let _ = response.send(Err(format!("GoBack failed: {e}"))); }
@@ -4176,10 +4252,10 @@ fn main() {
                         }
                     }
                     McpCommand::GoForward { tab_id, response } => {
-                        let target_id = tab_id.or(Some(active_wv_id));
+                        let target_id = tab_id.or(Some(mcp_default_tab));
                         if let Some(id) = target_id {
-                            let _ = mcp_ensure_tab!(id);
-                            if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                            let _ = mcp_ensure_tab!(ws_idx, id);
+                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 match wv.evaluate_script("history.forward()") {
                                     Ok(()) => { let _ = response.send(Ok(())); }
                                     Err(e) => { let _ = response.send(Err(format!("GoForward failed: {e}"))); }
@@ -4192,7 +4268,7 @@ fn main() {
                         }
                     }
                     McpCommand::GetHistory { limit, response } => {
-                        let mut tm = workspace_manager.active().tabs.lock().unwrap();
+                        let mut tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         tm.ensure_contiguous();
                         let history = tm.history();
                         let limit = limit.unwrap_or(50);
@@ -4203,7 +4279,7 @@ fn main() {
                         let _ = response.send(Ok(entries));
                     }
                     McpCommand::GetPlayingTabs { response } => {
-                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let active = tm.active_id();
                         let playing: Vec<TabInfo> = tm.tabs().iter()
                             .filter(|t| t.is_playing_audio)
@@ -4212,9 +4288,9 @@ fn main() {
                         let _ = response.send(Ok(playing));
                     }
                     McpCommand::Reload { tab_id, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let _ = wv.reload();
                             let _ = response.send(Ok(()));
                         } else {
@@ -4222,9 +4298,9 @@ fn main() {
                         }
                     }
                     McpCommand::Screenshot { tab_id, full_page, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
 
@@ -4328,9 +4404,9 @@ fn main() {
                         }
                     }
                     McpCommand::GetPageContent { tab_id, response, is_retry } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             match wv.evaluate_script_with_callback(
@@ -4347,14 +4423,15 @@ fn main() {
                                     if !is_retry {
                                         let arc_wd = response.clone();
                                         let tx_for_retry = mcp_cmd_tx.clone();
+                                                let retry_ws = mcp_ws_id.clone();
                                         std::thread::spawn(move || {
                                             std::thread::sleep(std::time::Duration::from_millis(3000));
                                             if let Some(tx) = arc_wd.lock().unwrap().take() {
-                                                let _ = tx_for_retry.send(mcp::McpCommand::GetPageContent {
+                                                let _ = tx_for_retry.send((retry_ws, mcp::McpCommand::GetPageContent {
                                                     tab_id: Some(target_id),
                                                     response: tx,
                                                     is_retry: true,
-                                                });
+                                                }));
                                             }
                                         });
                                     } else {
@@ -4374,9 +4451,9 @@ fn main() {
                         }
                     }
                     McpCommand::Scroll { tab_id, direction, pixels, selector, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             if !matches!(direction.as_str(), "up" | "down" | "top" | "bottom") {
                                 let _ = response.send(Err(format!("Invalid direction: {direction}. Use up, down, top, or bottom.")));
                                 continue;
@@ -4427,7 +4504,7 @@ fn main() {
                         }
                     }
                     McpCommand::PressKey { tab_id, key, selector, modifiers, expect, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
                         let Some(key_info) = native_input::key_info(&key) else {
                             let _ = response.send(Err(format!(
                                 "Unknown key '{key}' — pass a KeyboardEvent.key name (Enter, Escape, Tab, Backspace, \
@@ -4442,8 +4519,8 @@ fn main() {
                                 continue;
                             }
                         }
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             // Phase 1 (JS): focus the target (or keep the current focus) and arm
                             // effect capture. Phase 2 (native): trusted key down/up — native
                             // default actions apply (Enter submits, Space activates, Tab moves
@@ -4455,7 +4532,7 @@ fn main() {
                             let sel_for_msg = sel_for_err.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = workspace_manager.active().tabs.clone();
+                            let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                             let key_label = if modifiers.is_empty() {
                                 key.clone()
                             } else {
@@ -4497,7 +4574,7 @@ fn main() {
                                 }
                             });
                             let key_wd = key.clone();
-                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
+                            mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
                                 move |url: String| Ok(format!("Pressed {key_wd} → page navigated to {url}")),
                                 format!(
                                     "PressKey on '{sel_for_msg}' got no answer from the page within {}s and the tab \
@@ -4509,9 +4586,9 @@ fn main() {
                         }
                     }
                     McpCommand::Wait { tab_id, event, timeout_ms, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let script = match event.as_str() {
                                 "load" => format!(
                                     "new Promise(r => {{ if (document.readyState === 'complete') r('ready'); else {{ const t = setTimeout(() => r('timeout'), {timeout_ms}); window.addEventListener('load', () => {{ clearTimeout(t); r('ready'); }}, {{once: true}}); }} }})"
@@ -4550,7 +4627,7 @@ fn main() {
                             // the callback was discarded — give the script timeout_ms + 5s.
                             let wd_ms = timeout_ms.saturating_add(5000);
                             let gen0 = tab_nav::get(target_id);
-                            let tabs_cb = workspace_manager.active().tabs.clone();
+                            let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 if let Some(tx) = response_cb.lock().unwrap().take() {
                                     // Only a real navigation (nav generation moved) is reported
@@ -4567,7 +4644,7 @@ fn main() {
                                     });
                                 }
                             });
-                            mcp_nav_watchdog!(response, wd_ms, target_id, gen0,
+                            mcp_nav_watchdog!(ws_idx, response, wd_ms, target_id, gen0,
                                 |url: String| Ok(format!(
                                     "interrupted: the page navigated mid-wait (now at {url}) — \
                                      call browser_wait again to wait on the new page"
@@ -4581,13 +4658,13 @@ fn main() {
                         }
                     }
                     McpCommand::SelectOption { tab_id, selector, value, expect, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
                         if selector.trim().is_empty() {
                             let _ = response.send(Err("selector is empty — pass a CSS selector or @ref of a <select>".into()));
                             continue;
                         }
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             // Returns: "true" | "stale" | "missing" | "detached" | "not-select" | "no-such-option"
                             let script = dom_actions::select_option_script(&selector, &value, expect.as_deref());
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
@@ -4612,7 +4689,7 @@ fn main() {
                                 }
                             });
                             let sel_wd = sel_for_msg.clone();
-                            mcp_nav_watchdog!(response, dom_actions::WATCHDOG_MS, target_id, gen0,
+                            mcp_nav_watchdog!(ws_idx, response, dom_actions::WATCHDOG_MS, target_id, gen0,
                                 move |url: String| Ok(format!("SelectOption on '{sel_wd}' → page navigated to {url}")),
                                 format!(
                                     "SelectOption on '{sel_for_msg}' got no answer from the page within {}s and the \
@@ -4624,15 +4701,15 @@ fn main() {
                         }
                     }
                     McpCommand::DismissOverlay { tab_id, response } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let script = dom_actions::dismiss_overlay_script();
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = workspace_manager.active().tabs.clone();
+                            let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
                             let zoom = zoom_level;
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 let val = match res {
@@ -4682,7 +4759,7 @@ fn main() {
                                     }
                                 }
                             });
-                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
+                            mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
                                 |url: String| Ok(format!("Dismissed overlay → page navigated to {url}")),
                                 format!(
                                     "browser_dismiss_overlay got no answer within {}s and the tab did not navigate.",
@@ -4693,9 +4770,9 @@ fn main() {
                         }
                     }
                     McpCommand::Snapshot { tab_id, within, diff, response, is_retry } => {
-                        let target_id = tab_id.unwrap_or(active_wv_id);
-                        let _ = mcp_ensure_tab!(target_id);
-                        if let Some(wv) = workspace_manager.active().webviews.get(&target_id) {
+                        let target_id = tab_id.unwrap_or(mcp_default_tab);
+                        let _ = mcp_ensure_tab!(ws_idx, target_id);
+                        if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
                             let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                             let response_cb = response.clone();
                             let script = snapshot_js::snapshot_script(within.as_deref(), diff);
@@ -4717,16 +4794,17 @@ fn main() {
                                         // error instead of looping.
                                         let arc_wd = response.clone();
                                         let tx_for_retry = mcp_cmd_tx.clone();
+                                                let retry_ws = mcp_ws_id.clone();
                                         std::thread::spawn(move || {
                                             std::thread::sleep(std::time::Duration::from_millis(3000));
                                             if let Some(tx) = arc_wd.lock().unwrap().take() {
-                                                let _ = tx_for_retry.send(mcp::McpCommand::Snapshot {
+                                                let _ = tx_for_retry.send((retry_ws, mcp::McpCommand::Snapshot {
                                                     tab_id: Some(target_id),
                                                     within: within.clone(),
                                                     diff,
                                                     response: tx,
                                                     is_retry: true,
-                                                });
+                                                }));
                                             }
                                         });
                                     } else {
@@ -4939,6 +5017,11 @@ fn main() {
                         .to_string();
                 // Seeds one tab (metadata only) and makes the new workspace active.
                 workspace_manager.create(name, color);
+                if let Some(ref handle) = mcp_handle {
+                    let new_ws_id = workspace_manager.active().id.clone();
+                    workspace_manager.active_mut().mcp_endpoint =
+                        handle.start_workspace(&new_ws_id, 0);
+                }
                 let (new_tab_id, new_tab_url) = {
                     let tm = workspace_manager.active().tabs.lock().unwrap();
                     let t = tm
@@ -4995,6 +5078,9 @@ fn main() {
             Event::UserEvent(AppEvent::DeleteWorkspace(id)) => {
                 if workspace_manager.list().len() <= 1 {
                     return; // refuse to remove the last workspace
+                }
+                if let Some(ref handle) = mcp_handle {
+                    handle.stop_workspace(&id);
                 }
                 if id == workspace_manager.active().id {
                     if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
@@ -5608,6 +5694,7 @@ fn main() {
                     );
                     // Reconnect any session whose handle has died (e.g. after
                     // max retries exceeded — manual sidebar open re-arms it).
+                    let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                     for s in workspace_manager.active_mut().acp_sessions.iter_mut() {
                         if s.handle.is_none() {
                             s.retry_count = 0;
@@ -5622,6 +5709,7 @@ fn main() {
                             };
                             s.handle = acp::AcpHandle::connect(
                                 &cmd,
+                                mcp_url.clone(),
                                 make_wake(acp_proxy.clone()),
                             )
                             .ok();
@@ -5697,6 +5785,7 @@ fn main() {
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
                 let mut should_persist = false;
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Inbox-driven turns stream with no terminal Done — commit any
                     // response still buffered so it lands before this user message.
@@ -5718,6 +5807,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
+                            mcp_url.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -5757,6 +5847,7 @@ fn main() {
             }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     let now = std::time::Instant::now();
                     let recent = s
@@ -5776,6 +5867,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
+                            mcp_url.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -5808,6 +5900,7 @@ fn main() {
             // ── ACP set agent for an existing session (kills + respawns its handle) ──
             Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
                 let mut should_persist = false;
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
                     s.retry_count = 0;
@@ -5816,6 +5909,7 @@ fn main() {
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
+                        mcp_url.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -5843,6 +5937,7 @@ fn main() {
             // ── ACP clear session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
                 let mut should_persist = false;
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
@@ -5850,6 +5945,7 @@ fn main() {
                     s.handle = None; // drop old (kills subprocess)
                     s.handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", s.tag),
+                        mcp_url.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -5878,12 +5974,14 @@ fn main() {
 
             // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
             Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
                     tracing::warn!(max = MAX_SESSIONS, "session create rejected — cap reached");
                 } else {
                     let sid = next_acp_session_id();
                     let handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
+                        mcp_url.clone(),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -5953,6 +6051,7 @@ fn main() {
                 workspace_manager.active_mut().acp_active_session_id = sid;
                 // Lazy-spawn: if this session has no live handle (persisted
                 // but not yet connected this run), bring it up now.
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     if s.handle.is_none() {
                         let cmd = match &s.acp_session_id {
@@ -5961,6 +6060,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
+                            mcp_url.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -6222,6 +6322,7 @@ fn main() {
                     let lp = proxy.clone();
                     learning_handle = acp::AcpHandle::connect(
                         "octomind acp octoweb:learning",
+                        workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url()),
                         move || { let _ = lp.send_event(AppEvent::LearningWake); },
                     ).ok();
                     if let Some(ref h) = learning_handle {
@@ -6232,6 +6333,7 @@ fn main() {
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
+                let mcp_url = workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url());
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Ignore stale timers from a previous error cycle — the user may
                     // have manually reconnected (AcpSetAgent / AcpClearSession) in the
@@ -6247,6 +6349,7 @@ fn main() {
                         };
                         s.handle = acp::AcpHandle::connect(
                             &cmd,
+                            mcp_url.clone(),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok();
@@ -6842,6 +6945,7 @@ fn main() {
                 inline_edit_response.clear();
                 inline_edit_acp = acp::AcpHandle::connect(
                     "octomind acp octoweb:editor",
+                    workspace_manager.active().mcp_endpoint.as_ref().map(|e| e.url()),
                     { let p = acp_proxy.clone(); move || { let _ = p.send_event(AppEvent::AcpWake); } }
                 ).ok();
                 if let Some(ref h) = inline_edit_acp {

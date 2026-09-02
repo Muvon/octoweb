@@ -747,8 +747,11 @@ pub struct SelectOptionRequest {
 /// Shared state for MCP tools to communicate with main event loop.
 #[derive(Clone)]
 pub struct McpState {
+    /// Which workspace this server instance speaks for. Fixed at construction
+    /// — each workspace has its own listener, so it can never be ambiguous.
+    pub workspace_id: String,
     /// Channel to send commands to main event loop
-    pub command_tx: mpsc::UnboundedSender<McpCommand>,
+    pub command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
 }
 
 /// MCP Server that exposes browser control tools.
@@ -790,7 +793,7 @@ impl McpServer {
         let (tx, rx) = oneshot::channel();
         self.state
             .command_tx
-            .send(build(tx))
+            .send((self.state.workspace_id.clone(), build(tx)))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
@@ -818,9 +821,15 @@ impl McpServer {
 
 #[tool_router]
 impl McpServer {
-    pub fn new(command_tx: mpsc::UnboundedSender<McpCommand>) -> Self {
+    pub fn new(
+        workspace_id: String,
+        command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
+    ) -> Self {
         Self {
-            state: McpState { command_tx },
+            state: McpState {
+                workspace_id,
+                command_tx,
+            },
         }
     }
 
@@ -1567,62 +1576,114 @@ impl ServerHandler for McpServer {
 // Server spawning (HTTP JSON-RPC)
 // ─────────────────────────────────────────────────────────────────────
 
+/// Where one workspace's MCP server listens, and the secret that reaches it.
+#[derive(Debug, Clone)]
+pub struct McpEndpoint {
+    pub port: u16,
+    pub token: String,
+}
+
+impl McpEndpoint {
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}/mcp/{}", self.port, self.token)
+    }
+}
+
+/// Control messages to the tokio thread that owns the listeners.
+enum ServerCtl {
+    Start {
+        workspace_id: String,
+        token: String,
+        listener: std::net::TcpListener,
+    },
+    Stop(String),
+}
+
 /// Handle returned from spawn_mcp_server for polling commands.
+///
+/// Every workspace gets its own listener, so the port+token a request arrives
+/// on *is* the caller's workspace identity — commands come back tagged with
+/// it and the main loop applies them to that workspace rather than to whatever
+/// happens to be on screen.
 pub struct McpHandle {
-    /// Receiver for commands from MCP tools
-    pub command_rx: mpsc::UnboundedReceiver<McpCommand>,
+    /// Receiver for (workspace_id, command) from MCP tools
+    pub command_rx: mpsc::UnboundedReceiver<(String, McpCommand)>,
     /// Sender used by the main loop to re-issue read commands from a
     /// watchdog when the first eval's callback was discarded.
-    pub command_tx: mpsc::UnboundedSender<McpCommand>,
+    pub command_tx: mpsc::UnboundedSender<(String, McpCommand)>,
+    ctl_tx: mpsc::UnboundedSender<ServerCtl>,
 }
 
 pub fn spawn_mcp_server() -> McpHandle {
-    let (command_tx, command_rx) = mpsc::unbounded_channel::<McpCommand>();
+    let (command_tx, command_rx) = mpsc::unbounded_channel::<(String, McpCommand)>();
+    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<ServerCtl>();
 
-    let command_tx_clone = command_tx.clone();
+    let command_tx_for_servers = command_tx.clone();
     let command_tx_for_handle = command_tx.clone();
     // Spawn tokio runtime in a separate thread
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(async move {
-            let server_factory = move || {
-                let server = McpServer::new(command_tx_clone.clone());
-                Ok(server) as Result<McpServer, std::io::Error>
-            };
+            let mut shutdowns: std::collections::HashMap<String, oneshot::Sender<()>> =
+                std::collections::HashMap::new();
+            while let Some(ctl) = ctl_rx.recv().await {
+                match ctl {
+                    ServerCtl::Start {
+                        workspace_id,
+                        token,
+                        listener,
+                    } => {
+                        let listener = match tokio::net::TcpListener::from_std(listener) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                tracing::warn!(error = %e, %workspace_id, "MCP listener adopt failed");
+                                continue;
+                            }
+                        };
 
-            // Stateless JSON-RPC mode: no sessions, plain JSON responses.
-            // Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
-            use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
-            let mut config = StreamableHttpServerConfig::default();
-            config.json_response = true;
-            config.stateful_mode = false;
+                        let ws_id = workspace_id.clone();
+                        let ctx = command_tx_for_servers.clone();
+                        let server_factory = move || {
+                            Ok(McpServer::new(ws_id.clone(), ctx.clone()))
+                                as Result<McpServer, std::io::Error>
+                        };
 
-            let service = StreamableHttpService::new(
-                server_factory,
-                LocalSessionManager::default().into(),
-                config,
-            );
+                        // Stateless JSON-RPC mode: no sessions, plain JSON responses.
+                        // Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
+                        use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
+                        let mut config = StreamableHttpServerConfig::default();
+                        config.json_response = true;
+                        config.stateful_mode = false;
 
-            let app = axum::Router::new().nest_service("/mcp", service);
+                        let service = StreamableHttpService::new(
+                            server_factory,
+                            LocalSessionManager::default().into(),
+                            config,
+                        );
 
-            // OCTOWEB_MCP_PORT override lets a second instance (e2e tests,
-            // isolated profiles) run beside the daily browser on 3434.
-            let port: u16 = std::env::var("OCTOWEB_MCP_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(3434);
-            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(error = %e, port, "MCP HTTP server failed to bind");
-                    return;
+                        // The token is baked into the route, so a request with the
+                        // wrong one 404s in the router — no auth code of our own.
+                        let app = axum::Router::new().nest_service(&format!("/mcp/{token}"), service);
+
+                        let (sd_tx, sd_rx) = oneshot::channel::<()>();
+                        shutdowns.insert(workspace_id.clone(), sd_tx);
+                        tokio::spawn(async move {
+                            let served = axum::serve(listener, app)
+                                .with_graceful_shutdown(async move {
+                                    let _ = sd_rx.await;
+                                })
+                                .await;
+                            if let Err(e) = served {
+                                tracing::error!(error = %e, %workspace_id, "MCP HTTP server error");
+                            }
+                        });
+                    }
+                    ServerCtl::Stop(workspace_id) => {
+                        if let Some(sd) = shutdowns.remove(&workspace_id) {
+                            let _ = sd.send(());
+                        }
+                    }
                 }
-            };
-
-            tracing::info!("MCP HTTP server listening on http://127.0.0.1:{port}/mcp");
-
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!(error = %e, "MCP HTTP server error");
             }
         });
     });
@@ -1630,15 +1691,70 @@ pub fn spawn_mcp_server() -> McpHandle {
     McpHandle {
         command_rx,
         command_tx: command_tx_for_handle,
+        ctl_tx,
     }
 }
 
 impl McpHandle {
     /// Poll for pending MCP commands (non-blocking).
     /// Returns None if no commands are pending.
-    pub fn poll(&mut self) -> Option<McpCommand> {
+    pub fn poll(&mut self) -> Option<(String, McpCommand)> {
         self.command_rx.try_recv().ok()
     }
+
+    /// Bind a listener for `workspace_id` and start serving on it.
+    ///
+    /// The bind happens here, on the caller's thread, so the port is known
+    /// synchronously — the caller needs it immediately to build the agent's
+    /// MCP URL. `preferred_port` is honoured when free (the Default workspace
+    /// keeps 3434 so pre-workspaces agent configs still resolve); everything
+    /// else takes an ephemeral port. Returns `None` if the bind fails.
+    pub fn start_workspace(&self, workspace_id: &str, preferred_port: u16) -> Option<McpEndpoint> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", preferred_port))
+            .or_else(|e| {
+                if preferred_port != 0 {
+                    tracing::warn!(error = %e, preferred_port, "MCP port busy — falling back to ephemeral");
+                    std::net::TcpListener::bind(("127.0.0.1", 0))
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| tracing::warn!(error = %e, %workspace_id, "MCP bind failed"))
+            .ok()?;
+        let port = listener.local_addr().ok()?.port();
+        listener.set_nonblocking(true).ok()?;
+
+        let token = random_token();
+        let endpoint = McpEndpoint {
+            port,
+            token: token.clone(),
+        };
+        self.ctl_tx
+            .send(ServerCtl::Start {
+                workspace_id: workspace_id.to_string(),
+                token,
+                listener,
+            })
+            .ok()?;
+        tracing::info!(%workspace_id, port, "MCP HTTP server listening");
+        Some(endpoint)
+    }
+
+    /// Shut the workspace's listener down — called when a workspace is deleted.
+    pub fn stop_workspace(&self, workspace_id: &str) {
+        let _ = self.ctl_tx.send(ServerCtl::Stop(workspace_id.to_string()));
+    }
+}
+
+/// 32 hex chars from `/dev/urandom`. Ephemeral: minted per run, never
+/// persisted, so a stale token can't outlive the process that issued it.
+fn random_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .expect("failed to read /dev/urandom for MCP token");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
