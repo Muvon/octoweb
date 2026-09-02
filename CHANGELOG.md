@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.12.0] - 2026-09-02
+
+### 📋 Release Summary
+
+This release introduces workspace-scoped MCP routing, workspace switching, index shortcuts, quick slots, and lazy session restoration (0433db17, 04d0cf67, 9dfba3be, 6dbb6534, f8b34290). It adds searchable paged chat history, guided approvals and harvests, agent and capability configuration, and specialist run reports (be3497cc, 2c6c33b5, 87890854, 682e4148). Improvements and fixes enhance input handling, workspace state and navigation, A2UI interactions, webview data, and MCP error handling (049a5163, 9927036c, 8c7c5786, f64808be, 965a2f8f, a6927eb6, 9eb971a1).
+
+
+### ✨ New Features & Enhancements
+
+- **chat**: enable searchable paged history `be3497cc`
+- **octoweb**: guide approvals and harvests `2c6c33b5`
+- **octoweb**: configure agents and capabilities `87890854`
+- **mcp**: route MCP by workspace `0433db17`
+- **workspaces**: add index switching shortcuts `04d0cf67`
+- **workspaces**: scope quick slots per workspace `9dfba3be`
+- **workspaces**: restore sessions lazily `6dbb6534`
+- **workspaces**: add workspace switching `f8b34290`
+- **acp**: surface specialist run reports `682e4148`
+
+### 🔧 Improvements & Optimizations
+
+- **acp**: group session channel receivers `8a436f2b`
+- **workspace**: unify A2UI session handling `72493370`
+- **mcp**: route workspace calls by token `2da2602c`
+
+### 🐛 Bug Fixes & Stability
+
+- **input**: handle rich editor typing modes `049a5163`
+- **workspaces**: route ACP state correctly `9927036c`
+- **a2ui**: route clicks through Rust prompts `8c7c5786`
+- **workspace**: prevent row reflow and window shadow `f64808be`
+- **webview**: use active workspace data store `965a2f8f`
+- **tabs**: scope MRU navigation per workspace `a6927eb6`
+- **mcp**: pass owned watchdog error messages `9eb971a1`
+
 ## [0.11.0] - 2026-08-31
 
 ### 📋 Release Summary
