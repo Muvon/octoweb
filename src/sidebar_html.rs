@@ -15,9 +15,9 @@
 ///   window.__appendChunk(sid, text)               — append streaming MD chunk
 ///   window.__appendSpecialist(sid, text)          — injected specialist reply bubble
 ///   window.__appendImage(sid, mime, b64)          — append image to current bubble
-///   window.__toolStart(sid, id, title, kind, ri, locs) — start tool row
+///   window.__toolStart(sid, id, title, kind, ri, locs, startedMsAgo?) — start tool row
 ///   window.__toolUpdate(sid, id, title, status, ro)    — update tool row
-///   window.__setThinking(sid, bool)               — show/hide activity feed
+///   window.__setThinking(sid, bool, elapsedMs?)   — show/hide activity feed
 ///   window.__appendError(sid, text)               — show an error bubble
 ///   window.__setAvailableCommands(sid, json)      — populate slash-command list
 ///   window.__a2uiUpdate(sid, fileId, payload, live, ts) — render / update an A2UI surface
@@ -4748,7 +4748,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return title === 'render_ui' || (typeof title === 'string' && title.indexOf('render_ui') === 0);
   }
 
-  window.__toolStart = function(sid, id, title, kind, rawInput, locations) {
+  // `startedMsAgo` is only passed when Rust rebuilds a turn already in
+  // progress (workspace switch-back) so the row's timer resumes, not restarts.
+  window.__toolStart = function(sid, id, title, kind, rawInput, locations, startedMsAgo) {
     const s = sessions.get(sid);
     if (!s) return;
     registerTapRunPrompt(s, title, rawInput, null);
@@ -4773,7 +4775,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     ttl.textContent = title;
     const tm = document.createElement('span');
     tm.className = 'tool-time';
-    tm.textContent = '0s';
+    tm.textContent = fmtElapsed(startedMsAgo || 0);
     row.appendChild(icon);
     row.appendChild(ttl);
     row.appendChild(tm);
@@ -4783,7 +4785,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     item.appendChild(row);
     item.appendChild(detail);
     s.thinking.appendChild(item);
-    s.toolRows[id] = { el: row, item, detail, startTime: Date.now(), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
+    s.toolRows[id] = { el: row, item, detail, startTime: Date.now() - (startedMsAgo || 0), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
     s.runningTools++;
     syncFeed(s);
     if (sid === activeSid) scrollToBottom();
@@ -4854,7 +4856,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.activityStart = 0;
   }
 
-  window.__setThinking = function(sid, on) {
+  // `elapsedMs` is only passed when Rust rebuilds a turn already in progress
+  // (workspace switch-back): the timer resumes from the real start instead
+  // of 0s, and `busy` is restored since no dispatch path set it.
+  window.__setThinking = function(sid, on, elapsedMs) {
     const s = sessions.get(sid);
     if (!s) return;
     s.isThinking = on;
@@ -4867,12 +4872,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       // response. Finalize its bubble before resetting live-turn state; the
       // old behavior dropped the reference and left it without copy/steps.
       finishLiveTurn(s);
-      s.activityStart = Date.now();
+      if (elapsedMs !== undefined) s.busy = true;
+      s.activityStart = Date.now() - (elapsedMs || 0);
       const hdr = document.createElement('div');
       hdr.className = 'activity-header';
       hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span>' +
         '<span class="activity-label">Working…</span>' +
-        '<span class="activity-elapsed">0s</span>';
+        '<span class="activity-elapsed">' + fmtElapsed(elapsedMs || 0) + '</span>';
       s.thinking.appendChild(hdr);
       s.activityTimer = setInterval(() => tickActivity(s), 1000);
       syncFeed(s);
@@ -5555,8 +5561,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   // Hook into __setThinking to drain queue when agent becomes free
   const _origSetThinking = window.__setThinking;
-  window.__setThinking = function(sid, on) {
-    _origSetThinking(sid, on);
+  window.__setThinking = function(sid, on, elapsedMs) {
+    _origSetThinking(sid, on, elapsedMs);
     if (!on) {
       const s = sessions.get(sid);
       if (s) setTimeout(() => drainQueueForSession(s), 80);

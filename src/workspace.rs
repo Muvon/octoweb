@@ -147,6 +147,31 @@ impl WorkspaceManager {
         self.workspaces.iter().position(|w| w.id == id)
     }
 
+    /// Workspace owning tab `id`. Per-webview callbacks (title, URL, popup,
+    /// crash) arrive with just a tab id and must not assume it belongs to the
+    /// workspace on screen — an agent drives tabs in background workspaces.
+    /// Tab ids are process-unique (`browser::NEXT_TAB_ID`), so at most one
+    /// workspace matches.
+    pub fn index_of_tab(&self, id: usize) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|w| w.tabs.lock().unwrap().tabs().iter().any(|t| t.id == id))
+    }
+
+    /// Live `WebView` of tab `id`, whichever workspace owns it.
+    pub fn webview_of_tab(&self, id: usize) -> Option<&WebView> {
+        self.workspaces.iter().find_map(|w| w.webviews.get(&id))
+    }
+
+    /// Workspace owning AI session `id` (process-unique as well — see
+    /// `main::next_acp_session_id`). Reconnect timers and login pollers fire
+    /// regardless of which workspace the user has switched to since.
+    pub fn index_of_session(&self, id: u64) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|w| w.acp_sessions.iter().any(|s| s.id == id))
+    }
+
     /// Positional access, for code that must act on a specific workspace
     /// rather than the active one — MCP commands carry their caller's
     /// workspace id and resolve it to an index once per command.
