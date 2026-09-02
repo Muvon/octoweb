@@ -1,0 +1,23 @@
+# capabilities/octoweb/octoweb.toml
+# Capability: octoweb
+# Provider: Octoweb — browser-based personal assistant
+# Title: Octoweb
+# Description: Browser-based personal assistant via Octoweb HTTP server.
+#
+# The workspace header is what binds an agent to the workspace that spawned it.
+# Octoweb sets OCTOWEB_MCP_TOKEN on every agent it launches; without it octomind
+# gates this server off rather than letting the agent drive whichever workspace
+# happens to be on screen. Agents that only need generic browser control and
+# don't care about workspaces should use the `browser` capability instead.
+
+[roles.mcp]
+server_refs = ["octoweb"]
+allowed_tools = ["octoweb:*"]
+
+[[mcp.servers]]
+name = "octoweb"
+type = "http"
+url = "http://localhost:3434/mcp"
+timeout_seconds = 120
+tools = []
+headers = { "X-Octoweb-Workspace" = "{{ENV:OCTOWEB_MCP_TOKEN}}" }
