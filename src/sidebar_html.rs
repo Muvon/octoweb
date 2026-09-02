@@ -612,6 +612,132 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     border-radius: 2px;
   }
 
+  /* ── Chat search (⌘F) ───────────────────────────────────────────────────── */
+  #chat-search {
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--divider);
+    flex-shrink: 0;
+  }
+  #chat-search.hidden { display: none; }
+  #cs-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    color: var(--text-secondary);
+  }
+  #cs-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--text-primary);
+    padding: 2px 0;
+  }
+  #cs-count {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  #cs-bar button {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 5px;
+    width: 20px;
+    height: 20px;
+    line-height: 1;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  #cs-bar button:hover { background: var(--hover-bg); color: var(--text-primary); }
+  #cs-results {
+    max-height: 220px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #cs-results::-webkit-scrollbar { width: 3px; }
+  #cs-results::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+  #cs-results:empty { display: none; }
+  .cs-hit {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-top: 1px solid var(--divider);
+  }
+  .cs-hit:hover, .cs-hit.active { background: var(--hover-bg); }
+  .cs-hit-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+  }
+  .cs-hit-chat {
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent);
+  }
+  .cs-hit-snippet {
+    font-size: 12px;
+    color: var(--text-primary);
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .cs-hit-snippet mark {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+  #cs-empty {
+    padding: 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+  }
+
+  /* Sentinel at the top of a partially-mounted log. */
+  /* `.session-messages` is a plain block, so this centers by margin rather
+     than align-self. */
+  .msg-more {
+    display: block;
+    width: fit-content;
+    margin: 0 auto 10px;
+    border: none;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text-secondary);
+    padding: 4px 10px;
+    border-radius: var(--r-capsule);
+    background: var(--hover-bg);
+    cursor: pointer;
+  }
+  .msg-more:hover { color: var(--text-primary); }
+
+  /* Brief flash on the message a search hit jumped to. */
+  @keyframes chat-hit-flash {
+    0%   { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+    100% { background: transparent; }
+  }
+  .chat-hit {
+    animation: chat-hit-flash 1.6s ease-out;
+    border-radius: 10px;
+  }
+
   /* ── Welcome screen (empty session) ─────────────────────────────────────── */
   #welcome {
     display: flex;
@@ -2478,6 +2604,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     <button id="sc-cancel" type="button" class="secondary" title="Cancel">×</button>
   </div>
 
+  <!-- Chat search (⌘F while the sidebar has focus) — searches every session's
+       message log, including messages not currently mounted in the DOM -->
+  <div id="chat-search" class="hidden">
+    <div id="cs-bar">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <input id="cs-input" type="text" placeholder="Search all chats" autocomplete="off" spellcheck="false" aria-label="Search conversations">
+      <span id="cs-count"></span>
+      <button id="cs-prev" type="button" title="Previous (⇧⏎)" aria-label="Previous match">↑</button>
+      <button id="cs-next" type="button" title="Next (⏎)" aria-label="Next match">↓</button>
+      <button id="cs-close" type="button" title="Close (Esc)" aria-label="Close search">×</button>
+    </div>
+    <div id="cs-results" role="listbox"></div>
+  </div>
+
   <!-- Messages — host element; per-session containers mounted/swapped by JS -->
   <div id="messages"></div>
 
@@ -2764,7 +2907,127 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       inputDraft: '',
       inputSelectionStart: 0,
       inputSelectionEnd: 0,
+      // ── Message log ──────────────────────────────────────────────────
+      // Persisted-shaped records ({role,text,ts,tools,turn_ms,a2ui}) for the
+      // whole conversation. The DOM holds only the tail of this; search runs
+      // over the array, so it finds messages that were never mounted.
+      log: [],
+      // Index of the oldest record currently mounted. Equals log.length when
+      // nothing is mounted yet.
+      renderedFrom: 0,
+      // Set while (re)rendering from `log` so the append helpers don't push
+      // duplicate records back into it.
+      replaying: false,
+      // Set while a composite append (a specialist message) renders its
+      // parts, so only the outer call logs a record.
+      logSuppress: false,
+      // Log index the next mounted wrapper should carry; null = live append,
+      // which lands at log.length (the index the record is about to get).
+      renderIndex: null,
+      // Where mountMsg inserts. Normally null (= before `thinking`, i.e. at
+      // the bottom); set to the topmost mounted message while back-filling.
+      insertAnchor: null,
+      // "N earlier messages" sentinel while log[0] is off-screen.
+      moreRow: null,
     };
+  }
+
+  // ── Windowed history ──────────────────────────────────────────────────
+  // Long conversations only mount their tail; scrolling up back-fills older
+  // records in chunks. The window only ever GROWS — nothing is unmounted, so
+  // A2UI blocks and tool groups keep their DOM identity and their live wiring.
+  // ponytail: no eviction. A session is capped at max_acp_session_messages and
+  // the user has to scroll to reach the top; if that ever gets heavy, evict
+  // from the bottom of the window here rather than making the mount path
+  // reversible everywhere.
+  const HISTORY_WINDOW = 40;   // records mounted on first paint
+  const HISTORY_CHUNK  = 30;   // records added per scroll-up
+
+  // Every message wrapper mounts through here so it carries its log index
+  // (search scrolls to it) and lands at the right end of the container.
+  function mountMsg(s, wrap) {
+    wrap.dataset.logIndex = (s.renderIndex != null ? s.renderIndex : s.log.length);
+    s.container.insertBefore(wrap, s.insertAnchor || s.thinking);
+  }
+
+  // Record a live message in the log. No-op during replay — those records are
+  // already in `log`, that's what we're rendering from — and while a caller
+  // that logs the whole message itself is rendering its parts.
+  function logPush(s, rec) {
+    if (s.replaying || s.logSuppress) return;
+    s.log.push(rec);
+  }
+
+  function firstMessageNode(s) {
+    for (const n of s.container.childNodes) {
+      if (n.nodeType === 1 && n.dataset && n.dataset.logIndex != null) return n;
+    }
+    return null;
+  }
+
+  // Mount log records [from, s.renderedFrom) above whatever is already there.
+  function mountRange(s, from) {
+    if (from < 0) from = 0;
+    if (from >= s.renderedFrom) return;
+    const prevAnchor = s.insertAnchor;
+    s.insertAnchor = firstMessageNode(s);
+    s.replaying = true;
+    for (let i = from; i < s.renderedFrom; i++) {
+      s.renderIndex = i;
+      renderLogRecord(s, s.log[i]);
+    }
+    s.renderIndex = null;
+    s.replaying = false;
+    s.insertAnchor = prevAnchor;
+    s.renderedFrom = from;
+    syncMoreRow(s);
+  }
+
+  function syncMoreRow(s) {
+    const hidden = s.renderedFrom;
+    if (hidden <= 0) {
+      if (s.moreRow) { s.moreRow.remove(); s.moreRow = null; }
+      return;
+    }
+    if (!s.moreRow) {
+      s.moreRow = document.createElement('button');
+      s.moreRow.type = 'button';
+      s.moreRow.className = 'msg-more';
+      s.moreRow.addEventListener('click', () => loadOlder(s));
+    }
+    s.moreRow.textContent = hidden + (hidden === 1 ? ' earlier message' : ' earlier messages');
+    s.container.insertBefore(s.moreRow, s.container.firstChild);
+  }
+
+  // Back-fill one chunk while pinning the reading position: the container
+  // grows upward, so scrollTop has to grow by the same amount.
+  function loadOlder(s) {
+    if (s.renderedFrom <= 0) return;
+    const isActive = s.sid === activeSid;
+    const before = isActive ? messagesHost.scrollHeight : 0;
+    // scroll-behavior: smooth would animate this correction into a visible
+    // jump, so the adjustment runs with it off.
+    const prevBehavior = messagesHost.style.scrollBehavior;
+    if (isActive) messagesHost.style.scrollBehavior = 'auto';
+    mountRange(s, s.renderedFrom - HISTORY_CHUNK);
+    if (isActive) {
+      messagesHost.scrollTop += messagesHost.scrollHeight - before;
+      messagesHost.style.scrollBehavior = prevBehavior;
+    }
+  }
+
+  // Ensure `index` is mounted, back-filling as far as needed in one go.
+  function ensureMounted(s, index) {
+    if (index >= s.renderedFrom) return;
+    const isActive = s.sid === activeSid;
+    const before = isActive ? messagesHost.scrollHeight : 0;
+    const prevBehavior = messagesHost.style.scrollBehavior;
+    if (isActive) messagesHost.style.scrollBehavior = 'auto';
+    mountRange(s, index);
+    if (isActive) {
+      messagesHost.scrollTop += messagesHost.scrollHeight - before;
+      messagesHost.style.scrollBehavior = prevBehavior;
+    }
   }
 
   function refreshAddBtn() {
@@ -3063,6 +3326,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
     s.availableCommands = [];
+    s.log = [];
+    s.renderedFrom = 0;
+    s.moreRow = null; // was just removed with the rest of the container
+    if (csOpen) runChatSearch();
     s.inputDraft = '';
     s.inputSelectionStart = 0;
     s.inputSelectionEnd = 0;
@@ -3313,7 +3580,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       wrap.dataset.raw = text;
       bubble.appendChild(makeCopyBtn(wrap));
     }
-    s.container.insertBefore(wrap, s.thinking);
+    mountMsg(s, wrap);
+    logPush(s, { role: role, text: text, ts: Date.now() });
     if (s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
     return bubble;
   }
@@ -4136,6 +4404,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     const wrap = bubble.closest('.msg');
     if (!wrap) return;
     wrap.dataset.raw = rawText;
+    // Before the early returns below — a tool-only turn is still a searchable
+    // record, and `startAgentBubble` already stamped the wrap with this index.
+    logPush(s, { role: 'agent', text: rawText, ts: Date.now(), tools: details || [], turn_ms: turnMs || 0 });
 
     var cmdObj = tryParseCommandJson(rawText);
     if (cmdObj) {
@@ -4189,7 +4460,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     bubble.className = 'msg-bubble';
     wrap.appendChild(label);
     wrap.appendChild(bubble);
-    s.container.insertBefore(wrap, s.thinking);
+    mountMsg(s, wrap);
     if (s.sid === activeSid) scrollToBottom();
     return bubble;
   }
@@ -4228,6 +4499,20 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // the bracket tag becomes the sender label (tap-run labels collapse to the
   // bare role, e.g. "doctor:blood").
   function appendSpecialistMsg(s, text) {
+    // One record for the whole message, with the role Rust persists. The
+    // inner render paths (report card, or a plain agent bubble) would
+    // otherwise log nothing, or log it as `agent`.
+    const wasSuppressed = s.logSuppress;
+    s.logSuppress = true;
+    try {
+      appendSpecialistMsgInner(s, text);
+    } finally {
+      s.logSuppress = wasSuppressed;
+    }
+    logPush(s, { role: 'specialist', text: text, ts: Date.now() });
+  }
+
+  function appendSpecialistMsgInner(s, text) {
     let who = 'Specialist', body = text;
     const m = text.match(/^\[([^\]\n]+)\]\s*/);
     if (m) { who = m[1]; body = text.slice(m[0].length); }
@@ -4288,7 +4573,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       details.appendChild(summary);
       details.appendChild(content);
       wrap.appendChild(details);
-      s.container.insertBefore(wrap, s.thinking);
+      mountMsg(s, wrap);
       if (s.sid === activeSid) scrollToBottom();
       return who;
     }
@@ -4629,48 +4914,283 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   //            a2ui?: <envelope-body>, tools?: [tool records], turn_ms?: number }.
   // Agent turns rebuild their steps group from `tools`; inline images are
   // live-only and skipped.
+  // Render one persisted record into `s.container`. Shared by first paint and
+  // by scroll-up back-fill, so both produce identical DOM.
+  function renderLogRecord(s, m) {
+    const role = m && m.role;
+    const text = (m && typeof m.text === 'string') ? m.text : '';
+    if (role === 'user' || role === 'error') {
+      appendMessage(s, role, text);
+    } else if (role === 'specialist') {
+      appendSpecialistMsg(s, text);
+    } else if (role === 'agent') {
+      const bubble = startAgentBubble(s);
+      if (!bubble) return;
+      const cmdObj = tryParseCommandJson(text);
+      bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
+      // Persisted snake_case tool records → live detail shape.
+      const tools = Array.isArray(m.tools) ? m.tools.map(t => ({
+        kind: t.kind,
+        title: t.title || '',
+        status: t.status,
+        duration: t.duration_ms || 0,
+        rawInput: t.raw_input != null ? t.raw_input : null,
+        locations: Array.isArray(t.locations) ? t.locations : [],
+        rawOutput: t.raw_output != null ? t.raw_output : null
+      })) : [];
+      for (const t of tools) registerTapRunPrompt(s, t.title, t.rawInput, t.rawOutput);
+      finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0);
+    } else if (role === 'ui' && m && m.a2ui) {
+      // Rebuild the A2UI bubble from the persisted envelope body. Replays are
+      // ghosts (nothing is blocked on them) and anchor on the persisted
+      // creation ts so the bubble keeps its original chronological spot and
+      // time label rather than showing "now".
+      window.__a2uiUpdate(s.sid, text, m.a2ui, false, typeof m.ts === 'number' ? m.ts : 0);
+    }
+  }
+
+  // Tear a session's rendered history back down to empty. `__addSession` is a
+  // no-op for a session that already exists, so a second replay (sidebar
+  // reload, re-entering a workspace) would otherwise stack a duplicate copy
+  // of the whole conversation on top of the first.
+  function resetSessionDom(s) {
+    for (const entry of Array.from(a2uiBlocks)) {
+      const fid = entry[0], b = entry[1];
+      if (b.sid !== s.sid) continue;
+      a2uiBlocks.delete(fid);
+      a2uiBubbleByFile.delete(fid);
+      if (b.surfaceId != null) a2uiSurfaceIndex.delete(a2uiSurfaceKey(s.sid, b.surfaceId));
+    }
+    while (s.container.firstChild) s.container.removeChild(s.container.firstChild);
+    s.container.appendChild(s.thinking);
+    s.moreRow = null;
+    s.currentAgentBubble = null;
+    s.currentAgentRaw = '';
+  }
+
   window.__replayMessages = function(sid, msgs) {
     const s = sessions.get(sid);
     if (!s || !Array.isArray(msgs) || msgs.length === 0) return;
-    for (let i = 0; i < msgs.length; i++) {
-      const m = msgs[i];
-      const role = m && m.role;
-      const text = (m && typeof m.text === 'string') ? m.text : '';
-      if (role === 'user' || role === 'error') {
-        appendMessage(s, role, text);
-      } else if (role === 'specialist') {
-        appendSpecialistMsg(s, text);
-      } else if (role === 'agent') {
-        const bubble = startAgentBubble(s);
-        if (!bubble) continue;
-        const cmdObj = tryParseCommandJson(text);
-        bubble.innerHTML = cmdObj ? renderCommandOutput(cmdObj) : renderMd(text);
-        // Persisted snake_case tool records → live detail shape.
-        const tools = Array.isArray(m.tools) ? m.tools.map(t => ({
-          kind: t.kind,
-          title: t.title || '',
-          status: t.status,
-          duration: t.duration_ms || 0,
-          rawInput: t.raw_input != null ? t.raw_input : null,
-          locations: Array.isArray(t.locations) ? t.locations : [],
-          rawOutput: t.raw_output != null ? t.raw_output : null
-        })) : [];
-        for (const t of tools) registerTapRunPrompt(s, t.title, t.rawInput, t.rawOutput);
-        finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0);
-      } else if (role === 'ui' && m && m.a2ui) {
-        // Rebuild the A2UI bubble from the persisted envelope body. Replays
-        // are ghosts (no live poll) and anchor on the persisted creation ts
-        // so the bubble lands in its original chronological spot and shows
-        // its original time, not "now".
-        window.__a2uiUpdate(sid, text, m.a2ui, false, typeof m.ts === 'number' ? m.ts : 0);
-      }
-    }
+    if (firstMessageNode(s)) resetSessionDom(s);
+    s.log = msgs.slice();
+    // Nothing mounted yet, so the window starts empty at the end and
+    // mountRange back-fills the tail.
+    s.renderedFrom = s.log.length;
+    mountRange(s, s.log.length - HISTORY_WINDOW);
     if (sid === activeSid) { updateWelcome(); scrollToBottom(); }
   };
 
   function scrollToBottom() {
+    // Back-filling older history mounts messages above the viewport; jumping
+    // to the bottom would throw the user out of what they scrolled up to read.
+    if (active && active.replaying) return;
     messagesHost.scrollTop = messagesHost.scrollHeight;
   }
+
+  // Scrolling to the top back-fills the next chunk of history.
+  messagesHost.addEventListener('scroll', () => {
+    if (!active || active.renderedFrom <= 0) return;
+    if (messagesHost.scrollTop > 240) return;
+    loadOlder(active);
+  }, { passive: true });
+
+  // ── Chat search (⌘F) ──────────────────────────────────────────────────
+  // Runs over each session's `log`, not the DOM, so it finds messages the
+  // window hasn't mounted. Jumping to a hit back-fills far enough to show it.
+  const chatSearchEl = document.getElementById('chat-search');
+  const csInput   = document.getElementById('cs-input');
+  const csCount   = document.getElementById('cs-count');
+  const csResults = document.getElementById('cs-results');
+  const CS_MAX_HITS = 100;
+  let csOpen = false;
+  let csHits = [];
+  let csIdx = -1;
+  let csTimer = null;
+
+  const CS_ROLE_LABEL = {
+    user: 'You', agent: 'Octopus', error: 'Error', specialist: 'Specialist', ui: 'Surface',
+  };
+
+  // What a record contributes to the index. A2UI records carry their content
+  // in components rather than `text` (which is just the call id).
+  function logRecordText(m) {
+    if (!m) return '';
+    if (m.role === 'ui') {
+      const out = [];
+      const envelopes = (m.a2ui && Array.isArray(m.a2ui.messages)) ? m.a2ui.messages : [];
+      for (const env of envelopes) {
+        const comps = env && env.updateComponents && env.updateComponents.components;
+        if (!Array.isArray(comps)) continue;
+        for (const c of comps) {
+          for (const k of ['text', 'label', 'placeholder', 'description']) {
+            if (c && typeof c[k] === 'string') out.push(c[k]);
+          }
+        }
+      }
+      return out.join(' ');
+    }
+    return typeof m.text === 'string' ? m.text : '';
+  }
+
+  function runChatSearch() {
+    const q = csInput.value.trim();
+    csHits = [];
+    csIdx = -1;
+    csResults.innerHTML = '';
+    if (q.length < 2) {
+      csCount.textContent = '';
+      return;
+    }
+    const needle = q.toLowerCase();
+    // Current chat first — that's what ⌘F usually means — then the others in
+    // tab order.
+    const order = [];
+    if (active) order.push(active);
+    for (const s of sessions.values()) if (s !== active) order.push(s);
+    outer:
+    for (const s of order) {
+      for (let i = 0; i < s.log.length; i++) {
+        const text = logRecordText(s.log[i]);
+        if (!text) continue;
+        const at = text.toLowerCase().indexOf(needle);
+        if (at < 0) continue;
+        csHits.push({
+          sid: s.sid, index: i, role: s.log[i].role, title: s.title,
+          text: text, at: at, len: q.length,
+        });
+        if (csHits.length >= CS_MAX_HITS) break outer;
+      }
+    }
+    renderChatHits();
+  }
+
+  function renderChatHits() {
+    csResults.innerHTML = '';
+    updateCsCount();
+    if (!csHits.length) {
+      if (csInput.value.trim().length >= 2) {
+        const empty = document.createElement('div');
+        empty.id = 'cs-empty';
+        empty.textContent = 'No matches';
+        csResults.appendChild(empty);
+      }
+      return;
+    }
+    csHits.forEach((h, i) => {
+      const row = document.createElement('div');
+      row.className = 'cs-hit';
+      row.setAttribute('role', 'option');
+      const meta = document.createElement('div');
+      meta.className = 'cs-hit-meta';
+      const chat = document.createElement('span');
+      chat.className = 'cs-hit-chat';
+      chat.textContent = h.title;
+      const who = document.createElement('span');
+      who.textContent = CS_ROLE_LABEL[h.role] || h.role || '';
+      meta.appendChild(chat);
+      meta.appendChild(who);
+      row.appendChild(meta);
+      row.appendChild(hitSnippet(h));
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); jumpToHit(i); });
+      csResults.appendChild(row);
+    });
+  }
+
+  // Text nodes around a <mark>, never innerHTML — the haystack is user and
+  // agent content.
+  function hitSnippet(h) {
+    const el = document.createElement('div');
+    el.className = 'cs-hit-snippet';
+    const start = Math.max(0, h.at - 48);
+    const stop = Math.min(h.text.length, h.at + h.len + 90);
+    el.appendChild(document.createTextNode((start > 0 ? '…' : '') + h.text.slice(start, h.at)));
+    const mk = document.createElement('mark');
+    mk.textContent = h.text.slice(h.at, h.at + h.len);
+    el.appendChild(mk);
+    el.appendChild(document.createTextNode(h.text.slice(h.at + h.len, stop) + (stop < h.text.length ? '…' : '')));
+    return el;
+  }
+
+  function updateCsCount() {
+    if (!csHits.length) {
+      csCount.textContent = csInput.value.trim().length >= 2 ? '0' : '';
+      return;
+    }
+    csCount.textContent = (csIdx >= 0 ? (csIdx + 1) + '/' : '') + csHits.length;
+  }
+
+  function updateCsActive() {
+    const rows = csResults.querySelectorAll('.cs-hit');
+    rows.forEach((r, i) => r.classList.toggle('active', i === csIdx));
+    if (rows[csIdx]) rows[csIdx].scrollIntoView({ block: 'nearest' });
+    updateCsCount();
+  }
+
+  function jumpToHit(i) {
+    if (!csHits.length) return;
+    csIdx = ((i % csHits.length) + csHits.length) % csHits.length;
+    const h = csHits[csIdx];
+    updateCsActive();
+    if (h.sid !== activeSid) {
+      // Swap locally so the scroll below has a mounted container, and tell
+      // Rust so its own idea of the active session follows. Its echoed
+      // __switchSession is then a no-op.
+      switchTo(h.sid);
+      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: h.sid }));
+    }
+    const s = sessions.get(h.sid);
+    if (!s) return;
+    ensureMounted(s, h.index);
+    scrollToLogIndex(s, h.index);
+  }
+
+  function scrollToLogIndex(s, index) {
+    let target = null;
+    for (const n of s.container.querySelectorAll('[data-log-index]')) {
+      if (Number(n.dataset.logIndex) >= index) { target = n; break; }
+    }
+    if (!target) return;
+    target.scrollIntoView({ block: 'center' });
+    target.classList.remove('chat-hit');
+    void target.offsetWidth; // restart the flash animation on a repeat jump
+    target.classList.add('chat-hit');
+    setTimeout(() => target.classList.remove('chat-hit'), 1800);
+  }
+
+  // ⌘F toggles, matching the page find bar. Pressing it while the field is
+  // open but unfocused re-focuses instead of closing.
+  window.__openChatSearch = function() {
+    if (csOpen && document.activeElement === csInput) { closeChatSearch(); return; }
+    chatSearchEl.classList.remove('hidden');
+    csOpen = true;
+    csInput.focus();
+    csInput.select();
+    if (csInput.value.trim()) runChatSearch();
+  };
+
+  function closeChatSearch() {
+    chatSearchEl.classList.add('hidden');
+    csOpen = false;
+    csHits = [];
+    csIdx = -1;
+    csResults.innerHTML = '';
+    csCount.textContent = '';
+    input.focus();
+  }
+
+  csInput.addEventListener('input', () => {
+    clearTimeout(csTimer);
+    csTimer = setTimeout(runChatSearch, 120);
+  });
+  csInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeChatSearch(); return; }
+    if (e.key === 'Enter')  { e.preventDefault(); jumpToHit(csIdx + (e.shiftKey ? -1 : 1)); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); jumpToHit(csIdx + 1); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); jumpToHit(csIdx - 1); return; }
+  });
+  document.getElementById('cs-next').addEventListener('click', () => jumpToHit(csIdx + 1));
+  document.getElementById('cs-prev').addEventListener('click', () => jumpToHit(csIdx - 1));
+  document.getElementById('cs-close').addEventListener('click', closeChatSearch);
 
   // ── Queue (per-session, max 2 pending) ─────────────────────────────────
   function renderQueue() {
@@ -6126,7 +6646,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     bubble.appendChild(body);
     wrap.appendChild(label);
     wrap.appendChild(bubble);
-    s.container.insertBefore(wrap, s.thinking);
+    mountMsg(s, wrap);
     a2uiBubbleByFile.set(fileId, wrap);
     if (s.sid === activeSid) { updateWelcome(); scrollToBottom(); }
     return block;
@@ -6227,6 +6747,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       block.pollFileId = null;
     }
     a2uiRerender(block);
+    // Mirror Rust's `upsert_a2ui_msg`: one log record per call id, updated in
+    // place, so a surface is searchable and survives a window re-render.
+    const sess = sessions.get(sid);
+    if (sess && !sess.replaying) {
+      const at = sess.log.findIndex(r => r.role === 'ui' && r.text === fileId);
+      if (at >= 0) sess.log[at].a2ui = payload;
+      else sess.log.push({ role: 'ui', text: fileId, ts: Date.now(), a2ui: payload });
+    }
   };
 
   // Legacy hook — kept for any callers still posting a separate "resolved"

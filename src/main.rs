@@ -134,6 +134,7 @@ enum AppEvent {
     HideShortcuts,                  // JS Esc / backdrop click in shortcuts overlay
     ToggleFindBar,                  // ⌘F — toggle find-in-page bar
     HideFindBar,                    // Esc / close button in find bar
+    SidebarFind,                    // ⌘F while the sidebar has key — search the chats
     FindInPage(String),             // search query from find bar input
     FindNext,                       // next match (Enter in find bar)
     FindPrev,                       // previous match (⇧Enter in find bar)
@@ -248,7 +249,16 @@ fn keybind_to_event(
         A::ZoomIn if !overlay => AppEvent::ZoomIn,
         A::ZoomOut if !overlay => AppEvent::ZoomOut,
         A::ZoomReset if !overlay => AppEvent::ZoomReset,
-        A::Find if !overlay => AppEvent::ToggleFindBar,
+        // ⌘F follows focus: the assistant searches its own conversations, the
+        // page searches the page. `sidebar` is `sidebar_owns_key`, so a sidebar
+        // that is merely open (user still reading the page) keeps find-in-page.
+        A::Find if !overlay => {
+            if sidebar {
+                AppEvent::SidebarFind
+            } else {
+                AppEvent::ToggleFindBar
+            }
+        }
         A::TogglePin if !overlay => AppEvent::TogglePin,
         _ => return None,
     })
@@ -6572,6 +6582,13 @@ fn main() {
             }
 
             // ── Find bar: search query from input ───────────────────────────
+            // ── ⌘F with the sidebar focused → search the conversations ──────
+            Event::UserEvent(AppEvent::SidebarFind) if sidebar_visible => {
+                let _ = sidebar_wv.focus();
+                let _ = sidebar_wv
+                    .evaluate_script("window.__openChatSearch && window.__openChatSearch()");
+            }
+
             Event::UserEvent(AppEvent::FindInPage(query)) => {
                 if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let escaped = webview_utils::escape_js_template(&query);
