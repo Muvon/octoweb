@@ -208,10 +208,13 @@ impl AcpHandle {
     ///
     /// `wake` is called from the ACP thread whenever an event is pushed — use it to
     /// poke the main event loop out of `ControlFlow::Wait`.
-    /// `mcp_token` identifies the agent's workspace to octoweb's MCP server, so
-    /// its browser tools act on that workspace's tabs regardless of which one
-    /// the user is looking at. `None` means the agent's tool calls land on the
-    /// first workspace, matching how it behaved before workspaces existed.
+    /// `mcp_token` identifies the caller to octoweb's MCP server. A chat
+    /// session's token names both its workspace and the session itself, so
+    /// browser tools act on that workspace's tabs and `render_ui` draws into
+    /// that chat, regardless of what the user is looking at. Background agents
+    /// (learning, inline edit) get a workspace-only token. `None` means tool
+    /// calls land on the default workspace, matching how it behaved before
+    /// workspaces existed.
     pub fn connect(
         cmd: &str,
         mcp_token: Option<String>,
@@ -415,13 +418,14 @@ async fn init_session(
     // Run the agent inside octoweb's internal workspace dir (not the user's
     // home). Combined with `--sandbox` (injected in `connect`), this confines
     // all of the agent's filesystem writes to this dir.
-    let workspace = crate::a2ui_render_ui::workspace_dir();
+    let workspace = crate::agent_workspace::workspace_dir();
     let _ = std::fs::create_dir_all(&workspace);
 
     let mut child = tokio::process::Command::new(&program);
     // The agent's capability manifest forwards this as the
     // `X-Octoweb-Workspace` header, which is how octoweb's MCP server knows
-    // which workspace the call belongs to. Ephemeral, minted per run.
+    // which workspace — and which chat session — the call belongs to.
+    // Ephemeral, minted per run.
     if let Some(token) = mcp_token {
         child.env("OCTOWEB_MCP_TOKEN", token);
     }

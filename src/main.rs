@@ -1,7 +1,6 @@
-mod a2ui_render_ui;
-mod a2ui_watcher;
 mod acp;
 mod address_bar_html;
+mod agent_workspace;
 mod async_eval;
 mod browser;
 mod cold_open;
@@ -160,10 +159,9 @@ enum AppEvent {
     LearningWake,                                // background learning agent pokes event loop
     LearningReady(String), // active tab content extracted — build prompt and send
     JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
-    /// A2UI surface envelope (from the `render_ui` tool) changed on disk —
-    /// watcher saw a new or status-flipped file. Forwarded to the sidebar's
-    /// currently-active session as a `.msg.ui` bubble.
-    A2uiUpdate(a2ui_watcher::A2uiSnapshot),
+    /// The user clicked a button on an A2UI surface: (call_id, action payload).
+    /// Completes the `render_ui` tool call still blocked on that surface.
+    A2uiResolve(String, serde_json::Value),
     KeybindRecord(String, String), // (action_id, chord) — remap a global shortcut
     KeybindReset(String),          // (action_id) — restore one action to its default
     KeybindResetAll,               // restore every keybinding to default
@@ -254,6 +252,21 @@ fn keybind_to_event(
         A::TogglePin if !overlay => AppEvent::TogglePin,
         _ => return None,
     })
+}
+
+/// A `render_ui` call parked until the user clicks one of its buttons. The
+/// agent's MCP request is blocked on `response` the whole time.
+struct PendingA2ui {
+    /// Workspace whose sidebar owns the bubble. The surface is only painted
+    /// while that workspace is on screen; elsewhere it waits in the log.
+    workspace_id: String,
+    /// Chat session the bubble belongs to.
+    sid: u64,
+    /// Event names the agent said would complete the call. A click with any
+    /// other name resolves it anyway — leaving the agent blocked forever is
+    /// strictly worse than handing it an event it didn't ask for.
+    await_events: Vec<String>,
+    response: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
 }
 
 /// Per-ACP-session live state.
@@ -1446,33 +1459,24 @@ fn main() {
                             let _ = p.send_event(AppEvent::SidebarReady);
                         }
                         Some("a2ui_resolve") => {
-                            let file_id = v["file_id"].as_str().unwrap_or("").to_string();
-                            let action = v["action"].clone();
-                            if !file_id.is_empty() {
-                                if let Err(e) = a2ui_render_ui::resolve(&file_id, action) {
-                                    tracing::warn!(file_id = %file_id, error = %e, "failed to resolve A2UI envelope");
-                                }
+                            let call_id = v["file_id"].as_str().unwrap_or("").to_string();
+                            if !call_id.is_empty() {
+                                let _ = p.send_event(AppEvent::A2uiResolve(
+                                    call_id,
+                                    v["action"].clone(),
+                                ));
                             }
                         }
                         Some("a2ui_replay_event") => {
-                            // Click on a ghost surface (bash poll loop dead).
-                            // Deliver the event to the agent as a synthetic
-                            // prompt in this session — the agent has the
-                            // surface in chat history and can resume in a
-                            // fresh turn.
+                            // Click on a ghost surface — nothing is blocked on
+                            // it any more (fire-and-forget update, app restart,
+                            // or the call already timed out). Deliver the event
+                            // as a synthetic prompt instead: the agent has the
+                            // surface in chat history and can resume in a fresh
+                            // turn.
                             let sid = v["sid"].as_u64().unwrap_or(0);
-                            let action = &v["action"];
-                            let name = action["name"].as_str().unwrap_or("");
-                            let surface_id = action["surfaceId"].as_str().unwrap_or("");
-                            let source = action["sourceComponentId"].as_str().unwrap_or("");
-                            let context_json = serde_json::to_string(&action["context"])
-                                .unwrap_or_else(|_| "{}".into());
-                            let data_model_json = serde_json::to_string(&action["dataModel"])
-                                .unwrap_or_else(|_| "{}".into());
-                            let prompt = format!(
-                                "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface whose `render_ui` poll has already exited (fire-and-forget update, replay, or prior session). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
-                            );
                             if sid != 0 {
+                                let prompt = a2ui_replay_prompt(&v["action"]);
                                 let _ = p.send_event(AppEvent::AcpPrompt(sid, prompt, vec![]));
                             }
                         }
@@ -1937,24 +1941,14 @@ fn main() {
         }
     };
 
-    // ── A2UI ────────────────────────────────────────────────────────────────
-    // Ship the `render_ui` tool into `<workspace>/.agents/tools/` so any
-    // octomind subprocess we spawn (CWD = workspace) auto-discovers it. Then start a
-    // background watcher on the envelope queue dir; every status transition
-    // becomes an `A2uiUpdate` event the active session renders inline.
-    match a2ui_render_ui::install() {
-        Ok(p) => tracing::info!(path = %p.display(), "installed render_ui tool"),
-        Err(e) => tracing::warn!(error = %e, "render_ui install failed — A2UI surfaces disabled"),
-    }
-    {
-        let proxy = acp_proxy.clone();
-        a2ui_watcher::start(a2ui_render_ui::queue_dir(), move |snap| {
-            let _ = proxy.send_event(AppEvent::A2uiUpdate(snap));
-        });
-        std::thread::spawn(|| {
-            a2ui_render_ui::prune_old(&a2ui_render_ui::queue_dir(), 86_400);
-        });
-    }
+    // Agents run with CWD = this dir (see `acp.rs`); mirror the user's own
+    // local tools in so running sandboxed doesn't hide them. A2UI needs
+    // nothing here — `render_ui` is a tool on our MCP server.
+    agent_workspace::prepare();
+    // A2UI surfaces still blocked on a click, keyed by the call id the sidebar
+    // echoes back in `a2ui_resolve`. Entries live only as long as the agent
+    // waits; a restart drops them and the surface replays as a ghost.
+    let mut pending_a2ui: HashMap<String, PendingA2ui> = HashMap::new();
     // Restore persisted ACP history (sessions + per-session message log) per
     // workspace. `--resume` is passed when an `acp_session_id` was captured
     // before — the agent then restores its in-memory conversation context,
@@ -2016,7 +2010,6 @@ fn main() {
     let startup_active_workspace_id = workspace_manager.active().id.clone();
     for ws in workspace_manager.list_mut() {
         let is_startup_active_ws = ws.id == startup_active_workspace_id;
-        let mcp_token = ws.mcp_token.clone();
         let persisted = persisted_acp
             .as_ref()
             .and_then(|h| h.workspaces.get(&ws.id));
@@ -2040,7 +2033,9 @@ fn main() {
                         };
                         acp::AcpHandle::connect(
                             &cmd,
-                            mcp_token.clone(),
+                            mcp_handle
+                                .as_ref()
+                                .map(|h| h.register_session(&ws.id, snap.id)),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok()
@@ -2083,7 +2078,7 @@ fn main() {
                     handle: if is_startup_active_ws {
                         acp::AcpHandle::connect(
                             "octomind acp octoweb:assistant",
-                            mcp_token.clone(),
+                            mcp_handle.as_ref().map(|h| h.register_session(&ws.id, id)),
                             make_wake(acp_proxy.clone()),
                         )
                         .ok()
@@ -2800,6 +2795,54 @@ fn main() {
     /// Reused by `SidebarReady` (first boot — which additionally reconciles
     /// the sid=1 JS placeholder, not handled here) and every workspace
     /// switch/create/delete.
+    /// Mint the MCP token for one chat session's agent process. It names both
+    /// the workspace and the session, so `render_ui` lands in the chat that
+    /// asked for it rather than whichever one is in front. Replaces whatever
+    /// token that session held before, which is what stops a superseded
+    /// subprocess from still rendering into the chat.
+    macro_rules! session_mcp_token {
+        ($sid:expr) => {
+            mcp_handle
+                .as_ref()
+                .map(|h| h.register_session(&workspace_manager.active().id, $sid))
+        };
+    }
+
+    /// Paint (or repaint) one A2UI surface in the sidebar. `live` marks the
+    /// surface as still wired to a blocked `render_ui` call, which is what
+    /// lets a click resolve it directly instead of going through the replay
+    /// path. Only ever targets the sidebar of the workspace on screen.
+    macro_rules! push_a2ui_surface {
+        ($sid:expr, $call_id:expr, $body:expr, $live:expr) => {{
+            let sid = $sid;
+            let body_json = serde_json::to_string($body).unwrap_or_else(|_| "{}".into());
+            let escaped_id = webview_utils::escape_js_template($call_id);
+            let escaped_body = webview_utils::escape_js_template(&body_json);
+            let live_js = if $live { "true" } else { "false" };
+            let _ = sidebar_wv.evaluate_script(&format!(
+                "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`),{live_js},0)"
+            ));
+        }};
+    }
+
+    /// Replay rebuilds every A2UI surface as a ghost. Any whose `render_ui`
+    /// call is still blocked is not a ghost — re-mark it live so a click
+    /// resolves the waiting agent instead of reaching it as a synthetic
+    /// prompt. Call after every `push_acp_sessions_to_sidebar!`.
+    macro_rules! relive_pending_a2ui {
+        () => {{
+            let ws_id = workspace_manager.active().id.clone();
+            for (call_id, p) in pending_a2ui.iter().filter(|(_, p)| p.workspace_id == ws_id) {
+                let body = serde_json::json!({
+                    "id": call_id,
+                    "status": "pending",
+                    "await_events": p.await_events,
+                });
+                push_a2ui_surface!(p.sid, call_id, &body, true);
+            }
+        }};
+    }
+
     macro_rules! push_acp_sessions_to_sidebar {
         () => {{
             for s in workspace_manager.active().acp_sessions.iter() {
@@ -3573,7 +3616,7 @@ fn main() {
                         if signed_in {
                             if let Some(stop) = login_pollers.remove(&sid) {
                                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                                let mcp_token = workspace_manager.active().mcp_token.clone();
+                                let mcp_token = session_mcp_token!(sid);
                                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                                     s.retry_count = 0;
                                     s.reconnect_gen += 1;
@@ -4789,6 +4832,61 @@ fn main() {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
                     }
+                    McpCommand::RenderUi { messages, await_events, session_id, response } => {
+                        let ws_id = workspace_manager.at(ws_idx).id.clone();
+                        // Route to the caller's own chat when its token names
+                        // one. A workspace-level token — or a session closed
+                        // while the agent was still running — lands on that
+                        // workspace's foreground session instead.
+                        let sid = session_id
+                            .filter(|id| {
+                                workspace_manager
+                                    .at(ws_idx)
+                                    .acp_sessions
+                                    .iter()
+                                    .any(|s| s.id == *id)
+                            })
+                            .unwrap_or(workspace_manager.at(ws_idx).acp_active_session_id);
+                        let call_id = next_a2ui_call_id();
+                        let awaiting = !await_events.is_empty();
+                        let body = serde_json::json!({
+                            "id": call_id,
+                            "status": "pending",
+                            "messages": messages,
+                            "await_events": await_events,
+                        });
+                        // Paint only when this workspace is the one on screen.
+                        // Otherwise the bubble is rebuilt from the persisted
+                        // log (and re-marked live) on workspace switch.
+                        if ws_idx == workspace_manager.active_index() {
+                            push_a2ui_surface!(sid, &call_id, &body, awaiting);
+                        }
+                        if let Some(s) = workspace_manager
+                            .at_mut(ws_idx)
+                            .acp_sessions
+                            .iter_mut()
+                            .find(|s| s.id == sid)
+                        {
+                            upsert_a2ui_msg(s, &call_id, body, cfg.max_acp_session_messages);
+                        }
+                        persist_acp_history(
+                            &ws_id,
+                            &workspace_manager.at(ws_idx).acp_sessions,
+                            workspace_manager.at(ws_idx).acp_active_session_id,
+                            cfg.max_acp_session_messages,
+                        );
+                        if awaiting {
+                            pending_a2ui.insert(
+                                call_id,
+                                PendingA2ui { workspace_id: ws_id, sid, await_events, response },
+                            );
+                        } else {
+                            let _ = response.send(Ok(serde_json::json!({
+                                "ok": true,
+                                "surfaceCallId": call_id,
+                            })));
+                        }
+                    }
                     McpCommand::Snapshot { tab_id, within, diff, response, is_retry } => {
                         let target_id = tab_id.unwrap_or(mcp_default_tab);
                         let _ = mcp_ensure_tab!(ws_idx, target_id);
@@ -5020,6 +5118,7 @@ fn main() {
                 push_workspace_dot!();
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
+                relive_pending_a2ui!();
                 sync_quickslots_ui!();
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible.store(false, Ordering::Relaxed);
@@ -5102,6 +5201,10 @@ fn main() {
                 if let Some(ref handle) = mcp_handle {
                     handle.unregister_workspace(&id);
                 }
+                // Drop the senders too, so any agent still blocked in
+                // `render_ui` for this workspace gets an error instead of
+                // hanging on a surface that is about to disappear.
+                pending_a2ui.retain(|_, p| p.workspace_id != id);
                 if id == workspace_manager.active().id {
                     if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                         let _ = wv.set_visible(false);
@@ -5151,6 +5254,7 @@ fn main() {
                     push_workspace_dot!();
                     reset_sys_stats!();
                     push_acp_sessions_to_sidebar!();
+                    relive_pending_a2ui!();
                     save_quickslots!();
                     sync_quickslots_ui!();
                     refresh_workspace_switcher!();
@@ -5714,7 +5818,19 @@ fn main() {
                     );
                     // Reconnect any session whose handle has died (e.g. after
                     // max retries exceeded — manual sidebar open re-arms it).
-                    let mcp_token = workspace_manager.active().mcp_token.clone();
+                    // Tokens are minted up front: the loop below holds a
+                    // mutable borrow of the workspace that `session_mcp_token!`
+                    // would need to read from.
+                    let mut session_tokens: HashMap<u64, Option<String>> = workspace_manager
+                        .active()
+                        .acp_sessions
+                        .iter()
+                        .filter(|s| s.handle.is_none())
+                        .map(|s| s.id)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|id| (id, session_mcp_token!(id)))
+                        .collect();
                     for s in workspace_manager.active_mut().acp_sessions.iter_mut() {
                         if s.handle.is_none() {
                             s.retry_count = 0;
@@ -5729,7 +5845,7 @@ fn main() {
                             };
                             s.handle = acp::AcpHandle::connect(
                                 &cmd,
-                                mcp_token.clone(),
+                                session_tokens.remove(&s.id).flatten(),
                                 make_wake(acp_proxy.clone()),
                             )
                             .ok();
@@ -5805,7 +5921,7 @@ fn main() {
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
                 let mut should_persist = false;
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Inbox-driven turns stream with no terminal Done — commit any
                     // response still buffered so it lands before this user message.
@@ -5867,7 +5983,7 @@ fn main() {
             }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     let now = std::time::Instant::now();
                     let recent = s
@@ -5920,7 +6036,9 @@ fn main() {
             // ── ACP set agent for an existing session (kills + respawns its handle) ──
             Event::UserEvent(AppEvent::AcpSetAgent(sid, tag)) => {
                 let mut should_persist = false;
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                // The chat log is cleared below, taking every surface with it.
+                pending_a2ui.retain(|_, p| p.sid != sid);
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
                     s.retry_count = 0;
@@ -5957,7 +6075,9 @@ fn main() {
             // ── ACP clear session (same agent, fresh chat) ────────────────────────
             Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
                 let mut should_persist = false;
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                // The chat log is cleared below, taking every surface with it.
+                pending_a2ui.retain(|_, p| p.sid != sid);
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
                     s.reconnect_gen += 1;
@@ -5994,14 +6114,13 @@ fn main() {
 
             // ── ACP create new session (capped at MAX_SESSIONS) ────────────────────
             Event::UserEvent(AppEvent::AcpSessionCreate(title, tag)) => {
-                let mcp_token = workspace_manager.active().mcp_token.clone();
                 if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
                     tracing::warn!(max = MAX_SESSIONS, "session create rejected — cap reached");
                 } else {
                     let sid = next_acp_session_id();
                     let handle = acp::AcpHandle::connect(
                         &format!("octomind acp {}", tag),
-                        mcp_token.clone(),
+                        session_mcp_token!(sid),
                         make_wake(acp_proxy.clone()),
                     )
                     .ok();
@@ -6049,6 +6168,12 @@ fn main() {
                     tracing::debug!(session_id = sid, "session close ignored — last session");
                 } else if let Some(pos) = workspace_manager.active().acp_sessions.iter().position(|s| s.id == sid) {
                     let _removed = workspace_manager.active_mut().acp_sessions.remove(pos); // drop kills subprocess
+                    if let Some(ref handle) = mcp_handle {
+                        handle.unregister_session(sid);
+                    }
+                    // Its surfaces went with the chat — release anything the
+                    // dying agent was still blocked on.
+                    pending_a2ui.retain(|_, p| p.sid != sid);
                     // If we closed the active session, fall back to the first one.
                     if workspace_manager.active().acp_active_session_id == sid {
                         workspace_manager.active_mut().acp_active_session_id = workspace_manager.active().acp_sessions[0].id;
@@ -6071,7 +6196,7 @@ fn main() {
                 workspace_manager.active_mut().acp_active_session_id = sid;
                 // Lazy-spawn: if this session has no live handle (persisted
                 // but not yet connected this run), bring it up now.
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     if s.handle.is_none() {
                         let cmd = match &s.acp_session_id {
@@ -6152,6 +6277,7 @@ fn main() {
                         "window.__removeSession && window.__removeSession(1)"
                     );
                 }
+                relive_pending_a2ui!();
             }
 
             // ── Sidebar re-focus after transient app reactivation ─────────
@@ -6277,54 +6403,60 @@ fn main() {
             // ── ACP wake — no-op, just wakes the loop so ACP poll runs ──
             Event::UserEvent(AppEvent::AcpWake) => {}
 
-            // ── A2UI envelope changed on disk → render in the active session ─
-            // We don't try to bind surfaces to a specific octomind subprocess.
-            // The agent only renders during its own turn, so the foreground
-            // session is the right place for the surface to appear.
-            Event::UserEvent(AppEvent::A2uiUpdate(snap)) => {
-                // Route by `parent_pid` — match the session whose octomind
-                // subprocess invoked render_ui. The bash script stamps its
-                // $PPID into the envelope on creation. Falls back to the
-                // active session only if no match (e.g. before any session
-                // has registered its pid, or for envelopes from outside).
-                let target_sid = workspace_manager
-                    .active()
-                    .acp_sessions
-                    .iter()
-                    .find(|s| s.octomind_pid == Some(snap.parent_pid) && snap.parent_pid != 0)
-                    .map(|s| s.id)
-                    .unwrap_or(workspace_manager.active().acp_active_session_id);
-                let sid = target_sid;
-                // A surface is "live" only if its render_ui bash subprocess is
-                // still polling — i.e. its parent octomind subprocess matches
-                // a session we're currently running. Anything else is a ghost:
-                // file on disk, but no one to receive the resolution. Clicks
-                // on ghost surfaces are suppressed with a toast in the sidebar.
-                let is_live = snap.parent_pid != 0
-                    && workspace_manager
-                        .active()
-                        .acp_sessions
-                        .iter()
-                        .any(|s| s.octomind_pid == Some(snap.parent_pid));
-                let live_js = if is_live { "true" } else { "false" };
-                let body_json = serde_json::to_string(&snap.body).unwrap_or_else(|_| "{}".into());
-                let escaped_id = webview_utils::escape_js_template(&snap.id);
-                let escaped_body = webview_utils::escape_js_template(&body_json);
-                if snap.status == "pending" {
-                    let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__a2uiUpdate && window.__a2uiUpdate({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`),{live_js})"
-                    ));
-                } else {
-                    let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__a2uiResolved && window.__a2uiResolved({sid},`{escaped_id}`,JSON.parse(`{escaped_body}`))"
-                    ));
+            // ── A2UI button click → unblock the `render_ui` call waiting on it ─
+            Event::UserEvent(AppEvent::A2uiResolve(call_id, action)) => {
+                // No pending entry means the surface outlived its agent (app
+                // restart, session closed, or the call already timed out). The
+                // sidebar routes those clicks through `a2ui_replay_event`
+                // instead, so there is nothing for us to complete here.
+                let Some(pending) = pending_a2ui.remove(&call_id) else {
+                    tracing::debug!(%call_id, "A2UI click with no waiting render_ui call");
+                    return;
+                };
+                let name = action
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default();
+                if !pending.await_events.iter().any(|e| e == name) {
+                    tracing::warn!(
+                        %call_id, %name, await_events = ?pending.await_events,
+                        "A2UI event outside await_events — resolving anyway rather than \
+                         leaving the agent blocked",
+                    );
                 }
-                // Persist the surface alongside the chat log so a cold restart
-                // can rebuild the bubble. Same fileId upserts in place — keeps
-                // pending→resolved transitions to a single bubble.
-                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
-                    upsert_a2ui_msg(s, &snap.id, snap.body, cfg.max_acp_session_messages);
-                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
+                let mut resolution = action;
+                if let Some(obj) = resolution.as_object_mut() {
+                    obj.insert("actor".into(), serde_json::Value::String("human".into()));
+                }
+                let Some(ws_idx) = workspace_manager.index_of(&pending.workspace_id) else {
+                    return; // workspace deleted mid-flight; sender drops, agent errors
+                };
+                let updated = workspace_manager
+                    .at_mut(ws_idx)
+                    .acp_sessions
+                    .iter_mut()
+                    .find(|s| s.id == pending.sid)
+                    .and_then(|s| mark_a2ui_resolved(s, &call_id, &resolution));
+                if let Some(body) = updated {
+                    if ws_idx == workspace_manager.active_index() {
+                        push_a2ui_surface!(pending.sid, &call_id, &body, true);
+                    }
+                    persist_acp_history(
+                        &pending.workspace_id,
+                        &workspace_manager.at(ws_idx).acp_sessions,
+                        workspace_manager.at(ws_idx).acp_active_session_id,
+                        cfg.max_acp_session_messages,
+                    );
+                }
+                // A send error means the agent stopped listening — its call hit
+                // the 30-minute cap, or the process died. Don't swallow the
+                // click: hand it over as a prompt, same as a ghost surface.
+                if pending.response.send(Ok(resolution.clone())).is_err() {
+                    let _ = proxy.send_event(AppEvent::AcpPrompt(
+                        pending.sid,
+                        a2ui_replay_prompt(&resolution),
+                        vec![],
+                    ));
                 }
             }
             // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
@@ -6353,7 +6485,7 @@ fn main() {
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
-                let mcp_token = workspace_manager.active().mcp_token.clone();
+                let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Ignore stale timers from a previous error cycle — the user may
                     // have manually reconnected (AcpSetAgent / AcpClearSession) in the
@@ -7874,6 +8006,53 @@ fn cap_tool_json(v: &serde_json::Value) -> serde_json::Value {
         }
         _ => v.clone(),
     }
+}
+
+/// Turn an A2UI click into a prompt, for the cases where no `render_ui` call
+/// can receive it: the surface is replayed from history, the agent sent a
+/// fire-and-forget update, or its call already timed out. The agent still has
+/// the surface in its chat history, so it can act on the choice in a fresh turn.
+fn a2ui_replay_prompt(action: &serde_json::Value) -> String {
+    let name = action["name"].as_str().unwrap_or("");
+    let surface_id = action["surfaceId"].as_str().unwrap_or("");
+    let source = action["sourceComponentId"].as_str().unwrap_or("");
+    let context_json = serde_json::to_string(&action["context"]).unwrap_or_else(|_| "{}".into());
+    let data_model_json =
+        serde_json::to_string(&action["dataModel"]).unwrap_or_else(|_| "{}".into());
+    format!(
+        "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface no `render_ui` call is waiting on (fire-and-forget update, replay, or a call that already timed out). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
+    )
+}
+
+/// Identity for one `render_ui` call, and the key the sidebar echoes back on
+/// click. Persisted with the bubble, so it carries the wall clock to stay
+/// distinct from ids minted by earlier runs.
+fn next_a2ui_call_id() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("u_{ms}_{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Flip a persisted A2UI bubble to `resolved` and stamp what the user chose.
+/// Returns the updated body so the caller can repaint, or `None` if the
+/// bubble is no longer in the log (trimmed by `max_acp_session_messages`).
+fn mark_a2ui_resolved(
+    s: &mut AcpSession,
+    call_id: &str,
+    resolution: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let msg = s
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == "ui" && m.text == call_id)?;
+    let body = msg.a2ui.as_mut()?;
+    body["status"] = serde_json::Value::String("resolved".into());
+    body["resolution"] = resolution.clone();
+    Some(body.clone())
 }
 
 /// Upsert an A2UI surface snapshot in the session's message log. Same envelope

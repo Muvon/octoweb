@@ -24,6 +24,11 @@
 //! - `browser_handle_dialog` / `browser_upload_file` — arm answers for native
 //!   dialogs and file choosers before the click that triggers them
 //!
+//! Asking the user:
+//! - `render_ui` — draw an A2UI v0.9 surface inline in the AI sidebar and
+//!   block until the user clicks. Routed to the caller's own chat session via
+//!   the per-session token in `X-Octoweb-Workspace`.
+//!
 //! # Selector resolution
 //!
 //! `selector` is interpreted in JS by checking the first character: a leading
@@ -208,6 +213,20 @@ pub enum McpCommand {
         response: oneshot::Sender<Result<String, String>>,
         /// Internal: see `GetPageContent::is_retry`.
         is_retry: bool,
+    },
+    /// Render an A2UI surface in the AI sidebar, optionally blocking until the
+    /// user clicks a button whose event name is in `await_events`.
+    RenderUi {
+        /// A2UI v0.9 envelope messages, passed through to the renderer as-is.
+        messages: Vec<serde_json::Value>,
+        /// Event names that complete the call. Empty = fire-and-forget.
+        await_events: Vec<String>,
+        /// Sidebar session the calling agent belongs to, from its per-session
+        /// token. `None` (workspace-level token) targets that workspace's
+        /// foreground session.
+        session_id: Option<u64>,
+        /// Resolved with the A2UI action payload once the user clicks.
+        response: oneshot::Sender<Result<serde_json::Value, String>>,
     },
 }
 
@@ -499,6 +518,18 @@ pub struct NavigateRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RenderUiRequest {
+    #[schemars(
+        description = "A2UI v0.9 envelope messages, applied in order. Each item is exactly one of: {\"createSurface\":{\"surfaceId\",\"catalogId\",\"theme\"?}} | {\"updateComponents\":{\"surfaceId\",\"components\":[{\"id\",\"component\",...props}]}} | {\"updateDataModel\":{\"surfaceId\",\"path\",\"value\"}} | {\"deleteSurface\":{\"surfaceId\"}}. Reuse a surfaceId to update a surface in place instead of stacking new ones."
+    )]
+    pub messages: Vec<serde_json::Value>,
+    #[schemars(
+        description = "Event names that complete this call. Each must match a Button's action.event.name. Omit or leave empty for a fire-and-forget update, which returns immediately."
+    )]
+    pub await_events: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TabIdRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
@@ -753,8 +784,11 @@ pub struct McpState {
     /// from the `X-Octoweb-Workspace` header in `call_tool`. `None` = the
     /// caller sent no header; the main loop reads that as the first workspace.
     pub workspace_id: Option<String>,
-    /// Known workspace tokens, so `call_tool` can turn a header into an id.
-    pub tokens: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    /// Which sidebar session the caller is, when its token was minted for one.
+    /// Only `render_ui` cares — every other tool acts on the workspace.
+    pub session_id: Option<u64>,
+    /// Known tokens, so `call_tool` can turn a header into a scope.
+    pub tokens: WorkspaceTokens,
     /// Channel to send commands to main event loop
     pub command_tx: mpsc::UnboundedSender<(Option<String>, McpCommand)>,
 }
@@ -824,17 +858,52 @@ impl McpServer {
                 )
             })
     }
+
+    /// Like `send_command`, but waits `RENDER_UI_AWAIT_TIMEOUT` instead of 30 s.
+    /// Only `render_ui` uses it: its response comes from a human clicking a
+    /// button, which is not a latency the browser controls.
+    async fn send_command_awaiting_user<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, String>>) -> McpCommand,
+    ) -> Result<Result<T, String>, McpError> {
+        let (tx, rx) = oneshot::channel();
+        self.state
+            .command_tx
+            .send((self.state.workspace_id.clone(), build(tx)))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        match tokio::time::timeout(RENDER_UI_AWAIT_TIMEOUT, rx).await {
+            // The surface stays on screen after the timeout, so tell the model
+            // the truth: nothing was answered, but the user may still be there.
+            Err(_) => Ok(Err(format!(
+                "No response after {} minutes — the surface is still on screen. \
+                 Ask the user in chat, or call render_ui again with the same surfaceId.",
+                RENDER_UI_AWAIT_TIMEOUT.as_secs() / 60
+            ))),
+            Ok(Err(_)) => Ok(Err(
+                "The surface was discarded before it was answered (session closed \
+                 or the workspace went away)."
+                    .to_string(),
+            )),
+            Ok(Ok(v)) => Ok(v),
+        }
+    }
 }
+
+/// How long `render_ui` blocks waiting for a click before giving the agent a
+/// usable answer back. The surface itself is not torn down — a late click
+/// still reaches the agent through the sidebar's replay path.
+const RENDER_UI_AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 
 #[tool_router]
 impl McpServer {
     pub fn new(
-        tokens: Arc<std::sync::RwLock<HashMap<String, String>>>,
+        tokens: WorkspaceTokens,
         command_tx: mpsc::UnboundedSender<(Option<String>, McpCommand)>,
     ) -> Self {
         Self {
             state: McpState {
                 workspace_id: None,
+                session_id: None,
                 tokens,
                 command_tx,
             },
@@ -1493,6 +1562,68 @@ impl McpServer {
             "Armed: the next file chooser receives {count} file(s). Now click the file input (browser_click)."
         ))]))
     }
+
+    // ── A2UI ────────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Render an interactive UI surface (A2UI v0.9) inline in this chat and optionally BLOCK until an awaited event fires. Use for forms, approval cards, wizards, confirms, dashboards, lists, pickers — anything better answered by clicking than by typing.\n\
+        \n\
+        Returns {name,surfaceId,sourceComponentId,timestamp,context,dataModel} when an awaited event fires; returns immediately with {ok:true} when await_events is empty (fire-and-forget update).\n\
+        \n\
+        COMMON MISTAKES that render an empty surface: (1) the key is \"component\", NOT \"type\". (2) Components are a FLAT adjacency list — every component has a string \"id\" and parents reference children BY ID, never inline. (3) Exactly one component must have id \"root\". (4) Only components from the catalog below are rendered; anything else shows as unsupported.\n\
+        \n\
+        Catalog (values for \"component\"):\n\
+        Card{child|children}, Column{children,gap?,align?}, Row{children,gap?,align?,justify?},\n\
+        Spacer{size?}, Divider, Text{text,muted?}, Heading{text,level?:1-4}, Markdown{text},\n\
+        Image{src,alt?,width?,height?}, Icon{name}, Video{url}, AudioPlayer{url,description?},\n\
+        Button{text,kind?:primary|danger|warn|success,disabled?,checks?:[ValueRef],action:{event:{name,context?}} | {functionCall:{call,args}}},\n\
+        TextField{label?,placeholder?,type?:text|email|password|number|tel,multiline?,rows?,value:{path}},\n\
+        CheckBox{label?,value:{path}}, Slider{label?,min?,max?,step?,value:{path}},\n\
+        ChoicePicker{label?,value:{path},choices:[scalar | {label,value}]},\n\
+        DateTimeInput{label?,mode?:date|datetime|time,min?,max?,value:{path}},\n\
+        List{children:{path,componentId}}, Tabs{tabs:[{title,content:ComponentId}]},\n\
+        Modal{trigger:ComponentId,content:ComponentId}\n\
+        \n\
+        ValueRef — any prop accepts a literal, {\"path\":\"/json/ptr\"} (RFC 6901 against dataModel), or {\"call\":\"<fn>\",\"args\":{...}} (resolved recursively). Functions: required, email, numeric, regex{pattern}, length{min,max}, range{min,max}, and{values}, or{values}, not, eq{a,b}, neq{a,b}, formatString{template,args} (\"{key}\" interpolation), formatDate{value,locale?}, formatNumber{value,decimals?,locale?}, formatCurrency{value,currency?,locale?}, openUrl{url} (http(s)/mailto only).\n\
+        \n\
+        Gate a Button with `checks` — an array of ValueRefs evaluated at click time; if any is falsy the action is suppressed and that check's optional `message` is toasted. Inputs two-way bind to their {path}, and the whole dataModel rides along in the event payload, so a form submit needs no extra plumbing. updateDataModel pre-fills fields before render.\n\
+        \n\
+        Working example (approval card that blocks on a click):\n\
+        {\"await_events\":[\"approve\",\"reject\"],\"messages\":[{\"createSurface\":{\"surfaceId\":\"r1\",\"catalogId\":\"https://a2ui.org/specification/v0_9/basic_catalog.json\"}},{\"updateDataModel\":{\"surfaceId\":\"r1\",\"path\":\"/form\",\"value\":{\"reason\":\"\"}}},{\"updateComponents\":{\"surfaceId\":\"r1\",\"components\":[{\"id\":\"root\",\"component\":\"Card\",\"child\":\"body\"},{\"id\":\"body\",\"component\":\"Column\",\"gap\":10,\"children\":[\"t\",\"f1\",\"actions\"]},{\"id\":\"t\",\"component\":\"Heading\",\"text\":\"Review change\",\"level\":2},{\"id\":\"f1\",\"component\":\"TextField\",\"label\":\"Reason\",\"value\":{\"path\":\"/form/reason\"}},{\"id\":\"actions\",\"component\":\"Row\",\"gap\":8,\"children\":[\"ok\",\"no\"]},{\"id\":\"ok\",\"component\":\"Button\",\"text\":\"Approve\",\"kind\":\"primary\",\"checks\":[{\"call\":\"required\",\"args\":{\"value\":{\"path\":\"/form/reason\"}},\"message\":\"Reason is required\"}],\"action\":{\"event\":{\"name\":\"approve\",\"context\":{\"reason\":{\"path\":\"/form/reason\"}}}}},{\"id\":\"no\",\"component\":\"Button\",\"text\":\"Reject\",\"kind\":\"danger\",\"action\":{\"event\":{\"name\":\"reject\"}}}]}}]}"
+    )]
+    async fn render_ui(
+        &self,
+        Parameters(req): Parameters<RenderUiRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // An envelope with no messages targets no surface and would paint an
+        // orphan "Loading…" bubble in the sidebar.
+        if req.messages.is_empty() {
+            return Ok(err_result(
+                "render_ui needs at least one message — createSurface, updateComponents, \
+                 updateDataModel, or deleteSurface."
+                    .to_string(),
+            ));
+        }
+        let await_events = req.await_events.unwrap_or_default();
+        let blocking = !await_events.is_empty();
+        let session_id = self.state.session_id;
+        tracing::debug!(?session_id, blocking, "MCP render_ui");
+
+        let build = |tx: oneshot::Sender<Result<serde_json::Value, String>>| McpCommand::RenderUi {
+            messages: req.messages,
+            await_events,
+            session_id,
+            response: tx,
+        };
+        let outcome = if blocking {
+            browser_try!(self.send_command_awaiting_user(build).await?)
+        } else {
+            browser_try!(self.send_command(build).await?)
+        };
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&outcome).unwrap_or_else(|_| "{\"ok\":true}".to_string()),
+        )]))
+    }
 }
 
 /// Decode a wry-JSON-encoded `JSON.stringify` result and scrub one string
@@ -1534,7 +1665,7 @@ impl ServerHandler for McpServer {
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
 
-        let workspace_id =
+        let scope =
             match header {
                 // No header: the main loop falls back to the first workspace.
                 None => None,
@@ -1545,7 +1676,7 @@ impl ServerHandler for McpServer {
                     .ok()
                     .and_then(|m| m.get(&token).cloned())
                 {
-                    Some(id) => Some(id),
+                    Some(scope) => Some(scope),
                     // A token we don't know is never treated as "use the default" —
                     // silently acting on the wrong workspace is the exact failure
                     // this header exists to prevent.
@@ -1559,7 +1690,8 @@ impl ServerHandler for McpServer {
 
         let scoped = McpServer {
             state: McpState {
-                workspace_id,
+                workspace_id: scope.as_ref().map(|s| s.workspace_id.clone()),
+                session_id: scope.and_then(|s| s.session_id),
                 tokens: Arc::clone(&self.state.tokens),
                 command_tx: self.state.command_tx.clone(),
             },
@@ -1628,7 +1760,12 @@ impl ServerHandler for McpServer {
                 \n\
                 Dialogs & uploads: arm BEFORE the triggering click — browser_handle_dialog answers the \
                 next alert/confirm/prompt, browser_upload_file feeds the next file chooser. Un-armed \
-                dialogs pop up natively for the user and you cannot answer them."
+                dialogs pop up natively for the user and you cannot answer them.\n\
+                \n\
+                Asking the user: render_ui draws a real interactive surface (forms, approval cards, \
+                pickers, wizards) inline in the chat and blocks until they click. Prefer it over asking \
+                a question in prose whenever the answer is a choice, a confirmation, or structured input \
+                — it lands in the same chat the user is already looking at."
                     .to_string(),
             )
     }
@@ -1643,8 +1780,17 @@ impl ServerHandler for McpServer {
 /// keeps agent configs written before workspaces existed working unchanged.
 pub const WORKSPACE_HEADER: &str = "x-octoweb-workspace";
 
-/// token → workspace id, shared between the HTTP thread and the main loop.
-type WorkspaceTokens = Arc<std::sync::RwLock<HashMap<String, String>>>;
+/// What a token grants. Every token names a workspace; tokens minted for one
+/// agent process also name the sidebar session that spawned it, which is how
+/// `render_ui` puts its surface in the chat the user is actually talking to.
+#[derive(Clone)]
+pub struct TokenScope {
+    pub workspace_id: String,
+    pub session_id: Option<u64>,
+}
+
+/// token → scope, shared between the HTTP thread and the main loop.
+pub type WorkspaceTokens = Arc<std::sync::RwLock<HashMap<String, TokenScope>>>;
 
 /// Handle returned from spawn_mcp_server for polling commands.
 ///
@@ -1730,7 +1876,31 @@ impl McpHandle {
     pub fn register_workspace(&self, workspace_id: &str) -> String {
         let token = random_token();
         if let Ok(mut map) = self.tokens.write() {
-            map.insert(token.clone(), workspace_id.to_string());
+            map.insert(
+                token.clone(),
+                TokenScope {
+                    workspace_id: workspace_id.to_string(),
+                    session_id: None,
+                },
+            );
+        }
+        token
+    }
+
+    /// Mint the token for one sidebar session's agent process. Replaces any
+    /// token this session held before, so a reconnect doesn't leave the old
+    /// subprocess able to keep rendering into the chat.
+    pub fn register_session(&self, workspace_id: &str, session_id: u64) -> String {
+        let token = random_token();
+        if let Ok(mut map) = self.tokens.write() {
+            map.retain(|_, scope| scope.session_id != Some(session_id));
+            map.insert(
+                token.clone(),
+                TokenScope {
+                    workspace_id: workspace_id.to_string(),
+                    session_id: Some(session_id),
+                },
+            );
         }
         token
     }
@@ -1739,7 +1909,14 @@ impl McpHandle {
     /// still-running agent can't keep driving tabs that no longer exist.
     pub fn unregister_workspace(&self, workspace_id: &str) {
         if let Ok(mut map) = self.tokens.write() {
-            map.retain(|_, id| id != workspace_id);
+            map.retain(|_, scope| scope.workspace_id != workspace_id);
+        }
+    }
+
+    /// Drop one session's token — called when the session is closed.
+    pub fn unregister_session(&self, session_id: u64) {
+        if let Ok(mut map) = self.tokens.write() {
+            map.retain(|_, scope| scope.session_id != Some(session_id));
         }
     }
 }

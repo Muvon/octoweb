@@ -20,7 +20,7 @@
 ///   window.__setThinking(sid, bool)               — show/hide activity feed
 ///   window.__appendError(sid, text)               — show an error bubble
 ///   window.__setAvailableCommands(sid, json)      — populate slash-command list
-///   window.__a2uiUpdate(sid, fileId, payload)     — render / update an A2UI surface
+///   window.__a2uiUpdate(sid, fileId, payload, live, ts) — render / update an A2UI surface
 ///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
 ///
 /// IPC messages sent to Rust (all session-scoped messages include `session_id`):
@@ -33,7 +33,7 @@
 ///   { type: "acp_session_switch", session_id }
 ///   { type: "acp_session_rename", session_id, title }
 ///   { type: "sidebar_close" }
-///   { type: "a2ui_resolve",  file_id, action } — A2UI Button event → unblocks the bash tool
+///   { type: "a2ui_resolve",  file_id, action } — A2UI Button event → unblocks the waiting render_ui call
 ///   { type: "a2ui_open_url", url }              — A2UI Button.openUrl → open in a browser tab
 pub fn html(max_ai_prompt_history: usize) -> String {
     let prompt_history_js = crate::prompt_history_js::prompt_history_js();
@@ -4601,10 +4601,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       syncFeed(s);
       // A2UI: a click optimistically locks its card into "Processing…" and
       // waits for the agent's next envelope to lift it. Turn end (Done /
-      // Cancelled / Error) means no envelope is coming and every render_ui
-      // bash poll of this turn is dead — unlock the cards and drop the stale
+      // Cancelled / Error) means no envelope is coming and no render_ui call
+      // from this turn is still waiting — unlock the cards and drop the stale
       // poll ids so the next click routes through the ghost path (synthetic
-      // prompt) instead of resolving a file nobody is reading.
+      // prompt) instead of resolving a call nobody is listening to.
       for (const block of a2uiBlocks.values()) {
         if (block.sid !== sid) continue;
         block.pollFileId = null;
@@ -5079,7 +5079,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Inline interactive surfaces produced by the agent's `render_ui` tool.
   // Each envelope file (`~/.local/share/a2ui/<id>.json`) becomes one
   // `.msg.ui` bubble. Button clicks IPC `a2ui_resolve` back to Rust, which
-  // writes the resolution into the file and unblocks the tool's bash poll.
+  // hands the resolution to the render_ui call blocked on it.
   const a2uiBlocks = new Map();           // fileId  -> block state
   const a2uiBubbleByFile = new Map();     // fileId  -> wrapper element
   const a2uiSurfaceIndex = new Map();     // "sid:surfaceId" -> fileId of live block
@@ -5566,10 +5566,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           }
         }
         const action = def.action || {};
+        // A2UI v0.9 spells a client-side action as
+        // `action.functionCall = {call, args}` — the same shape a ValueRef
+        // uses, so resolving it runs the registry entry (openUrl, etc.).
+        if (action.functionCall && typeof action.functionCall.call === 'string') {
+          r(action.functionCall);
+          return;
+        }
         if (action.openUrl) {
-          // A2UI v0.9: Button.action.openUrl is `{ url: string }` (an object,
-          // not a bare string). Older renderer assumed a string and lost the
-          // URL. Accept both shapes defensively.
+          // Shorthand some agents emit instead of functionCall: `{url: string}`
+          // (an object, not a bare string). Accept both shapes defensively.
           const urlValue = typeof action.openUrl === 'string'
             ? action.openUrl
             : (action.openUrl && typeof action.openUrl.url === 'string' ? action.openUrl.url : '');
@@ -5586,11 +5592,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           name: ev.name,
           sourceComponentId: typeof def.id === 'string' ? def.id : undefined,
           surfaceId: block.surfaceId,
+          // Required by the A2UI v0.9 client-to-agent `action` message.
+          timestamp: new Date().toISOString(),
           context,
           dataModel: block.dataModel,
         };
         if (block.pollFileId) {
-          // An envelope's bash poll is still waiting for a click. Send the
+          // A render_ui call is still waiting on this envelope. Send the
           // resolution to THAT file (not necessarily the latest envelope we
           // received — fire-and-forget updates don't carry a poll).
           window.ipc.postMessage(JSON.stringify({
@@ -6036,7 +6044,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       dataModel: {},
       awaitEvents: [],
       resolved: false,
-      // The fileId of the envelope whose bash poll loop is currently waiting
+      // The fileId of the envelope whose render_ui call is currently waiting
       // for a click. `null` if no such envelope (after-restart replay, after
       // the agent sent a fire-and-forget update without a new poll, or after
       // the prior poll exhausted). Clicks go via the live `a2ui_resolve` path
@@ -6090,7 +6098,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     //
     // `live` is the 4th arg: true only when the envelope's parent octomind
     // subprocess is still running this session. Replayed / cross-session /
-    // post-restart surfaces are NOT live — their bash poll loop is dead so
+    // post-restart surfaces are NOT live — no render_ui call is waiting, so
     // clicks have nowhere to land. We render them anyway (history is useful)
     // but suppress clicks with a toast.
     const isLive = live === true;
@@ -6129,7 +6137,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     // wired into a running agent and clicks can resolve normally. Replays
     // and ghosts never flip it on.
     if (isLive) block.live = true;
-    // pollFileId tracks which envelope's bash is currently waiting for a
+    // pollFileId tracks which envelope render_ui is currently waiting on for a
     // click. Set when an envelope arrives with non-empty await_events and
     // pending status. Cleared below if THIS envelope is the active poll AND
     // it just transitioned to a terminal status.
@@ -6148,7 +6156,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       a2uiSurfaceIndex.set(a2uiSurfaceKey(sid, newSurfaceId), fileId);
     }
     // Resolved-state logic differs for live vs ghost:
-    //   LIVE: "resolved" means the bash poll is mid-flight after a click;
+    //   LIVE: "resolved" means the render_ui call is mid-flight after a click;
     //         we lock the bubble into "Processing…" until the next envelope.
     //   GHOST: "resolved" is the frozen end-state of a prior session — there
     //          IS no next envelope coming. Locking ghosts blocks the

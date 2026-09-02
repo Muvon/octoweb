@@ -14,10 +14,13 @@
 server_refs = ["octoweb"]
 allowed_tools = ["octoweb:*"]
 
+# `render_ui` blocks on a human clicking a button, so the client must outwait
+# octoweb's own 30-minute cap on that — otherwise the transport gives up first
+# and the agent never learns what the user chose.
 [[mcp.servers]]
 name = "octoweb"
 type = "http"
 url = "http://localhost:3434/mcp"
-timeout_seconds = 120
+timeout_seconds = 2000
 tools = []
 headers = { "X-Octoweb-Workspace" = "{{ENV:OCTOWEB_MCP_TOKEN}}" }
