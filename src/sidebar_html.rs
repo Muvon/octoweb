@@ -5375,10 +5375,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }, 2400);
   }
 
+  // Tags every rendered element with the component id that produced it, so
+  // `a2uiRerender` can put focus and the caret back after a rebuild. List rows
+  // reuse one template id, so the row index disambiguates them.
+  function a2uiRenderNode(block, def, scope) {
+    const el = a2uiRenderNodeInner(block, def, scope);
+    if (el && el.nodeType === 1 && def && typeof def.id === 'string') {
+      el.dataset.a2uiId = def.id + (scope && scope.rowKey != null ? '#' + scope.rowKey : '');
+    }
+    return el;
+  }
+
   // Builds a fresh DOM tree from `def` and its children-by-id refs in
   // `block.componentsMap`. Re-rendered on every mutation — components are
   // small enough (typical surface: <20 nodes) that we don't need a smart diff.
-  function a2uiRenderNode(block, def, scope) {
+  function a2uiRenderNodeInner(block, def, scope) {
     if (!def) return document.createComment('missing');
     const type = typeof def.component === 'string' ? def.component : '';
     const r = v => a2uiResolveValue(v, scope);
@@ -5864,9 +5875,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         const items = r({ path: ch.path });
         const tpl = block.componentsMap.get(ch.componentId);
         if (Array.isArray(items) && tpl) {
-          for (const item of items) {
-            el.appendChild(a2uiRenderNode(block, tpl, { root: scope.root, local: item }));
-          }
+          items.forEach((item, i) => {
+            el.appendChild(a2uiRenderNode(block, tpl, { root: scope.root, local: item, rowKey: i }));
+          });
           return el;
         }
       }
@@ -5961,6 +5972,34 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return unk;
   }
 
+  // Focus survival across a full surface rebuild. Anchors on the owning
+  // component's id rather than the element itself, which is gone by then.
+  function captureA2uiFocus(body) {
+    const act = document.activeElement;
+    if (!act || !body.contains(act)) return null;
+    const holder = act.closest('[data-a2ui-id]');
+    if (!holder) return null;
+    const out = { id: holder.dataset.a2uiId, scroll: act.scrollTop || 0, start: null, end: null };
+    // selectionStart throws on input types that don't support selection
+    // (number, email, …), so it's guarded rather than feature-detected.
+    try { out.start = act.selectionStart; out.end = act.selectionEnd; } catch (e) {}
+    return out;
+  }
+
+  function restoreA2uiFocus(body, restore) {
+    if (!restore) return;
+    const holder = body.querySelector('[data-a2ui-id="' + String(restore.id).replace(/"/g, '\\"') + '"]');
+    const el = holder && holder.querySelector('input, textarea, select');
+    if (!el) return;
+    // preventScroll: refocusing must not yank the chat viewport around while
+    // the user is mid-sentence.
+    el.focus({ preventScroll: true });
+    if (restore.scroll) el.scrollTop = restore.scroll;
+    if (restore.start != null && typeof el.setSelectionRange === 'function') {
+      try { el.setSelectionRange(restore.start, restore.end); } catch (e) {}
+    }
+  }
+
   function a2uiRerender(block) {
     const wrap = a2uiBubbleByFile.get(block.fileId);
     if (!wrap) return;
@@ -6004,8 +6043,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (body) {
       const rootDef = block.componentsMap.get('root');
       if (rootDef) {
+        // Two-way binding re-renders the whole surface on every keystroke so
+        // derived props (checks, formatString, counters) stay in sync. That
+        // destroys the focused input, so remember where the caret was and put
+        // it back — otherwise typing drops focus after each character.
+        const restore = captureA2uiFocus(body);
         body.innerHTML = '';
         body.appendChild(a2uiRenderNode(block, rootDef, { root: block.dataModel, local: null }));
+        restoreA2uiFocus(body, restore);
       } else if (body.childNodes.length === 0) {
         // Only render the empty placeholder if this bubble has never had a
         // root. Once we've shown something useful we KEEP it on screen even

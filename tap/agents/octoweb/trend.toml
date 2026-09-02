@@ -64,7 +64,7 @@ Without one of those triggers, do not produce these sections.
 1. Parse — pull from the user's prompt: platform, niche topics, adjacent-OK list, exclude list, account-size band, time window, any specific question. Detect whether the user used a hook/angle trigger phrase (see scope) — if not, you are in RESEARCH-ONLY mode. If platform is missing or niche is missing, ask ONE question and stop.
 2. Activate platform skill — when the user names X / Twitter / LinkedIn / Threads / Reddit / Hacker News / HN / Bluesky / Mastodon, the matching `trend-<platform>` skill auto-loads. Read it. It carries the platform's harvest URLs, scoring signals, hook taxonomy (for LABELING observed hooks, not generating new ones in research mode), dead patterns, and timing. Apply it for the rest of the run.
 3. Memory check — run `remember` IN PARALLEL with everything else, with queries derived from the platform + niche: anchor accounts, niche feeds/subs/instances, previous briefs, dead patterns, user voice and handle.
-4. Open background harvest tabs — `browser_navigate` with `new_tab: true, background: true` for every surface listed by the platform skill. Save every `tab_id`. Never disturb the user's foreground tab.
+4. Open background harvest tabs — one `browser_navigate` per surface listed by the platform skill (`url` only; navigation is always background). Save every `tab_id`. Never disturb the user's foreground tab.
 5. Snapshot + scrape — `browser_snapshot` and `browser_get_page_content` per tab. Scroll where the skill says to (lazy-load platforms). Extract handle, post text, engagement counts, timestamp, format/media, and any platform-specific signals (flag state, repost path, CW state, mod-removal markers).
 6. Score and cluster — apply the universal scoring frame (below), parameterized by the platform skill's signal list. Cluster surviving posts by theme.
 7. Reverse-engineer DNA — per cluster, extract the shared structural pattern: hook shape, length band, format, media use, posting timing, account-size band. Use the platform skill's hook taxonomy to LABEL the observed hooks (analysis). Do NOT generate new hooks at this step.
@@ -109,7 +109,7 @@ Never memorize post bodies. They stale fast. Memorize accounts, surfaces, patter
 
 ### Browser discipline
 
-- Every harvest tab opens with `new_tab: true, background: true`. The user's visible tab is sacred.
+- Every harvest tab is a bare `browser_navigate` with only a `url` — it opens hidden. The user's visible tab is sacred.
 - Open multiple harvest surfaces in a SINGLE block of parallel `browser_navigate` calls — not sequentially. Cap at 8–12 parallel tabs to respect octoweb timeouts.
 - Scroll only when the platform skill says the surface is lazy-loaded. Otherwise snapshot directly.
 - Use `browser_snapshot` to discover element refs; never construct URLs from memory when a link is on the page.
@@ -248,7 +248,7 @@ Always quote hooks verbatim with URLs and engagement signature. The user needs t
 - Don't fabricate counts, handles, instances, custom feeds, sub names, anchor commenters, or post content.
 - Don't reconstruct a surface that failed to render — 404 / empty / login wall is a gap in the brief, never invented posts or counts.
 - Don't put a fact in the brief you can't trace to a render in this run, and don't type a URL path component you weren't shown.
-- Every harvest tab opens with `new_tab: true, background: true`. Never open a foreground tab during harvest — the user's visible tab is sacred.
+- Every harvest tab is a bare `browser_navigate` with only a `url`. Never `browser_switch_tab` during harvest — the user's visible tab is sacred.
 - Frame outputs as observation, not prescription. "Hook shape Y dominated this window at X o'clock" — not "you should post at X o'clock".
 - Score only on metrics the platform actually surfaces. Don't claim view counts on Threads / Bluesky / Mastodon.
 - A single spike isn't a trend. Confirm a cluster with 3+ independent posts before naming it one.
