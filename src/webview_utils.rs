@@ -183,34 +183,51 @@ pub const COMBINED_SCRIPT: &str = r#"
     var elToId  = new WeakMap();
     var capture = new Set();    // live getUserMedia/getDisplayMedia tracks
     var lastState = false;
+    var poll = null;
+    var POLL_MS = 15000;
 
     function sendState() {
-      // Prune dead WeakRefs / stopped tracks on each check.
-      playing.forEach(function (ref, id) { if (!ref.deref()) playing.delete(id); });
+      // Re-verify against the elements themselves rather than trusting the
+      // event log: a site can tear a player out of the DOM without ever firing
+      // `pause`, which would leave the tab flagged as playing forever.
+      playing.forEach(function (ref, id) {
+        var el = ref.deref();
+        if (!el || !audible(el)) playing.delete(id);
+      });
       capture.forEach(function (t) { if (t.readyState === 'ended') capture.delete(t); });
       var nowPlaying = playing.size > 0 || capture.size > 0;
       if (nowPlaying !== lastState) {
         lastState = nowPlaying;
         _ipc({ type: nowPlaying ? 'media:playing' : 'media:paused' });
+        // Only a tab claiming media polls, so idle tabs stay fully asleep and
+        // a stuck flag self-heals within POLL_MS.
+        if (nowPlaying) { poll = setInterval(sendState, POLL_MS); }
+        else { clearInterval(poll); poll = null; }
       }
     }
     function isMedia(el) { var t = el && el.tagName; return t === 'VIDEO' || t === 'AUDIO'; }
+    // Muted or zero-volume playback makes no sound — timeline autoplay (X,
+    // Facebook, Reddit) would otherwise light the tab up as "playing audio".
+    function audible(el) { return !el.paused && !el.ended && !el.muted && el.volume > 0; }
+    function sync(el) {
+      if (!isMedia(el)) return;
+      if (audible(el)) addPlaying(el); else removePlaying(el);
+    }
     function addPlaying(el) {
-      if (!elToId.has(el)) {
-        var id = nextId++;
-        elToId.set(el, id);
-        playing.set(id, new WeakRef(el));
-      }
+      var id = elToId.get(el);
+      // Re-set on every call: a pause/play cycle reuses the same id, and the
+      // old WeakRef entry was deleted by removePlaying.
+      if (id === undefined) { id = nextId++; elToId.set(el, id); }
+      playing.set(id, new WeakRef(el));
       sendState();
     }
     function removePlaying(el) {
       if (elToId.has(el)) { playing.delete(elToId.get(el)); }
       sendState();
     }
-    document.addEventListener('play',    function (e) { if (isMedia(e.target)) addPlaying(e.target); },    true);
-    document.addEventListener('pause',   function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
-    document.addEventListener('ended',   function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
-    document.addEventListener('emptied', function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
+    ['play', 'playing', 'pause', 'ended', 'emptied', 'volumechange'].forEach(function (t) {
+      document.addEventListener(t, function (e) { sync(e.target); }, true);
+    });
 
     // A call (Meet/Zoom/Teams) can route audio through WebAudio and never play
     // an <audio> element, or sit muted for minutes — a live mic/camera/screen
@@ -235,6 +252,13 @@ pub const COMBINED_SCRIPT: &str = r#"
       var origStop = MediaStreamTrack.prototype.stop;
       MediaStreamTrack.prototype.stop = function () { origStop.call(this); capture.delete(this); sendState(); };
     }
+
+    // A fresh document plays nothing. Rust only clears the tab's playing flag
+    // when it receives 'media:paused', and a navigation/reload reinjects this
+    // script with no event to send — so say it explicitly, or the previous
+    // page's flag sticks forever. Main frame only: a subframe load must not
+    // clear state the top document owns.
+    if (window.top === window) { _ipc({ type: 'media:paused' }); }
   }());
 
   // ── Autoplay blocking — strip autoplay + defer preload on media elements ──
