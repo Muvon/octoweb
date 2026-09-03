@@ -6120,7 +6120,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
             return;
           }
         }
-        const action = def.action || {};
+        // `action` is the catalog spelling. Agents routinely emit `actions`;
+        // ignoring it rendered a live-looking button that did nothing at all.
+        const action = def.action || def.actions || {};
         // A2UI v0.9 spells a client-side action as
         // `action.functionCall = {call, args}` — the same shape a ValueRef
         // uses, so resolving it runs the registry entry (openUrl, etc.).
@@ -6140,7 +6142,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           return;
         }
         const ev = action.event;
-        if (!ev || !ev.name) return;
+        if (!ev || !ev.name) {
+          // Never fail silently: a dead button is indistinguishable from a
+          // broken app until it says why.
+          a2uiToast('This button has no action - the surface was built wrong.');
+          return;
+        }
         const context = {};
         for (const k in (ev.context || {})) context[k] = r(ev.context[k]);
         const actionPayload = {

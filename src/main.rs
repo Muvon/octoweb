@@ -2838,6 +2838,25 @@ fn main() {
         }};
     }
 
+    /// Like `session_mcp_token!`, but mints only when the session has no live
+    /// handle — i.e. when the caller is about to spawn an agent that will
+    /// actually receive the token. Minting revokes whatever token the session
+    /// handed out before, so minting without spawning cuts a running agent off
+    /// from every octoweb tool ("Unknown workspace token") until it restarts.
+    macro_rules! session_spawn_token {
+        ($sid:expr) => {{
+            let sid = $sid;
+            workspace_manager
+                .index_of_session(sid)
+                .map_or_else(|| workspace_manager.active(), |i| workspace_manager.at(i))
+                .acp_sessions
+                .iter()
+                .any(|s| s.id == sid && s.handle.is_none())
+                .then(|| session_mcp_token!(sid))
+                .flatten()
+        }};
+    }
+
     /// Paint (or repaint) one A2UI surface in the sidebar. Always marked live:
     /// this macro only ever runs for a surface a running agent just produced.
     /// Replay from the persisted log passes `live = false` instead. Only ever
@@ -6111,7 +6130,7 @@ fn main() {
                     std::thread::spawn(move || config::save_ai_prompt_history(&snapshot));
                 }
                 let mut should_persist = false;
-                let mcp_token = session_mcp_token!(sid);
+                let mcp_token = session_spawn_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     // Inbox-driven turns stream with no terminal Done — commit any
                     // response still buffered so it lands before this user message.
@@ -6188,14 +6207,19 @@ fn main() {
             }
             Event::UserEvent(AppEvent::AcpCancel(sid)) => {
                 let mut should_persist = false;
-                let mcp_token = session_mcp_token!(sid);
+                let now = std::time::Instant::now();
+                // A second cancel within the window force-respawns; a single one
+                // leaves the agent running, so it must not mint (and revoke).
+                let recent = workspace_manager
+                    .active()
+                    .acp_sessions
+                    .iter()
+                    .find(|s| s.id == sid)
+                    .and_then(|s| s.last_cancel_at)
+                    .map(|t| now.duration_since(t) < std::time::Duration::from_secs(12))
+                    .unwrap_or(false);
+                let mcp_token = recent.then(|| session_mcp_token!(sid)).flatten();
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
-                    let now = std::time::Instant::now();
-                    let recent = s
-                        .last_cancel_at
-                        .map(|t| now.duration_since(t) < std::time::Duration::from_secs(12))
-                        .unwrap_or(false);
-
                     if recent {
                         let tag = s.tag.clone();
                         let resume = s.acp_session_id.clone();
@@ -6405,7 +6429,7 @@ fn main() {
                 workspace_manager.active_mut().acp_active_session_id = sid;
                 // Lazy-spawn: if this session has no live handle (persisted
                 // but not yet connected this run), bring it up now.
-                let mcp_token = session_mcp_token!(sid);
+                let mcp_token = session_spawn_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     if s.handle.is_none() {
                         let cmd = match &s.acp_session_id {
@@ -6702,7 +6726,13 @@ fn main() {
 
             // ── ACP reconnection attempt (scheduled after error) ──
             Event::UserEvent(AppEvent::AcpReconnect(sid, gen)) => {
-                let mcp_token = session_mcp_token!(sid);
+                // A stale timer bails below without spawning, so it must not mint.
+                let mcp_token = workspace_manager
+                    .index_of_session(sid)
+                    .and_then(|i| workspace_manager.at(i).acp_sessions.iter().find(|s| s.id == sid))
+                    .is_some_and(|s| gen == s.reconnect_gen)
+                    .then(|| session_mcp_token!(sid))
+                    .flatten();
                 // The backoff timer doesn't know which workspace is on screen
                 // when it fires — find the session where it actually lives.
                 let session = match workspace_manager.index_of_session(sid) {
