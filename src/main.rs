@@ -81,6 +81,7 @@ enum AppEvent {
     PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
     NextTab,                 // Ctrl+N — switch to next tab in MRU order
     ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
+    OpenNotifiedSession,     // user clicked the notification toast
     ToggleFullscreen,        // ⌘Return — toggle native macOS fullscreen on the chrome window
     ToggleSidebarFullscreen, // ⌘⇧Return / icon — sidebar expands to full window width inside chrome
     /// (session_id, text, images, display) — a prompt for the agent. `display`
@@ -1885,7 +1886,7 @@ fn main() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
                         Some("open_sidebar") => {
-                            let _ = p.send_event(AppEvent::ToggleSidebar);
+                            let _ = p.send_event(AppEvent::OpenNotifiedSession);
                         }
                         Some("dismiss_notification") => {
                             let _ = p.send_event(AppEvent::DismissNotification);
@@ -1899,6 +1900,10 @@ fn main() {
         .expect("Failed to create notification WebView");
     let _ = notification_wv.set_visible(false);
     let mut notification_visible = false;
+    // Which (workspace, session) produced the toast currently on screen. The
+    // toast surfaces any workspace's session, so clicking it has to land on
+    // that chat rather than on whatever the user happens to be looking at.
+    let mut notif_origin: Option<(String, u64)> = None;
 
     // ── Quick-slots footer bar (static strip at bottom — page content ends above it) ──
     let footer_wv = WebViewBuilder::new()
@@ -3318,6 +3323,7 @@ fn main() {
         if let Some(at) = welcome_toast_at {
             if now >= at {
                 welcome_toast_at = None;
+                notif_origin = None;
                 let _ = notification_wv.set_visible(true);
                 notification_visible = true;
                 // text, icon, title, autoDismissMs — reuse the existing toast API
@@ -3515,6 +3521,7 @@ fn main() {
                         // The toast surfaces ANY session's chunk — only one toast
                         // visible at a time is fine (it auto-dismisses).
                         if !sidebar_visible || !on_screen {
+                            notif_origin = Some((workspace_manager.at(ws_idx).id.clone(), sid));
                             let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
                             );
@@ -3727,6 +3734,7 @@ fn main() {
                                         "window.__appendError && window.__appendError({sid},`{escaped}`)"
                                     ));
                                     if !sidebar_visible || !on_screen {
+                                        notif_origin = Some((workspace_manager.at(ws_idx).id.clone(), sid));
                                         let _ = address_bar_wv.evaluate_script(
                                             "window.__setBadge && window.__setBadge(true)"
                                         );
@@ -5964,6 +5972,26 @@ fn main() {
 
             // ── Toggle sidebar (Cmd+Shift+A or JS sidebar_close) ──────────
             // Sidebar overlays on top of the page — no tab/footer resizing.
+            // ── Notification toast clicked ─────────────────────────────────
+            // Switch to the workspace and session that produced it before
+            // opening the sidebar, otherwise the user lands on whichever chat
+            // happened to be in front and the toast looks like it did nothing.
+            // Queued in order, so the session switch runs once the workspace
+            // it lives in is active.
+            Event::UserEvent(AppEvent::OpenNotifiedSession) => {
+                if let Some((ws_id, sid)) = notif_origin.take() {
+                    if ws_id != workspace_manager.active().id {
+                        let _ = proxy.send_event(AppEvent::SwitchWorkspace(ws_id));
+                    }
+                    let _ = proxy.send_event(AppEvent::AcpSessionSwitch(sid));
+                }
+                // Toggling a sidebar that is already open would hide it — the
+                // toast also fires when the window itself is off screen.
+                if !sidebar_visible {
+                    let _ = proxy.send_event(AppEvent::ToggleSidebar);
+                }
+            }
+
             Event::UserEvent(AppEvent::ToggleSidebar) => {
                 let sz = browser_win.inner_size();
                 if sidebar_visible {
@@ -6874,6 +6902,7 @@ fn main() {
                 }
                 let msg = format!("Downloading: {filename}…");
                 let escaped = webview_utils::escape_js_template(&msg);
+                notif_origin = None;
                 if !notification_visible {
                     let _ = notification_wv.set_visible(true);
                     notification_visible = true;
@@ -6892,6 +6921,7 @@ fn main() {
                 };
                 tracing::debug!(%msg, "Download completed");
                 let escaped = webview_utils::escape_js_template(&msg);
+                notif_origin = None;
                 if !notification_visible {
                     let _ = notification_wv.set_visible(true);
                     notification_visible = true;
