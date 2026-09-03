@@ -130,25 +130,26 @@ enum AppEvent {
     HideWorkspaces,                 // JS Esc / backdrop click in workspace switcher
     SwitchWorkspace(String),        // (workspace_id) — switch active workspace
     SwitchWorkspaceByIndex(usize),  // ⌘1–⌘0 while the popover is open
-    CreateWorkspace,                // "+ New Workspace" row
+    JumpToTab(usize), // switcher "live" row — activate a tab in whichever workspace owns it
+    CreateWorkspace,  // "+ New Workspace" row
     RenameWorkspace(String, String), // (workspace_id, name)
-    DeleteWorkspace(String),        // (workspace_id)
-    ToggleShortcuts,                // ⌘/ — toggle keyboard shortcuts overlay
-    HideShortcuts,                  // JS Esc / backdrop click in shortcuts overlay
-    ToggleFindBar,                  // ⌘F — toggle find-in-page bar
-    HideFindBar,                    // Esc / close button in find bar
-    SidebarFind,                    // ⌘F while the sidebar has key — search the chats
-    FindInPage(String),             // search query from find bar input
-    FindNext,                       // next match (Enter in find bar)
-    FindPrev,                       // previous match (⇧Enter in find bar)
-    FindCount(usize, usize),        // (current, total) — match count from tab WebView
-    WebContentTerminated(usize),    // (tab_id) — WebContent XPC process killed by OS
-    ScrollDown,                     // ⌃D — scroll down one full screen
-    ScrollUp,                       // ⌃U — scroll up one full screen
-    ScrollTop,                      // ⌃T — scroll to top of page
-    ScrollBottom,                   // ⌃B — scroll to bottom of page
-    Screenshot,                     // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
-    ScreenshotFullPage,             // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
+    DeleteWorkspace(String), // (workspace_id)
+    ToggleShortcuts,  // ⌘/ — toggle keyboard shortcuts overlay
+    HideShortcuts,    // JS Esc / backdrop click in shortcuts overlay
+    ToggleFindBar,    // ⌘F — toggle find-in-page bar
+    HideFindBar,      // Esc / close button in find bar
+    SidebarFind,      // ⌘F while the sidebar has key — search the chats
+    FindInPage(String), // search query from find bar input
+    FindNext,         // next match (Enter in find bar)
+    FindPrev,         // previous match (⇧Enter in find bar)
+    FindCount(usize, usize), // (current, total) — match count from tab WebView
+    WebContentTerminated(usize), // (tab_id) — WebContent XPC process killed by OS
+    ScrollDown,       // ⌃D — scroll down one full screen
+    ScrollUp,         // ⌃U — scroll up one full screen
+    ScrollTop,        // ⌃T — scroll to top of page
+    ScrollBottom,     // ⌃B — scroll to bottom of page
+    Screenshot,       // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
+    ScreenshotFullPage, // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
     SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
     FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
     InlineEditRequest,               // ⌘⇧E — capture selection, show modal
@@ -1309,6 +1310,11 @@ fn main() {
                         Some("workspace_switch") => {
                             if let Some(id) = v["id"].as_str() {
                                 let _ = p.send_event(AppEvent::SwitchWorkspace(id.to_string()));
+                            }
+                        }
+                        Some("workspace_jump_tab") => {
+                            if let Some(tab_id) = v["tab_id"].as_u64() {
+                                let _ = p.send_event(AppEvent::JumpToTab(tab_id as usize));
                             }
                         }
                         Some("workspace_create") => {
@@ -2723,12 +2729,25 @@ fn main() {
                 .list()
                 .iter()
                 .map(|ws| {
+                    let tm = ws.tabs.lock().unwrap();
+                    // Tabs with audio or a live mic/camera (a call) — listed
+                    // under the row as a one-click jump across workspaces.
+                    let live: Vec<serde_json::Value> = tm
+                        .tabs()
+                        .iter()
+                        .filter(|t| t.is_playing_audio)
+                        .map(|t| {
+                            let title = if t.title.is_empty() { &t.url } else { &t.title };
+                            serde_json::json!({ "id": t.id, "title": title })
+                        })
+                        .collect();
                     serde_json::json!({
                         "id": ws.id,
                         "name": ws.name,
                         "color": ws.color,
-                        "tab_count": ws.tabs.lock().unwrap().tabs().len(),
+                        "tab_count": tm.tabs().len(),
                         "active": ws.id == active_id,
+                        "live": live,
                     })
                 })
                 .collect();
@@ -5216,6 +5235,22 @@ fn main() {
                 // monitor has no view of the workspace list.
                 if let Some(ws) = workspace_manager.list().get(idx) {
                     let id = ws.id.clone();
+                    let _ = proxy.send_event(AppEvent::SwitchWorkspace(id));
+                }
+            }
+            Event::UserEvent(AppEvent::JumpToTab(tab_id)) => {
+                let Some(ws_idx) = workspace_manager.index_of_tab(tab_id) else {
+                    return; // tab closed since the popover was rendered
+                };
+                // Same pattern as MCP switch_tab: update the TabManager first;
+                // SwitchWorkspace lands on that workspace's active tab.
+                workspace_manager.at(ws_idx).tabs.lock().unwrap().switch(tab_id);
+                if ws_idx == workspace_manager.active_index() {
+                    workspace_switcher_win.set_visible(false);
+                    workspace_switcher_visible.store(false, Ordering::Relaxed);
+                    let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                } else {
+                    let id = workspace_manager.at(ws_idx).id.clone();
                     let _ = proxy.send_event(AppEvent::SwitchWorkspace(id));
                 }
             }

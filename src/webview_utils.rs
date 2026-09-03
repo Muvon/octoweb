@@ -181,12 +181,14 @@ pub const COMBINED_SCRIPT: &str = r#"
     var nextId = 0;
     var playing = new Map();    // id → WeakRef<Element>
     var elToId  = new WeakMap();
+    var capture = new Set();    // live getUserMedia/getDisplayMedia tracks
     var lastState = false;
 
     function sendState() {
-      // Prune dead WeakRefs on each check.
+      // Prune dead WeakRefs / stopped tracks on each check.
       playing.forEach(function (ref, id) { if (!ref.deref()) playing.delete(id); });
-      var nowPlaying = playing.size > 0;
+      capture.forEach(function (t) { if (t.readyState === 'ended') capture.delete(t); });
+      var nowPlaying = playing.size > 0 || capture.size > 0;
       if (nowPlaying !== lastState) {
         lastState = nowPlaying;
         _ipc({ type: nowPlaying ? 'media:playing' : 'media:paused' });
@@ -209,6 +211,30 @@ pub const COMBINED_SCRIPT: &str = r#"
     document.addEventListener('pause',   function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
     document.addEventListener('ended',   function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
     document.addEventListener('emptied', function (e) { if (isMedia(e.target)) removePlaying(e.target); }, true);
+
+    // A call (Meet/Zoom/Teams) can route audio through WebAudio and never play
+    // an <audio> element, or sit muted for minutes — a live mic/camera/screen
+    // track is the reliable "in a call" signal, so it counts as media and keeps
+    // the tab out of hibernation/tab-cap eviction.
+    function trackStream(stream) {
+      stream.getTracks().forEach(function (t) {
+        capture.add(t);
+        t.addEventListener('ended', sendState);
+      });
+      sendState();
+      return stream;
+    }
+    var md = navigator.mediaDevices;
+    ['getUserMedia', 'getDisplayMedia'].forEach(function (name) {
+      if (!md || typeof md[name] !== 'function') return;
+      var orig = md[name];
+      md[name] = function () { return orig.apply(md, arguments).then(trackStream); };
+    });
+    if (window.MediaStreamTrack) {
+      // stop() does not fire `ended` on the stopped track itself.
+      var origStop = MediaStreamTrack.prototype.stop;
+      MediaStreamTrack.prototype.stop = function () { origStop.call(this); capture.delete(this); sendState(); };
+    }
   }());
 
   // ── Autoplay blocking — strip autoplay + defer preload on media elements ──

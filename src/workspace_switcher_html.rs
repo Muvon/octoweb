@@ -1,6 +1,6 @@
 /// Returns the HTML for the workspace switcher popover (⌘⇧O).
 /// Compact card anchored under the toolbar — not a full-screen modal like settings.
-/// IPC messages: workspace_switch, workspace_rename, workspace_delete, workspace_create, workspace_close.
+/// IPC messages: workspace_switch, workspace_jump_tab, workspace_rename, workspace_delete, workspace_create, workspace_close.
 pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -148,6 +148,36 @@ pub fn html() -> String {
   .ws-icon-btn:hover { background: var(--fill-press); color: var(--label); }
   .ws-icon-btn svg { width: 12px; height: 12px; }
   .ws-icon-btn.ws-delete[disabled] { opacity: 0 !important; pointer-events: none !important; }
+
+  /* Tab with audio or a live mic/camera (a call), nested under its workspace. */
+  .ws-live {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 26px;
+    padding: 0 8px 0 26px;
+    border-radius: var(--r-ctl);
+    cursor: pointer;
+    font-size: 11.5px;
+    color: var(--label-2);
+    transition: background var(--t-fast) var(--ease);
+  }
+  .ws-live:hover { background: var(--fill-hover); }
+  .ws-live:active { background: var(--fill-press); }
+  .ws-live-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #ff453a;
+    flex-shrink: 0;
+    animation: livePulse 1.6s ease-in-out infinite;
+  }
+  @keyframes livePulse { 50% { opacity: 0.35; } }
+  .ws-live-title {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
   .ws-sep {
     height: 0.5px;
@@ -300,6 +330,23 @@ pub fn html() -> String {
     return row;
   }
 
+  function liveRow(t) {
+    var row = document.createElement('div');
+    row.className = 'ws-live';
+    row.title = 'Jump to call';
+    var dot = document.createElement('span');
+    dot.className = 'ws-live-dot';
+    row.appendChild(dot);
+    var title = document.createElement('span');
+    title.className = 'ws-live-title';
+    title.textContent = t.title;
+    row.appendChild(title);
+    row.addEventListener('click', function() {
+      ipc({ type: 'workspace_jump_tab', tab_id: t.id });
+    });
+    return row;
+  }
+
   function render(data) {
     lastData = data;
     var list = document.getElementById('ws-list');
@@ -307,6 +354,7 @@ pub fn html() -> String {
     var onlyOne = data.length <= 1;
     data.forEach(function(ws, idx) {
       list.appendChild(wsRow(ws, idx, onlyOne));
+      (ws.live || []).forEach(function(t) { list.appendChild(liveRow(t)); });
     });
   }
 
