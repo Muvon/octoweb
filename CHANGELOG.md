@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.13.0] - 2026-09-03
+
+### 📋 Release Summary
+
+This release adds live media tabs to workspaces (9eef06d9). Several fixes improve media state handling, ensure notifications open the session that triggered them, and preserve live tokens and button actions (d9766eb0, f7ae9d86, a7072353). Documentation now includes the latest release badge and updated guidance for workspaces and MCP (c01da76d, 92fff260).
+
+
+### ✨ New Features & Enhancements
+
+- **workspaces**: show live media tabs `9eef06d9`
+
+### 🐛 Bug Fixes & Stability
+
+- **webview**: clear stale media state `d9766eb0`
+- **notifications**: open the session that triggered toast `f7ae9d86`
+- **app**: preserve live tokens and button actions `a7072353`
+
+### 📚 Documentation & Examples
+
+- **readme**: show latest release badge `c01da76d`
+- **readme**: document workspaces and MCP updates `92fff260`
+
 ## [0.12.0] - 2026-09-02
 
 ### 📋 Release Summary
