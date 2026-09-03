@@ -1,6 +1,6 @@
 # Octoweb — the keyboard-first AI browser for macOS
 
-[![Version](https://img.shields.io/badge/version-0.12.0-blue.svg)](https://github.com/muvon/octoweb/releases)
+[![Latest release](https://img.shields.io/github/v/release/muvon/octoweb?sort=semver&color=blue)](https://github.com/muvon/octoweb/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS-black.svg)](https://github.com/muvon/octoweb/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
