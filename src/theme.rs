@@ -39,8 +39,13 @@ pub const CSS: &str = r#"
     --label-4: rgba(0, 0, 0, 0.10);
 
     --canvas: #f5f5f7;
-    --glass:       rgba(248, 248, 250, 0.68);
-    --glass-thick: rgba(246, 246, 248, 0.86);
+    /* Floating panels are opaque: they live in transparent WebViews layered
+       over the page, where backdrop-filter has no backdrop to sample, so a
+       translucent fill reads as whatever happens to sit behind the window —
+       the panel's opacity appeared to change at random. --glass-thin stays
+       translucent: it only ever paints over an opaque panel. */
+    --glass:       rgb(248, 248, 250);
+    --glass-thick: rgb(246, 246, 248);
     --glass-thin:  rgba(252, 252, 254, 0.48);
     --glass-blur:  blur(40px) saturate(200%);
     --glass-shine: inset 0 1px 0 rgba(255, 255, 255, 0.65),
@@ -83,8 +88,8 @@ pub const CSS: &str = r#"
       --label-4: rgba(255, 255, 255, 0.10);
 
       --canvas: #1c1c1e;
-      --glass:       rgba(30, 30, 34, 0.62);
-      --glass-thick: rgba(36, 36, 40, 0.86);
+      --glass:       rgb(30, 30, 34);
+      --glass-thick: rgb(36, 36, 40);
       --glass-thin:  rgba(44, 44, 48, 0.42);
       --glass-shine: inset 0 1px 0 rgba(255, 255, 255, 0.12),
                      inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
@@ -106,14 +111,12 @@ pub const CSS: &str = r#"
   @media (prefers-contrast: more) {
     :root {
       --hairline: rgba(0, 0, 0, 0.35);
-      --glass:       rgba(248, 248, 250, 0.92);
       --glass-thin:  rgba(248, 248, 250, 0.85);
     }
   }
   @media (prefers-contrast: more) and (prefers-color-scheme: dark) {
     :root {
       --hairline: rgba(255, 255, 255, 0.40);
-      --glass:       rgba(30, 30, 34, 0.94);
       --glass-thin:  rgba(30, 30, 34, 0.88);
     }
   }

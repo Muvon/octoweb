@@ -10,21 +10,25 @@
 ///
 /// Must be called before any WKWebView instantiation.
 pub fn set_english_locale() {
-    // Set AppleLanguages to ["en"] so WKWebView sends "Accept-Language: en" only.
-    // Without this, WKWebView uses the system's full language list (e.g., en, en-TH, ru-TH, th)
-    // which causes sites to suggest content in those languages.
+    // Set AppleLanguages to ["en-US"] so WKWebView sends "Accept-Language: en-US"
+    // only. Without this, WKWebView uses the system's full language list (e.g.
+    // en, en-TH, ru-TH, th) which causes sites to suggest content in those
+    // languages. Region-tagged on purpose: a bare "en" makes `navigator.language`
+    // and Accept-Language disagree with the macOS Safari user agent we send, and
+    // fingerprinting bot checks score that inconsistency.
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
     use objc2_foundation::NSString;
 
     unsafe {
-        let en: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: c"en".as_ptr()];
+        let en: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: c"en-US".as_ptr()];
         let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: en];
         let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
         let key = NSString::from_str("AppleLanguages");
         let _: () = msg_send![defaults, setObject: arr, forKey: &*key];
     }
-    tracing::debug!("set AppleLanguages to [\"en\"] for WKWebView Accept-Language header");
+    tracing::debug!("set AppleLanguages to [\"en-US\"] for WKWebView Accept-Language header");
 }
 
 /// Disable macOS automatic termination.

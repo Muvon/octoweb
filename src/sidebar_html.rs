@@ -453,6 +453,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   #session-create-panel {
     display: none;
     position: relative;
+    /* Above the later `#sidebar > *` siblings (all z-index: 1), or #messages
+       paints over the tag suggestions that overhang it. */
+    z-index: 20;
     align-items: center;
     gap: 6px;
     padding: 6px 10px;

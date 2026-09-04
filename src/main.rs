@@ -687,8 +687,11 @@ fn main() {
                 // spawn hidden and load before the deferred swap, so Suspend stalls
                 // exactly that pipeline (slow/never PageLoadStarted).
                 .with_background_throttling(BackgroundThrottlingPolicy::Throttle)
-                // Safari-compatible UA so sites serve optimised WebKit assets; octoweb tag for identification
-                .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Octoweb/1.0")
+                // Plain Safari UA so sites serve optimised WebKit assets. No product
+                // token of our own: a trailing unknown token is what tips fingerprinting
+                // bot checks (Hetzner's HeRay reads `navigator` and re-challenges
+                // forever when it does not like what it sees) into treating us as a bot.
+                .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15")
                 // Single merged script: page stats + favicon + URL tracking +
                 // media tracking + find-in-page. One JSC compile pass instead of five.
                 .with_initialization_script(webview_utils::COMBINED_SCRIPT)
