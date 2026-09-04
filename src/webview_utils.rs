@@ -26,6 +26,33 @@ pub const COMBINED_SCRIPT: &str = r#"
   // Shared IPC helper — one call site instead of five.
   function _ipc(obj) { window.ipc.postMessage(JSON.stringify(obj)); }
 
+  // ── Native-function masking ───────────────────────────────────────────────
+  // The instrumentation below replaces natives (fetch, XHR, console,
+  // addEventListener, History, getUserMedia). Bot deterrents fingerprint that
+  // by stringifying them and looking for "[native code]" — a browser that
+  // fails the check keeps getting re-challenged even after it solved the
+  // puzzle (Hetzner's HeRay proof-of-work behaves that way). Every wrapper
+  // registers its original here and reports the original's source instead of
+  // its own. Functions we never touched still stringify normally, so page code
+  // that parses its own sources (Angular DI, template compilers) is unaffected.
+  // ponytail: toString masking only — a probe that compares against a fresh
+  // iframe's natives still sees the wrappers. Go deeper only if a site proves
+  // it needs it.
+  var _origToString = Function.prototype.toString;
+  var _native = new WeakMap();
+  Function.prototype.toString = function () {
+    return _origToString.call(_native.get(this) || this);
+  };
+  _native.set(Function.prototype.toString, _origToString);
+  function _mask(wrapper, orig) {
+    try {
+      Object.defineProperty(wrapper, 'name', { value: orig.name, configurable: true });
+      Object.defineProperty(wrapper, 'length', { value: orig.length, configurable: true });
+      _native.set(wrapper, orig);
+    } catch (e) {}
+    return wrapper;
+  }
+
   // ── Page stats + Favicon ── single load listener combining both tasks ──────
   // Merging two former load listeners cuts event-handler overhead per page.
   window.addEventListener('load', function () {
@@ -96,11 +123,11 @@ pub const COMBINED_SCRIPT: &str = r#"
     var proto = History.prototype;
     function wrap(method) {
       var orig = proto[method];
-      proto[method] = function () {
+      proto[method] = _mask(function () {
         var ret = orig.apply(this, arguments);
         notify();
         return ret;
-      };
+      }, orig);
     }
     wrap('pushState');
     wrap('replaceState');
@@ -245,12 +272,12 @@ pub const COMBINED_SCRIPT: &str = r#"
     ['getUserMedia', 'getDisplayMedia'].forEach(function (name) {
       if (!md || typeof md[name] !== 'function') return;
       var orig = md[name];
-      md[name] = function () { return orig.apply(md, arguments).then(trackStream); };
+      md[name] = _mask(function () { return orig.apply(md, arguments).then(trackStream); }, orig);
     });
     if (window.MediaStreamTrack) {
       // stop() does not fire `ended` on the stopped track itself.
       var origStop = MediaStreamTrack.prototype.stop;
-      MediaStreamTrack.prototype.stop = function () { origStop.call(this); capture.delete(this); sendState(); };
+      MediaStreamTrack.prototype.stop = _mask(function () { origStop.call(this); capture.delete(this); sendState(); }, origStop);
     }
 
     // A fresh document plays nothing. Rust only clears the tab's playing flag
@@ -515,7 +542,7 @@ pub const COMBINED_SCRIPT: &str = r#"
     // Console wrap — keeps original behavior, mirrors a truncated text line.
     ['log', 'info', 'warn', 'error', 'debug'].forEach(function (level) {
       var orig = console[level];
-      console[level] = function () {
+      console[level] = _mask(function () {
         try {
           var parts = [];
           for (var i = 0; i < arguments.length; i++) {
@@ -526,7 +553,7 @@ pub const COMBINED_SCRIPT: &str = r#"
           con.push2({ level: level, text: parts.join(' ').substring(0, 500), ts: Date.now() });
         } catch (e) {}
         return orig.apply(console, arguments);
-      };
+      }, orig);
     });
     window.addEventListener('error', function (e) {
       con.push2({ level: 'error', text: ('Uncaught: ' + e.message + ' @' + (e.filename || '') + ':' + (e.lineno || 0)).substring(0, 500), ts: Date.now() });
@@ -545,7 +572,7 @@ pub const COMBINED_SCRIPT: &str = r#"
 
     // fetch wrap
     var origFetch = window.fetch;
-    if (origFetch) window.fetch = function (input, init) {
+    if (origFetch) window.fetch = _mask(function (input, init) {
       var url = ''; try { url = (typeof input === 'string') ? input : ((input && input.url) || String(input)); } catch (e) {}
       var method = (init && init.method) || (input && input.method) || 'GET';
       var t0 = performance.now();
@@ -568,7 +595,7 @@ pub const COMBINED_SCRIPT: &str = r#"
         },
         function (err) { rec(0, String(err).substring(0, 200)); throw err; }
       );
-    };
+    }, origFetch);
 
     // Resource timing — no status code from this API (responseStatus only on
     // newer WebKit), but it proves *whether* a beacon / image / script fired.
@@ -587,8 +614,8 @@ pub const COMBINED_SCRIPT: &str = r#"
 
     // XHR wrap
     var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (m, u) { this.__ow_req = [String(m), String(u)]; return XO.apply(this, arguments); };
-    XMLHttpRequest.prototype.send = function () {
+    XMLHttpRequest.prototype.open = _mask(function (m, u) { this.__ow_req = [String(m), String(u)]; return XO.apply(this, arguments); }, XO);
+    XMLHttpRequest.prototype.send = _mask(function () {
       var x = this, t0 = performance.now();
       x.addEventListener('loadend', function () {
         var i = x.__ow_req || ['?', '?'];
@@ -603,19 +630,19 @@ pub const COMBINED_SCRIPT: &str = r#"
         net.push2(entry);
       });
       return XS.apply(this, arguments);
-    };
+    }, XS);
 
     // Click-listener tagging: lets browser_snapshot surface <div>-buttons whose
     // only interactivity is an addEventListener — invisible to role/tag scans.
     var tagged = new WeakSet();
     Object.defineProperty(window, '__octoweb_listeners', { value: tagged, configurable: true });
     var origAdd = EventTarget.prototype.addEventListener;
-    EventTarget.prototype.addEventListener = function (type) {
+    EventTarget.prototype.addEventListener = _mask(function (type) {
       try {
         if ((type === 'click' || type === 'pointerdown' || type === 'mousedown') && this && this.nodeType === 1) tagged.add(this);
       } catch (e) {}
       return origAdd.apply(this, arguments);
-    };
+    }, origAdd);
   }());
 
   // ── target=_blank link interceptor ────────────────────────────────────────
