@@ -20,6 +20,7 @@
 ///   window.__setThinking(sid, bool, elapsedMs?)   — show/hide activity feed
 ///   window.__appendError(sid, text)               — show an error bubble
 ///   window.__setAvailableCommands(sid, json)      — populate slash-command list
+///   window.__setAgents(list)                      — agent tags for create-panel autocomplete
 ///   window.__a2uiUpdate(sid, fileId, payload, live, ts) — render / update an A2UI surface
 ///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
 ///
@@ -451,6 +452,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   /* ── Create-session inline panel (drops down from header) ───────────────── */
   #session-create-panel {
     display: none;
+    position: relative;
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
@@ -494,6 +496,27 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     background: rgba(0,0,0,0.06);
     color: var(--text-primary);
   }
+
+  /* Agent tag autocomplete — same sheet as the slash-command dropdown, but
+     dropping down from the tag input instead of up from the prompt box. */
+  #sc-suggest {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 126px; right: 10px;
+    margin-top: 4px;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--glass-solid);
+    border-radius: 14px;
+    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--rim-hi), inset 0 0 0 0.5px var(--rim-lo);
+    z-index: 10;
+    padding: 4px;
+  }
+  #sc-suggest.visible { display: block; animation: menu-pop 0.25s var(--spring); }
+  #sc-suggest::-webkit-scrollbar { width: 3px; }
+  #sc-suggest::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+  #sc-suggest .cmd-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -2602,6 +2625,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     <input id="sc-tag"   type="text" placeholder="agent:tag (e.g. octoweb:assistant)" autocomplete="off" spellcheck="false">
     <button id="sc-create" type="button">Create</button>
     <button id="sc-cancel" type="button" class="secondary" title="Cancel">×</button>
+    <div id="sc-suggest"></div>
   </div>
 
   <!-- Chat search (⌘F while the sidebar has focus) — searches every session's
@@ -2717,6 +2741,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
 <!-- marked.js — lightweight MD parser, served from embedded binary -->
 <script src="octoweb-lib://localhost/marked.min.js"></script>
+<!-- fuzzysort — fuzzy matcher for the new-session agent tag autocomplete -->
+<script src="octoweb-lib://localhost/fuzzysort.min.js"></script>
 <script>
   // Inline icon strings injected from src/icons.rs (Lucide stroke icons).
   const ICON_CHECK        = '/* ICON_CHECK */';
@@ -2758,6 +2784,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const scTitle        = document.getElementById('sc-title');
   const scTag          = document.getElementById('sc-tag');
   const scCreate       = document.getElementById('sc-create');
+  const scSuggest      = document.getElementById('sc-suggest');
   const scCancel       = document.getElementById('sc-cancel');
   const input          = document.getElementById('prompt-input');
   const sendBtn        = document.getElementById('send-btn');
@@ -3221,6 +3248,71 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   // ── Session create panel (header + button) ──────────────────────────────
+  // Agent tags Rust scanned out of the registered octomind taps: [tag, title].
+  let agents = [];
+  window.__setAgents = function(list) {
+    agents = (list || []).map(a => ({ tag: a[0], title: a[1] }));
+  };
+
+  const SC_SUGGEST_MAX = 8;
+  let scMatches = [];
+  let scIdx = 0;
+
+  function scHideSuggest() {
+    scSuggest.classList.remove('visible');
+    scMatches = [];
+    scIdx = 0;
+  }
+
+  function scShowSuggest() {
+    const q = scTag.value.trim();
+    scMatches = q
+      ? fuzzysort.go(q, agents, { keys: ['tag', 'title'], limit: SC_SUGGEST_MAX }).map(r => r.obj)
+      : agents.slice(0, SC_SUGGEST_MAX);
+    if (!scMatches.length) { scHideSuggest(); return; }
+    scIdx = 0;
+    scSuggest.innerHTML = '';
+    scMatches.forEach((a, i) => {
+      const div = document.createElement('div');
+      div.className = 'cmd-item' + (i === scIdx ? ' active' : '');
+      const name = document.createElement('div');
+      name.className = 'cmd-name';
+      name.textContent = a.tag;
+      const desc = document.createElement('div');
+      desc.className = 'cmd-desc';
+      desc.textContent = a.title;
+      div.appendChild(name);
+      div.appendChild(desc);
+      // mousedown, not click — click fires after blur has already closed us.
+      div.addEventListener('mousedown', (e) => { e.preventDefault(); scPick(i); });
+      div.addEventListener('mouseenter', () => { scIdx = i; scPaintActive(); });
+      scSuggest.appendChild(div);
+    });
+    scSuggest.classList.add('visible');
+  }
+
+  function scPaintActive() {
+    const items = scSuggest.querySelectorAll('.cmd-item');
+    items.forEach((el, i) => el.classList.toggle('active', i === scIdx));
+    if (items[scIdx]) items[scIdx].scrollIntoView({ block: 'nearest' });
+  }
+
+  function scMove(delta) {
+    scIdx = Math.max(0, Math.min(scMatches.length - 1, scIdx + delta));
+    scPaintActive();
+  }
+
+  function scPick(i) {
+    if (!scMatches[i]) return;
+    scTag.value = scMatches[i].tag;
+    scHideSuggest();
+    scTag.focus();
+  }
+
+  scTag.addEventListener('input', scShowSuggest);
+  scTag.addEventListener('focus', scShowSuggest);
+  scTag.addEventListener('blur', () => setTimeout(scHideSuggest, 150));
+
   function openCreatePanel() {
     if (sessions.size >= MAX_SESSIONS) return;
     scPanel.classList.add('visible');
@@ -3230,7 +3322,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   window.__openCreatePanel = openCreatePanel;
   sessionAddBtn.addEventListener('click', openCreatePanel);
-  function hideCreatePanel() { scPanel.classList.remove('visible'); }
+  function hideCreatePanel() { scPanel.classList.remove('visible'); scHideSuggest(); }
   scCancel.addEventListener('click', hideCreatePanel);
   function submitCreate() {
     const title = scTitle.value.trim() || 'Session';
@@ -3242,6 +3334,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   scCreate.addEventListener('click', submitCreate);
   [scTitle, scTag].forEach(el => {
     el.addEventListener('keydown', (e) => {
+      // While the tag suggestions are open they own the arrows, Enter and Escape.
+      if (el === scTag && scSuggest.classList.contains('visible')) {
+        if (e.key === 'ArrowDown')                     { e.preventDefault(); scMove(1);  return; }
+        if (e.key === 'ArrowUp')                       { e.preventDefault(); scMove(-1); return; }
+        if (e.key === 'Enter' || e.key === 'Tab')      { e.preventDefault(); scPick(scIdx); return; }
+        if (e.key === 'Escape')                        { e.preventDefault(); scHideSuggest(); return; }
+      }
       if (e.key === 'Enter') { e.preventDefault(); submitCreate(); }
       else if (e.key === 'Escape') { e.preventDefault(); hideCreatePanel(); }
     });

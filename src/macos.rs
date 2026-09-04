@@ -480,3 +480,81 @@ pub fn register_octomind_tap(tap_name: &str) {
         Err(e) => tracing::warn!(error = %e, "octomind not on PATH — skipping tap registration"),
     }
 }
+
+/// Every agent tag octomind can resolve (`category:variant`) with its title,
+/// sorted alphabetically. Feeds the sidebar's new-session tag autocomplete.
+///
+/// Scanned off disk because octomind has no "list agents" command. Resolution
+/// is first-tap-wins, so `taps.toml` order is honoured and later duplicates are
+/// dropped; the cloned-tap sweep at the end is what surfaces the always-active
+/// built-in tap, which never appears in `taps.toml`.
+pub fn octomind_agents() -> Vec<(String, String)> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let root = home.join(".local/share/octomind");
+    let read = |dir: std::path::PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+
+    let mut tap_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(taps) = std::fs::read_to_string(root.join("taps.toml"))
+        .unwrap_or_default()
+        .parse::<toml::Value>()
+    {
+        for tap in taps
+            .get("taps")
+            .and_then(|t| t.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(local) = tap.get("local_path").and_then(|p| p.as_str()) {
+                tap_dirs.push(local.into());
+            } else if let Some((user, repo)) = tap
+                .get("name")
+                .and_then(|n| n.as_str())
+                .and_then(|n| n.split_once('/'))
+            {
+                tap_dirs.push(
+                    root.join("taps")
+                        .join(user)
+                        .join(format!("octomind-{repo}")),
+                );
+            }
+        }
+    }
+    for user in read(root.join("taps")) {
+        tap_dirs.extend(read(user.path()).map(|repo| repo.path()));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut agents = Vec::new();
+    for tap in tap_dirs {
+        for category in read(tap.join("agents")) {
+            let name = category.file_name().to_string_lossy().into_owned();
+            for entry in read(category.path()) {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                    continue;
+                }
+                let Some(variant) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let tag = format!("{name}:{variant}");
+                if !seen.insert(tag.clone()) {
+                    continue;
+                }
+                // Agent TOMLs carry their human title in a header comment.
+                let title = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| {
+                        s.lines()
+                            .take(8)
+                            .find_map(|l| l.strip_prefix("# Title:").map(|t| t.trim().to_string()))
+                    })
+                    .unwrap_or_default();
+                agents.push((tag, title));
+            }
+        }
+    }
+    agents.sort();
+    agents
+}

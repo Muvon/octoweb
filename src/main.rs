@@ -6505,6 +6505,13 @@ fn main() {
             // add any extra persisted sessions, replay messages, restore the
             // last-active session, and re-broadcast cached available_commands.
             Event::UserEvent(AppEvent::SidebarReady) => {
+                // Tag autocomplete for the new-session panel — scanned from the
+                // registered taps, so it lists whatever octomind can resolve.
+                let agents_json = serde_json::to_string(&macos::octomind_agents())
+                    .unwrap_or_else(|_| "[]".into());
+                let _ = sidebar_wv.evaluate_script(&format!(
+                    "window.__setAgents && window.__setAgents({agents_json})"
+                ));
                 let rust_has_sid1 = workspace_manager.active().acp_sessions.iter().any(|s| s.id == 1);
                 push_acp_sessions_to_sidebar!();
                 // Reconcile the JS-side placeholder session (sid=1, added by
