@@ -1,3 +1,5 @@
+mod a2ui;
+mod a2ui_js;
 mod acp;
 mod address_bar_html;
 mod agent_workspace;
@@ -169,6 +171,10 @@ enum AppEvent {
     /// action payload). Completes the `render_ui` call blocked on that
     /// surface, or — when nothing is waiting — reaches the agent as a prompt.
     A2uiResolve(String, u64, serde_json::Value),
+    /// The renderer ran a function the agent asked for with
+    /// `callRendererFunction`: (call_id, `rendererFunctionResponse` envelope).
+    /// Completes the `render_ui` call blocked on that surface, if any.
+    A2uiFunctionResponse(String, serde_json::Value),
     KeybindRecord(String, String), // (action_id, chord) — remap a global shortcut
     KeybindReset(String),          // (action_id) — restore one action to its default
     KeybindResetAll,               // restore every keybinding to default
@@ -1501,8 +1507,18 @@ fn main() {
                                 ));
                             }
                         }
+                        Some("a2ui_fn_response") => {
+                            // Result of an agent-issued `callRendererFunction`.
+                            let call_id = v["file_id"].as_str().unwrap_or("").to_string();
+                            if !call_id.is_empty() {
+                                let _ = p.send_event(AppEvent::A2uiFunctionResponse(
+                                    call_id,
+                                    v["response"].clone(),
+                                ));
+                            }
+                        }
                         Some("a2ui_open_url") => {
-                            // A2UI `Button.action.openUrl` — open in a new browser tab.
+                            // A2UI `openUrl` — open in a new browser tab.
                             if let Some(url) = v["url"].as_str() {
                                 let _ = p.send_event(AppEvent::OpenInNewTab(url.to_string(), None));
                             }
@@ -6738,6 +6754,23 @@ fn main() {
                     ));
                 }
             }
+            // ── A2UI renderer function result ───────────────────────────────
+            // The agent asked the renderer to run a function (A2UI v1.0
+            // `callRendererFunction`). If that same envelope has a `render_ui`
+            // call blocked on it, the result is its answer. Otherwise the agent
+            // never waited for one, so there is nowhere to send it.
+            Event::UserEvent(AppEvent::A2uiFunctionResponse(call_id, response)) => {
+                match pending_a2ui.remove(&call_id) {
+                    Some(pending) => {
+                        let _ = pending.response.send(Ok(response));
+                    }
+                    None => tracing::debug!(
+                        %call_id,
+                        "callRendererFunction result with no waiting render_ui call — dropping"
+                    ),
+                }
+            }
+
             // ── Learning wake — no-op, just wakes the loop so learning poll runs ──
             Event::UserEvent(AppEvent::LearningWake) => {}
 
@@ -8322,6 +8355,13 @@ fn cap_tool_json(v: &serde_json::Value) -> serde_json::Value {
 /// agent gets `a2ui_replay_prompt`'s full instruction block; the user sees one
 /// line, because they clicked a button — they didn't type any of this.
 fn a2ui_click_label(action: &serde_json::Value) -> String {
+    // A2UI v1.0 lets the surface author write that line itself. When they did,
+    // it beats anything we can assemble from the raw event.
+    if let Some(msg) = action["userMessage"].as_str() {
+        if !msg.trim().is_empty() {
+            return msg.trim().to_string();
+        }
+    }
     let name = action["name"].as_str().unwrap_or("(unknown)");
     match action["context"].as_object() {
         Some(ctx) if !ctx.is_empty() => {
@@ -8359,10 +8399,17 @@ fn a2ui_replay_prompt(action: &serde_json::Value) -> String {
     let surface_id = action["surfaceId"].as_str().unwrap_or("");
     let source = action["sourceComponentId"].as_str().unwrap_or("");
     let context_json = serde_json::to_string(&action["context"]).unwrap_or_else(|_| "{}".into());
-    let data_model_json =
-        serde_json::to_string(&action["dataModel"]).unwrap_or_else(|_| "{}".into());
+    // The data model only rides along when the surface set `sendDataModel`;
+    // printing "dataModel: null" would read as "the form was empty".
+    let data_model_line = match action.get("dataModel") {
+        Some(model) if !model.is_null() => format!(
+            "\ndataModel: {}",
+            serde_json::to_string(model).unwrap_or_else(|_| "{}".into())
+        ),
+        _ => String::new(),
+    };
     format!(
-        "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface no `render_ui` call is waiting on (fire-and-forget update, replay, or a call that already timed out). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}\ndataModel: {data_model_json}"
+        "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface no `render_ui` call is waiting on (fire-and-forget update, replay, or a call that already timed out). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}{data_model_line}"
     )
 }
 
@@ -8845,5 +8892,154 @@ mod injected_turn_tests {
         assert_eq!(messages[1].role, "agent");
         assert_eq!(messages[1].text, "response without Done");
         assert_eq!(s.messages.len(), 1, "snapshot must not mutate live history");
+    }
+}
+
+#[cfg(test)]
+mod a2ui_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn session() -> AcpSession {
+        AcpSession {
+            id: 1,
+            title: "test".into(),
+            tag: "octoweb:assistant".into(),
+            handle: None,
+            retry_count: 0,
+            reconnect_gen: 0,
+            last_cancel_at: None,
+            acp_session_id: None,
+            messages: Vec::new(),
+            agent_buf: String::new(),
+            tool_buf: Vec::new(),
+            tool_starts: HashMap::new(),
+            tool_since_text: false,
+            turn_started: None,
+            prompt_in_flight: false,
+            available_commands_json: None,
+            account_json: None,
+            octomind_pid: None,
+        }
+    }
+
+    fn envelope() -> serde_json::Value {
+        json!({
+            "id": "u_1_0",
+            "status": "pending",
+            "messages": [{"version": "v1.0", "createSurface": {"surfaceId": "s1"}}],
+            "await_events": ["approve"],
+        })
+    }
+
+    #[test]
+    fn a_click_label_summarises_the_event_context() {
+        let label = a2ui_click_label(&json!({
+            "name": "approve",
+            "context": {"reason": "looks good", "id": 7},
+        }));
+        assert_eq!(label, "Clicked approve — id: 7, reason: looks good");
+    }
+
+    #[test]
+    fn a_click_label_skips_empty_and_null_context_fields() {
+        let label = a2ui_click_label(&json!({
+            "name": "reject",
+            "context": {"reason": "", "note": null},
+        }));
+        assert_eq!(label, "Clicked reject");
+    }
+
+    #[test]
+    fn a_user_message_replaces_the_assembled_click_label() {
+        let label = a2ui_click_label(&json!({
+            "name": "approve",
+            "userMessage": "  Approved the deploy  ",
+            "context": {"reason": "looks good"},
+        }));
+        assert_eq!(label, "Approved the deploy");
+    }
+
+    #[test]
+    fn a_blank_user_message_falls_back_to_the_event_name() {
+        let label = a2ui_click_label(&json!({"name": "approve", "userMessage": "   "}));
+        assert_eq!(label, "Clicked approve");
+    }
+
+    #[test]
+    fn a_replay_prompt_carries_the_whole_event() {
+        let prompt = a2ui_replay_prompt(&json!({
+            "name": "approve",
+            "surfaceId": "s1",
+            "sourceComponentId": "ok",
+            "context": {"reason": "ship it"},
+            "dataModel": {"form": {"reason": "ship it"}},
+        }));
+        assert!(prompt.contains("surfaceId: s1"), "{prompt}");
+        assert!(prompt.contains("event: approve"), "{prompt}");
+        assert!(prompt.contains("sourceComponentId: ok"), "{prompt}");
+        assert!(
+            prompt.contains(r#"context: {"reason":"ship it"}"#),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(r#"dataModel: {"form":{"reason":"ship it"}}"#),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_replay_prompt_omits_a_data_model_the_surface_withheld() {
+        // `sendDataModel: false` means no model reaches us; saying
+        // "dataModel: null" would read as "the form was empty".
+        let prompt = a2ui_replay_prompt(&json!({"name": "approve", "context": {}}));
+        assert!(!prompt.contains("dataModel"), "{prompt}");
+    }
+
+    #[test]
+    fn a_surface_updates_in_place_instead_of_stacking() {
+        let mut s = session();
+        upsert_a2ui_msg(&mut s, "u_1_0", envelope(), 10);
+        let first_ts = s.messages[0].ts;
+        let mut second = envelope();
+        second["await_events"] = json!(["approve", "reject"]);
+        upsert_a2ui_msg(&mut s, "u_1_0", second, 10);
+
+        assert_eq!(s.messages.len(), 1);
+        assert_eq!(s.messages[0].ts, first_ts, "the bubble keeps its clock");
+        assert_eq!(
+            s.messages[0].a2ui.as_ref().unwrap()["await_events"][1],
+            "reject"
+        );
+    }
+
+    #[test]
+    fn an_empty_envelope_is_never_persisted() {
+        let mut s = session();
+        upsert_a2ui_msg(&mut s, "u_1_0", json!({"messages": []}), 10);
+        assert!(s.messages.is_empty());
+    }
+
+    #[test]
+    fn resolving_a_surface_stamps_the_users_choice() {
+        let mut s = session();
+        upsert_a2ui_msg(&mut s, "u_1_0", envelope(), 10);
+        let resolution = json!({"name": "approve", "context": {"reason": "ok"}});
+        let body = mark_a2ui_resolved(&mut s, "u_1_0", &resolution).expect("bubble in log");
+
+        assert_eq!(body["status"], "resolved");
+        assert_eq!(body["resolution"], resolution);
+        assert_eq!(s.messages[0].a2ui.as_ref().unwrap()["status"], "resolved");
+    }
+
+    #[test]
+    fn resolving_a_trimmed_away_surface_is_not_an_error() {
+        let mut s = session();
+        assert!(mark_a2ui_resolved(&mut s, "u_gone", &json!({"name": "approve"})).is_none());
+    }
+
+    #[test]
+    fn call_ids_are_unique_per_call() {
+        assert_ne!(next_a2ui_call_id(), next_a2ui_call_id());
     }
 }
