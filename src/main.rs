@@ -610,11 +610,15 @@ fn main() {
         .expect("Failed to create overlay window");
     // Set hidesOnDeactivate — window auto-hides when app resigns active (Cmd+Tab, etc.)
     // This is how Spotlight/Raycast overlays behave.
+    // hasShadow=NO: the window is transparent, so AppKit would derive the shadow
+    // shape from the opaque content (the modal) and draw a halo around it — the
+    // modal already paints its own --shadow-float.
     unsafe {
         use objc2::msg_send;
         use objc2::runtime::AnyObject;
         let ns_win: *mut AnyObject = overlay_win.ns_window() as *mut AnyObject;
         let _: () = msg_send![ns_win, setHidesOnDeactivate: true];
+        let _: () = msg_send![ns_win, setHasShadow: false];
     }
 
     let overlay_win = Arc::new(overlay_win);
