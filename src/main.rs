@@ -103,7 +103,7 @@ enum AppEvent {
     AcpSessionSwitch(u64),    // (session_id) — switch active session
     AcpSessionRename(u64, String), // (session_id, title) — rename session
     SidebarReady,             // sidebar JS finished initializing — push restore
-    SidebarReFocus,           // app reactivated while sidebar owned key — restore textarea focus
+    SidebarReFocus,           // sidebar window became key — restore textarea focus
     AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
     // Open URL in a new tab. Second field = the tab that requested it (a page's
@@ -546,10 +546,8 @@ fn main() {
     // chord (otherwise a bound combo like ⌘⇧P would be swallowed before the UI
     // sees it). Cleared on capture end or when the panel closes.
     let keybind_capturing = Arc::new(AtomicBool::new(false));
-    // Tracks whether chrome_win (sidebar host) currently owns logical input
-    // focus. Read by the NSApplicationDidBecomeActive observer to decide
-    // whether to restore key status + textarea focus after a transient
-    // deactivation (notification banner, Spotlight, brief Cmd-Tab).
+    // Sidebar's requested input target. This flag alone does not establish
+    // native keyboard ownership; delayed focus also checks the key window.
     let sidebar_owns_key = Arc::new(AtomicBool::new(false));
     // Note: app-frontmost state is queried on demand via `is_app_active()`
     // (NSApplication.isActive). We deliberately do NOT cache via
@@ -662,9 +660,8 @@ fn main() {
     let chrome_win_id = chrome_win.id();
 
     // Resign chrome_win's key status on deactivate (so Slack-Enter doesn't
-    // route back to us) and restore it on reactivate when the sidebar still
-    // owned focus (so transient deactivations — banners, Spotlight — don't
-    // silently steal the user's typing focus).
+    // route back to us). Restore sidebar text focus only when macOS makes
+    // chrome_win key again, without promoting it over an external panel.
     unsafe {
         macos::install_app_active_observers(
             chrome_win.ns_window(),
@@ -2890,13 +2887,21 @@ fn main() {
     /// settings/shortcuts panels) or the app isn't frontmost.
     macro_rules! focus_active_webview {
         () => {{
+            focus_active_webview!(true);
+        }};
+        ($restore_window:expr) => {{
             if is_app_active()
                 && !overlay_visible
                 && !settings_visible
                 && !shortcuts_visible
                 && !sidebar_owns_key.load(Ordering::Relaxed)
+                && ($restore_window || unsafe { macos::window_is_key(browser_win.ns_window()) })
             {
-                browser_win.set_focus();
+                // Delayed page loads may restore the view responder only.
+                // Tao's set_focus also activates the app over other apps.
+                if $restore_window {
+                    browser_win.set_focus();
+                }
                 if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.focus();
                 }
@@ -6931,17 +6936,25 @@ fn main() {
                 relive_pending_a2ui!();
             }
 
-            // ── Sidebar re-focus after transient app reactivation ─────────
-            // Posted by the NSApplicationDidBecomeActive observer (macos.rs)
-            // when our app reactivates and the sidebar still owns logical
-            // focus. Re-promotes the WKWebView and the textarea so the user's
-            // typing focus survives notification banners, Spotlight, etc.
-            Event::UserEvent(AppEvent::SidebarReFocus) if sidebar_visible => {
+            // The key notification is queued: ownership can change before it
+            // arrives here, including when 1Password opens a floating panel.
+            Event::UserEvent(AppEvent::SidebarReFocus)
+                if sidebar_visible
+                    && sidebar_owns_key.load(Ordering::Relaxed)
+                    && !find_bar_visible
+                    && !inline_edit_visible
+                    && !overlay_visible
+                    && !settings_visible
+                    && !shortcuts_visible
+                    && !workspace_switcher_visible.load(Ordering::Relaxed)
+                    && is_app_active()
+                    && unsafe { macos::window_is_key(chrome_win.ns_window()) } =>
+            {
                 let _ = sidebar_wv.focus();
                 let _ = sidebar_wv.evaluate_script(
                     "(function(){var el=document.getElementById('prompt-input');\
                      if(!el)return;if(document.activeElement===el)return;\
-                     var n=0;(function f(){if(n++>20)return;el.focus();\
+                     var n=0;(function f(){if(n++>20||!document.hasFocus())return;el.focus();\
                      if(document.activeElement===el)return;setTimeout(f,30)})()})()"
                 );
             }
@@ -7549,9 +7562,9 @@ fn main() {
                         // navigation (palette / address bar). The palette was the
                         // key window; now that it's gone, hand keyboard
                         // first-responder to the page so typing works without a
-                        // click. `browser_win.set_focus()` (in NavigateTo) only
-                        // set window-level key, not the view-level responder.
-                        focus_active_webview!();
+                        // click, but only if the browser still owns key. A
+                        // password-manager panel may have opened during load.
+                        focus_active_webview!(false);
                     }
                 }
                 if tab_id == active_wv_id {

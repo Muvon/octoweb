@@ -19,6 +19,7 @@
 //!   --fill/-hover/-press    neutral control fills
 //!   --accent/--on-accent    system accent + text on accent
 //!   --ok/--warn/--err       semantic status colors
+//!   --brand                 octomind purple for the brand mark only
 //!   --r-panel/-card/-ctl/-capsule  concentric radius scale
 //!   --spring/--ease, --t-fast/--t-pop  motion
 //!
@@ -68,6 +69,8 @@ pub const CSS: &str = r#"
 
     --accent: #0a84ff;
     --on-accent: #ffffff;
+    /* octomind brand purple — only for the brand mark, never for controls */
+    --brand: #9333ea;
     --ok: #34c759;
     --warn: #ff9500;
     --err: #ff3b30;
@@ -114,6 +117,7 @@ pub const CSS: &str = r#"
       --ok: #30d158;
       --warn: #ff9f0a;
       --err: #ff453a;
+      --brand: #a855f7;
     }
   }
 

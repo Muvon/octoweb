@@ -147,30 +147,17 @@ pub const SHIELD_ALERT: &str = concat!(
 
 // ── Brand mark ─────────────────────────────────────────────────────────────
 //
-// Hand-drawn octopus for new-tab and error-page heros. Eight tentacles
-// curving outward, two dots for eyes. Not a copy of the .icns mascot, just
-// a friendly mark that renders identically across macOS versions (unlike the
-// 🐙 emoji which varies).
+// Brand mark: the octomind pixel octopus, shared with the CLI and the app
+// icon (assets/icon.svg). Renders identically across macOS versions (unlike
+// the 🐙 emoji which varies).
 
-/// Octopus brand mark. 64×64 viewBox. Uses `currentColor` so it inherits the
-/// page's text colour and adapts to dark mode automatically.
+/// Octopus brand mark. 480×480 viewBox on a 24 px pixel grid. The body uses
+/// `currentColor` (set `color: var(--brand)` on the container); the eyes stay
+/// octomind cyan.
 pub const OCTOPUS_BRAND: &str = concat!(
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="currentColor">"#,
-    // Head/body
-    r#"<ellipse cx="32" cy="26" rx="16" ry="14"/>"#,
-    // Eyes (negative space)
-    r#"<circle cx="26" cy="24" r="2.4" fill="rgba(255,255,255,0.95)"/>"#,
-    r#"<circle cx="38" cy="24" r="2.4" fill="rgba(255,255,255,0.95)"/>"#,
-    r#"<circle cx="26.5" cy="24.5" r="1.1" fill="rgba(0,0,0,0.6)"/>"#,
-    r#"<circle cx="38.5" cy="24.5" r="1.1" fill="rgba(0,0,0,0.6)"/>"#,
-    // Eight tentacles — outer curl, paired
-    r#"<path d="M18 36 q -6 4 -8 12 q 5 -2 9 -7 z"/>"#,
-    r#"<path d="M22 38 q -4 7 -3 14 q 5 -5 6 -12 z"/>"#,
-    r#"<path d="M27 39 q -1 8 1 16 q 4 -7 3 -15 z"/>"#,
-    r#"<path d="M32 39 q 1 8 0 17 q 2 -8 3 -17 z"/>"#,
-    r#"<path d="M37 39 q 2 9 5 16 q 1 -9 -2 -16 z"/>"#,
-    r#"<path d="M42 38 q 5 6 7 13 q 0 -8 -4 -14 z"/>"#,
-    r#"<path d="M46 36 q 7 4 10 11 q -2 -8 -7 -12 z"/>"#,
+    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" shape-rendering="crispEdges">"#,
+    r#"<path fill="currentColor" d="M384 48H96V96H384V48Z M408 96H72V192H408V96Z M408 192H72V240H408V192Z M384 240H96V288H384V240Z M120 288H72V384H120V288Z M216 288H168V384H216V288Z M312 288H264V384H312V288Z M408 288H360V384H408V288Z M96 384H72V432H96V384Z M192 384H168V432H192V384Z M288 384H264V432H288V384Z M384 384H360V432H384V384Z"/>"#,
+    r##"<path fill="#22D3EE" d="M192 144H144V192H192V144Z M336 144H288V192H336V144Z"/>"##,
     "</svg>"
 );
 

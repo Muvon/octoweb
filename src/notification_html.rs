@@ -71,7 +71,7 @@ pub fn html() -> String {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    color: var(--accent);
+    color: var(--brand);
     flex-shrink: 0;
   }
   .app-icon svg { width: 24px; height: 24px; }

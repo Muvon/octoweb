@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 480 480">
+  <!-- Octoweb app icon: the octomind pixel octopus climbing out of a Mac window on an indigo glass field. -->
+  <defs>
+    <clipPath id="squircle"><rect x="0" y="0" width="480" height="480" rx="108"/></clipPath>
+    <linearGradient id="field" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2B2660"/><stop offset="1" stop-color="#161334"/></linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.16"/><stop offset="0.5" stop-color="#fff" stop-opacity="0"/></linearGradient>
+  </defs>
+  <g clip-path="url(#squircle)">
+    <rect width="480" height="480" fill="url(#field)"/>
+    <g id="window">
+      <rect x="56" y="60" width="368" height="248" rx="30" fill="#fff" fill-opacity="0.09" stroke="#fff" stroke-opacity="0.12" stroke-width="2"/>
+      <circle cx="96" cy="100" r="11" fill="#D97B78"/><circle cx="130" cy="100" r="11" fill="#D6B25E"/><circle cx="164" cy="100" r="11" fill="#6FBE7A"/>
+      <rect x="200" y="88" width="196" height="24" rx="12" fill="#fff" fill-opacity="0.12"/>
+      <rect x="56" y="132" width="368" height="2" fill="#fff" fill-opacity="0.12"/>
+    </g>
+    <g id="octopus" transform="translate(96 132) scale(0.6)">
+      <path fill="#A855F7" d="M384 48H96V96H384V48Z M408 96H72V192H408V96Z M408 192H72V240H408V192Z M384 240H96V288H384V240Z M120 288H72V384H120V288Z M216 288H168V384H216V288Z M312 288H264V384H312V288Z M408 288H360V384H408V288Z M96 384H72V432H96V384Z M192 384H168V432H192V384Z M288 384H264V432H288V384Z M384 384H360V432H384V384Z"/>
+      <path fill="#22D3EE" d="M192 144H144V192H192V144Z M336 144H288V192H336V144Z"/>
+    </g>
+    <rect width="480" height="480" fill="url(#shine)"/>
+  </g>
+</svg>

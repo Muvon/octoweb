@@ -269,7 +269,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     line-height: 0;
     flex-shrink: 0;
     cursor: default;
-    color: color-mix(in srgb, var(--err) 65%, var(--warn)); /* brand orange, same as new tab */
+    color: var(--brand);
   }
   #header-logo svg { width: 16px; height: 16px; display: block; }
 
@@ -848,7 +848,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: opacity 0.25s ease;
   }
   #welcome.hidden { opacity: 0; pointer-events: none; position: absolute; }
-  #welcome-icon { margin-bottom: 8px; line-height: 0; color: color-mix(in srgb, var(--err) 65%, var(--warn)); }
+  #welcome-icon { margin-bottom: 8px; line-height: 0; color: var(--brand); }
   #welcome-icon svg { width: 40px; height: 40px; }
   #welcome-title {
     font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;

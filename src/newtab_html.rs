@@ -218,7 +218,7 @@ const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0;
     width: 40px;
     height: 40px;
     margin: 0 auto 12px;
-    color: color-mix(in srgb, var(--err) 65%, var(--warn));
+    color: var(--brand);
     display: flex;
     align-items: center;
     justify-content: center;

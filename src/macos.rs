@@ -260,10 +260,8 @@ pub fn set_app_icon() {
     }
 }
 
-/// Install symmetric observers for `NSApplicationDidResignActiveNotification`
-/// and `NSApplicationDidBecomeActiveNotification` so that `chrome_ns_window`
-/// (our borderless transparent sidebar window) plays nicely with app
-/// activation transitions.
+/// Keep the borderless sidebar window from retaining key status on deactivate,
+/// and restore its text responder when macOS makes that window key again.
 ///
 /// **Resign on deactivate** — `chrome_win` is a borderless transparent child
 /// window. We explicitly call `makeKeyWindow` on it to route input into the
@@ -275,14 +273,11 @@ pub fn set_app_icon() {
 /// `[chrome_ns_window resignKeyWindow]` so AppKit hands key status to the
 /// actual frontmost app's window.
 ///
-/// **Restore on activate** — when our app reactivates after a *transient*
-/// deactivation (notification banner, Spotlight, brief Cmd-Tab) and the
-/// sidebar still owns input focus from the user's perspective
-/// (`sidebar_owns_key` is true), we re-promote `chrome_win` to key window
-/// and notify the event loop via `AppEvent::SidebarReFocus` so it can
-/// re-focus the sidebar WKWebView and the textarea inside it. Without this,
-/// the previous fix overshoots: any deactivation drops key permanently and
-/// the user's typing focus silently disappears.
+/// **Restore on becoming key** — app activation does not mean the sidebar owns
+/// input. The user may have selected the page, or an external nonactivating
+/// panel may own keyboard focus. Never promote chrome_win from an app-active
+/// notification. Wait for its own DidBecomeKey notification, then let the event
+/// loop recheck ownership before restoring the sidebar's text responder.
 ///
 /// Both observers run on the main thread (queue: nil = posting thread; these
 /// notifications are posted on the main thread by NSApplication).
@@ -338,35 +333,35 @@ pub unsafe fn install_app_active_observers(
     ];
     std::mem::forget(resign_block);
 
-    // ── DidBecomeActive: if sidebar owned key before, restore it ───────────
+    // ── DidBecomeKey: restore text focus without taking key from a panel ──
     let activate_block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
         if !sidebar_owns_key.load(Ordering::Relaxed) {
             return;
-        }
-        let win = win_addr as *mut AnyObject;
-        if win.is_null() {
-            return;
-        }
-        let is_key: bool = unsafe { msg_send![win, isKeyWindow] };
-        if !is_key {
-            let _: () = unsafe { msg_send![win, makeKeyWindow] };
-            tracing::debug!("chrome_win re-promoted to key on app reactivate");
         }
         // Hand off to the event loop: wry WebView is !Send and must be
         // touched on the main event-loop thread.
         let _ = proxy.send_event(crate::AppEvent::SidebarReFocus);
     });
-    let activate_name = NSString::from_str("NSApplicationDidBecomeActiveNotification");
+    let activate_name = NSString::from_str("NSWindowDidBecomeKeyNotification");
     let _activate_token: *mut AnyObject = msg_send![
         center,
         addObserverForName: &*activate_name,
-        object: std::ptr::null::<AnyObject>(),
+        object: chrome_ns_window as *mut AnyObject,
         queue: std::ptr::null::<AnyObject>(),
         usingBlock: &*activate_block,
     ];
     std::mem::forget(activate_block);
 
-    tracing::debug!("installed NSApplication active/resign observers");
+    tracing::debug!("installed app-resign and chrome-key observers");
+}
+
+/// Query actual keyboard ownership, including nonactivating external panels.
+///
+/// # Safety
+/// `window` must be a live NSWindow pointer, accessed on the main thread.
+pub unsafe fn window_is_key(window: *mut std::ffi::c_void) -> bool {
+    use objc2::{msg_send, runtime::AnyObject};
+    !window.is_null() && msg_send![window as *mut AnyObject, isKeyWindow]
 }
 
 /// Push tab_id to front of MRU list, removing any prior occurrence.
