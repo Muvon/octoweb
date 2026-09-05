@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.14.0] - 2026-09-05
+
+### 📋 Release Summary
+
+This release adds support for declarative UI surfaces and tag autocomplete (e9e7dea7, 8b8a7252). The browser, sidebar, and panel experience has been refined with refreshed branding, improved focus and rendering stability, and cleaner window presentation (14bd9d76, 614be733, 0afb98d9, e042b2f1, 4775781a).
+
+
+### ✨ New Features & Enhancements
+
+- **a2ui**: support declarative UI surfaces `e9e7dea7`
+- **agent**: enable tag autocomplete `8b8a7252`
+
+### 🔧 Improvements & Optimizations
+
+- **ui**: rework browser and sidebar UI `14bd9d76`
+
+### 🐛 Bug Fixes & Stability
+
+- **app**: refresh branding and restore sidebar focus `614be733`
+- **overlay**: remove AppKit window shadow halo `0afb98d9`
+- **ui**: stabilize WebView and panel rendering `e042b2f1`
+- **webview**: mask wrapped native functions `4775781a`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.13.0] - 2026-09-03
 
 ### 📋 Release Summary
