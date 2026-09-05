@@ -21,6 +21,7 @@
 ///   window.__appendError(sid, text)               — show an error bubble
 ///   window.__setAvailableCommands(sid, json)      — populate slash-command list
 ///   window.__setAgents(list)                      — agent tags for create-panel autocomplete
+///   window.__setShortcuts(data)                   — update live control titles
 ///   window.__a2uiUpdate(sid, fileId, payload, live, ts) — render / update an A2UI surface
 ///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
 ///
@@ -34,11 +35,15 @@
 ///   { type: "acp_session_switch", session_id }
 ///   { type: "acp_session_rename", session_id, title }
 ///   { type: "sidebar_close" }
+///   { type: "sidebar_resize", width }                    — apply logical width while dragging
+///   { type: "sidebar_resize_end", width }                — apply and persist logical width
+///   { type: "sidebar_resize_reset" }                     — restore the default width
 ///   { type: "a2ui_resolve",  file_id, sid, action }     — A2UI v1.0 action event → unblocks the waiting render_ui call
 ///   { type: "a2ui_fn_response", file_id, sid, response } — result of an agent-issued callRendererFunction
 ///   { type: "a2ui_open_url", url }                       — A2UI openUrl → open in a browser tab
 pub fn html(max_ai_prompt_history: usize) -> String {
     let prompt_history_js = crate::prompt_history_js::prompt_history_js();
+    let keybindings_json = crate::keybindings::Keymap::load().ui_json().to_string();
     r#"<!DOCTYPE html>
 <html>
 <head>
@@ -192,6 +197,42 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   #sidebar > * { position: relative; z-index: 1; }
 
+  #resize-handle {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 6px;
+    z-index: 30;
+    cursor: col-resize;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #resize-handle::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 2px;
+    background: var(--accent);
+    opacity: 0;
+  }
+  #resize-handle:hover::after,
+  #resize-handle.active::after { opacity: 1; }
+  #resize-handle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  #sidebar.fullscreen #resize-handle { display: none; }
+  body.sidebar-resizing,
+  body.sidebar-resizing * {
+    cursor: col-resize !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+  }
+
   /* Specular rim — 1px gradient ring that reads as refracted light on glass.
      Applied to floating elements; they must be position:relative with a
      border-radius (the ring inherits it). */
@@ -216,21 +257,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   #header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: 36px;
-    padding: 0 8px 0 10px;
-    border-bottom: 1px solid var(--divider);
+    gap: 4px;
+    height: 32px;
+    padding: 0 10px;
+    box-shadow: 0 0.5px 0 var(--hairline);
     flex-shrink: 0;
     min-width: 0;
   }
 
   #header-logo {
-    font-size: 16px;
-    line-height: 1;
-    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.15));
+    line-height: 0;
     flex-shrink: 0;
     cursor: default;
+    color: color-mix(in srgb, var(--err) 65%, var(--warn)); /* brand orange, same as new tab */
   }
+  #header-logo svg { width: 16px; height: 16px; display: block; }
 
   /* ── Account bar — slim login / quota strip under the header ─────────────── */
   #account-bar {
@@ -238,31 +279,30 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     align-items: center;
     gap: 8px;
     padding: 5px 10px;
-    font-size: 11px;
+    font-size: 13px;
     line-height: 1.3;
-    color: var(--text-secondary);
-    background: var(--agent-bg);
-    border-bottom: 1px solid var(--divider);
+    color: var(--label);
+    background: var(--fill);
+    box-shadow: 0 0.5px 0 var(--hairline);
     flex-shrink: 0;
   }
   #account-bar.hidden { display: none; }
   #account-bar .account-dot {
     width: 6px; height: 6px; border-radius: 50%;
     flex-shrink: 0;
-    background: var(--text-tertiary);
+    background: var(--label-2);
   }
-  #account-bar.signed-in  .account-dot { background: #34c759; }
+  #account-bar.signed-in  .account-dot { background: var(--ok); }
   #account-bar.signed-out .account-dot,
-  #account-bar.over-quota .account-dot { background: var(--dot-err); }
+  #account-bar.over-quota .account-dot { background: var(--err); }
   #account-bar.pending    .account-dot {
     background: var(--accent);
     animation: acct-pulse 1.2s ease-in-out infinite;
   }
   @keyframes acct-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
   #account-bar.over-quota {
-    color: var(--error-text);
-    background: var(--error-bg);
-    border-bottom-color: var(--error-border);
+    color: var(--label);
+    background: color-mix(in srgb, var(--err) 10%, transparent);
   }
   #account-text {
     flex: 1; min-width: 0;
@@ -274,21 +314,24 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     border-radius: 11px;
     border: none;
     background: var(--accent);
-    color: #fff;
-    font-size: 11px;
+    color: var(--on-accent);
+    min-height: 22px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
   }
-  #account-action:hover { background: var(--accent-hover); }
+  #account-action:hover { opacity: 0.88; }
+  #account-action:active { opacity: 0.76; }
   #account-dismiss {
     flex-shrink: 0;
-    width: 16px; height: 16px;
+    width: 22px; height: 22px;
     display: flex; align-items: center; justify-content: center;
     border: none; background: transparent;
-    color: var(--text-tertiary);
-    cursor: pointer; font-size: 13px; line-height: 1; border-radius: 4px;
+    color: var(--label-2);
+    cursor: pointer; font-size: 13px; line-height: 1; border-radius: 6px;
   }
-  #account-dismiss:hover { background: var(--hover-bg); color: var(--text-secondary); }
+  #account-dismiss:hover { background: var(--fill-hover); color: var(--label); }
+  #account-dismiss:active { background: var(--fill-press); }
 
   /* ── Session tabs strip ─────────────────────────────────────────────────── */
   #session-strip {
@@ -307,148 +350,157 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     display: flex;
     align-items: center;
     gap: 5px;
-    padding: 3px 7px 3px 8px;
-    border-radius: 14px;
-    background: var(--agent-bg);
-    border: 1px solid var(--agent-border);
-    font-size: 11px;
-    color: var(--text-secondary);
+    height: 22px;
+    padding: 0 10px;
+    border-radius: var(--r-capsule);
+    background: var(--fill);
+    border: none;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--label);
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    transition: background var(--t-fast), color var(--t-fast);
     flex-shrink: 0;
-    max-width: 160px;
+    max-width: 140px;
     min-width: 0;
     user-select: none;
     -webkit-user-select: none;
   }
   .session-tab:hover {
-    background: rgba(0,0,0,0.06);
-    border-color: rgba(0,0,0,0.13);
-    color: var(--text-primary);
-  }
-  @media (prefers-color-scheme: dark) {
-    .session-tab:hover {
-      background: rgba(255,255,255,0.10);
-      border-color: rgba(255,255,255,0.16);
-    }
+    background: var(--fill-hover);
+    color: var(--label);
   }
   .session-tab.active {
-    background: var(--accent);
-    border-color: transparent;
-    color: #fff;
-    /* Glass capsule: specular top edge + soft accent glow */
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 1px 6px rgba(0,122,255,0.35);
+    max-width: 240px;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--label);
   }
   .session-tab.active:hover {
-    background: var(--accent-hover);
-    border-color: transparent;
-    color: #fff;
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--label);
   }
 
   .session-tab .session-dot {
     width: 6px; height: 6px;
     border-radius: 50%;
-    background: var(--dot-ok);
-    box-shadow: 0 0 0 2px rgba(40, 205, 65, 0.20);
+    background: var(--ok);
+    box-shadow: none;
     flex-shrink: 0;
     transition: background 0.3s, box-shadow 0.3s;
   }
   .session-tab .session-dot.connecting {
-    background: var(--dot-wait);
-    box-shadow: 0 0 0 2px rgba(255, 149, 0, 0.20);
+    background: var(--warn);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 20%, transparent);
     animation: pulse 1.4s ease-in-out infinite;
   }
   .session-tab .session-dot.thinking {
     background: var(--accent);
-    box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.20);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
     animation: pulse 1.4s ease-in-out infinite;
   }
   .session-tab .session-dot.error {
-    background: var(--dot-err);
-    box-shadow: 0 0 0 2px rgba(255, 59, 48, 0.20);
-  }
-  .session-tab.active .session-dot {
-    box-shadow: 0 0 0 2px rgba(255,255,255,0.35);
+    background: var(--err);
+    box-shadow: none;
   }
 
   .session-tab .session-title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 500;
     min-width: 0;
   }
   /* Inline rename input replaces the title span when editing */
   .session-tab .session-rename {
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(0,0,0,0.18);
-    border-radius: 6px;
+    background: var(--fill);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-ctl);
     padding: 1px 4px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 500;
-    color: var(--text-primary);
+    color: var(--label);
     outline: none;
     width: 90px;
     min-width: 0;
     font-family: inherit;
   }
   .session-tab.active .session-rename {
-    background: rgba(255,255,255,0.95);
-    color: var(--text-primary);
+    background: var(--fill);
+    color: var(--label);
+  }
+  .session-tab .session-rename:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .session-tab .session-close {
-    width: 14px; height: 14px;
-    border-radius: 50%;
+    position: relative;
+    width: 18px; height: 18px;
+    margin: 0 2px;
+    border-radius: var(--r-capsule);
     border: none;
     background: transparent;
-    color: inherit;
+    color: var(--label-2);
     cursor: pointer;
-    display: none;
+    display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
     flex-shrink: 0;
-    opacity: 0.65;
+    opacity: 0;
+    pointer-events: none;
     transition: background 0.12s, opacity 0.12s;
   }
-  .session-tab:hover .session-close { display: flex; }
+  .session-tab .session-close::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+  }
+  .session-tab:hover .session-close,
+  .session-tab:focus-within .session-close {
+    opacity: 1;
+    pointer-events: auto;
+  }
   .session-tab .session-close:hover {
-    background: rgba(0,0,0,0.13);
+    background: var(--fill-hover);
     opacity: 1;
   }
-  .session-tab.active .session-close:hover {
-    background: rgba(255,255,255,0.25);
-  }
+  .session-tab .session-close:active { background: var(--fill-press); }
 
-  /* + button — add session */
-  #session-add-btn {
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    border: 1px solid var(--agent-border);
-    background: var(--agent-bg);
-    color: var(--text-secondary);
+  /* Header controls */
+  #session-add-btn, #fullscreen-btn, #close-btn {
+    width: 24px; height: 24px;
+    border-radius: var(--r-ctl);
+    border: none;
+    background: transparent;
+    color: var(--label-2);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    padding: 0;
+    transition: background var(--t-fast), color var(--t-fast);
   }
-  #session-add-btn:hover:not(:disabled) {
-    background: rgba(0,0,0,0.07);
-    color: var(--text-primary);
-    border-color: rgba(0,0,0,0.13);
+  #session-add-btn svg, #fullscreen-btn svg, #close-btn svg {
+    width: 14px;
+    height: 14px;
   }
-  @media (prefers-color-scheme: dark) {
-    #session-add-btn:hover:not(:disabled) {
-      background: rgba(255,255,255,0.10);
-      border-color: rgba(255,255,255,0.16);
-    }
+  #session-add-btn:hover:not(:disabled),
+  #fullscreen-btn:hover, #close-btn:hover {
+    background: var(--fill-hover);
+    color: var(--label-2);
+  }
+  #session-add-btn:active:not(:disabled),
+  #fullscreen-btn:active, #close-btn:active {
+    background: var(--fill-press);
+  }
+  #session-add-btn:focus-visible,
+  #fullscreen-btn:focus-visible, #close-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
   #session-add-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
   }
-  #session-add-btn:active:not(:disabled) { transform: scale(0.92); }
 
   /* ── Create-session inline panel (drops down from header) ───────────────── */
   #session-create-panel {
@@ -457,49 +509,76 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     /* Above the later `#sidebar > *` siblings (all z-index: 1), or #messages
        paints over the tag suggestions that overhang it. */
     z-index: 20;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
-    padding: 6px 10px;
-    border-bottom: 1px solid var(--divider);
-    background: var(--glass-inner);
+    padding: 7px 10px;
+    background: transparent;
+    box-shadow: 0 0.5px 0 var(--hairline);
     flex-shrink: 0;
   }
   #session-create-panel.visible { display: flex; }
   #session-create-panel input {
-    background: var(--input-bg);
-    border: 1px solid var(--input-border);
-    border-radius: 8px;
-    padding: 4px 8px;
-    font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: var(--text-primary);
+    height: 28px;
+    background: var(--fill);
+    border: none;
+    border-radius: var(--r-ctl);
+    padding: 0 8px;
+    font: 400 13px/1 var(--font-text);
+    color: var(--label);
     outline: none;
+    box-shadow: 0 0 0 0.5px var(--hairline);
     min-width: 0;
   }
-  #session-create-panel input:focus { border-color: var(--input-focus-border); }
+  #session-create-panel input::placeholder { color: var(--label-2); }
+  #session-create-panel input:focus-visible {
+    box-shadow: 0 0 0 1px var(--accent),
+                0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
   #session-create-panel #sc-title  { flex: 0 0 110px; }
-  #session-create-panel #sc-tag    { flex: 1 1 auto; }
+  #session-create-panel .sc-agent-field {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  #session-create-panel #sc-tag { width: 100%; }
+  #sc-tag-meta {
+    min-height: 14px;
+    padding: 0 8px;
+    color: var(--label-2);
+    font-size: 11px;
+    line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   #session-create-panel button {
+    height: 28px;
     border: none;
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     cursor: pointer;
-    border-radius: 8px;
-    padding: 4px 10px;
-    font-size: 11px;
+    border-radius: var(--r-ctl);
+    padding: 0 12px;
+    font-family: var(--font-text);
+    font-size: 13px;
     font-weight: 500;
-    transition: background 0.15s;
+    transition: opacity var(--t-fast), color var(--t-fast), background var(--t-fast);
     flex-shrink: 0;
   }
-  #session-create-panel button:hover { background: var(--accent-hover); }
+  #session-create-panel #sc-create:hover { opacity: 0.88; }
+  #session-create-panel #sc-create:active { opacity: 0.76; }
   #session-create-panel button.secondary {
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--label-2);
+    padding: 0 4px;
   }
   #session-create-panel button.secondary:hover {
-    background: rgba(0,0,0,0.06);
-    color: var(--text-primary);
+    background: var(--fill-hover);
+    color: var(--label);
   }
+  #session-create-panel button.secondary:active { background: var(--fill-press); }
 
   /* Agent tag autocomplete — same sheet as the slash-command dropdown, but
      dropping down from the tag input instead of up from the prompt box. */
@@ -511,49 +590,33 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     margin-top: 4px;
     max-height: 240px;
     overflow-y: auto;
-    background: var(--glass-solid);
-    border-radius: 14px;
-    box-shadow: var(--glass-shadow), inset 0 1px 0 var(--rim-hi), inset 0 0 0 0.5px var(--rim-lo);
+    background: var(--glass);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow-float), var(--glass-shine);
     z-index: 10;
     padding: 4px;
   }
   #sc-suggest.visible { display: block; animation: menu-pop 0.25s var(--spring); }
   #sc-suggest::-webkit-scrollbar { width: 3px; }
-  #sc-suggest::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
-  #sc-suggest .cmd-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  #sc-suggest::-webkit-scrollbar-thumb { background: var(--label-4); border-radius: 2px; }
+  #sc-suggest .cmd-name { font-family: var(--font-text); font-size: 13px; }
+  #sc-suggest .cmd-desc { color: var(--label-2); font-size: 11px; }
+  #sc-suggest .cmd-item.active {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--label);
+  }
+  #sc-suggest .cmd-item.active .cmd-name { color: var(--label); }
+  #sc-suggest .cmd-item.active .cmd-desc { color: var(--label-2); }
+  #sc-suggest .cmd-item:hover:not(.active) { background: var(--fill-hover); }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.25; }
   }
 
-  #close-btn, #fullscreen-btn {
-    width: 24px; height: 24px;
-    border-radius: 50%;
-    border: 1px solid var(--agent-border);
-    background: var(--agent-bg);
-    color: var(--text-secondary);
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-    flex-shrink: 0;
-  }
-  #close-btn:hover, #fullscreen-btn:hover {
-    background: rgba(0,0,0,0.07);
-    color: var(--text-primary);
-    border-color: rgba(0,0,0,0.13);
-  }
-  @media (prefers-color-scheme: dark) {
-    #close-btn:hover, #fullscreen-btn:hover {
-      background: rgba(255,255,255,0.10);
-      border-color: rgba(255,255,255,0.16);
-    }
-  }
-  #close-btn:active, #fullscreen-btn:active { transform: scale(0.92); }
   #fullscreen-btn.active {
     color: var(--accent);
-    border-color: rgba(0, 122, 255, 0.30);
-    background: rgba(0, 122, 255, 0.10);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
 
   /* ── Copy button — macOS frosted pill, top-right of bubble ───────────────── */
@@ -637,6 +700,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   #messages::-webkit-scrollbar-thumb {
     background: var(--scrollbar);
     border-radius: 2px;
+  }
+  .session-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 100%;
   }
 
   /* ── Chat search (⌘F) ───────────────────────────────────────────────────── */
@@ -779,7 +848,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     transition: opacity 0.25s ease;
   }
   #welcome.hidden { opacity: 0; pointer-events: none; position: absolute; }
-  #welcome-icon { margin-bottom: 8px; opacity: 0.7; filter: drop-shadow(0 2px 6px rgba(0,122,255,0.25)); }
+  #welcome-icon { margin-bottom: 8px; line-height: 0; color: color-mix(in srgb, var(--err) 65%, var(--warn)); }
+  #welcome-icon svg { width: 40px; height: 40px; }
   #welcome-title {
     font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
     font-size: 21px;
@@ -863,23 +933,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     padding: 0 4px;
   }
   .msg-label .msg-who {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: -0.005em;
-    color: var(--text-secondary);
+    color: var(--label-2);
   }
   .msg-label .msg-time {
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 400;
     letter-spacing: 0.01em;
-    color: var(--text-tertiary);
-    opacity: 0.7;
+    color: var(--label-2);
     font-variant-numeric: tabular-nums;
   }
   .msg.user  .msg-label { justify-content: flex-end; }
-  .msg.user  .msg-label .msg-who { color: var(--accent); opacity: 0.75; }
-  .msg.error .msg-label .msg-who { color: var(--dot-err); opacity: 0.85; }
-  .msg.specialist .msg-label .msg-who { color: var(--dot-ok); opacity: 0.85; }
+  .msg.user .msg-label .msg-who,
+  .msg.error .msg-label .msg-who,
+  .msg.specialist .msg-label .msg-who { color: var(--label-2); opacity: 1; }
 
   /* Bubbles — solid material cards (HIG: no glass stacked on glass), depth
      comes from a specular inner top edge + soft ambient shadow. */
@@ -1233,10 +1302,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     display: flex;
     flex-direction: column;
     gap: 3px;
-    font-size: 12px;
+    font-size: 13px;
   }
   .a2ui-label {
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-secondary);
   }
@@ -1256,7 +1325,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     background: var(--input-bg);
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: 13px;
     outline: none;
     box-shadow: var(--input-shadow);
     transition: border-color 0.12s, box-shadow 0.12s;
@@ -1273,9 +1342,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     align-items: center;
     gap: 6px;
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--text-primary);
   }
+  .a2ui-check[hidden] { display: none; }
   .a2ui-check input { margin: 0; cursor: pointer; }
   .a2ui-slider-row { display: flex; align-items: center; gap: 8px; }
   .a2ui-slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
@@ -1349,7 +1419,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     border: 1px solid var(--input-border);
     background: var(--input-bg);
     color: var(--text-primary);
-    font-size: 11.5px;
+    font-size: 13px;
     cursor: pointer;
     transition: background 0.12s, border-color 0.12s, color 0.12s;
   }
@@ -1357,7 +1427,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .a2ui-chip.on {
     background: var(--accent);
     border-color: var(--accent);
-    color: white;
+    color: var(--on-accent);
   }
   /* Tabs */
   .a2ui-tabs { display: flex; flex-direction: column; gap: 6px; }
@@ -1376,7 +1446,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     background: transparent;
     color: var(--text-secondary);
     font-family: inherit;
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 600;
     border-radius: 6px;
     cursor: pointer;
@@ -1397,7 +1467,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .a2ui-modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.42);
+    background: rgba(0,0,0,0.10);
     z-index: 9998;
     display: flex;
     align-items: center;
@@ -1438,11 +1508,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     border-radius: 8px;
     border: 1px solid transparent;
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     transition: filter 0.12s, box-shadow 0.12s, transform 0.08s;
-    color: white;
+    color: var(--on-accent);
   }
   .a2ui-btn:active:not(:disabled) { transform: translateY(0.5px); }
   .a2ui-btn .a2ui-text,
@@ -1485,18 +1555,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .a2ui-choice-filter {
     margin-bottom: 4px;
     font-family: inherit;
-    font-size: 12px;
+    font-size: 13px;
   }
   .a2ui-icon-svg { display: inline-block; vertical-align: middle; color: var(--text-secondary); }
   /* Text renders Markdown per the v1.0 catalog, so it can't also pre-wrap. */
   .a2ui-text.a2ui-md { white-space: normal; }
   .a2ui-unknown {
-    padding: 4px 8px;
-    border-radius: 5px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 8px 10px;
+    border-radius: 8px;
     background: var(--error-bg);
     color: var(--error-text);
-    font-size: 11px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 13px;
   }
   .a2ui-toast {
     position: fixed;
@@ -1718,6 +1791,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .tool-group.expanded {
     background: var(--agent-bg);
     box-shadow: 0 0 0 0.5px var(--agent-border), 0 3px 12px rgba(0,0,0,0.08);
+    align-self: stretch;
+    overflow: visible;
+    margin-bottom: 5px;
+    z-index: 1;
   }
   .tool-group-header {
     display: flex;
@@ -1801,11 +1878,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .specialist-report-details[open] .specialist-report-chevron { transform: rotate(90deg); }
   .specialist-report-who {
     flex-shrink: 0;
-    color: var(--dot-ok);
-    font-size: 10.5px;
+    color: var(--label-2);
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: -0.005em;
-    opacity: 0.85;
   }
   .specialist-report-title {
     flex-shrink: 0;
@@ -1823,12 +1899,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .specialist-report-time {
     flex-shrink: 0;
     margin-left: auto;
-    color: var(--text-tertiary);
-    font-size: 9.5px;
+    color: var(--label-2);
+    font-size: 11px;
     font-weight: 400;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;
-    opacity: 0.7;
   }
   .msg.agent .msg-bubble.specialist-report-body {
     margin-top: 3px;
@@ -1867,6 +1942,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     flex-direction: column;
     gap: 6px;
     position: relative;
+  }
+  #composer-hint {
+    padding: 0 10px;
+    color: var(--label-2);
+    font-size: 11px;
+    line-height: 1.3;
+    text-align: right;
   }
 
   /* ── Slash command dropdown — floating glass sheet with springy pop ──── */
@@ -2348,22 +2430,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   #new-session-btn {
-    width: 28px; height: 28px;
-    border-radius: 50%;
+    width: 26px; height: 26px;
+    border-radius: var(--r-ctl);
     border: none;
     background: transparent;
-    color: var(--text-tertiary);
+    color: var(--label-2);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s, color 0.15s;
+    transition: background var(--t-fast), color var(--t-fast);
     padding: 0;
   }
+  #new-session-btn svg { width: 14px; height: 14px; }
   #new-session-btn:hover {
-    background: var(--hover-bg);
-    color: var(--text-primary);
+    background: var(--fill-hover);
+    color: var(--label-2);
   }
-  #new-session-btn:active { transform: scale(0.88); }
+  #new-session-btn:active { background: var(--fill-press); }
   #input-row:focus-within {
     transform: translateY(-1px);
     box-shadow: 0 0 0 1px var(--input-focus-border), var(--float-shadow),
@@ -2425,11 +2508,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     flex-shrink: 0;
   }
   #attach-btn {
-    width: 30px; height: 30px;
+    width: 28px; height: 28px;
     border-radius: 50%;
     border: none;
     background: transparent;
-    color: var(--text-tertiary);
+    color: var(--label-2);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     transition: background 0.15s, color 0.15s;
@@ -2480,9 +2563,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .doc-chip .rm {
-    width: 14px; height: 14px; border-radius: 50%;
+    width: 22px; height: 22px; border-radius: 50%;
     background: rgba(0,0,0,0.15); color: var(--text-secondary);
-    font-size: 9px; line-height: 14px; text-align: center;
+    font-size: 11px; line-height: 22px; text-align: center;
     cursor: pointer; border: none; padding: 0; flex-shrink: 0;
   }
 
@@ -2503,9 +2586,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .img-thumb img { width: 100%; height: 100%; object-fit: cover; }
   .img-thumb .rm {
     position: absolute; top: -1px; right: -1px;
-    width: 16px; height: 16px; border-radius: 50%;
-    background: rgba(0,0,0,0.6); color: #fff;
-    font-size: 10px; line-height: 16px; text-align: center;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(0,0,0,0.6); color: var(--on-accent);
+    font-size: 11px; line-height: 22px; text-align: center;
     cursor: pointer; border: none; padding: 0;
   }
 
@@ -2518,12 +2601,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   /* Gel button: vertical gradient + specular top edge + accent glow */
   #send-btn {
-    width: 30px; height: 30px;
+    width: 28px; height: 28px;
     border-radius: 50%;
     border: none;
     background: linear-gradient(180deg, #2e9bff 0%, var(--accent) 55%, #0070e8 100%);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.45), 0 2px 8px rgba(0,122,255,0.35);
-    color: #fff;
+    color: var(--on-accent);
     cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
@@ -2631,16 +2714,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 <body>
 <div id="sidebar">
 
+  <div id="resize-handle" role="separator" aria-label="Resize sidebar" aria-orientation="vertical" tabindex="0"></div>
+
   <!-- Header — session tabs strip -->
   <div id="header">
-    <span id="header-logo" title="Octopus">🐙</span>
+    <span id="header-logo" title="Octopus" aria-hidden="true">/* ICON_OCTOPUS_BRAND */</span>
     <div id="session-strip" role="tablist" aria-label="ACP sessions"></div>
-    <button id="session-add-btn" title="New session" aria-label="New session">
+    <button id="session-add-btn" type="button" title="New session" aria-label="New session">
       <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
         <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
     </button>
-    <button id="fullscreen-btn" title="Toggle fullscreen (⌘⇧Return)" aria-label="Toggle assistant fullscreen">
+    <button id="fullscreen-btn" type="button" title="Toggle fullscreen" aria-label="Toggle assistant fullscreen">
       <svg class="ic-enter" width="10" height="10" viewBox="0 0 10 10" fill="none">
         <path d="M1 4V1h3M9 4V1H6M1 6v3h3M9 6v3H6"
               stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -2650,7 +2735,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
               stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </button>
-    <button id="close-btn" title="Close (⌘⇧A)" aria-label="Close sidebar">
+    <button id="close-btn" type="button" title="Close sidebar" aria-label="Close sidebar">
       <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
         <path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
@@ -2667,11 +2752,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   <!-- Inline create-session panel (toggled by + button) -->
   <div id="session-create-panel">
-    <input id="sc-title" type="text" placeholder="Title" autocomplete="off" spellcheck="false" maxlength="32">
-    <input id="sc-tag"   type="text" placeholder="agent:tag (e.g. octoweb:assistant)" autocomplete="off" spellcheck="false">
+    <input id="sc-title" type="text" placeholder="Session name" aria-label="Session name" autocomplete="off" spellcheck="false" maxlength="32">
+    <div class="sc-agent-field">
+      <input id="sc-tag" type="text" placeholder="Agent" autocomplete="off" spellcheck="false" aria-label="Agent" aria-describedby="sc-tag-meta" role="combobox" aria-autocomplete="list" aria-controls="sc-suggest" aria-expanded="false">
+      <span id="sc-tag-meta"></span>
+    </div>
     <button id="sc-create" type="button">Create</button>
-    <button id="sc-cancel" type="button" class="secondary" title="Cancel">×</button>
-    <div id="sc-suggest"></div>
+    <button id="sc-cancel" type="button" class="secondary">Cancel</button>
+    <div id="sc-suggest" role="listbox" aria-label="Agents"></div>
   </div>
 
   <!-- Chat search (⌘F while the sidebar has focus) — searches every session's
@@ -2696,12 +2784,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   <!-- Welcome screen — shown when a session has no messages yet -->
   <div id="welcome">
-    <div id="welcome-icon">
-      <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-        <circle cx="16" cy="16" r="15" stroke="var(--accent)" stroke-width="1.5" fill="none" opacity="0.3"/>
-        <path d="M16 10v6M16 20v1" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
-      </svg>
-    </div>
+    <div id="welcome-icon" aria-hidden="true">/* ICON_OCTOPUS_BRAND */</div>
     <div id="welcome-title">How can I help?</div>
     <div id="welcome-desc">Ask questions, paste code, describe a bug, or attach a file. The assistant can browse and act on your behalf in the background.</div>
     <div id="welcome-suggestions">
@@ -2735,7 +2818,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         <textarea
           id="prompt-input"
           rows="1"
-          placeholder="Ask Octopus…   ↵ send · ⇧↵ newline"
+          placeholder="Ask Octopus"
           autocomplete="off"
           spellcheck="false"
         ></textarea>
@@ -2779,6 +2862,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         </svg>
       </button>
     </div>
+    <div id="composer-hint">↵ send, ⇧↵ newline</div>
     <div id="image-preview"></div>
     <div id="queue-list"></div>
   </div>
@@ -2795,7 +2879,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const ICON_CHECK_CIRCLE = '/* ICON_CHECK_CIRCLE */';
   const ICON_X_CIRCLE     = '/* ICON_X_CIRCLE */';
 
-  // Configure marked: safe defaults, no mangling
+  // Configure marked with an explicit allowlist boundary. Agent Markdown is
+  // untrusted: raw HTML is displayed as text, URLs are scheme-checked, and
+  // every value inserted into generated HTML is escaped first.
   if (typeof marked !== 'undefined') {
     marked.setOptions({ breaks: true, gfm: true });
     const _copyIcon =
@@ -2806,17 +2892,26 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     marked.use({ renderer: {
       code(text, lang) {
         const l = (lang || '').split(/\s+/)[0];
-        const label = l ? '<span class="code-lang">' + l + '</span>' : '';
+        const label = l ? '<span class="code-lang">' + escapeHtml(l) + '</span>' : '';
         return '<div class="code-block">' +
           '<div class="code-header">' + label +
             '<button class="code-copy" onclick="__copyCode(this)">' +
               _copyIcon + '<span>Copy</span>' +
             '</button>' +
           '</div>' +
-          '<pre><code' + (l ? ' class="language-' + l + '"' : '') + '>' +
-            text +
+          '<pre><code' + (l ? ' class="language-' + escapeAttr(l) + '"' : '') + '>' +
+            escapeHtml(text) +
           '</code></pre>' +
         '</div>';
+      },
+      html(text) {
+        return escapeHtml(text);
+      },
+      link(href, title, text) {
+        const target = String(href == null ? '' : href).trim();
+        if (!/^(https?:\/\/|mailto:)/i.test(target)) return text;
+        const titleAttr = title == null ? '' : ' title="' + escapeAttr(title) + '"';
+        return '<a href="' + escapeAttr(target) + '"' + titleAttr + ' rel="noopener">' + text + '</a>';
       }
     }});
   }
@@ -2829,6 +2924,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const scPanel        = document.getElementById('session-create-panel');
   const scTitle        = document.getElementById('sc-title');
   const scTag          = document.getElementById('sc-tag');
+  const scTagMeta      = document.getElementById('sc-tag-meta');
   const scCreate       = document.getElementById('sc-create');
   const scSuggest      = document.getElementById('sc-suggest');
   const scCancel       = document.getElementById('sc-cancel');
@@ -2843,6 +2939,108 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   const fileInputDoc   = document.getElementById('file-input-doc');
   const attachBtn      = document.getElementById('attach-btn');
   const attachMenu     = document.getElementById('attach-menu');
+  const resizeHandle   = document.getElementById('resize-handle');
+
+  // The sidebar moves while its left edge is dragged, so screenX is the only
+  // stable pointer coordinate. Live resize messages are limited to one per
+  // animation frame; the final message is persisted by Rust.
+  let resizePointerId = null;
+  let resizeStartScreenX = 0;
+  let resizeStartWidth = Math.round(window.innerWidth);
+  let resizeWidth = resizeStartWidth;
+  let resizeFrame = 0;
+
+  function queueSidebarResize(width) {
+    resizeWidth = Math.max(0, Math.round(width));
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      window.ipc.postMessage(JSON.stringify({ type: 'sidebar_resize', width: resizeWidth }));
+    });
+  }
+
+  resizeHandle.addEventListener('pointerdown', e => {
+    if (!e.isPrimary || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    resizePointerId = e.pointerId;
+    resizeStartScreenX = e.screenX;
+    resizeStartWidth = Math.round(window.innerWidth);
+    resizeWidth = resizeStartWidth;
+    resizeHandle.setPointerCapture(e.pointerId);
+    resizeHandle.classList.add('active');
+    document.body.classList.add('sidebar-resizing');
+  });
+
+  resizeHandle.addEventListener('pointermove', e => {
+    if (e.pointerId !== resizePointerId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    queueSidebarResize(resizeStartWidth + resizeStartScreenX - e.screenX);
+  });
+
+  function finishSidebarResize(e) {
+    if (e.pointerId !== resizePointerId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type !== 'pointercancel') {
+      resizeWidth = Math.max(0, Math.round(resizeStartWidth + resizeStartScreenX - e.screenX));
+    }
+    if (resizeFrame) {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = 0;
+    }
+    if (resizeHandle.hasPointerCapture(e.pointerId)) {
+      resizeHandle.releasePointerCapture(e.pointerId);
+    }
+    resizePointerId = null;
+    resizeHandle.classList.remove('active');
+    document.body.classList.remove('sidebar-resizing');
+    window.ipc.postMessage(JSON.stringify({ type: 'sidebar_resize_end', width: resizeWidth }));
+  }
+
+  resizeHandle.addEventListener('pointerup', finishSidebarResize);
+  resizeHandle.addEventListener('pointercancel', finishSidebarResize);
+  resizeHandle.addEventListener('dblclick', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    window.ipc.postMessage(JSON.stringify({ type: 'sidebar_resize_reset' }));
+  });
+  resizeHandle.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.shiftKey ? 64 : 16;
+    const direction = e.key === 'ArrowLeft' ? 1 : -1;
+    resizeWidth = Math.max(0, Math.round(window.innerWidth) + direction * step);
+    window.ipc.postMessage(JSON.stringify({ type: 'sidebar_resize_end', width: resizeWidth }));
+  });
+
+  // Control tooltips follow the effective keymap rather than compiled defaults.
+  let sessionCloseTitle = 'Close session';
+  let fullscreenShortcut = '';
+  window.__setShortcuts = function(data) {
+    const actions = data && Array.isArray(data.actions) ? data.actions : [];
+    const chordFor = function(id) {
+      const action = actions.find(function(item) { return item.id === id; });
+      return action && Array.isArray(action.keys) ? action.keys.join('') : '';
+    };
+    const newSessionChord = chordFor('new_session');
+    const sidebarChord = chordFor('sidebar');
+    fullscreenShortcut = chordFor('sidebar_fullscreen');
+    document.getElementById('session-add-btn').title = 'New session' + (newSessionChord ? ' (' + newSessionChord + ')' : '');
+    document.getElementById('close-btn').title = 'Close sidebar' + (sidebarChord ? ' (' + sidebarChord + ')' : '');
+    const fullscreenLabel = document.getElementById('fullscreen-btn').classList.contains('active')
+      ? 'Exit fullscreen'
+      : 'Toggle fullscreen';
+    document.getElementById('fullscreen-btn').title = fullscreenLabel + (fullscreenShortcut ? ' (' + fullscreenShortcut + ')' : '');
+    const closeChord = chordFor('close_tab');
+    sessionCloseTitle = 'Close session' + (closeChord ? ' (' + closeChord + ')' : '');
+    document.querySelectorAll('.session-close').forEach(function(button) {
+      button.title = sessionCloseTitle;
+    });
+  };
+  window.__setShortcuts(/* KEYBINDINGS_JSON */);
 
   const MAX_SESSIONS = /* MAX_SESSIONS */;
   const MAX_QUEUE    = 2;
@@ -2885,6 +3083,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // mounted in #messagesHost; others are detached (kept alive in JS memory).
   const sessions = new Map();
   let activeSid = null;
+  // Declared with the session state: history paging (mountRange callers)
+  // runs before the scroll helpers below are reached during load.
+  let programmaticMessagesScroll = false;
+  let programmaticMessagesScrollTimer = null;
   // `active` is a live proxy that always points to the current session's
   // state. Updated on every switchTo(). All chat helpers read/write through it.
   let active = null;
@@ -2915,7 +3117,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     titleEl.title = tag;
     const closeBtn = document.createElement('button');
     closeBtn.className = 'session-close';
-    closeBtn.title = 'Close session';
+    closeBtn.title = sessionCloseTitle;
     closeBtn.setAttribute('aria-label', 'Close session');
     closeBtn.innerHTML = '<svg width="7" height="7" viewBox="0 0 8 8" fill="none"><path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
     tab.appendChild(dot);
@@ -2976,10 +3178,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       availableCommands: [],
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
+      drainingQueue: false,
+      submitting: false,
       // input draft (per-session, isolated)
       inputDraft: '',
       inputSelectionStart: 0,
       inputSelectionEnd: 0,
+      pendingImages: [],
+      pendingDocs: [],
+      scrollTop: 0,
+      atBottom: true,
       // ── Message log ──────────────────────────────────────────────────
       // Persisted-shaped records ({role,text,ts,tools,turn_ms,a2ui}) for the
       // whole conversation. The DOM holds only the tail of this; search runs
@@ -3084,6 +3292,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (isActive) messagesHost.style.scrollBehavior = 'auto';
     mountRange(s, s.renderedFrom - HISTORY_CHUNK);
     if (isActive) {
+      beginProgrammaticMessagesScroll();
       messagesHost.scrollTop += messagesHost.scrollHeight - before;
       messagesHost.style.scrollBehavior = prevBehavior;
     }
@@ -3098,6 +3307,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (isActive) messagesHost.style.scrollBehavior = 'auto';
     mountRange(s, index);
     if (isActive) {
+      beginProgrammaticMessagesScroll();
       messagesHost.scrollTop += messagesHost.scrollHeight - before;
       messagesHost.style.scrollBehavior = prevBehavior;
     }
@@ -3108,9 +3318,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   function refreshTabActiveStates() {
+    let activeTab = null;
     for (const s of sessions.values()) {
-      s.tab.classList.toggle('active', s.sid === activeSid);
+      const selected = s.sid === activeSid;
+      s.tab.classList.toggle('active', selected);
+      s.tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+      if (selected) activeTab = s.tab;
     }
+    if (activeTab) requestAnimationFrame(() => {
+      if (activeTab.isConnected) activeTab.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    });
   }
 
   function applyStatus(s, st) {
@@ -3131,6 +3348,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       active.inputDraft = input.value;
       active.inputSelectionStart = input.selectionStart;
       active.inputSelectionEnd = input.selectionEnd;
+      active.scrollTop = messagesHost.scrollTop;
     }
     // Detach old container (its DOM stays in memory, attached to its session object)
     if (active && active.container.parentNode === messagesHost) {
@@ -3142,8 +3360,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     refreshTabActiveStates();
     // Restore new session's input state (history is global — no swap needed)
     input.value = s.inputDraft || '';
-    input.selectionStart = s.inputSelectionStart || 0;
-    input.selectionEnd = s.inputSelectionEnd || 0;
+    input.selectionStart = s.inputSelectionStart ?? 0;
+    input.selectionEnd = s.inputSelectionEnd ?? 0;
     _ph.resetState();
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
@@ -3151,16 +3369,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     sendBtn.classList.toggle('stop-mode', s.busy);
     sendBtn.title = s.busy ? 'Stop' : 'Send (Return)';
     renderQueue();
+    renderImagePreview();
+    updateSendBtn();
     updateInputLock();
     updateWelcome();
-    scrollToBottom();
+    restoreSessionScroll(s);
     // Focus always lands in the prompt input after any session switch (manual
     // tab click, Tab/Shift+Tab cycling, or Rust-driven switch after creating
     // a new session via ⌘T). Restore caret to the saved selection range.
     input.focus();
     try {
-      input.selectionStart = s.inputSelectionStart || input.value.length;
-      input.selectionEnd   = s.inputSelectionEnd   || input.value.length;
+      input.selectionStart = s.inputSelectionStart ?? input.value.length;
+      input.selectionEnd   = s.inputSelectionEnd   ?? input.value.length;
     } catch (_) {}
   }
 
@@ -3297,7 +3517,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Agent tags Rust scanned out of the registered octomind taps: [tag, title].
   let agents = [];
   window.__setAgents = function(list) {
-    agents = (list || []).map(a => ({ tag: a[0], title: a[1] }));
+    agents = (list || []).map(a => ({ tag: a[0], title: a[1] || a[0] }));
   };
 
   const SC_SUGGEST_MAX = 8;
@@ -3306,6 +3526,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   function scHideSuggest() {
     scSuggest.classList.remove('visible');
+    scTag.setAttribute('aria-expanded', 'false');
+    scTag.removeAttribute('aria-activedescendant');
     scMatches = [];
     scIdx = 0;
   }
@@ -3321,12 +3543,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     scMatches.forEach((a, i) => {
       const div = document.createElement('div');
       div.className = 'cmd-item' + (i === scIdx ? ' active' : '');
+      div.id = 'sc-agent-option-' + i;
+      div.setAttribute('role', 'option');
+      div.setAttribute('aria-selected', i === scIdx ? 'true' : 'false');
       const name = document.createElement('div');
       name.className = 'cmd-name';
-      name.textContent = a.tag;
+      name.textContent = a.title;
       const desc = document.createElement('div');
       desc.className = 'cmd-desc';
-      desc.textContent = a.title;
+      desc.textContent = a.tag;
       div.appendChild(name);
       div.appendChild(desc);
       // mousedown, not click — click fires after blur has already closed us.
@@ -3335,11 +3560,18 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       scSuggest.appendChild(div);
     });
     scSuggest.classList.add('visible');
+    scTag.setAttribute('aria-expanded', 'true');
+    scTag.setAttribute('aria-activedescendant', 'sc-agent-option-' + scIdx);
   }
 
   function scPaintActive() {
     const items = scSuggest.querySelectorAll('.cmd-item');
-    items.forEach((el, i) => el.classList.toggle('active', i === scIdx));
+    items.forEach((el, i) => {
+      const selected = i === scIdx;
+      el.classList.toggle('active', selected);
+      el.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    scTag.setAttribute('aria-activedescendant', 'sc-agent-option-' + scIdx);
     if (items[scIdx]) items[scIdx].scrollIntoView({ block: 'nearest' });
   }
 
@@ -3350,12 +3582,27 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   function scPick(i) {
     if (!scMatches[i]) return;
-    scTag.value = scMatches[i].tag;
+    const picked = scMatches[i];
+    scTag.value = picked.title;
+    scTag.dataset.agentTag = picked.tag;
+    scTagMeta.textContent = picked.tag;
     scHideSuggest();
     scTag.focus();
   }
 
-  scTag.addEventListener('input', scShowSuggest);
+  scTag.addEventListener('input', () => {
+    delete scTag.dataset.agentTag;
+    const typed = scTag.value.trim();
+    const exact = agents.find(a => a.tag === typed || a.title.toLowerCase() === typed.toLowerCase());
+    if (exact) {
+      scTag.value = exact.title;
+      scTag.dataset.agentTag = exact.tag;
+      scTagMeta.textContent = exact.tag;
+    } else {
+      scTagMeta.textContent = '';
+    }
+    scShowSuggest();
+  });
   scTag.addEventListener('focus', scShowSuggest);
   scTag.addEventListener('blur', () => setTimeout(scHideSuggest, 150));
 
@@ -3363,19 +3610,29 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (sessions.size >= MAX_SESSIONS) return;
     scPanel.classList.add('visible');
     scTitle.value = '';
-    scTag.value = 'octoweb:assistant';
+    const preferred = agents.find(a => a.tag === 'octoweb:assistant')
+      || { tag: 'octoweb:assistant', title: 'Assistant' };
+    scTag.value = preferred.title;
+    scTag.dataset.agentTag = preferred.tag;
+    scTagMeta.textContent = preferred.tag;
     scTitle.focus();
   }
   window.__openCreatePanel = openCreatePanel;
   sessionAddBtn.addEventListener('click', openCreatePanel);
-  function hideCreatePanel() { scPanel.classList.remove('visible'); scHideSuggest(); }
-  scCancel.addEventListener('click', hideCreatePanel);
+  function hideCreatePanel(restoreFocus) {
+    scPanel.classList.remove('visible');
+    scHideSuggest();
+    if (restoreFocus) sessionAddBtn.focus({ preventScroll: true });
+  }
+  scCancel.addEventListener('click', () => hideCreatePanel(true));
   function submitCreate() {
     const title = scTitle.value.trim() || 'Session';
-    const tag   = scTag.value.trim();
+    const typed = scTag.value.trim();
+    const known = agents.find(a => a.tag === typed || a.title === typed);
+    const tag   = scTag.dataset.agentTag || (known && known.tag) || typed;
     if (!tag) { scTag.focus(); return; }
     window.ipc.postMessage(JSON.stringify({ type: 'acp_session_create', title, tag }));
-    hideCreatePanel();
+    hideCreatePanel(false);
   }
   scCreate.addEventListener('click', submitCreate);
   [scTitle, scTag].forEach(el => {
@@ -3385,18 +3642,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         if (e.key === 'ArrowDown')                     { e.preventDefault(); scMove(1);  return; }
         if (e.key === 'ArrowUp')                       { e.preventDefault(); scMove(-1); return; }
         if (e.key === 'Enter' || e.key === 'Tab')      { e.preventDefault(); scPick(scIdx); return; }
-        if (e.key === 'Escape')                        { e.preventDefault(); scHideSuggest(); return; }
+        if (e.key === 'Escape')                        { e.preventDefault(); e.stopPropagation(); scHideSuggest(); return; }
       }
       if (e.key === 'Enter') { e.preventDefault(); submitCreate(); }
-      else if (e.key === 'Escape') { e.preventDefault(); hideCreatePanel(); }
     });
+  });
+  scPanel.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    hideCreatePanel(true);
   });
 
   // ── Prompt history (shared module) ──────────────────────────────────────
   // MUST be initialized before bootstrap — switchTo() references _ph.
   /* PROMPT_HISTORY_JS */
   const ghostEl = document.getElementById('prompt-ghost');
-  const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline', function() {
+  const _ph = createPromptHistory(input, ghostEl, 'Ask Octopus', function() {
     input.style.height = 'auto';
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
@@ -3674,8 +3935,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   function escapeHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
   }
+  function escapeAttr(s) { return escapeHtml(s); }
 
   // Per-code-block copy — called from inline onclick in custom renderer
   window.__copyCode = function(btn) {
@@ -5141,16 +5408,78 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (sid === activeSid) { updateWelcome(); scrollToBottom(); }
   };
 
-  function scrollToBottom() {
+  function isMessagesAtBottom() {
+    return messagesHost.scrollHeight - messagesHost.scrollTop - messagesHost.clientHeight <= 24;
+  }
+
+  function finishProgrammaticMessagesScroll() {
+    programmaticMessagesScroll = false;
+    if (programmaticMessagesScrollTimer) clearTimeout(programmaticMessagesScrollTimer);
+    programmaticMessagesScrollTimer = null;
+  }
+
+  function beginProgrammaticMessagesScroll() {
+    programmaticMessagesScroll = true;
+    if (programmaticMessagesScrollTimer) clearTimeout(programmaticMessagesScrollTimer);
+    // `scrollend` is not available in every WKWebView version. Keep the flag
+    // through the smooth animation and clear it shortly after its last event.
+    programmaticMessagesScrollTimer = setTimeout(finishProgrammaticMessagesScroll, 180);
+  }
+
+  function noteProgrammaticMessagesScrollEvent() {
+    if (!programmaticMessagesScroll) return;
+    if (programmaticMessagesScrollTimer) clearTimeout(programmaticMessagesScrollTimer);
+    programmaticMessagesScrollTimer = setTimeout(finishProgrammaticMessagesScroll, 180);
+  }
+
+  function noteUserMessagesScroll() {
+    finishProgrammaticMessagesScroll();
+  }
+
+  messagesHost.addEventListener('wheel', noteUserMessagesScroll, { passive: true });
+  messagesHost.addEventListener('touchstart', noteUserMessagesScroll, { passive: true });
+  messagesHost.addEventListener('touchmove', noteUserMessagesScroll, { passive: true });
+  messagesHost.addEventListener('pointerdown', noteUserMessagesScroll, { passive: true });
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const target = e.target;
+    if (target && ((target.matches && target.matches('input, textarea, select')) || target.isContentEditable)) return;
+    if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(e.key) >= 0) noteUserMessagesScroll();
+  }, true);
+  messagesHost.addEventListener('scrollend', finishProgrammaticMessagesScroll, { passive: true });
+
+  function restoreSessionScroll(s) {
+    const prevBehavior = messagesHost.style.scrollBehavior;
+    messagesHost.style.scrollBehavior = 'auto';
+    beginProgrammaticMessagesScroll();
+    messagesHost.scrollTop = s.atBottom ? messagesHost.scrollHeight : s.scrollTop;
+    s.scrollTop = messagesHost.scrollTop;
+    messagesHost.style.scrollBehavior = prevBehavior;
+  }
+
+  function scrollToBottom(force) {
     // Back-filling older history mounts messages above the viewport; jumping
     // to the bottom would throw the user out of what they scrolled up to read.
     if (active && active.replaying) return;
+    // DOM growth changes scrollHeight before this helper runs. `atBottom`
+    // records where the reader was before that growth, so streaming output
+    // follows only when they were already within 24px of the bottom.
+    if (!force && active && !active.atBottom) return;
+    beginProgrammaticMessagesScroll();
     messagesHost.scrollTop = messagesHost.scrollHeight;
+    if (active) {
+      active.scrollTop = messagesHost.scrollTop;
+      active.atBottom = true;
+    }
   }
 
   // Scrolling to the top back-fills the next chunk of history.
   messagesHost.addEventListener('scroll', () => {
-    if (!active || active.renderedFrom <= 0) return;
+    if (!active) return;
+    active.scrollTop = messagesHost.scrollTop;
+    if (programmaticMessagesScroll) noteProgrammaticMessagesScrollEvent();
+    else active.atBottom = isMessagesAtBottom();
+    if (active.renderedFrom <= 0) return;
     if (messagesHost.scrollTop > 240) return;
     loadOlder(active);
   }, { passive: true });
@@ -5311,6 +5640,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (Number(n.dataset.logIndex) >= index) { target = n; break; }
     }
     if (!target) return;
+    beginProgrammaticMessagesScroll();
     target.scrollIntoView({ block: 'center' });
     target.classList.remove('chat-hit');
     void target.offsetWidth; // restart the flash animation on a repeat jump
@@ -5356,8 +5686,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // ── Queue (per-session, max 2 pending) ─────────────────────────────────
   function renderQueue() {
     if (!active) { queueList.innerHTML = ''; return; }
+    const s = active;
     queueList.innerHTML = '';
-    active.msgQueue.forEach((entry, i) => {
+    s.msgQueue.forEach((entry, i) => {
       const item = document.createElement('div');
       item.className = 'queue-item';
       const lbl = document.createElement('span');
@@ -5369,11 +5700,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const rm = document.createElement('button');
       rm.className = 'queue-remove';
       rm.title = 'Remove';
+      rm.setAttribute('aria-label', 'Remove queued message');
       rm.innerHTML = '<svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
       rm.addEventListener('click', () => {
-        active.msgQueue.splice(i, 1);
-        renderQueue();
-        updateInputLock();
+        s.msgQueue.splice(i, 1);
+        if (active === s) {
+          renderQueue();
+          updateInputLock();
+        }
       });
       item.appendChild(lbl);
       item.appendChild(txt);
@@ -5389,19 +5723,35 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   function drainQueueForSession(s) {
-    if (!s || s.msgQueue.length === 0) return;
-    const next = s.msgQueue.shift();
-    renderQueue();
-    updateInputLock();
-    dispatchPromptForSession(s, next.text, next.images, next.docs);
-  }
-
-  function drainQueue() {
-    drainQueueForSession(active);
+    if (!s || s.busy || s.submitting || s.drainingQueue || s.msgQueue.length === 0) return;
+    s.drainingQueue = true;
+    try {
+      // Re-check inside the serialized section: a send or A2UI action may have
+      // claimed the session after the delayed drain was scheduled.
+      if (s.busy || s.submitting || s.msgQueue.length === 0) return;
+      const next = s.msgQueue.shift();
+      if (active === s) {
+        renderQueue();
+        updateInputLock();
+      }
+      if (!dispatchPromptForSession(s, next.text, next.images, next.docs)) {
+        s.msgQueue.unshift(next);
+        if (active === s) {
+          renderQueue();
+          updateInputLock();
+        }
+      }
+    } finally {
+      s.drainingQueue = false;
+    }
   }
 
   function dispatchPromptForSession(s, text, images, docs) {
-    if (!s) return;
+    if (!s || s.busy) return false;
+    // Claim the session before touching the DOM or calling any helper. Every
+    // dispatch path observes this synchronously, so only one prompt can leave
+    // a session at a time.
+    s.busy = true;
     const displayText = text.replace(/<doc filename="[^"]*">[\s\S]*?<\/doc>\s*/g, '').trim();
     const bubble = appendMessage(s, 'user', displayText || '(document attached)');
     if (docs && docs.length) {
@@ -5424,37 +5774,41 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         bubble.appendChild(el);
       }
     }
-    // Mark the session busy BEFORE flipping the spinner. send() reads `busy`
-    // to decide queue-vs-dispatch, and the stop button mirrors `busy`.
-    s.busy = true;
     window.__setThinking(s.sid, true);
     window.ipc.postMessage(JSON.stringify({ type: 'acp_prompt', session_id: s.sid, text, images: images || [] }));
-  }
-
-  function dispatchPrompt(text, images, docs) {
-    if (!active) return;
-    dispatchPromptForSession(active, text, images, docs);
+    return true;
   }
 
   // ── Image attachments ──────────────────────────────────────────────────
-  let pendingImages = []; // [{data: base64, mimeType: string}]
-  let pendingDocs = [];   // [{file: File, name: string}]
   let docLibsLoaded = false;
+  let imagePickerSid = null;
+  let docPickerSid = null;
 
-  function addImageFromFile(file) {
-    if (!file || !file.type.startsWith('image/')) return;
+  function addImageFromFile(file, session) {
+    const origin = session;
+    if (!origin || !file || !file.type.startsWith('image/')) return;
     const reader = new FileReader();
     reader.onload = () => {
+      if (sessions.get(origin.sid) !== origin) return;
       const b64 = reader.result.split(',')[1];
-      pendingImages.push({ data: b64, mimeType: file.type });
-      renderImagePreview();
-      updateSendBtn();
+      origin.pendingImages.push({ data: b64, mimeType: file.type });
+      if (active === origin) {
+        renderImagePreview();
+        updateSendBtn();
+      }
     };
     reader.readAsDataURL(file);
   }
 
   function renderImagePreview() {
     imagePreview.innerHTML = '';
+    if (!active) {
+      imagePreview.classList.remove('visible');
+      return;
+    }
+    const s = active;
+    const pendingImages = s.pendingImages;
+    const pendingDocs = s.pendingDocs;
     if (!pendingImages.length && !pendingDocs.length) {
       imagePreview.classList.remove('visible');
       return;
@@ -5467,9 +5821,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       el.src = 'data:' + img.mimeType + ';base64,' + img.data;
       thumb.appendChild(el);
       const rm = document.createElement('button');
+      rm.type = 'button';
       rm.className = 'rm';
+      rm.setAttribute('aria-label', 'Remove image attachment');
       rm.textContent = '×';
-      rm.onclick = () => { pendingImages.splice(i, 1); renderImagePreview(); updateSendBtn(); };
+      rm.onclick = () => {
+        s.pendingImages.splice(i, 1);
+        if (active === s) { renderImagePreview(); updateSendBtn(); }
+      };
       thumb.appendChild(rm);
       imagePreview.appendChild(thumb);
     });
@@ -5482,16 +5841,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       span.textContent = pendingDocs[i].name;
       chip.appendChild(span);
       const rm = document.createElement('button');
+      rm.type = 'button';
       rm.className = 'rm';
+      rm.setAttribute('aria-label', 'Remove document attachment');
       rm.textContent = '×';
-      rm.onclick = () => { pendingDocs.splice(i, 1); renderImagePreview(); updateSendBtn(); };
+      rm.onclick = () => {
+        s.pendingDocs.splice(i, 1);
+        if (active === s) { renderImagePreview(); updateSendBtn(); }
+      };
       chip.appendChild(rm);
       imagePreview.appendChild(chip);
     }
   }
 
   function updateSendBtn() {
-    sendBtn.classList.toggle('active', input.value.trim().length > 0 || pendingImages.length > 0 || pendingDocs.length > 0);
+    const hasDraft = active && (input.value.trim().length > 0
+      || active.pendingImages.length > 0 || active.pendingDocs.length > 0);
+    sendBtn.classList.toggle('active', !!hasDraft);
   }
 
   attachBtn.addEventListener('click', (e) => {
@@ -5503,16 +5869,23 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   document.querySelector('.attach-option[data-type="image"]').addEventListener('click', () => {
     attachMenu.classList.remove('visible');
+    imagePickerSid = active ? active.sid : null;
     fileInputImage.click();
   });
   document.querySelector('.attach-option[data-type="document"]').addEventListener('click', () => {
     attachMenu.classList.remove('visible');
+    docPickerSid = active ? active.sid : null;
     fileInputDoc.click();
   });
 
   fileInputImage.addEventListener('change', () => {
-    for (const f of fileInputImage.files) addImageFromFile(f);
+    // Never redirect a native-picker result to whichever session happens to
+    // be active now. If its originating session closed while the picker was
+    // open, discard the selection instead.
+    const origin = imagePickerSid == null ? null : sessions.get(imagePickerSid);
+    for (const f of fileInputImage.files) addImageFromFile(f, origin);
     fileInputImage.value = '';
+    imagePickerSid = null;
   });
 
   // ── Document attachments ──────────────────────────────────────────────
@@ -5555,12 +5928,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
 
   fileInputDoc.addEventListener('change', () => {
+    const origin = docPickerSid == null ? null : sessions.get(docPickerSid);
+    if (!origin) {
+      fileInputDoc.value = '';
+      docPickerSid = null;
+      return;
+    }
     for (const f of fileInputDoc.files) {
-      pendingDocs.push({ file: f, name: f.name });
+      origin.pendingDocs.push({ file: f, name: f.name });
     }
     fileInputDoc.value = '';
-    renderImagePreview();
-    updateSendBtn();
+    docPickerSid = null;
+    if (active === origin) {
+      renderImagePreview();
+      updateSendBtn();
+    }
   });
 
   input.addEventListener('paste', e => {
@@ -5569,7 +5951,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     for (const item of items) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
-        addImageFromFile(item.getAsFile());
+        addImageFromFile(item.getAsFile(), active);
         return;
       }
     }
@@ -5578,53 +5960,85 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // ── Send ────────────────────────────────────────────────────────────────
   async function send() {
     if (!active) return;
+    const s = active;
+    if (s.submitting) return;
     const text = input.value.trim();
-    const images = pendingImages.slice();
-    const docs = pendingDocs.slice();
+    const images = s.pendingImages.slice();
+    const docs = s.pendingDocs.slice();
     if (!text && !images.length && !docs.length) return;
+    s.submitting = true;
+    s.inputDraft = '';
+    s.inputSelectionStart = 0;
+    s.inputSelectionEnd = 0;
     input.value = '';
-    input.placeholder = 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline';
+    input.placeholder = 'Ask Octopus';
     input.style.height = 'auto';
-    pendingImages = [];
-    pendingDocs = [];
+    s.pendingImages = [];
+    s.pendingDocs = [];
     renderImagePreview();
     sendBtn.classList.remove('active');
 
     let docPrefix = '';
-    if (docs.length) {
-      for (const doc of docs) {
-        try {
-          const extracted = await extractDocText(doc.file);
-          if (extracted) {
-            docPrefix += '<doc filename="' + doc.name + '"\u003e\n' + extracted + '\n</doc>\n\n';
-          } else {
-            docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Document was empty or could not be parsed]\n</doc>\n\n';
+    try {
+      if (docs.length) {
+        for (const doc of docs) {
+          try {
+            const extracted = await extractDocText(doc.file);
+            if (extracted) {
+              docPrefix += '<doc filename="' + doc.name + '"\u003e\n' + extracted + '\n</doc>\n\n';
+            } else {
+              docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Document was empty or could not be parsed]\n</doc>\n\n';
+            }
+          } catch (e) {
+            const msg = e && (e.message || e.toString()) || 'unknown error';
+            console.error('Doc extraction failed:', e);
+            docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Failed to extract: ' + msg + ']\n</doc>\n\n';
           }
-        } catch (e) {
-          const msg = e && (e.message || e.toString()) || 'unknown error';
-          console.error('Doc extraction failed:', e);
-          docPrefix += '<doc filename="' + doc.name + '"\u003e\n[Failed to extract: ' + msg + ']\n</doc>\n\n';
         }
       }
-    }
-    const fullText = docPrefix + text;
+      if (sessions.get(s.sid) !== s) return;
+      const fullText = docPrefix + text;
 
-    if (!active.busy) {
-      dispatchPrompt(fullText, images, docs);
-    } else if (active.msgQueue.length < MAX_QUEUE) {
-      active.msgQueue.push({ text: fullText, images, docs });
-      renderQueue();
-      updateInputLock();
-    }
+      // `s` is the session that owned the draft before any extraction await.
+      // A session switch cannot redirect the completed prompt.
+      s.submitting = false;
+      if (!s.busy) {
+        dispatchPromptForSession(s, fullText, images, docs);
+      } else if (s.msgQueue.length < MAX_QUEUE) {
+        s.msgQueue.push({ text: fullText, images, docs });
+        if (active === s) {
+          renderQueue();
+          updateInputLock();
+        }
+      } else {
+        // The queue can fill while document extraction is awaiting. Put the
+        // entire unsent draft back on its originating session instead of
+        // dropping text or attachments.
+        const newerText = active === s ? input.value : s.inputDraft;
+        s.inputDraft = text + (newerText ? '\n' + newerText : '');
+        s.pendingImages = images.concat(s.pendingImages);
+        s.pendingDocs = docs.concat(s.pendingDocs);
+        if (active === s) {
+          input.value = s.inputDraft;
+          input.style.height = 'auto';
+          input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+          renderImagePreview();
+          updateSendBtn();
+          updateInputLock();
+        }
+      }
 
-    // Save raw prompt text to GLOBAL history (MRU, dedup) so Ctrl+P/N walks
-    // it from any session and persistence (driven by Rust) sees every prompt.
-    if (text) {
-      const pos = globalPromptHistory.indexOf(text);
-      if (pos !== -1) globalPromptHistory.splice(pos, 1);
-      globalPromptHistory.unshift(text);
-      if (globalPromptHistory.length > MAX_PROMPT_HISTORY) globalPromptHistory.pop();
-      _ph.setHistory(globalPromptHistory);
+      // Save raw prompt text to GLOBAL history (MRU, dedup) so Ctrl+P/N walks
+      // it from any session and persistence (driven by Rust) sees every prompt.
+      if (text) {
+        const pos = globalPromptHistory.indexOf(text);
+        if (pos !== -1) globalPromptHistory.splice(pos, 1);
+        globalPromptHistory.unshift(text);
+        if (globalPromptHistory.length > MAX_PROMPT_HISTORY) globalPromptHistory.pop();
+        _ph.setHistory(globalPromptHistory);
+      }
+    } finally {
+      s.submitting = false;
     }
   }
 
@@ -5646,25 +6060,27 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       send();
     }
   });
+  // Tab / Shift+Tab cycle ACP sessions from anywhere in the panel — the
+  // panel is one assistant, not a form. Only editing contexts keep native
+  // Tab: agent-widget fields, the rename field and the create-session form
+  // (their own handlers run first and preventDefault).
+  function cycleSession(backwards) {
+    const keys = Array.from(sessions.keys());
+    if (keys.length <= 1) return false;
+    const idx = keys.indexOf(activeSid);
+    const nextIdx = backwards
+      ? (idx <= 0 ? keys.length - 1 : idx - 1)
+      : (idx >= keys.length - 1 ? 0 : idx + 1);
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: keys[nextIdx] }));
+    input.focus();
+    return true;
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    if (e.target && e.target.closest && e.target.closest('.a2ui-body, #session-create-panel, .session-rename')) return;
+    if (cycleSession(e.shiftKey)) e.preventDefault();
+  });
   input.addEventListener('keydown', e => {
-    // Tab / Shift+Tab cycle ACP sessions. Handled here at the textarea level
-    // (not just at document capture) because WKWebView's native Tab focus
-    // traversal in <textarea> can race past a document-level capture listener
-    // and move focus to other page elements before our handler runs.
-    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (scPanel.classList.contains('visible')) return;
-      e.preventDefault();
-      const keys = Array.from(sessions.keys());
-      if (keys.length <= 1) { input.focus(); return; }
-      const idx = keys.indexOf(activeSid);
-      const nextIdx = e.shiftKey
-        ? (idx <= 0 ? keys.length - 1 : idx - 1)
-        : (idx >= keys.length - 1 ? 0 : idx + 1);
-      const nextSid = keys[nextIdx];
-      window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
-      input.focus();
-      return;
-    }
     if (_ph.isInSearchMode()) return;
     // Ctrl+J → insert newline at caret. execCommand('insertText') is the same
     // path WKWebView uses for Shift+Enter — preserves focus, caret, undo,
@@ -5691,7 +6107,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     input.style.height = Math.min(input.scrollHeight, 120) + 'px';
     updateSendBtn();
     var val = input.value;
-    if (!val) { input.placeholder = 'Ask Octopus\u2026   \u21B5 send \u00B7 \u21E7\u21B5 newline'; }
+    if (!val) { input.placeholder = 'Ask Octopus'; }
     if (val.charAt(0) === '/' && active && active.availableCommands.length > 0) {
       var spaceIdx = val.indexOf(' ');
       if (spaceIdx === -1) {
@@ -5729,32 +6145,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'sidebar_fullscreen_toggle' }));
   });
   window.__setSidebarFullscreen = function(on) {
+    document.getElementById('sidebar').classList.toggle('fullscreen', !!on);
     fsBtn.classList.toggle('active', !!on);
     fsEnter.style.display = on ? 'none' : '';
     fsExit.style.display  = on ? '' : 'none';
-    fsBtn.title = on ? 'Exit fullscreen (⌘⇧Return)' : 'Toggle fullscreen (⌘⇧Return)';
+    const label = on ? 'Exit fullscreen' : 'Toggle fullscreen';
+    fsBtn.title = label + (fullscreenShortcut ? ' (' + fullscreenShortcut + ')' : '');
   };
-
-  // Tab / Shift+Tab fallback for when focus is NOT in the prompt input
-  // (e.g. user clicked a session tab header). The textarea's own keydown
-  // handler covers the common case; this one catches everything else.
-  // Capture phase so we win against any other listener.
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.defaultPrevented) return;
-    if (document.activeElement === input) return; // textarea handler already ran
-    if (scPanel.classList.contains('visible')) return;
-    e.preventDefault();
-    const keys = Array.from(sessions.keys());
-    if (keys.length <= 1) { input.focus(); return; }
-    const idx = keys.indexOf(activeSid);
-    const nextIdx = e.shiftKey
-      ? (idx <= 0 ? keys.length - 1 : idx - 1)
-      : (idx >= keys.length - 1 ? 0 : idx + 1);
-    const nextSid = keys[nextIdx];
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_session_switch', session_id: nextSid }));
-    input.focus();
-  }, true);
 
   /* A2UI_CORE_JS */
 
@@ -5876,6 +6273,51 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }, 2400);
   }
 
+  function a2uiSendRepairPrompt(block, detail) {
+    const s = sessions.get(block.sid);
+    if (!s) return;
+    const prompt = 'An interactive A2UI control could not be loaded. Please fix the surface and render it again. Failure: '
+      + detail;
+    if (!s.busy && !s.submitting) {
+      dispatchPromptForSession(s, prompt, [], []);
+    } else if (s.msgQueue.length < MAX_QUEUE) {
+      s.msgQueue.push({ text: prompt, images: [], docs: [] });
+      if (active === s) {
+        renderQueue();
+        updateInputLock();
+      }
+    } else {
+      a2uiToast('The message queue is full.');
+    }
+  }
+
+  function a2uiFailureControl(block, detail) {
+    const wrap = document.createElement('div');
+    wrap.className = 'a2ui-unknown';
+    const text = document.createElement('span');
+    text.textContent = "This control couldn't be loaded";
+    const ask = document.createElement('button');
+    ask.type = 'button';
+    ask.className = 'a2ui-btn default';
+    ask.textContent = 'Ask the assistant to fix it';
+    ask.addEventListener('click', () => a2uiSendRepairPrompt(block, detail));
+    wrap.appendChild(text);
+    wrap.appendChild(ask);
+    return wrap;
+  }
+
+  // Local field edits keep the existing DOM controls alive so WKWebView keeps
+  // composition, selection, native slider capture and the undo stack. Only
+  // nodes with derived/bound presentation register a lightweight refresh.
+  function a2uiRefreshBoundOutputs(block) {
+    const wrap = a2uiBubbleByFile.get(block.fileId);
+    const body = wrap && wrap.querySelector('.a2ui-body');
+    if (!body) return;
+    for (const el of body.querySelectorAll('*')) {
+      if (typeof el.__a2uiRefresh === 'function') el.__a2uiRefresh();
+    }
+  }
+
   // Tags every rendered element with the component id that produced it, so
   // `a2uiRerender` can put focus and the caret back after a rebuild. List rows
   // reuse one template id, so the row index disambiguates them. `weight` and
@@ -5887,6 +6329,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (def && typeof def.id === 'string') {
       el.dataset.a2uiId = def.id + (scope && scope.rowKey != null ? '#' + scope.rowKey : '');
     }
+    el.__a2uiDef = def;
+    el.__a2uiScope = scope;
     if (def && def.weight != null && isFinite(Number(def.weight))) {
       el.style.flexGrow = String(Number(def.weight));
     }
@@ -5915,7 +6359,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     const label = r(def.label);
     const placeholder = r(def.placeholder);
     const valueRaw = r(def.value);
-    const path = a2uiPathOf(def.value);
+    const path = a2uiPathOf(def.value, scope);
 
     // A static id list, or a v1.0 ChildList template ({componentId, path}).
     // Returns [def, scope] pairs so template rows carry their own item scope.
@@ -5933,11 +6377,21 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           if (c) out.push([c, scope]);
         }
       } else if (ch && typeof ch === 'object' && typeof ch.componentId === 'string') {
-        const items = r({ path: typeof ch.path === 'string' ? ch.path : '' });
+        const childPath = typeof ch.path === 'string' ? ch.path : '';
+        const items = r({ path: childPath });
+        const listModelPath = a2uiPathOf({ path: childPath }, scope);
         const tpl = block.componentsMap.get(ch.componentId);
         if (Array.isArray(items) && tpl) {
           items.forEach((item, i) => {
-            out.push([tpl, { root: scope.root, local: item, index: i, rowKey: i }]);
+            const base = listModelPath === '/' ? '' : listModelPath;
+            const itemModelPath = typeof listModelPath === 'string' ? base + '/' + i : null;
+            out.push([tpl, {
+              root: scope.root,
+              local: item,
+              index: i,
+              rowKey: itemModelPath || i,
+              modelPath: itemModelPath,
+            }]);
           });
         }
       }
@@ -5947,9 +6401,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       for (const pair of childNodes()) el.appendChild(a2uiRenderNode(block, pair[0], pair[1]));
     }
     function writeBinding(p, v) {
+      if (!p) return;
       a2uiPtrSet(block.dataModel, p, v);
       block.version++;
-      a2uiRerender(block);
+      a2uiRefreshBoundOutputs(block);
     }
     // v1.0 CheckRule is {condition, message}; older surfaces put the function
     // call at the top level ({call, args, message}). Both gate the same way,
@@ -5971,7 +6426,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     // Held back while the field is still empty so an untouched form isn't a
     // wall of red before the user has typed anything.
     function appendCheckMessage(wrap) {
-      if (valueRaw == null || valueRaw === '') return;
+      for (const child of Array.from(wrap.children)) {
+        if (child.classList && child.classList.contains('a2ui-check-msg')) child.remove();
+      }
+      const currentValue = r(def.value);
+      if (currentValue == null || currentValue === '') return;
       const msg = failedCheck();
       if (!msg) return;
       const el = document.createElement('span');
@@ -6023,13 +6482,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const asHeading = ['h1', 'h2', 'h3', 'h4', 'h5'].indexOf(variant) >= 0;
       const el = document.createElement(asHeading ? variant : 'div');
       el.className = 'a2ui-text a2ui-text-' + variant + (def.muted ? ' muted' : '');
-      const raw = a2uiToStr(text);
-      if (asHeading) {
-        el.textContent = raw;
-      } else {
-        el.classList.add('a2ui-md');
-        el.innerHTML = a2uiRenderMarkdown(raw);
-      }
+      const paint = () => {
+        const raw = a2uiToStr(r(def.text));
+        if (asHeading) el.textContent = raw;
+        else el.innerHTML = a2uiRenderMarkdown(raw);
+      };
+      if (!asHeading) el.classList.add('a2ui-md');
+      paint();
+      el.__a2uiRefresh = paint;
       return el;
     }
     if (type === 'Heading') {
@@ -6037,28 +6497,37 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const lvl = Math.min(Math.max(1, Number(def.level == null ? 2 : def.level)), 4);
       const el = document.createElement('h' + lvl);
       el.className = 'a2ui-heading';
-      el.textContent = a2uiToStr(text);
+      const paint = () => { el.textContent = a2uiToStr(r(def.text)); };
+      paint();
+      el.__a2uiRefresh = paint;
       return el;
     }
     if (type === 'Markdown') {
       // Legacy render_ui component — the catalog puts Markdown in Text.
       const el = document.createElement('div');
       el.className = 'a2ui-md';
-      el.innerHTML = a2uiRenderMarkdown(a2uiToStr(text));
+      const paint = () => { el.innerHTML = a2uiRenderMarkdown(a2uiToStr(r(def.text))); };
+      paint();
+      el.__a2uiRefresh = paint;
       return el;
     }
     if (type === 'Image') {
       // v1.0: url, description, fit, variant. `src`/`alt` are the older
       // render_ui spellings.
-      const url = String((r(def.url) != null ? r(def.url) : r(def.src)) || '');
-      const desc = String((r(def.description) != null ? r(def.description) : r(def.alt)) || '');
       const fit = typeof def.fit === 'string' ? def.fit : null;
       const variant = typeof def.variant === 'string' ? def.variant : null;
       const img = document.createElement('img');
       img.className = 'a2ui-img' + (variant ? ' a2ui-img-' + variant : '');
       img.loading = 'lazy';
-      if (/^https?:\/\//i.test(url)) img.src = url;
-      img.alt = desc;
+      const paint = () => {
+        const url = String((r(def.url) != null ? r(def.url) : r(def.src)) || '');
+        const desc = String((r(def.description) != null ? r(def.description) : r(def.alt)) || '');
+        if (/^https?:\/\//i.test(url)) img.src = url;
+        else img.removeAttribute('src');
+        img.alt = desc;
+      };
+      paint();
+      img.__a2uiRefresh = paint;
       if (fit) {
         const map = { contain: 'contain', cover: 'cover', fill: 'fill', none: 'none', scaleDown: 'scale-down' };
         if (map[fit]) img.style.objectFit = map[fit];
@@ -6086,9 +6555,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       }
       const span = document.createElement('span');
       span.className = 'a2ui-icon';
-      const iname = String((r(nameRef) != null ? r(nameRef) : '') || '');
-      span.textContent = iname;
-      span.setAttribute('aria-label', iname);
+      const paint = () => {
+        const iname = String((r(nameRef) != null ? r(nameRef) : '') || '');
+        span.textContent = iname;
+        span.setAttribute('aria-label', iname);
+      };
+      paint();
+      span.__a2uiRefresh = paint;
       return span;
     }
     if (type === 'Video') {
@@ -6126,27 +6599,43 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       //         render_ui spellings and still render.
       const kind = typeof def.kind === 'string' ? def.kind : null;
       const variant = typeof def.variant === 'string' ? def.variant : null;
+      // `action` is the catalog spelling. Agents routinely emit `actions`;
+      // accept that legacy spelling but replace dead controls with a repair UI.
+      const action = def.action || def.actions || {};
+      const hasFunction = action.functionCall && typeof action.functionCall.call === 'string';
+      const hasOpenUrl = typeof action.openUrl === 'string'
+        || (action.openUrl && typeof action.openUrl.url === 'string');
+      const hasEvent = action.event && typeof action.event.name === 'string' && action.event.name;
+      const modalTriggerOnly = !hasFunction && !hasOpenUrl && !hasEvent && scope && scope.modalTrigger;
+      if (!hasFunction && !hasOpenUrl && !hasEvent && !modalTriggerOnly) {
+        return a2uiFailureControl(block, 'Button ' + (def.id || '(unnamed)') + ' has no supported action.');
+      }
       const btn = document.createElement('button');
       // The catalog's own default is the subtle style; `primary` is the
       // surface author's way of naming the call to action.
       btn.className = 'a2ui-btn ' + (kind || variant || 'default');
-      if (def.disabled) btn.disabled = true;
+      const paint = () => {
+        btn.disabled = a2uiTruthy(r(def.disabled));
+        if (typeof def.child !== 'string') {
+          const currentText = r(def.text);
+          btn.textContent = a2uiToStr(currentText != null ? currentText : (r(def.label) != null ? r(def.label) : 'Button'));
+        }
+      };
       if (typeof def.child === 'string') {
         const inner = block.componentsMap.get(def.child);
-        if (inner) btn.appendChild(a2uiRenderNode(block, inner, scope));
-      } else {
-        btn.textContent = a2uiToStr(text != null ? text : (def.label != null ? def.label : 'Button'));
+        if (!inner) return a2uiFailureControl(block, 'Button ' + (def.id || '(unnamed)') + ' references missing content.');
+        btn.appendChild(a2uiRenderNode(block, inner, scope));
       }
+      paint();
+      btn.__a2uiRefresh = paint;
       btn.addEventListener('click', () => {
+        if (modalTriggerOnly) return;
         if (block.resolved) return;
         const failure = failedCheck();
         if (failure) {
           a2uiToast(failure);
           return;
         }
-        // `action` is the catalog spelling. Agents routinely emit `actions`;
-        // ignoring it rendered a live-looking button that did nothing at all.
-        const action = def.action || def.actions || {};
         // A renderer-side action is `action.functionCall = {call, args}` — the
         // same shape a ValueRef uses, so resolving it runs the registry entry.
         // The click is the user activation openUrl requires.
@@ -6165,9 +6654,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         }
         const ev = action.event;
         if (!ev || !ev.name) {
-          // Never fail silently: a dead button is indistinguishable from a
-          // broken app until it says why.
-          a2uiToast('This button has no action - the surface was built wrong.');
+          a2uiSendRepairPrompt(block, 'Button ' + (def.id || '(unnamed)') + ' has no event action.');
           return;
         }
         const context = {};
@@ -6235,6 +6722,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         ta.value = a2uiToStr(valueRaw);
         ta.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
         wrap.appendChild(ta);
+        wrap.__a2uiRefresh = () => {
+          const next = a2uiToStr(r(def.value));
+          if (document.activeElement !== ta && ta.value !== next) ta.value = next;
+          appendCheckMessage(wrap);
+        };
       } else {
         const inp = document.createElement('input');
         inp.type = inputType;
@@ -6247,6 +6739,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           writeBinding(path, v);
         });
         wrap.appendChild(inp);
+        wrap.__a2uiRefresh = () => {
+          const next = a2uiToStr(r(def.value));
+          if (document.activeElement !== inp && inp.value !== next) inp.value = next;
+          appendCheckMessage(wrap);
+        };
       }
       appendCheckMessage(wrap);
       return wrap;
@@ -6262,6 +6759,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       sp.textContent = a2uiToStr(label);
       wrap.appendChild(inp);
       wrap.appendChild(sp);
+      wrap.__a2uiRefresh = () => {
+        inp.checked = a2uiTruthy(r(def.value));
+        sp.textContent = a2uiToStr(r(def.label));
+      };
       return wrap;
     }
     if (type === 'Slider') {
@@ -6293,6 +6794,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       row.appendChild(inp);
       row.appendChild(out);
       wrap.appendChild(row);
+      wrap.__a2uiRefresh = () => {
+        const next = r(def.value);
+        if (document.activeElement !== inp && next != null) inp.value = String(next);
+        out.textContent = inp.value;
+        appendCheckMessage(wrap);
+      };
       appendCheckMessage(wrap);
       return wrap;
     }
@@ -6321,11 +6828,15 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       }
       // v1.0 binds selections to a string array in both variants; a bare
       // scalar from an older surface still reads correctly.
-      const selected = new Set(
-        Array.isArray(valueRaw) ? valueRaw.map(a2uiToStr)
-          : valueRaw == null || valueRaw === '' ? []
-            : [a2uiToStr(valueRaw)]
-      );
+      const currentSelection = () => {
+        const current = r(def.value);
+        return new Set(
+          Array.isArray(current) ? current.map(a2uiToStr)
+            : current == null || current === '' ? []
+              : [a2uiToStr(current)]
+        );
+      };
+      const selected = currentSelection();
       // Writing back keeps the array shape the catalog asks for.
       const writeSelection = next => path && writeBinding(path, Array.from(next));
       // `filterable` narrows a long list; the filter itself is view state, so
@@ -6333,6 +6844,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       block.filterState = block.filterState || {};
       const filterKey = typeof def.id === 'string' ? def.id : 'choice';
       const filter = String(block.filterState[filterKey] || '');
+      const choiceRows = [];
+      const applyFilter = value => {
+        const needle = String(value || '').toLowerCase();
+        for (const row of choiceRows) row.el.hidden = !!needle && row.search.indexOf(needle) < 0;
+      };
       if (def.filterable) {
         const f = document.createElement('input');
         f.type = 'search';
@@ -6341,16 +6857,22 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         f.value = filter;
         f.addEventListener('input', e => {
           block.filterState[filterKey] = e.currentTarget.value;
-          a2uiRerender(block);
+          applyFilter(e.currentTarget.value);
         });
         wrap.appendChild(f);
       }
-      const visible = filter
-        ? opts.filter(o => a2uiToStr(o.label != null ? o.label : o.value).toLowerCase().indexOf(filter.toLowerCase()) >= 0)
-        : opts;
+      const visible = opts;
       // Mutually exclusive, plain style: a native <select> reads best.
       if (!isMulti && !useChips && style !== 'checkbox' && !def.filterable) {
         const sel = document.createElement('select');
+        if (selected.size === 0) {
+          const placeholderOpt = document.createElement('option');
+          placeholderOpt.value = '';
+          placeholderOpt.textContent = 'Select an option';
+          placeholderOpt.disabled = true;
+          placeholderOpt.selected = true;
+          sel.appendChild(placeholderOpt);
+        }
         for (const o of visible) {
           const opt = document.createElement('option');
           opt.value = a2uiToStr(o.value);
@@ -6358,8 +6880,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           if (selected.has(opt.value)) opt.selected = true;
           sel.appendChild(opt);
         }
-        sel.addEventListener('change', e => writeSelection(new Set([e.currentTarget.value])));
+        sel.addEventListener('change', e => {
+          if (e.currentTarget.value !== '') writeSelection(new Set([e.currentTarget.value]));
+        });
         wrap.appendChild(sel);
+        wrap.__a2uiRefresh = () => {
+          const current = currentSelection();
+          const value = current.size ? Array.from(current)[0] : '';
+          if (sel.value !== value) sel.value = value;
+          appendCheckMessage(wrap);
+        };
         appendCheckMessage(wrap);
         return wrap;
       }
@@ -6374,7 +6904,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
             writeSelection(on ? new Set([v]) : new Set());
             return;
           }
-          const next = new Set(selected);
+          const next = currentSelection();
           if (on) next.add(v); else next.delete(v);
           writeSelection(next);
         };
@@ -6383,8 +6913,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           chip.type = 'button';
           chip.className = 'a2ui-chip' + (isOn ? ' on' : '');
           chip.textContent = lblTxt;
-          chip.addEventListener('click', () => toggle(isMulti ? !isOn : true));
+          chip.addEventListener('click', () => toggle(isMulti ? !currentSelection().has(v) : true));
           list.appendChild(chip);
+          choiceRows.push({ el: chip, search: lblTxt.toLowerCase(), value: v, control: chip });
         } else {
           const item = document.createElement('label');
           item.className = 'a2ui-check';
@@ -6398,9 +6929,20 @@ pub fn html(max_ai_prompt_history: usize) -> String {
           item.appendChild(inp);
           item.appendChild(sp);
           list.appendChild(item);
+          choiceRows.push({ el: item, search: lblTxt.toLowerCase(), value: v, control: inp });
         }
       }
       wrap.appendChild(list);
+      wrap.__a2uiRefresh = () => {
+        const current = currentSelection();
+        for (const row of choiceRows) {
+          const on = current.has(row.value);
+          if (row.control.tagName === 'BUTTON') row.control.classList.toggle('on', on);
+          else row.control.checked = on;
+        }
+        appendCheckMessage(wrap);
+      };
+      applyFilter(filter);
       appendCheckMessage(wrap);
       return wrap;
     }
@@ -6427,6 +6969,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       if (def.max != null) inp.max = a2uiToStr(r(def.max));
       inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
       wrap.appendChild(inp);
+      wrap.__a2uiRefresh = () => {
+        const next = a2uiToStr(r(def.value));
+        if (document.activeElement !== inp && inp.value !== next) inp.value = next;
+        inp.min = def.min != null ? a2uiToStr(r(def.min)) : '';
+        inp.max = def.max != null ? a2uiToStr(r(def.max)) : '';
+        appendCheckMessage(wrap);
+      };
       appendCheckMessage(wrap);
       return wrap;
     }
@@ -6483,48 +7032,69 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       const wrap = document.createElement('span');
       wrap.className = 'a2ui-modal-trigger-wrap';
       block.modalState = block.modalState || {};
+      block.modalNeedsFocus = block.modalNeedsFocus || {};
       const key = typeof def.id === 'string' ? def.id : 'modal';
       const triggerDef = triggerId ? block.componentsMap.get(triggerId) : null;
       if (triggerDef) {
-        const trig = a2uiRenderNode(block, triggerDef, scope);
+        const triggerScope = Object.assign({}, scope, { modalTrigger: true });
+        const trig = a2uiRenderNode(block, triggerDef, triggerScope);
         trig.addEventListener('click', (e) => {
           e.stopPropagation();
           block.modalState[key] = true;
+          block.modalNeedsFocus[key] = true;
           a2uiRerender(block);
         }, true);
         wrap.appendChild(trig);
+      } else {
+        wrap.appendChild(a2uiFailureControl(block, 'Modal ' + key + ' references a missing trigger.'));
       }
-      if (block.modalState[key] && contentId) {
-        const contentDef = block.componentsMap.get(contentId);
+      if (block.modalState[key]) {
+        const contentDef = contentId ? block.componentsMap.get(contentId) : null;
         const overlay = document.createElement('div');
         overlay.className = 'a2ui-modal-overlay';
-        overlay.addEventListener('click', () => {
+        const closeModal = () => {
           block.modalState[key] = false;
           a2uiRerender(block);
+        };
+        overlay.addEventListener('click', closeModal);
+        overlay.addEventListener('keydown', (e) => {
+          if (e.key !== 'Escape') return;
+          e.preventDefault();
+          e.stopPropagation();
+          closeModal();
         });
         const panel = document.createElement('div');
         panel.className = 'a2ui-modal-panel';
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-modal', 'true');
+        panel.setAttribute('aria-label', a2uiToStr(label != null ? label : (r(def.title) || 'Assistant control')));
+        panel.tabIndex = -1;
         panel.addEventListener('click', (e) => e.stopPropagation());
         const close = document.createElement('button');
         close.type = 'button';
         close.className = 'a2ui-modal-close';
         close.setAttribute('aria-label', 'Close');
         close.textContent = '×';
-        close.addEventListener('click', () => {
-          block.modalState[key] = false;
-          a2uiRerender(block);
-        });
+        close.addEventListener('click', closeModal);
         panel.appendChild(close);
         if (contentDef) panel.appendChild(a2uiRenderNode(block, contentDef, scope));
+        else panel.appendChild(a2uiFailureControl(block, 'Modal ' + key + ' references missing content.'));
         overlay.appendChild(panel);
         wrap.appendChild(overlay);
+        if (block.modalNeedsFocus[key]) {
+          block.modalNeedsFocus[key] = false;
+          requestAnimationFrame(() => {
+            if (!panel.isConnected) return;
+            const initial = panel.querySelector(
+              'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not(.a2ui-modal-close):not([disabled])'
+            ) || close;
+            initial.focus({ preventScroll: true });
+          });
+        }
       }
       return wrap;
     }
-    const unk = document.createElement('div');
-    unk.className = 'a2ui-unknown';
-    unk.textContent = '[unsupported component: ' + (type || '?') + ']';
-    return unk;
+    return a2uiFailureControl(block, 'Unsupported component ' + (type || '(missing type)') + '.');
   }
 
   // Focus survival across a full surface rebuild. Anchors on the owning
@@ -6543,8 +7113,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 
   function restoreA2uiFocus(body, restore) {
     if (!restore) return;
-    const holder = body.querySelector('[data-a2ui-id="' + String(restore.id).replace(/"/g, '\\"') + '"]');
-    const el = holder && holder.querySelector('input, textarea, select');
+    const holder = Array.from(body.querySelectorAll('[data-a2ui-id]'))
+      .find(el => el.dataset.a2uiId === String(restore.id));
+    const selector = 'input, textarea, select, button';
+    const el = holder && (holder.matches(selector) ? holder : holder.querySelector(selector));
     if (!el) return;
     // preventScroll: refocusing must not yank the chat viewport around while
     // the user is mid-sentence.
@@ -6583,13 +7155,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (body) {
       const rootDef = block.componentsMap.get('root');
       if (rootDef) {
-        // Two-way binding re-renders the whole surface on every keystroke so
-        // derived props (checks, formatString, counters) stay in sync. That
-        // destroys the focused input, so remember where the caret was and put
-        // it back — otherwise typing drops focus after each character.
+        // Agent envelopes and structural actions rebuild the surface. Local
+        // field edits take the incremental a2uiRefreshBoundOutputs path, so
+        // this focus restoration is only for genuine structural replacement.
         const restore = captureA2uiFocus(body);
         body.innerHTML = '';
-        body.appendChild(a2uiRenderNode(block, rootDef, { root: block.dataModel, local: null }));
+        body.appendChild(a2uiRenderNode(block, rootDef, {
+          root: block.dataModel,
+          local: null,
+          modelPath: null,
+        }));
         restoreA2uiFocus(body, restore);
       } else if (body.childNodes.length === 0) {
         // Only render the empty placeholder if this bubble has never had a
@@ -6797,11 +7372,13 @@ pub fn html(max_ai_prompt_history: usize) -> String {
 </html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
         .replace("/* A2UI_CORE_JS */", crate::a2ui_js::CORE)
         .replace("/* PROMPT_HISTORY_JS */", prompt_history_js)
+        .replace("/* KEYBINDINGS_JSON */", &keybindings_json)
         .replace("/* MAX_SESSIONS */", &crate::MAX_SESSIONS.to_string())
         .replace(
             "/* MAX_PROMPT_HISTORY */",
             &max_ai_prompt_history.to_string(),
         )
+        .replace("/* ICON_OCTOPUS_BRAND */", crate::icons::OCTOPUS_BRAND)
         .replace("/* ICON_CHECK */", crate::icons::CHECK)
         .replace("/* ICON_CHECK_CIRCLE */", crate::icons::CHECK_CIRCLE)
         .replace("/* ICON_X_CIRCLE */", crate::icons::X_CIRCLE)

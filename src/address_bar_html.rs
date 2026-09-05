@@ -12,6 +12,7 @@
 ///   window.__setFavicon(dataUri)                              — update favicon
 ///   window.__setBadge(show)                                   — show/hide unread badge on 🐙
 ///   window.__sysStats(cpuPct, memMb)                          — update CPU%/RSS (null = hide)
+///   window.__setShortcuts(data)                               — update live shortcut titles
 ///
 /// IPC messages sent to Rust:
 ///   { type: "toggle_sidebar" }       — 🐙 button clicked
@@ -72,8 +73,7 @@ pub fn html() -> String {
 
   #favicon.visible { display: block; }
 
-  /* Title and URL share the available space equally — each gets exactly 50%.
-     overflow:hidden on each half ensures neither can push the other out. */
+  /* A short title yields its unused space to the URL. */
   #text-stack {
     display: flex;
     flex-direction: row;
@@ -83,15 +83,15 @@ pub fn html() -> String {
     overflow: hidden;
   }
 
-  /* Title — clickable to copy, fixed 38% of text-stack (URL gets more room) */
+  /* Title — clicking enters address edit; fixed 38% column so the URL column never moves. */
   #title-row {
     display: flex;
     align-items: center;
     gap: 3px;
-    cursor: pointer;
-    min-height: 22px;
+    min-height: var(--ctl-min);
     border-radius: var(--r-ctl);
     padding: 2px 5px;
+    /* Fixed split with #url-row so the address never shifts with title length. */
     flex: 0 0 38%;
     min-width: 0;
     overflow: hidden;
@@ -99,10 +99,24 @@ pub fn html() -> String {
   }
   #title-row:hover  { background: var(--fill-hover); }
   #title-row:active { background: var(--fill-press); }
-  #title-row.copied { background: var(--fill); }
+
+  #title-edit {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
 
   #page-title {
-    font-size: 11px;
+    font-size: var(--fs-body);
     font-weight: 500;
     color: var(--label);
     white-space: nowrap;
@@ -113,31 +127,28 @@ pub fn html() -> String {
 
   /* Separator between title and url */
   #sep {
-    font-size: 10px;
+    font-size: var(--fs-caption);
     color: var(--label-3);
     flex-shrink: 0;
     padding: 0 1px;
     opacity: 0.5;
   }
 
-  /* URL — text click copies; pencil click enters edit mode. Fixed 62% width. */
+  /* URL — a single click enters edit mode and selects the whole address. */
   #url-row {
     position: relative;
     display: flex;
     align-items: center;
     gap: 3px;
-    min-height: 22px;
+    min-height: var(--ctl-min);
     border-radius: var(--r-ctl);
     padding: 2px 5px;
-    flex: 0 0 calc(62% - 14px); /* subtract sep width so total stays 100% */
+    flex: 0 0 calc(62% - 14px); /* subtract #sep width so total stays 100% */
     min-width: 0;
     overflow: visible; /* let the suggestion dropdown escape this row */
     transition: background var(--t-fast) var(--ease);
   }
-  #url-row.copied { background: var(--fill); }
-
-  /* The copyable text portion is its own hover target so the pencil doesn't
-     paint the whole row on hover. */
+  /* The displayed address is the edit affordance. */
   #url-copy {
     display: flex;
     align-items: center;
@@ -146,7 +157,12 @@ pub fn html() -> String {
     min-width: 0;
     overflow: hidden;
     cursor: pointer;
-    min-height: 22px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    text-align: left;
+    min-height: var(--ctl-min);
     border-radius: var(--r-ctl);
     padding: 0 2px;
     transition: background var(--t-fast) var(--ease);
@@ -154,41 +170,49 @@ pub fn html() -> String {
   #url-copy:hover { background: var(--fill-hover); }
   #url-copy:active { background: var(--fill-press); }
 
-  /* Pencil edit button — small, dim at rest, brightens on hover. */
-  #url-edit-btn {
-    flex-shrink: 0;
+  .copy-btn {
     width: 22px;
     height: 22px;
+    flex: 0 0 22px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: none;
-    background: transparent;
-    border-radius: var(--r-ctl);
-    cursor: pointer;
-    color: var(--label-3);
-    opacity: 0.55;
-    line-height: 0;
-    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
-                color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
     padding: 0;
+    border: none;
+    border-radius: var(--r-ctl);
+    background: transparent;
+    color: var(--label-2);
+    cursor: pointer;
+    line-height: 0;
+    visibility: hidden;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
   }
-  #url-edit-btn:hover  { opacity: 1; background: var(--fill-hover); color: var(--label); }
-  #url-edit-btn:active { background: var(--fill-press); transform: scale(0.92); }
-  #url-edit-btn svg { width: 10px; height: 10px; }
+  #title-row:hover .copy-btn,
+  #title-row:focus-within .copy-btn,
+  #url-row:hover .copy-btn,
+  #url-row:focus-within .copy-btn,
+  .copy-btn.copied { visibility: visible; }
+  .copy-btn:hover  { background: var(--fill-hover); color: var(--label); }
+  .copy-btn:active { background: var(--fill-press); transform: scale(0.92); }
+  .copy-btn svg { width: 12px; height: 12px; }
+  .copy-btn .copy-check { display: none; }
+  .copy-btn.copied { color: var(--ok); }
+  .copy-btn.copied .copy-icon { display: none; }
+  .copy-btn.copied .copy-check { display: inline; }
 
   /* URL input — shown only while editing; replaces the copyable URL display. */
   #url-input {
     flex: 1;
     min-width: 0;
-    height: 22px;
+    height: var(--ctl-min);
     padding: 0 9px;
     font: inherit;
-    font-size: 10.5px;
+    font-size: var(--fs-body);
     color: var(--label);
     background: var(--fill);
     border: none;
-    border-radius: var(--r-capsule);
+    border-radius: var(--r-ctl);
     box-shadow: 0 0 0 0.5px var(--hairline), 0 0 0 2.5px color-mix(in srgb, var(--accent) 28%, transparent);
     outline: none;
     display: none;
@@ -201,6 +225,7 @@ pub fn html() -> String {
   #url-row.editing #url-input { display: block; }
   #url-row.editing #url-copy  { display: none; }
   #url-row.editing #lock      { display: none; }
+  #url-row.editing .copy-btn  { visibility: hidden; }
 
   /* Suggestion dropdown — paints into the expanded address-bar webview.
      Positioned absolute against the document body (the titlebar #bar element
@@ -234,7 +259,7 @@ pub fn html() -> String {
     gap: 8px;
     padding: 6px 9px;
     min-height: 32px;
-    border-radius: var(--r-ctl);
+    border-radius: calc(var(--r-panel) - 5px);
     cursor: pointer;
     min-width: 0;
     transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
@@ -260,7 +285,7 @@ pub fn html() -> String {
   }
   .sg-text { flex: 1; min-width: 0; overflow: hidden; }
   .sg-title {
-    font-size: 11px;
+    font-size: var(--fs-body);
     color: var(--label);
     white-space: nowrap;
     overflow: hidden;
@@ -268,7 +293,8 @@ pub fn html() -> String {
     letter-spacing: -0.1px;
   }
   .sg-url {
-    font-size: 10px;
+    font-family: var(--font-text);
+    font-size: var(--fs-caption);
     color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
@@ -278,9 +304,9 @@ pub fn html() -> String {
   }
   .sg-kind {
     flex-shrink: 0;
-    font-size: 9.5px;
+    font-size: var(--fs-caption);
     font-weight: 500;
-    color: var(--label-3);
+    color: var(--label-2);
     padding: 1px 6px;
     border-radius: var(--r-capsule);
     background: var(--fill);
@@ -292,15 +318,15 @@ pub fn html() -> String {
     gap: 5px;
     min-height: 24px;
     padding: 4px 7px 1px;
-    color: var(--label-3);
-    font-size: 9.5px;
+    color: var(--label-2);
+    font-size: var(--fs-caption);
     box-shadow: 0 -0.5px 0 var(--hairline);
   }
 
   #lock {
     flex-shrink: 0;
-    width: 10px;
-    height: 10px;
+    width: 12px;
+    height: 12px;
     display: none;
     align-items: center;
     justify-content: center;
@@ -311,93 +337,52 @@ pub fn html() -> String {
   #lock.secure   { color: var(--lock-secure); }
   #lock.insecure { color: var(--lock-insecure); }
 
-  /* ── Rich tooltip for icon buttons (label + shortcut) ─────────────── */
-  .bar-btn[data-tip] { position: relative; }
-  .bar-btn[data-tip]::after {
-    content: attr(data-tip);
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 50%;
-    transform: translate(-50%, -2px);
-    background: var(--glass-thick);
-    color: var(--label);
-    font-size: 10.5px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    white-space: nowrap;
-    padding: 4px 7px;
-    border-radius: var(--r-ctl);
-    box-shadow: var(--shadow-float), var(--glass-shine);
-    -webkit-backdrop-filter: var(--glass-blur);
-    backdrop-filter: var(--glass-blur);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--t-fast) var(--ease) 0.25s, transform var(--t-fast) var(--ease) 0.25s;
-    z-index: 100;
-  }
-  .bar-btn[data-tip]:hover::after {
-    opacity: 1;
-    transform: translate(-50%, 0);
-  }
   #url {
-    font-size: 10px;
+    font-size: var(--fs-body);
+    font-weight: 400;
     color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     letter-spacing: -0.1px;
   }
-  #url .host { color: var(--label-2); }
+  #url .host { color: var(--label); }
 
-  /* Shared "Copied" flash label */
-  .copied-label {
-    font-size: 9px;
-    color: var(--label-3);
-    opacity: 0;
-    transition: opacity var(--t-fast) var(--ease);
-    flex-shrink: 0;
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
-  .copied-label.show { opacity: 1; }
 
-  /* ── Stats section ───────────────────────────────────────────────── */
-  #stats {
+  /* ── Combined page/system diagnostics ────────────────────────────── */
+  #stats-chip {
     display: flex;
     align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    color: var(--label-3);
+    gap: 6px;
+    min-height: var(--ctl-min);
+    padding: 0 7px;
+    border-radius: var(--r-capsule);
+    background: var(--fill);
+    font-size: var(--fs-caption);
+    color: var(--label-2);
     flex-shrink: 0;
-    margin-left: 12px;
+    margin-left: 8px;
     margin-right: 8px;
     letter-spacing: -0.1px;
     font-variant-numeric: tabular-nums;
   }
-  .stat { white-space: nowrap; }
+  #stats-chip.hidden { display: none; }
+  .stat { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+  .stat.hidden { display: none; }
   .stat-val {
     display: inline-block;
-    width: 4.5ch;
     text-align: right;
-    overflow: hidden;
-  }
-  /* ── System stats: CPU% and RSS memory of the active tab's WebContent process ── */
-  #sys-stats {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 10px;
-    color: var(--label-3);
-    flex-shrink: 0;
-    margin-left: 4px;
-    margin-right: 4px;
-    letter-spacing: -0.1px;
-    font-variant-numeric: tabular-nums;
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity var(--t-pop) var(--ease);
-  }
-  #sys-stats.visible {
-    visibility: visible;
-    opacity: 1;
   }
   .sys-chip {
     display: flex;
@@ -417,6 +402,10 @@ pub fn html() -> String {
   }
   .sys-icon svg { width: 100%; height: 100%; }
 
+  @media (max-width: 999px) {
+    #stats-chip { display: none !important; }
+  }
+
   /* ── 🐙 AI toggle button + utility buttons (spotlight, close tab) ── */
   .bar-btn {
     position: relative;
@@ -430,7 +419,7 @@ pub fn html() -> String {
     background: transparent;
     cursor: pointer;
     flex-shrink: 0;
-    color: var(--label-3);
+    color: var(--label-2);
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
                 transform var(--t-fast) var(--spring);
   }
@@ -450,13 +439,13 @@ pub fn html() -> String {
 
   #ai-btn {
     background: transparent;
-    color: var(--label-3);
+    color: var(--label-2);
     width: 28px;
     height: 28px;
     border-radius: 50%;
     border: none;
   }
-  #ai-btn:hover  { background: var(--fill-hover); color: var(--label); transform: scale(1.08); }
+  #ai-btn:hover  { background: var(--fill-hover); color: var(--label); }
   #ai-btn:active { background: var(--fill-press); transform: scale(0.92); }
   .ai-icon { display: inline-flex; width: 16px; height: 16px; line-height: 0; }
   .ai-icon svg { width: 100%; height: 100%; }
@@ -484,63 +473,67 @@ pub fn html() -> String {
     <img id="favicon" alt="">
     <div id="text-stack">
       <div id="title-row">
-        <span id="page-title"></span>
-        <span class="copied-label" id="title-copied">Copied</span>
+        <button id="title-edit" type="button" title="Edit address"><span id="page-title"></span></button>
+        <button id="title-copy-btn" class="copy-btn" type="button" aria-label="Copy title" title="Copy title">
+          <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+          <svg class="copy-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 12 10 18 20 6"/></svg>
+        </button>
       </div>
       <span id="sep">·</span>
       <div id="url-row">
-        <div id="url-copy">
+        <button id="url-copy" type="button" title="Edit address">
           <span id="lock"></span>
           <span id="url"></span>
-          <span class="copied-label" id="url-copied">Copied</span>
-        </div>
-        <input id="url-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off">
-        <button id="url-edit-btn" type="button" title="Edit URL">@@ICON_PENCIL@@</button>
+        </button>
+        <button id="url-copy-btn" class="copy-btn" type="button" aria-label="Copy address" title="Copy address">
+          <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+          <svg class="copy-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 12 10 18 20 6"/></svg>
+        </button>
+        <input id="url-input" type="text" role="combobox" aria-label="Address" aria-autocomplete="list" aria-expanded="false" aria-controls="url-suggest" spellcheck="false" autocomplete="off" autocapitalize="off">
       </div>
     </div>
   </div>
-  <div id="stats">
-    <span class="stat sys-chip" id="size-chip" title="Page transfer size"><span class="sys-icon">@@ICON_DOWNLOAD@@</span><span class="stat-val" id="size">&mdash;</span></span>
-    <span class="stat sys-chip" id="time-chip" title="Page load time"><span class="sys-icon">@@ICON_CLOCK@@</span><span class="stat-val" id="time">&mdash;</span></span>
+  <div id="stats-chip" class="hidden" aria-label="Page and system diagnostics">
+    <span class="stat hidden" id="size-chip" title="Page transfer size"><span class="sys-icon">@@ICON_DOWNLOAD@@</span><span class="stat-val" id="size"></span></span>
+    <span class="stat hidden" id="time-chip" title="Page load time"><span class="sys-icon">@@ICON_CLOCK@@</span><span class="stat-val" id="time"></span></span>
+    <span class="stat hidden" id="cpu-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
+    <span class="stat hidden" id="mem-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
-  <div id="sys-stats">
-    <span class="sys-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
-    <span class="sys-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
-  </div>
-  <button id="workspace-btn" class="bar-btn" data-tip="Workspaces  ⌘⇧O">
+  <button id="workspace-btn" class="bar-btn" type="button" title="Workspaces">
     <span class="ws-icon">@@ICON_LAYERS@@</span>
     <span class="ws-dot" id="ws-dot"></span>
   </button>
-  <button id="settings-btn" class="bar-btn" data-tip="Settings  ⌘," title="Settings (⌘,)">
+  <button id="settings-btn" class="bar-btn" type="button" title="Settings">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.6 1.2h2.8l.4 1.9.5.2 1.7-.9 2 2-.9 1.7.2.5 1.9.4v2.8l-1.9.4-.2.5.9 1.7-2 2-1.7-.9-.5.2-.4 1.9H6.6l-.4-1.9-.5-.2-1.7.9-2-2 .9-1.7-.2-.5L.8 9.2V6.4l1.9-.4.2-.5-.9-1.7 2-2 1.7.9.5-.2.4-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
       <circle cx="8" cy="7.8" r="2" stroke="currentColor" stroke-width="1.2" fill="none"/>
     </svg>
   </button>
-  <button id="shortcuts-btn" class="bar-btn" data-tip="Shortcuts  ⌘/" title="Keyboard shortcuts (⌘/)">
+  <button id="shortcuts-btn" class="bar-btn" type="button" title="Shortcuts">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.2 5.6c0-.9.7-1.6 1.8-1.6 1 0 1.8.7 1.8 1.6 0 .7-.4 1.1-1.1 1.6-.6.4-.9.7-.9 1.3v.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       <circle cx="8" cy="11.5" r="0.9" fill="currentColor"/>
     </svg>
   </button>
-  <button id="spotlight-btn" class="bar-btn" data-tip="Search  ⌘⇧P" title="Command palette (⌘⇧P)">
+  <button id="spotlight-btn" class="bar-btn" type="button" title="Search">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
       <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.6"/>
       <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
     </svg>
   </button>
-  <button id="close-tab-btn" class="bar-btn" data-tip="Close tab  ⌘W" title="Close tab (⌘W)">
+  <button id="close-tab-btn" class="bar-btn" type="button" title="Close tab">
     <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
       <line x1="1.5" y1="1.5" x2="10.5" y2="10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       <line x1="10.5" y1="1.5" x2="1.5" y2="10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
     </svg>
   </button>
-  <button id="ai-btn" class="bar-btn" data-tip="AI sidebar  ⌘⇧A" title="Toggle AI sidebar (⌘⇧A)">
+  <button id="ai-btn" class="bar-btn" type="button" title="AI sidebar">
     <span class="ai-icon">@@ICON_SPARKLES@@</span>
     <span id="badge" class="badge"></span>
   </button>
 </div>
-<div id="url-suggest" class="glass-panel"></div>
+<div id="url-suggest" class="glass-panel" role="listbox"></div>
+<div id="copy-status" class="visually-hidden" aria-live="polite"></div>
 <script>
 (function() {
   const titleEl      = document.getElementById('page-title');
@@ -551,33 +544,57 @@ pub fn html() -> String {
   const timeEl       = document.getElementById('time');
   const sizeChipEl   = document.getElementById('size-chip');
   const timeChipEl   = document.getElementById('time-chip');
-  const sysStatsEl   = document.getElementById('sys-stats');
+  const statsChipEl  = document.getElementById('stats-chip');
+  const cpuChipEl    = document.getElementById('cpu-chip');
+  const memChipEl    = document.getElementById('mem-chip');
   const cpuStatEl    = document.getElementById('cpu-stat');
   const memStatEl    = document.getElementById('mem-stat');
   const titleRow     = document.getElementById('title-row');
+  const titleEdit    = document.getElementById('title-edit');
+  const titleCopyBtn = document.getElementById('title-copy-btn');
   const urlRow       = document.getElementById('url-row');
   const urlCopy      = document.getElementById('url-copy');
+  const urlCopyBtn   = document.getElementById('url-copy-btn');
   const urlInput     = document.getElementById('url-input');
-  const urlEditBtn   = document.getElementById('url-edit-btn');
   const urlSuggest   = document.getElementById('url-suggest');
-  const titleCopied  = document.getElementById('title-copied');
-  const urlCopied    = document.getElementById('url-copied');
+  const copyStatus   = document.getElementById('copy-status');
 
   let currentUrl   = '';
   let currentTitle = '';
+
+  window.__setShortcuts = function(data) {
+    const actions = data && Array.isArray(data.actions) ? data.actions : [];
+    const titles = {
+      toggle_workspaces: ['workspace-btn', 'Workspaces'],
+      settings: ['settings-btn', 'Settings'],
+      shortcuts: ['shortcuts-btn', 'Shortcuts'],
+      command_palette: ['spotlight-btn', 'Search'],
+      close_tab: ['close-tab-btn', 'Close tab'],
+      sidebar: ['ai-btn', 'AI sidebar'],
+      url_edit: ['url-copy', 'Edit address']
+    };
+    Object.keys(titles).forEach(function(id) {
+      const target = titles[id];
+      const action = actions.find(function(item) { return item.id === id; });
+      const chord = action && Array.isArray(action.keys) ? action.keys.join('') : '';
+      document.getElementById(target[0]).title = target[1] + (chord ? ' (' + chord + ')' : '');
+    });
+  };
 
   // Copy via IPC — navigator.clipboard unavailable in child WKWebViews
   function copyViaIpc(text) {
     window.ipc.postMessage(JSON.stringify({ type: 'copy_text', text }));
   }
 
-  function flashCopied(row, label) {
-    row.classList.add('copied');
-    label.classList.add('show');
-    setTimeout(function() {
-      row.classList.remove('copied');
-      label.classList.remove('show');
-    }, 1000);
+  function flashCopied(button, announcement) {
+    if (button.copyResetTimer) clearTimeout(button.copyResetTimer);
+    button.classList.add('copied');
+    copyStatus.textContent = '';
+    requestAnimationFrame(function() { copyStatus.textContent = announcement; });
+    button.copyResetTimer = setTimeout(function() {
+      button.classList.remove('copied');
+      button.copyResetTimer = null;
+    }, 1200);
   }
 
   function formatSize(bytes) {
@@ -612,14 +629,24 @@ pub fn html() -> String {
   }
 
   function renderUrl(url) {
+    urlEl.replaceChildren();
+    if (!url) return;
     try {
       const u = new URL(url);
-      const host = u.host;
-      const rest = url.slice(url.indexOf(host) + host.length);
-      const scheme = u.protocol + '//';
-      return '<span style="opacity:0.5">' + scheme + '</span><span class="host">' + host + '</span>' + rest;
+      const scheme = document.createElement('span');
+      scheme.textContent = u.protocol + (u.host ? '//' : '');
+      urlEl.appendChild(scheme);
+      if (u.host) {
+        const host = document.createElement('span');
+        host.className = 'host';
+        host.textContent = u.host;
+        urlEl.appendChild(host);
+        urlEl.appendChild(document.createTextNode(u.pathname + u.search + u.hash));
+      } else {
+        urlEl.appendChild(document.createTextNode(u.href.slice(u.protocol.length)));
+      }
     } catch(e) {
-      return url;
+      urlEl.textContent = url;
     }
   }
 
@@ -637,17 +664,30 @@ pub fn html() -> String {
   }
 
   function updateStats(sizeBytes, timeMs) {
-    sizeEl.textContent = formatSize(sizeBytes);
-    timeEl.textContent = formatTime(timeMs);
+    const hasSize = sizeBytes > 0;
+    const hasTime = timeMs > 0;
+    sizeEl.textContent = hasSize ? formatSize(sizeBytes) : '';
+    timeEl.textContent = hasTime ? formatTime(timeMs) : '';
+    sizeChipEl.classList.toggle('hidden', !hasSize);
+    timeChipEl.classList.toggle('hidden', !hasTime);
     sizeChipEl.title = detailSize(sizeBytes);
     timeChipEl.title = detailTime(timeMs);
+    updateStatsChip();
+  }
+
+  function updateStatsChip() {
+    const hasData = !sizeChipEl.classList.contains('hidden')
+      || !timeChipEl.classList.contains('hidden')
+      || !cpuChipEl.classList.contains('hidden')
+      || !memChipEl.classList.contains('hidden');
+    statsChipEl.classList.toggle('hidden', !hasData);
   }
 
   window.__update = function(url, secure, title, sizeBytes, timeMs) {
     currentUrl   = url;
     currentTitle = title || '';
     titleEl.textContent = currentTitle;
-    urlEl.innerHTML = url ? renderUrl(url) : '';
+    renderUrl(url);
     updateLock(url, secure);
     updateStats(sizeBytes, timeMs);
   };
@@ -668,20 +708,30 @@ pub fn html() -> String {
   };
 
   window.__clear = function() {
-    sizeEl.textContent = '\u2014';
-    timeEl.textContent = '\u2014';
+    sizeEl.textContent = '';
+    timeEl.textContent = '';
+    sizeChipEl.classList.add('hidden');
+    timeChipEl.classList.add('hidden');
     sizeChipEl.title = 'Page transfer size';
     timeChipEl.title = 'Page load time';
+    updateStatsChip();
   };
 
   window.__sysStats = function(cpuPct, memMb) {
-    if (cpuPct === null || memMb === null) {
-      sysStatsEl.classList.remove('visible');
+    if (cpuPct === null || memMb === null || !Number.isFinite(Number(cpuPct))
+        || !Number.isFinite(Number(memMb)) || Number(memMb) <= 0) {
+      cpuChipEl.classList.add('hidden');
+      memChipEl.classList.add('hidden');
+      cpuStatEl.textContent = '';
+      memStatEl.textContent = '';
+      updateStatsChip();
       return;
     }
     cpuStatEl.textContent = cpuPct + '%';
     memStatEl.textContent = memMb + 'M';
-    sysStatsEl.classList.add('visible');
+    cpuChipEl.classList.remove('hidden');
+    memChipEl.classList.remove('hidden');
+    updateStatsChip();
   };
 
   // Poll system stats via custom protocol (avoids evaluate_script leak — wry#1489)
@@ -705,38 +755,58 @@ pub fn html() -> String {
     updateStats(sizeBytes, timeMs);
   };
 
-  // Copy title on click
-  titleRow.addEventListener('click', function() {
-    if (!currentTitle) return;
-    copyViaIpc(currentTitle);
-    flashCopied(titleRow, titleCopied);
+  function copyFromButton(event, button, text, announcement) {
+    event.stopPropagation();
+    if (!text) return;
+    copyViaIpc(text);
+    flashCopied(button, announcement);
+  }
+
+  titleCopyBtn.addEventListener('click', function(e) {
+    copyFromButton(e, titleCopyBtn, currentTitle, 'Title copied');
   });
 
-  // Copy URL when the text portion is clicked (not the pencil).
-  urlCopy.addEventListener('click', function() {
+  urlCopyBtn.addEventListener('click', function(e) {
+    copyFromButton(e, urlCopyBtn, currentUrl, 'Address copied');
+  });
+
+  function restoreRowFocusOnEscape(button, rowControl) {
+    button.addEventListener('keydown', function(e) {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      rowControl.focus();
+    });
+  }
+
+  restoreRowFocusOnEscape(titleCopyBtn, titleEdit);
+  restoreRowFocusOnEscape(urlCopyBtn, urlCopy);
+
+  // Both title and address clicks enter the same address editor.
+  titleRow.addEventListener('click', function() {
     if (!currentUrl) return;
-    copyViaIpc(currentUrl);
-    flashCopied(urlRow, urlCopied);
+    enterEdit();
+  });
+
+  // Safari-style single click: edit and select the entire address.
+  urlRow.addEventListener('click', function() {
+    if (!currentUrl) return;
+    enterEdit();
   });
 
   // ── URL edit mode ───────────────────────────────────────────────────────
-  // Pencil click → swap URL display for an input + suggestions dropdown.
+  // Address click or ⌘E → swap URL display for an input + suggestions dropdown.
   // Submit on Enter; cancel on Esc or click outside.
 
   var suggestions = [];       // history+tabs snapshot pushed from Rust
   var filtered    = [];       // current filtered list
   var activeIdx   = 0;
+  var explicitSelection = false;
   var editing     = false;
   var focusPoll   = null;     // interval that exits edit mode when the
                               // address bar webview loses keyboard focus
                               // (clicks into sibling webviews don't fire
                               // window.blur reliably under WKWebView).
-
-  function escHtml(s) {
-    return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
 
   // Match the query against title and URL substrings (case-insensitive).
   // Score: prefix match on URL > prefix match on host/title > substring match.
@@ -776,32 +846,86 @@ pub fn html() -> String {
   }
 
   function renderSuggestions() {
+    urlSuggest.replaceChildren();
     if (!filtered.length) {
       urlSuggest.classList.remove('show');
-      urlSuggest.innerHTML = '';
+      urlInput.setAttribute('aria-expanded', 'false');
+      urlInput.removeAttribute('aria-activedescendant');
       return;
     }
     if (activeIdx >= filtered.length) activeIdx = 0;
-    var html = '';
     for (var i = 0; i < filtered.length; i++) {
       var it = filtered[i];
-      var fav = it.favicon
-        ? '<img class="sg-fav" src="' + escHtml(it.favicon) + '" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{className:\'sg-fav-fallback\'}))" />'
-        : '<span class="sg-fav-fallback"></span>';
       var kind = it.kind === 'tab' ? 'Tab' : 'History';
       var titleText = it.title && it.title.length ? it.title : it.url;
-      html += '<div class="sg-item' + (i === activeIdx ? ' active' : '') + '" data-idx="' + i + '">'
-            + fav
-            + '<div class="sg-text">'
-            + '<div class="sg-title">' + escHtml(titleText) + '</div>'
-            + '<div class="sg-url">' + escHtml(it.url) + '</div>'
-            + '</div>'
-            + '<span class="sg-kind">' + kind + '</span>'
-            + '</div>';
+      var row = document.createElement('div');
+      row.id = 'url-suggestion-' + i;
+      row.className = 'sg-item';
+      row.dataset.idx = i;
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', 'false');
+
+      var fav;
+      if (it.favicon) {
+        fav = document.createElement('img');
+        fav.className = 'sg-fav';
+        fav.alt = '';
+        fav.src = it.favicon;
+        fav.addEventListener('error', function(e) {
+          var fallback = document.createElement('span');
+          fallback.className = 'sg-fav-fallback';
+          e.currentTarget.replaceWith(fallback);
+        });
+      } else {
+        fav = document.createElement('span');
+        fav.className = 'sg-fav-fallback';
+      }
+
+      var text = document.createElement('div');
+      text.className = 'sg-text';
+      var title = document.createElement('div');
+      title.className = 'sg-title';
+      title.textContent = titleText;
+      var address = document.createElement('div');
+      address.className = 'sg-url';
+      address.textContent = it.url;
+      text.append(title, address);
+
+      var kindEl = document.createElement('span');
+      kindEl.className = 'sg-kind';
+      kindEl.textContent = kind;
+      row.append(fav, text, kindEl);
+      urlSuggest.appendChild(row);
     }
-    urlSuggest.innerHTML = html + '<div class="sg-hint"><span class="kbd">esc</span> dismiss</div>';
+    var hint = document.createElement('div');
+    hint.className = 'sg-hint';
+    hint.setAttribute('role', 'presentation');
+    var key = document.createElement('span');
+    key.className = 'kbd';
+    key.textContent = 'esc';
+    hint.append(key, document.createTextNode(' Dismiss'));
+    urlSuggest.appendChild(hint);
     positionSuggest();
     urlSuggest.classList.add('show');
+    urlInput.setAttribute('aria-expanded', 'true');
+    updateSelection(false);
+  }
+
+  function updateSelection(scroll) {
+    var nodes = urlSuggest.querySelectorAll('.sg-item');
+    var selected = null;
+    for (var i = 0; i < nodes.length; i++) {
+      var isActive = i === activeIdx;
+      nodes[i].classList.toggle('active', isActive);
+      nodes[i].setAttribute('aria-selected', isActive ? 'true' : 'false');
+      if (isActive) selected = nodes[i];
+    }
+    if (selected) {
+      urlInput.setAttribute('aria-activedescendant', selected.id);
+      if (scroll) selected.scrollIntoView({ block: 'nearest' });
+    } else {
+      urlInput.removeAttribute('aria-activedescendant');
+    }
   }
 
   function positionSuggest() {
@@ -817,6 +941,7 @@ pub fn html() -> String {
     urlRow.classList.add('editing');
     urlInput.value = currentUrl || '';
     activeIdx = 0;
+    explicitSelection = false;
     // Grow the address bar webview so the dropdown isn't clipped by the 32 px
     // titlebar, then ask Rust for a fresh history snapshot for autocomplete.
     window.ipc.postMessage(JSON.stringify({ type: 'url_edit_expand', expanded: true }));
@@ -859,7 +984,9 @@ pub fn html() -> String {
     editing = false;
     urlRow.classList.remove('editing');
     urlSuggest.classList.remove('show');
-    urlSuggest.innerHTML = '';
+    urlSuggest.replaceChildren();
+    urlInput.setAttribute('aria-expanded', 'false');
+    urlInput.removeAttribute('aria-activedescendant');
     urlInput.value = '';
     urlInput.blur();
     if (focusPoll) { clearInterval(focusPoll); focusPoll = null; }
@@ -872,6 +999,11 @@ pub fn html() -> String {
     if (editing) { exitEdit(); } else { enterEdit(); }
   };
 
+  window.__urlEditFocus = function() {
+    if (!editing) enterEdit();
+    else urlInput.focus();
+  };
+
   function submit(rawUrl) {
     var u = (rawUrl == null ? urlInput.value : rawUrl).trim();
     if (!u) return;
@@ -879,24 +1011,21 @@ pub fn html() -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'navigate', url: u }));
   }
 
-  urlEditBtn.addEventListener('click', function(e) {
-    e.stopPropagation();
-    enterEdit();
-  });
-
   urlInput.addEventListener('input', function() {
     activeIdx = 0;
+    explicitSelection = false;
     filtered = filterSuggestions(urlInput.value);
     renderSuggestions();
   });
 
   urlInput.addEventListener('keydown', function(e) {
     if (e.key === 'Enter') {
+      if (e.isComposing) return;
       e.preventDefault();
       if (filtered.length && activeIdx >= 0 && activeIdx < filtered.length
           && filtered[activeIdx].url
           && urlInput.value.trim() !== ''
-          && filtered[activeIdx].score >= 60) {
+          && (explicitSelection || filtered[activeIdx].score >= 60)) {
         submit(filtered[activeIdx].url);
       } else {
         submit();
@@ -904,22 +1033,27 @@ pub fn html() -> String {
     } else if (e.key === 'Escape') {
       e.preventDefault();
       exitEdit();
-    } else if (e.key === 'ArrowDown') {
+    } else if (e.key === 'ArrowDown' || (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'n' || e.key === 'N'))) {
+      // Ctrl+N/P walk the suggestions while editing (the tab-switch binding
+      // is suppressed by the host during URL edit).
       e.preventDefault();
       if (filtered.length) {
         activeIdx = (activeIdx + 1) % filtered.length;
-        renderSuggestions();
+        explicitSelection = true;
+        updateSelection(true);
       }
-    } else if (e.key === 'ArrowUp') {
+    } else if (e.key === 'ArrowUp' || (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'p' || e.key === 'P'))) {
       e.preventDefault();
       if (filtered.length) {
         activeIdx = (activeIdx - 1 + filtered.length) % filtered.length;
-        renderSuggestions();
+        explicitSelection = true;
+        updateSelection(true);
       }
     } else if (e.key === 'Tab' && filtered.length) {
       e.preventDefault();
       urlInput.value = filtered[activeIdx].url;
       activeIdx = 0;
+      explicitSelection = false;
       filtered = filterSuggestions(urlInput.value);
       renderSuggestions();
     }
@@ -940,10 +1074,8 @@ pub fn html() -> String {
     var idx = parseInt(item.getAttribute('data-idx'), 10);
     if (!isNaN(idx) && idx !== activeIdx) {
       activeIdx = idx;
-      var nodes = urlSuggest.querySelectorAll('.sg-item');
-      for (var i = 0; i < nodes.length; i++) {
-        nodes[i].classList.toggle('active', i === activeIdx);
-      }
+      explicitSelection = true;
+      updateSelection(false);
     }
   });
 
@@ -1004,8 +1136,6 @@ pub fn html() -> String {
   window.__setWorkspace = function(color, name) {
     var dot = document.getElementById('ws-dot');
     if (dot) dot.style.background = color;
-    var btn = document.getElementById('workspace-btn');
-    if (btn) btn.title = 'Workspaces (⌘⇧O) — ' + name;
   };
 
   // Settings
@@ -1037,7 +1167,7 @@ pub fn html() -> String {
   // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
-    if (e.target.closest('#ai-btn, .bar-btn, #page-title, #url, #url-edit-btn, #url-input, #url-suggest')) return;
+    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest')) return;
     if (editing) return;
     window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });
@@ -1054,6 +1184,5 @@ pub fn html() -> String {
         .replace("@@ICON_SPARKLES@@", crate::icons::SPARKLES)
         .replace("@@ICON_LOCK@@", crate::icons::LOCK)
         .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
-        .replace("@@ICON_PENCIL@@", crate::icons::PENCIL)
         .replace("@@ICON_LAYERS@@", crate::icons::LAYERS)
 }

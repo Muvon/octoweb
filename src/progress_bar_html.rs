@@ -22,30 +22,23 @@ pub fn html() -> String {
     top: 0;
     left: 0;
     width: 0%;
-    height: 3px;
-    background: linear-gradient(90deg,
-      color-mix(in srgb, var(--accent) 78%, transparent),
-      var(--accent));
+    height: 100%;
+    opacity: 0;
+    background: var(--accent);
     border-radius: 0 var(--r-capsule) var(--r-capsule) 0;
-    box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 38%, transparent);
+    box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 32%, transparent);
     transition: width var(--t-fast) var(--ease), opacity var(--t-pop) var(--ease);
   }
 
-  #bar::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 12px;
-    height: 100%;
-    border-radius: var(--r-capsule);
-    background: color-mix(in srgb, var(--accent) 72%, white);
-    box-shadow: 0 0 7px 1px color-mix(in srgb, var(--accent) 62%, transparent);
-  }
+  #bar.running { opacity: 1; }
 
   #bar.complete {
     width: 100%;
     opacity: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #bar { transition: none; }
   }
 </style>
 </head>
@@ -54,35 +47,68 @@ pub fn html() -> String {
 <script>
 (function() {
   const bar = document.getElementById('bar');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let current = 0;
+  let trickleTimer = null;
 
-  // Auto-start on load
-  window.__start = function() {
+  function stopTrickle() {
+    if (trickleTimer) {
+      clearInterval(trickleTimer);
+      trickleTimer = null;
+    }
+  }
+
+  function setProgress(next) {
+    current = Math.max(current, Math.min(95, Number(next) || 0));
+    bar.style.width = current + '%';
+  }
+
+  window.__stop = function() {
+    stopTrickle();
+    current = 0;
     bar.style.transition = 'none';
     bar.style.width = '0%';
-    bar.style.opacity = '1';
+    bar.classList.remove('running', 'complete');
+  };
+
+  window.__start = function() {
+    stopTrickle();
+    current = 0;
+    bar.style.transition = 'none';
+    bar.style.width = '0%';
     bar.classList.remove('complete');
-    // Force reflow
+    bar.classList.add('running');
     void bar.offsetWidth;
-    // Animate to ~70% quickly, then slower
-    bar.style.transition = 'width var(--t-pop) var(--spring)';
-    bar.style.width = '70%';
+    current = 8;
+    bar.style.width = current + '%';
+    if (reducedMotion.matches) return;
+    bar.style.transition = 'width 200ms var(--ease)';
+    trickleTimer = setInterval(function() {
+      setProgress(current + (85 - current) * 0.12);
+    }, 200);
   };
 
   window.__progress = function(pct) {
+    if (reducedMotion.matches) return;
     bar.style.transition = 'width var(--t-fast) var(--ease)';
-    bar.style.width = Math.min(95, pct) + '%';
+    setProgress(pct);
   };
 
-  window.__finish = function() {
-    bar.style.transition = 'width var(--t-pop) var(--spring), opacity var(--t-pop) var(--ease) var(--t-fast)';
+  window.__complete = function() {
+    stopTrickle();
+    current = 100;
+    bar.style.transition = reducedMotion.matches
+      ? 'none'
+      : 'width var(--t-pop) var(--spring), opacity var(--t-pop) var(--ease) var(--t-fast)';
     bar.style.width = '100%';
+    bar.classList.remove('running');
     bar.classList.add('complete');
   };
 
-  // Start immediately on load
-  window.__start();
+  window.__finish = window.__complete;
 })();
 </script>
 </body>
-</html>"#.replace("/*@@THEME@@*/", crate::theme::CSS)
+</html>"#
+        .replace("/*@@THEME@@*/", crate::theme::CSS)
 }

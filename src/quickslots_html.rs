@@ -1,7 +1,7 @@
 /// Static quick-slots footer bar — pinned at the bottom of the browser window.
 ///
 /// Page content ends above this bar (not overlaid). Same treatment as the title bar.
-/// Hover reveals ✕ to remove. Clicks open the slot URL.
+/// Hover or keyboard focus reveals a separate remove button. The primary button opens the URL.
 ///
 /// IPC messages sent to Rust:
 ///   { type: "quickslot_open",   slot: 0-9 }
@@ -9,7 +9,8 @@
 ///   { type: "quickslot_save",   slot: 0-9 }  (click empty slot → save current page)
 ///
 /// JS API called from Rust:
-///   window.__updateSlots(jsonArray)  — refresh slot data
+///   window.__updateSlots(jsonArray, activeUrl?)  — refresh slot data and current marker
+///   window.__setActiveUrl(activeUrl?)            — refresh only the current marker
 pub fn html() -> String {
     let template = r#"<!DOCTYPE html>
 <html>
@@ -36,6 +37,7 @@ pub fn html() -> String {
     justify-content: center;
     gap: 4px;
     padding: 0 8px;
+    overflow: hidden;
     background: var(--glass);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
@@ -48,34 +50,65 @@ pub fn html() -> String {
 
   .slot {
     position: relative;
-    display: flex;
-    align-items: center;
-    gap: 5px;
     height: 24px;
-    padding: 0 8px 0 6px;
     border-radius: var(--r-capsule);
     background: var(--fill);
     box-shadow: 0 0 0 0.5px var(--hairline);
-    cursor: pointer;
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
                 transform var(--t-fast) var(--ease);
-    max-width: 140px;
-    flex-shrink: 1;
+    max-width: 180px;
+    flex: 1 1 96px;
     min-width: 0;
     user-select: none;
     -webkit-user-select: none;
+    overflow: hidden;
   }
 
-  .slot:hover {
+  .slot:hover,
+  .slot:focus-within {
     background: var(--fill-hover);
   }
-  .slot:active,
+  .slot:has(.slot-open:active),
   .slot.current {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
   }
-  .slot:active { transform: scale(0.97); }
+  .slot:has(.slot-open:active) { transform: scale(0.97); }
+
+  button {
+    font-family: var(--font-text);
+  }
+
+  .slot-open,
+  .slot.empty {
+    width: 100%;
+    min-width: var(--ctl-min);
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--label);
+    cursor: pointer;
+  }
+
+  .slot-open {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 28px 0 6px;
+    border-radius: var(--r-capsule);
+    overflow: hidden;
+  }
 
   .slot.empty {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    flex: 1 1 72px;
+    max-width: 140px;
+    min-width: var(--ctl-min);
+    padding: 0 6px;
+    border-radius: var(--r-capsule);
     background: transparent;
     box-shadow: none;
     border: 1px dashed var(--hairline);
@@ -84,7 +117,8 @@ pub fn html() -> String {
                 transform var(--t-fast) var(--ease);
   }
 
-  .slot.empty:hover {
+  .slot.empty:hover,
+  .slot.empty:focus-visible {
     background: var(--fill-hover);
     border-color: transparent;
     box-shadow: 0 0 0 0.5px var(--hairline);
@@ -92,14 +126,15 @@ pub fn html() -> String {
 
   .slot.empty:active { transform: scale(0.97); }
 
-  .slot .badge {
+  .slot .badge,
+  .slot.empty .badge {
     flex-shrink: 0;
     width: 17px; height: 17px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 0;
-    font-size: 9px;
+    font-size: var(--fs-caption);
     font-weight: 600;
     color: var(--label-2);
     font-variant-numeric: tabular-nums;
@@ -112,8 +147,9 @@ pub fn html() -> String {
     object-fit: contain;
   }
 
-  .slot .label {
-    font-size: 11px;
+  .slot .label,
+  .slot.empty .label {
+    font-size: var(--fs-body);
     font-weight: 450;
     color: var(--label);
     white-space: nowrap;
@@ -124,8 +160,11 @@ pub fn html() -> String {
   }
 
   .slot.empty .label {
-    color: var(--label-3);
+    color: var(--label-2);
     font-weight: 400;
+    opacity: 0;
+    max-width: 0;
+    transition: opacity var(--t-fast) var(--ease), max-width var(--t-fast) var(--ease);
   }
 
   /* Empty-state plus glyph — quiet at rest, surfaces on hover */
@@ -134,23 +173,15 @@ pub fn html() -> String {
     align-items: center;
     justify-content: center;
     width: 10px; height: 10px;
-    opacity: 0.35;
+    opacity: 0.55;
     transition: opacity var(--t-fast) var(--ease);
-    color: var(--label-3);
+    color: var(--label-2);
   }
   .slot.empty .plus svg { width: 100%; height: 100%; }
-  .slot.empty .hint {
-    font-size: 10px;
-    color: var(--label-3);
-    opacity: 0;
-    max-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
-    transition: opacity var(--t-fast) var(--ease), max-width var(--t-fast) var(--ease);
-    letter-spacing: 0.01em;
-  }
-  .slot.empty:hover .plus { opacity: 0; max-width: 0; width: 0; }
-  .slot.empty:hover .hint { opacity: 1; max-width: 60px; }
+  .slot.empty:hover .plus,
+  .slot.empty:focus-visible .plus { display: none; }
+  .slot.empty:hover .label,
+  .slot.empty:focus-visible .label { opacity: 1; max-width: 70px; }
 
   /* Close button — appears on hover, right side */
   .slot .close {
@@ -158,9 +189,10 @@ pub fn html() -> String {
     right: 1px;
     top: 50%;
     transform: translateY(-50%);
-    width: 22px; height: 22px;
+    width: var(--ctl-min); height: var(--ctl-min);
     border-radius: var(--r-capsule);
     background: var(--fill);
+    border: none;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -170,7 +202,8 @@ pub fn html() -> String {
     cursor: pointer;
   }
 
-  .slot:not(.empty):hover .close {
+  .slot:hover .close,
+  .slot:focus-within .close {
     opacity: 1;
     pointer-events: auto;
   }
@@ -190,6 +223,13 @@ pub fn html() -> String {
   .slot .close:hover svg {
     stroke: var(--err);
   }
+
+  @media (max-width: 999px) {
+    #bar { justify-content: flex-start; }
+    .slot,
+    .slot.empty { min-width: 0; }
+    .slot.empty.extra-empty { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -198,26 +238,36 @@ pub fn html() -> String {
 (function() {
   const bar = document.getElementById('bar');
   let slots = [];
+  let activeUrl = '';
+
+  function appendBadge(target, index) {
+    const badge = document.createElement('span');
+    badge.className = 'badge kbd';
+    badge.textContent = (index + 1) % 10;
+    target.appendChild(badge);
+  }
 
   function render() {
-    bar.innerHTML = '';
+    bar.replaceChildren();
+    let foundEmpty = false;
     for (let i = 0; i < 10; i++) {
       const s = slots[i];
-      const el = document.createElement('div');
-      el.className = 'slot' + (s ? '' : ' empty');
-
-      // Number badge: 1-9, then 0
-      const badge = document.createElement('div');
-      badge.className = 'badge kbd';
-      badge.textContent = (i + 1) % 10;
-      el.appendChild(badge);
 
       if (s) {
+        const el = document.createElement('div');
+        el.className = 'slot' + (activeUrl && s.url === activeUrl ? ' current' : '');
+
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'slot-open';
+        appendBadge(open, i);
+
         if (s.favicon) {
           const img = document.createElement('img');
           img.className = 'favicon';
           img.src = s.favicon;
-          el.appendChild(img);
+          img.alt = '';
+          open.appendChild(img);
         }
         const lbl = document.createElement('span');
         lbl.className = 'label';
@@ -228,46 +278,59 @@ pub fn html() -> String {
         } catch(_) {
           lbl.textContent = s.title || s.url;
         }
-        lbl.title = s.title ? s.title + ' — ' + s.url : s.url;
-        el.appendChild(lbl);
+        open.title = s.title ? s.title + ' — ' + s.url : s.url;
+        open.appendChild(lbl);
+        open.addEventListener('click', function() {
+          window.ipc.postMessage(JSON.stringify({ type: 'quickslot_open', slot: i }));
+        });
+        el.appendChild(open);
 
-        // Close button
-        const close = document.createElement('div');
+        const close = document.createElement('button');
+        close.type = 'button';
         close.className = 'close';
+        close.setAttribute('aria-label', 'Remove slot ' + ((i + 1) % 10));
+        close.title = 'Remove slot ' + ((i + 1) % 10);
         close.innerHTML = '<svg viewBox="0 0 8 8"><line x1="1" y1="1" x2="7" y2="7"/><line x1="7" y1="1" x2="1" y2="7"/></svg>';
-        close.addEventListener('click', function(e) {
-          e.stopPropagation();
+        close.addEventListener('click', function() {
           window.ipc.postMessage(JSON.stringify({ type: 'quickslot_remove', slot: i }));
         });
         el.appendChild(close);
-
-        el.addEventListener('click', function() {
-          window.ipc.postMessage(JSON.stringify({ type: 'quickslot_open', slot: i }));
-        });
+        bar.appendChild(el);
       } else {
+        const el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'slot empty' + (foundEmpty ? ' extra-empty' : '');
+        foundEmpty = true;
+        appendBadge(el, i);
+
         const plus = document.createElement('span');
         plus.className = 'plus';
         plus.innerHTML = '@@ICON_PLUS@@';
         el.appendChild(plus);
 
-        const hint = document.createElement('span');
-        hint.className = 'hint';
-        hint.textContent = '⌘⇧' + ((i + 1) % 10);
-        el.appendChild(hint);
+        const lbl = document.createElement('span');
+        lbl.className = 'label';
+        lbl.textContent = 'Save page';
+        el.appendChild(lbl);
 
-        el.title = 'Save current page to slot ' + ((i + 1) % 10) + '  (⌘⇧' + ((i + 1) % 10) + ')';
+        el.title = 'Save current page (⌘⇧' + ((i + 1) % 10) + ')';
 
         el.addEventListener('click', function() {
           window.ipc.postMessage(JSON.stringify({ type: 'quickslot_save', slot: i }));
         });
+        bar.appendChild(el);
       }
-
-      bar.appendChild(el);
     }
   }
 
-  window.__updateSlots = function(data) {
-    slots = data;
+  window.__updateSlots = function(data, currentUrl) {
+    slots = Array.isArray(data) ? data : [];
+    activeUrl = typeof currentUrl === 'string' ? currentUrl : '';
+    render();
+  };
+
+  window.__setActiveUrl = function(currentUrl) {
+    activeUrl = typeof currentUrl === 'string' ? currentUrl : '';
     render();
   };
 

@@ -6,6 +6,31 @@ use wry::http::Response;
 
 use crate::browser;
 
+/// Copy UTF-8 text to the macOS general pasteboard.
+pub fn copy_text_to_pasteboard(text: &str) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::{NSArray, NSString};
+
+    unsafe {
+        let pasteboard: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+        let _: () = msg_send![pasteboard, clearContents];
+        let text = NSString::from_str(text);
+        let objects = NSArray::arrayWithObject(&*text);
+        let _: bool = msg_send![pasteboard, writeObjects: &*objects];
+    }
+}
+
+/// Reveal a downloaded file in Finder.
+pub fn reveal_file_in_finder(path: &str) {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    let urls = NSArray::arrayWithObject(&*url);
+    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
+}
+
 /// Single JS script injected into every tab page at document-start.
 ///
 /// Merges all five former scripts into one IIFE so JavaScriptCore compiles

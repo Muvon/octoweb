@@ -21,12 +21,10 @@ pub fn html() -> String {
 
   #backdrop {
     position: fixed; inset: 0;
-    background: color-mix(in srgb, var(--label) 18%, transparent);
+    background: rgba(0, 0, 0, 0.10);
     display: flex;
     align-items: center;
     justify-content: center;
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
     animation: fadeIn var(--t-fast) var(--ease);
   }
 
@@ -55,7 +53,7 @@ pub fn html() -> String {
 
   #title {
     font-family: var(--font-display);
-    font-size: 15px;
+    font-size: 17px;
     font-weight: 600;
     color: var(--label);
     letter-spacing: -0.01em;
@@ -70,7 +68,7 @@ pub fn html() -> String {
     border: none;
     background: transparent;
     cursor: pointer;
-    color: var(--label-3);
+    color: var(--label-2);
     transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
                 transform var(--t-fast) var(--ease);
   }
@@ -83,8 +81,8 @@ pub fn html() -> String {
     gap: 5px;
     margin-left: auto;
     margin-right: 8px;
-    color: var(--label-3);
-    font-size: 10px;
+    color: var(--label-2);
+    font-size: 11px;
   }
 
   .section {
@@ -105,7 +103,7 @@ pub fn html() -> String {
 
   code {
     font-family: var(--font-mono);
-    font-size: 10.5px;
+    font-size: 11px;
     background: var(--fill-hover);
     border: 0.5px solid var(--hairline);
     border-radius: var(--r-ctl);
@@ -119,6 +117,7 @@ pub fn html() -> String {
     padding: 7px 12px;
     gap: 12px;
     min-height: 32px;
+    flex-wrap: wrap;
   }
 
   .row + .row {
@@ -126,7 +125,7 @@ pub fn html() -> String {
   }
 
   .row-label {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--label);
     white-space: nowrap;
     flex-shrink: 0;
@@ -143,13 +142,21 @@ pub fn html() -> String {
     max-width: 240px;
   }
 
+  .row-error {
+    flex: 0 0 100%;
+    padding-left: 0;
+    color: var(--err);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
   .row input[type="text"],
   .row input[type="number"] {
     flex: 1;
     min-width: 0;
     height: 24px;
     padding: 0 8px;
-    font-size: 12px;
+    font-size: 13px;
     font-family: inherit;
     color: var(--label);
     background: var(--fill);
@@ -174,7 +181,7 @@ pub fn html() -> String {
     max-width: 170px;
     min-height: 24px;
     padding: 2px 24px 2px 8px;
-    font-size: 12px;
+    font-size: 13px;
     font-family: inherit;
     color: var(--label);
     background-color: var(--fill);
@@ -230,7 +237,7 @@ pub fn html() -> String {
   .tab {
     flex: 1;
     text-align: center;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--label-2);
     padding: 5px 8px;
@@ -259,6 +266,7 @@ pub fn html() -> String {
     min-height: 17px;
     white-space: nowrap;
     user-select: none;
+    font-size: 11px;
   }
   .kb-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   .kb-bind {
@@ -280,6 +288,17 @@ pub fn html() -> String {
     box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .rec-hint { font-size: 11px; color: var(--accent); }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .kb-reset {
     display: flex;
     align-items: center;
@@ -287,7 +306,7 @@ pub fn html() -> String {
     width: 22px; height: 22px;
     border: none;
     background: transparent;
-    color: var(--label-3);
+    color: var(--label-2);
     cursor: pointer;
     border-radius: var(--r-capsule);
     font-size: 13px;
@@ -306,7 +325,7 @@ pub fn html() -> String {
   .kb-note { font-size: 11px; color: var(--label-2); }
   .kb-reset-all {
     min-height: 24px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--on-accent);
     background: var(--accent);
@@ -322,11 +341,11 @@ pub fn html() -> String {
 </head>
 <body>
 <div id="backdrop">
-  <div id="panel" class="glass-panel">
+  <div id="panel" class="glass-panel" role="dialog" aria-modal="true" aria-labelledby="title">
     <div id="header">
       <span id="title">Settings</span>
       <span id="dismiss-hint"><span class="kbd">esc</span> close</span>
-      <button id="close-btn" title="Close">
+      <button id="close-btn" title="Close" aria-label="Close settings">
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
@@ -336,7 +355,7 @@ pub fn html() -> String {
 
     <div class="tabs">
       <button class="tab active" data-pane="tab-general">General</button>
-      <button class="tab" data-pane="tab-keybindings">Keybindings</button>
+      <button class="tab" data-pane="tab-keybindings">Keyboard shortcuts</button>
     </div>
 
     <div id="tab-general" class="tab-pane active">
@@ -344,14 +363,14 @@ pub fn html() -> String {
       <div class="section-title">General</div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Home page</span>
+          <label class="row-label" for="home_page">Home page</label>
           <span class="row-hint">Loads on launch when there's no previous session to restore.</span>
         </div>
         <input type="text" id="home_page" data-key="home_page">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Search engine</span>
+          <label class="row-label" for="search_engine_select">Search engine</label>
           <span class="row-hint">Used when you type a search instead of a URL.</span>
         </div>
         <select id="search_engine_select">
@@ -365,17 +384,17 @@ pub fn html() -> String {
       </div>
       <div class="row with-hint" id="search_engine_custom_row" style="display:none">
         <div class="row-label-stack">
-          <span class="row-label">Custom search URL</span>
+          <label class="row-label" for="search_engine">Custom search URL</label>
           <span class="row-hint"><code>{}</code> is replaced with your search terms.</span>
         </div>
         <input type="text" id="search_engine" data-key="search_engine" placeholder="https://example.com/search?q={}">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Max history</span>
-          <span class="row-hint">Total entries kept across sessions.</span>
+          <label class="row-label" for="max_history">Max history</label>
+          <span class="row-hint">Keep 0 or more total entries across sessions.</span>
         </div>
-        <input type="number" id="max_history" data-key="max_history" min="100" step="100">
+        <input type="number" id="max_history" data-key="max_history" min="0" step="1">
       </div>
     </div>
 
@@ -383,15 +402,15 @@ pub fn html() -> String {
       <div class="section-title">Window</div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Default width</span>
-          <span class="row-hint">Initial window width in pixels.</span>
+          <label class="row-label" for="window_width">Default width</label>
+          <span class="row-hint">Use an initial window width of at least 400 pixels.</span>
         </div>
         <input type="number" id="window_width" data-key="window_width" min="400" step="10">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Default height</span>
-          <span class="row-hint">Initial window height in pixels.</span>
+          <label class="row-label" for="window_height">Default height</label>
+          <span class="row-hint">Use an initial window height of at least 300 pixels.</span>
         </div>
         <input type="number" id="window_height" data-key="window_height" min="300" step="10">
       </div>
@@ -401,17 +420,17 @@ pub fn html() -> String {
       <div class="section-title">Memory</div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Aggressive hibernation</span>
-          <span class="row-hint">Reclaim tab memory sooner. Leave off on modern Macs — tabs survive longer.</span>
+          <label class="row-label" id="aggressive_hibernation_label" for="aggressive_hibernation">Save memory aggressively</label>
+          <span class="row-hint">Reclaim tab memory sooner; leave this off on modern Macs so tabs survive longer.</span>
         </div>
-        <button class="toggle" id="aggressive_hibernation" data-key="aggressive_hibernation"></button>
+        <button class="toggle" id="aggressive_hibernation" data-key="aggressive_hibernation" role="switch" aria-checked="false" aria-labelledby="aggressive_hibernation_label"></button>
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Max open tabs</span>
-          <span class="row-hint">Least-recently-used tabs above this are closed automatically; pages stay in history. 0 disables.</span>
+          <label class="row-label" for="max_tabs">Max open tabs</label>
+          <span class="row-hint">Close least-recently-used tabs above this non-negative limit while keeping pages in history; 0 disables the limit.</span>
         </div>
-        <input type="number" id="max_tabs" data-key="max_tabs" min="0" step="50">
+        <input type="number" id="max_tabs" data-key="max_tabs" min="0" step="1">
       </div>
     </div>
 
@@ -419,36 +438,36 @@ pub fn html() -> String {
       <div class="section-title">AI</div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Auto-hide edit modal</span>
-          <span class="row-hint">Hide the ⌘⇧E modal after submit; show a loading cursor instead.</span>
+          <label class="row-label" id="ai_edit_auto_hide_label" for="ai_edit_auto_hide">Hide the editor after applying</label>
+          <span class="row-hint">Hide the <span id="inline-edit-key">⌘⇧E</span> modal after submit; show a loading cursor instead.</span>
         </div>
-        <button class="toggle" id="ai_edit_auto_hide" data-key="ai_edit_auto_hide"></button>
+        <button class="toggle" id="ai_edit_auto_hide" data-key="ai_edit_auto_hide" role="switch" aria-checked="false" aria-labelledby="ai_edit_auto_hide_label"></button>
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Editor prompt history size</span>
-          <span class="row-hint">Recall via ⌃P / ⌃N inside the ⌘⇧E modal.</span>
+          <label class="row-label" for="max_prompt_history">Editor prompt history size</label>
+          <span class="row-hint">Keep at least 10 prompts for recall via ⌃P / ⌃N inside the editor.</span>
         </div>
         <input type="number" id="max_prompt_history" data-key="max_prompt_history" min="10" step="10">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Assistant prompt history size</span>
-          <span class="row-hint">Sidebar (⌘⇧A) prompt recall depth.</span>
+          <label class="row-label" for="max_ai_prompt_history">Assistant prompt history size</label>
+          <span class="row-hint">Keep at least 10 prompts available for recall in the assistant sidebar.</span>
         </div>
         <input type="number" id="max_ai_prompt_history" data-key="max_ai_prompt_history" min="10" step="10">
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Proactive learning</span>
+          <label class="row-label" id="proactive_learning_label" for="proactive_learning">Proactive learning</label>
           <span class="row-hint">Background agent reads recent browsing and memorizes patterns.</span>
         </div>
-        <button class="toggle" id="proactive_learning" data-key="proactive_learning"></button>
+        <button class="toggle" id="proactive_learning" data-key="proactive_learning" role="switch" aria-checked="false" aria-labelledby="proactive_learning_label"></button>
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
-          <span class="row-label">Learning interval (min)</span>
-          <span class="row-hint">How often the learning agent runs.</span>
+          <label class="row-label" for="learning_interval_min">Learning interval (min)</label>
+          <span class="row-hint">Run the learning agent at intervals of at least 5 minutes.</span>
         </div>
         <input type="number" id="learning_interval_min" data-key="learning_interval_min" min="5" step="5">
       </div>
@@ -457,6 +476,7 @@ pub fn html() -> String {
 
     <div id="tab-keybindings" class="tab-pane">
       <div id="kb-groups"></div>
+      <div id="kb-record-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
       <div id="kb-error" class="kb-error"></div>
       <div class="kb-footer">
         <span class="kb-note">Click a shortcut, then press the new combination.</span>
@@ -481,14 +501,71 @@ pub fn html() -> String {
   });
   document.getElementById('close-btn').addEventListener('click', close);
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Tab') {
+      var focusable = Array.prototype.slice.call(document.querySelectorAll('#panel button:not([disabled]), #panel input:not([disabled]), #panel select:not([disabled])'))
+        .filter(function(el) { return el.offsetParent !== null; });
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
   });
 
-  // Send update on change for text/number inputs
+  var lastValidValues = {};
+
+  function validationError(el) {
+    var value = el.value.trim();
+    if (el.id === 'search_engine' && value.indexOf('{}') < 0) {
+      return 'Include {} where the search terms should appear.';
+    }
+    if (el.type !== 'number') return '';
+    if (value === '' || !Number.isFinite(Number(value)) || !Number.isInteger(Number(value))) {
+      return 'Enter a whole number.';
+    }
+    var number = Number(value);
+    if ((el.id === 'max_history' || el.id === 'max_tabs') && number < 0) {
+      return 'Enter a non-negative integer.';
+    }
+    var min = el.hasAttribute('min') ? Number(el.min) : null;
+    var max = el.hasAttribute('max') ? Number(el.max) : null;
+    if (min !== null && number < min) return 'Enter ' + min + ' or more.';
+    if (max !== null && number > max) return 'Enter ' + max + ' or less.';
+    return '';
+  }
+
+  function showRowError(el, message) {
+    var row = el.closest('.row');
+    if (!row) return;
+    var error = row.querySelector('.row-error');
+    if (message) {
+      if (!error) {
+        error = document.createElement('div');
+        error.className = 'row-error';
+        error.setAttribute('aria-live', 'polite');
+        row.appendChild(error);
+      }
+      error.textContent = message;
+      el.setAttribute('aria-invalid', 'true');
+      el.setAttribute('aria-describedby', error.id || (error.id = el.id + '-error'));
+    } else {
+      if (error) error.remove();
+      el.removeAttribute('aria-invalid');
+      el.removeAttribute('aria-describedby');
+    }
+  }
+
+  function commitInput(el) {
+    var error = validationError(el);
+    showRowError(el, error);
+    if (error) return;
+    lastValidValues[el.dataset.key] = el.value;
+    ipc({ type: 'settings_update', key: el.dataset.key, value: el.value });
+  }
+
+  // Validate locally before any text or numeric value reaches Rust.
   document.querySelectorAll('input[data-key]').forEach(function(el) {
-    el.addEventListener('change', function() {
-      ipc({ type: 'settings_update', key: el.dataset.key, value: el.value });
-    });
+    el.addEventListener('change', function() { commitInput(el); });
   });
 
   // Toggle switches
@@ -496,6 +573,7 @@ pub fn html() -> String {
     el.addEventListener('click', function() {
       var on = !el.classList.contains('on');
       el.classList.toggle('on', on);
+      el.setAttribute('aria-checked', on ? 'true' : 'false');
       ipc({ type: 'settings_update', key: el.dataset.key, value: on ? 'true' : 'false' });
     });
   });
@@ -506,12 +584,17 @@ pub fn html() -> String {
       var el = document.getElementById(key);
       if (!el) continue;
       if (el.classList.contains('toggle')) {
-        el.classList.toggle('on', cfg[key] === true || cfg[key] === 'true');
+        var on = cfg[key] === true || cfg[key] === 'true';
+        el.classList.toggle('on', on);
+        el.setAttribute('aria-checked', on ? 'true' : 'false');
       } else {
         el.value = cfg[key];
+        if (el.dataset.key) lastValidValues[el.dataset.key] = String(cfg[key]);
+        showRowError(el, '');
       }
     }
     syncSearchEngine();
+    requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
 
   // ── Search engine presets ─────────────────────────────────────────────
@@ -537,6 +620,8 @@ pub fn html() -> String {
     }
     seCustomRow.style.display = 'none';
     seInput.value = seSelect.value;
+    lastValidValues.search_engine = seSelect.value;
+    showRowError(seInput, '');
     ipc({ type: 'settings_update', key: 'search_engine', value: seSelect.value });
   });
 
@@ -575,11 +660,36 @@ pub fn html() -> String {
   var lastData = null;     // most recent bindings snapshot, for cancel re-render
   var recordingId = null;  // action id currently capturing a chord
   var recordingBtn = null;
+  var pendingFocusId = null;
+
+  function actionFor(data, id) {
+    return data && data.actions && data.actions.find(function(a) { return a.id === id; });
+  }
+
+  function actionRow(id) {
+    return Array.prototype.find.call(document.querySelectorAll('[data-action]'), function(row) {
+      return row.dataset.action === id;
+    });
+  }
+
+  function focusBinding(id) {
+    var row = actionRow(id);
+    var button = row && row.querySelector('[data-bind]');
+    if (button) button.focus();
+  }
+
+  function setRecordingStatus(message) {
+    document.getElementById('kb-record-status').textContent = message;
+  }
 
   function cancelRecord() {
     if (recordingId) {
+      var id = recordingId;
       ipc({ type: 'keybind_capture', on: false });
-      if (lastData) render(lastData);
+      recordingId = null;
+      recordingBtn = null;
+      setRecordingStatus('');
+      if (lastData) replaceActionRow(id, lastData, true);
     }
   }
 
@@ -589,22 +699,43 @@ pub fn html() -> String {
     recordingBtn = btn;
     btn.classList.add('recording');
     btn.querySelector('.keys').innerHTML = '<span class="rec-hint">Press keys…</span>';
+    var action = actionFor(lastData, id);
+    if (action) setRecordingStatus('Recording shortcut for ' + action.label + '. Press keys, or Escape to cancel.');
     // Tell the host to stop firing global shortcuts so we can capture the chord.
     ipc({ type: 'keybind_capture', on: true });
   }
 
   function kbRow(a) {
     var keys = a.keys.map(function(k) { return '<kbd class="kbd">' + esc(k) + '</kbd>'; }).join('');
+    var currentChord = a.keys.join('');
+    var controlId = 'kb-bind-' + esc(a.id);
     var reset = a.is_default ? '' :
-      '<button class="kb-reset" data-reset="' + esc(a.id) + '" title="Reset to default">↺</button>';
-    return '<div class="row">' +
-      '<span class="row-label">' + esc(a.label) + '</span>' +
+      '<button class="kb-reset" data-reset="' + esc(a.id) + '" title="Reset to default" aria-label="Reset ' + esc(a.label) + ' to default">↺</button>';
+    return '<div class="row" data-action="' + esc(a.id) + '">' +
+      '<label class="row-label" for="' + controlId + '">' + esc(a.label) + '</label>' +
       '<span class="kb-right">' + reset +
-        '<button class="kb-bind" data-bind="' + esc(a.id) + '"><span class="keys">' + keys + '</span></button>' +
+        '<button class="kb-bind" id="' + controlId + '" data-bind="' + esc(a.id) + '" aria-label="Change shortcut for ' + esc(a.label) + ', currently ' + esc(currentChord) + '"><span class="keys">' + keys + '</span></button>' +
       '</span></div>';
   }
 
-  function render(data) {
+  function updateKeybindingError(data) {
+    var err = document.getElementById('kb-error');
+    if (data.error) { err.textContent = data.error; err.classList.add('show'); }
+    else { err.textContent = ''; err.classList.remove('show'); }
+  }
+
+  function replaceActionRow(id, data, restoreFocus) {
+    var action = actionFor(data, id);
+    var existing = actionRow(id);
+    if (!action || !existing) return false;
+    var holder = document.createElement('div');
+    holder.innerHTML = kbRow(action);
+    existing.replaceWith(holder.firstElementChild);
+    if (restoreFocus) focusBinding(id);
+    return true;
+  }
+
+  function render(data, restoreFocusId) {
     lastData = data;
     recordingId = null;
     recordingBtn = null;
@@ -617,15 +748,43 @@ pub fn html() -> String {
       return '<div class="section"><div class="section-title">' + esc(g) + '</div>' +
         groups[g].map(kbRow).join('') + '</div>';
     }).join('');
-    var err = document.getElementById('kb-error');
-    if (data.error) { err.textContent = data.error; err.classList.add('show'); }
-    else { err.textContent = ''; err.classList.remove('show'); }
+    updateKeybindingError(data);
+    if (restoreFocusId) focusBinding(restoreFocusId);
   }
 
   // Rust pushes the full binding set on open and after every edit.
   window.__setKeybindings = function(data) {
     if (!data || !data.actions) return;
-    render(data);
+    var focused = document.activeElement.closest && document.activeElement.closest('[data-action]');
+    var restoreFocusId = pendingFocusId || (focused && focused.dataset.action);
+    var previous = lastData;
+    lastData = data;
+    recordingId = null;
+    recordingBtn = null;
+
+    var changed = previous ? data.actions.filter(function(action) {
+      var old = actionFor(previous, action.id);
+      return !old || JSON.stringify(old) !== JSON.stringify(action);
+    }).map(function(action) { return action.id; }) : [];
+
+    if (!previous) {
+      render(data, restoreFocusId);
+    } else if (pendingFocusId) {
+      if (!replaceActionRow(pendingFocusId, data, true)) render(data, pendingFocusId);
+      updateKeybindingError(data);
+    } else if (changed.length === 1) {
+      if (!replaceActionRow(changed[0], data, restoreFocusId === changed[0])) render(data, restoreFocusId);
+      updateKeybindingError(data);
+    } else if (changed.length > 1) {
+      render(data, restoreFocusId);
+    } else {
+      updateKeybindingError(data);
+      if (restoreFocusId) focusBinding(restoreFocusId);
+    }
+    pendingFocusId = null;
+
+    var inlineEdit = actionFor(data, 'inline_edit');
+    if (inlineEdit) document.getElementById('inline-edit-key').textContent = inlineEdit.keys.join('');
   };
 
   // Delegate clicks: start recording on a binding, reset on the ↺ button.
@@ -633,7 +792,8 @@ pub fn html() -> String {
     var reset = e.target.closest('[data-reset]');
     if (reset) {
       cancelRecord();
-      ipc({ type: 'keybind_reset', action: reset.dataset.reset });
+      pendingFocusId = reset.dataset.reset;
+      ipc({ type: 'keybind_reset', action: pendingFocusId });
       return;
     }
     var bind = e.target.closest('[data-bind]');
@@ -646,6 +806,7 @@ pub fn html() -> String {
   });
 
   document.getElementById('kb-reset-all').addEventListener('click', function() {
+    cancelRecord();
     ipc({ type: 'keybind_reset_all' });
   });
 
@@ -672,6 +833,8 @@ pub fn html() -> String {
     var id = recordingId;
     recordingId = null;
     recordingBtn = null;
+    setRecordingStatus('');
+    pendingFocusId = id;
     ipc({ type: 'keybind_record', action: id, chord: mods.concat([token]).join('+') });
     ipc({ type: 'keybind_capture', on: false });
   }, true);

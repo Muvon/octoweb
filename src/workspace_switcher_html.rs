@@ -46,12 +46,10 @@ pub fn html() -> String {
 
   #title {
     font-family: var(--font-display);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--label-2);
     padding: 4px 8px 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
   }
 
   .ws-row {
@@ -66,6 +64,7 @@ pub fn html() -> String {
   }
   .ws-row:hover { background: var(--fill-hover); }
   .ws-row:active { background: var(--fill-press); }
+  .ws-row.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
 
   .ws-dot {
     width: 10px; height: 10px;
@@ -77,7 +76,7 @@ pub fn html() -> String {
   .ws-name {
     flex: 1;
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 13px;
     color: var(--label);
     white-space: nowrap;
     overflow: hidden;
@@ -89,7 +88,7 @@ pub fn html() -> String {
     min-width: 0;
     height: 22px;
     padding: 0 4px;
-    font-size: 12.5px;
+    font-size: 13px;
     font-family: inherit;
     color: var(--label);
     background: var(--fill);
@@ -101,14 +100,14 @@ pub fn html() -> String {
 
   .ws-count {
     font-size: 11px;
-    color: var(--label-3);
+    color: var(--label-2);
     flex-shrink: 0;
   }
 
   .ws-kbd {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
-    color: var(--label-3);
+    color: var(--label-2);
     background: var(--fill);
     box-shadow: 0 0 0 0.5px var(--hairline);
     border-radius: var(--r-capsule);
@@ -133,10 +132,10 @@ pub fn html() -> String {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 20px; height: 20px;
+    width: 22px; height: 22px;
     border: none;
     background: transparent;
-    color: var(--label-3);
+    color: var(--label-2);
     cursor: pointer;
     border-radius: var(--r-ctl);
     flex-shrink: 0;
@@ -144,7 +143,9 @@ pub fn html() -> String {
     pointer-events: none;
     transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
   }
-  .ws-row:hover .ws-icon-btn { opacity: 1; pointer-events: auto; }
+  .ws-row:hover .ws-icon-btn,
+  .ws-row:focus-within .ws-icon-btn,
+  .ws-icon-btn:focus-visible { opacity: 1; pointer-events: auto; }
   .ws-icon-btn:hover { background: var(--fill-press); color: var(--label); }
   .ws-icon-btn svg { width: 12px; height: 12px; }
   .ws-icon-btn.ws-delete[disabled] { opacity: 0 !important; pointer-events: none !important; }
@@ -164,20 +165,23 @@ pub fn html() -> String {
   }
   .ws-live:hover { background: var(--fill-hover); }
   .ws-live:active { background: var(--fill-press); }
+  .ws-live.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .ws-live-dot {
     width: 6px; height: 6px;
     border-radius: 50%;
-    background: #ff453a;
+    background: var(--err);
     flex-shrink: 0;
     animation: livePulse 1.6s ease-in-out infinite;
   }
   @keyframes livePulse { 50% { opacity: 0.35; } }
   .ws-live-title {
+    flex: 1;
     min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .ws-live-status { flex-shrink: 0; color: var(--label-2); font-size: 11px; }
 
   .ws-sep {
     height: 0.5px;
@@ -194,12 +198,13 @@ pub fn html() -> String {
     border-radius: var(--r-ctl);
     cursor: pointer;
     color: var(--accent);
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     transition: background var(--t-fast) var(--ease);
   }
   .ws-create:hover { background: var(--fill-hover); }
   .ws-create:active { background: var(--fill-press); }
+  .ws-create.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .ws-create-icon { display: inline-flex; width: 14px; height: 14px; }
   .ws-create-icon svg { width: 100%; height: 100%; }
 </style>
@@ -208,11 +213,11 @@ pub fn html() -> String {
 <div id="backdrop">
   <div id="panel" class="glass-panel">
     <div id="title">Workspaces</div>
-    <div id="ws-list"></div>
-    <div class="ws-sep"></div>
-    <div class="ws-create" id="ws-create-row">
-      <span class="ws-create-icon">@@ICON_PLUS@@</span>
-      <span>New Workspace</span>
+    <div id="ws-list" role="listbox" aria-label="Workspaces">
+      <div class="ws-create" id="ws-create-row" role="option" aria-selected="false" tabindex="-1" data-row-key="create">
+        <span class="ws-create-icon">@@ICON_PLUS@@</span>
+        <span>Create workspace</span>
+      </div>
     </div>
   </div>
 </div>
@@ -229,15 +234,55 @@ pub fn html() -> String {
   document.getElementById('backdrop').addEventListener('mousedown', function(e) {
     if (e.target === this) close();
   });
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') { e.preventDefault(); close(); }
-  });
-
-  document.getElementById('ws-create-row').addEventListener('click', function() {
-    ipc({ type: 'workspace_create' });
-  });
-
   var lastData = [];
+  var selectedKey = null;
+  var pendingFocusKey = null;
+
+  function selectableRows() {
+    return Array.prototype.slice.call(document.querySelectorAll('[data-row-key]'));
+  }
+
+  function setSelection(row, focus) {
+    if (!row) return;
+    selectedKey = row.dataset.rowKey;
+    selectableRows().forEach(function(candidate) {
+      var selected = candidate === row;
+      candidate.classList.toggle('selected', selected);
+      candidate.setAttribute('aria-selected', selected ? 'true' : 'false');
+      candidate.tabIndex = selected ? 0 : -1;
+    });
+    row.scrollIntoView({ block: 'nearest' });
+    if (focus) row.focus();
+  }
+
+  function activateRow(row) {
+    if (!row) return;
+    if (row.dataset.kind === 'workspace') {
+      ipc({ type: 'workspace_switch', id: row.dataset.workspaceId });
+    } else if (row.dataset.kind === 'live') {
+      ipc({ type: 'workspace_jump_tab', tab_id: Number(row.dataset.tabId) });
+    } else if (row.dataset.kind === 'create') {
+      ipc({ type: 'workspace_create' });
+    }
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.target.closest('input')) return;
+    var rows = selectableRows();
+    if (!rows.length) return;
+    var current = rows.indexOf(document.activeElement.closest && document.activeElement.closest('[data-row-key]'));
+    if (current < 0) current = Math.max(0, rows.findIndex(function(row) { return row.dataset.rowKey === selectedKey; }));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      var delta = e.key === 'ArrowDown' ? 1 : -1;
+      setSelection(rows[(current + delta + rows.length) % rows.length], true);
+    } else if (e.key === 'Enter') {
+      if (e.target.closest('button')) return;
+      e.preventDefault();
+      activateRow(rows[current]);
+    }
+  });
 
   function renameStart(row, ws) {
     var nameEl = row.querySelector('.ws-name');
@@ -249,18 +294,22 @@ pub fn html() -> String {
     input.focus();
     input.select();
 
-    function commit() {
+    var finished = false;
+    function finish(send) {
+      if (finished) return;
+      finished = true;
       var val = input.value.trim();
-      if (val && val !== ws.name) {
+      pendingFocusKey = 'workspace-' + ws.id;
+      if (send && val && val !== ws.name) {
         ipc({ type: 'workspace_rename', id: ws.id, name: val });
       } else {
-        render(lastData);
+        render(lastData, pendingFocusKey);
       }
     }
-    input.addEventListener('blur', commit);
+    input.addEventListener('blur', function() { finish(true); });
     input.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); render(lastData); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
     });
     input.addEventListener('click', function(e) { e.stopPropagation(); });
   }
@@ -268,6 +317,12 @@ pub fn html() -> String {
   function wsRow(ws, idx, onlyOne) {
     var row = document.createElement('div');
     row.className = 'ws-row';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
+    row.tabIndex = -1;
+    row.dataset.rowKey = 'workspace-' + ws.id;
+    row.dataset.kind = 'workspace';
+    row.dataset.workspaceId = ws.id;
 
     var dot = document.createElement('span');
     dot.className = 'ws-dot';
@@ -282,6 +337,7 @@ pub fn html() -> String {
     var count = document.createElement('span');
     count.className = 'ws-count';
     count.textContent = ws.tab_count;
+    count.title = ws.tab_count + (ws.tab_count === 1 ? ' tab' : ' tabs');
     row.appendChild(count);
 
     // ⌘1–⌘9 then ⌘0, matching the command palette's jump list. Rust re-targets
@@ -303,28 +359,39 @@ pub fn html() -> String {
     var rename = document.createElement('button');
     rename.className = 'ws-icon-btn ws-rename';
     rename.title = 'Rename';
+    rename.setAttribute('aria-label', 'Rename ' + ws.name);
     rename.innerHTML = '@@ICON_PENCIL@@';
     rename.addEventListener('click', function(e) {
       e.stopPropagation();
+      setSelection(row, false);
       renameStart(row, ws);
     });
+    rename.addEventListener('focus', function() { setSelection(row, false); });
     row.appendChild(rename);
 
     var del = document.createElement('button');
     del.className = 'ws-icon-btn ws-delete';
     del.title = 'Delete';
+    del.setAttribute('aria-label', 'Delete ' + ws.name);
     del.innerHTML = '@@ICON_TRASH@@';
     if (onlyOne) del.disabled = true;
     del.addEventListener('click', function(e) {
       e.stopPropagation();
+      setSelection(row, false);
       if (window.confirm('Delete workspace “' + ws.name + '”? This closes all its tabs.')) {
+        pendingFocusKey = 'workspace-' + ws.id;
         ipc({ type: 'workspace_delete', id: ws.id });
       }
     });
+    del.addEventListener('focus', function() { setSelection(row, false); });
     row.appendChild(del);
 
     row.addEventListener('click', function() {
-      ipc({ type: 'workspace_switch', id: ws.id });
+      setSelection(row, false);
+      activateRow(row);
+    });
+    row.addEventListener('focus', function() {
+      setSelection(row, false);
     });
 
     return row;
@@ -333,7 +400,15 @@ pub fn html() -> String {
   function liveRow(t) {
     var row = document.createElement('div');
     row.className = 'ws-live';
-    row.title = 'Jump to call';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
+    row.tabIndex = -1;
+    row.dataset.rowKey = 'live-' + t.id;
+    row.dataset.kind = 'live';
+    row.dataset.tabId = t.id;
+    var cameraInUse = t.media_kind === 'camera' || t.camera_in_use === true;
+    var mediaStatus = cameraInUse ? 'Camera in use' : 'Playing audio';
+    row.title = mediaStatus;
     var dot = document.createElement('span');
     dot.className = 'ws-live-dot';
     row.appendChild(dot);
@@ -341,13 +416,42 @@ pub fn html() -> String {
     title.className = 'ws-live-title';
     title.textContent = t.title;
     row.appendChild(title);
+    var status = document.createElement('span');
+    status.className = 'ws-live-status';
+    status.textContent = mediaStatus;
+    row.appendChild(status);
     row.addEventListener('click', function() {
-      ipc({ type: 'workspace_jump_tab', tab_id: t.id });
+      setSelection(row, false);
+      activateRow(row);
+    });
+    row.addEventListener('focus', function() {
+      setSelection(row, false);
     });
     return row;
   }
 
-  function render(data) {
+  function createRow() {
+    var row = document.createElement('div');
+    row.className = 'ws-create';
+    row.id = 'ws-create-row';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
+    row.tabIndex = -1;
+    row.dataset.rowKey = 'create';
+    row.dataset.kind = 'create';
+    var icon = document.createElement('span');
+    icon.className = 'ws-create-icon';
+    icon.innerHTML = '@@ICON_PLUS@@';
+    row.appendChild(icon);
+    var label = document.createElement('span');
+    label.textContent = 'Create workspace';
+    row.appendChild(label);
+    row.addEventListener('click', function() { setSelection(row, false); activateRow(row); });
+    row.addEventListener('focus', function() { setSelection(row, false); });
+    return row;
+  }
+
+  function render(data, requestedFocusKey) {
     lastData = data;
     var list = document.getElementById('ws-list');
     list.innerHTML = '';
@@ -356,12 +460,31 @@ pub fn html() -> String {
       list.appendChild(wsRow(ws, idx, onlyOne));
       (ws.live || []).forEach(function(t) { list.appendChild(liveRow(t)); });
     });
+    var separator = document.createElement('div');
+    separator.className = 'ws-sep';
+    separator.setAttribute('role', 'presentation');
+    list.appendChild(separator);
+    list.appendChild(createRow());
+
+    var focusKey = requestedFocusKey || pendingFocusKey;
+    pendingFocusKey = null;
+    var rows = selectableRows();
+    var target = focusKey && rows.find(function(row) { return row.dataset.rowKey === focusKey; });
+    if (!target && selectedKey) target = rows.find(function(row) { return row.dataset.rowKey === selectedKey; });
+    if (!target) {
+      var active = data.find(function(ws) { return ws.active; });
+      if (active) target = rows.find(function(row) { return row.dataset.rowKey === 'workspace-' + active.id; });
+    }
+    target = target || rows[0];
+    setSelection(target, Boolean(focusKey));
   }
 
   // Rust pushes the current workspace list on open and after every edit.
   window.__setWorkspaces = function(data) {
     if (!Array.isArray(data)) return;
-    render(data);
+    var activeRow = document.activeElement.closest && document.activeElement.closest('[data-row-key]');
+    var focusKey = activeRow ? activeRow.dataset.rowKey : pendingFocusKey;
+    render(data, focusKey);
   };
 })();
 </script>

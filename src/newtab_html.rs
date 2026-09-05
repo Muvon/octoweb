@@ -1,13 +1,18 @@
 /// Styled new-tab page shown instead of a blank about:blank.
 ///
-/// Displays the octopus branding, a greeting, and quick-slot cards.
-/// Slots are baked into the HTML at creation time (no dynamic JS update needed —
-/// the page is only shown once per new tab).
+/// Displays the octopus branding, address/search field, and quick-slot cards.
 ///
 /// IPC messages sent to Rust:
+///   { type: "newtab_navigate", url: string }
 ///   { type: "quickslot_open", slot: 0-9 }
-///   { type: "quickslot_save", slot: 0-9 }  (click empty slot → save current page)
+///   { type: "quickslot_save_url", slot: 0-9, url: string }
+///   { type: "quickslot_remove", slot: 0-9 }
 pub fn html(slots_json: &str) -> String {
+    let keybindings_json = crate::keybindings::Keymap::load().ui_json().to_string();
+    let safe_slots_json = slots_json
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -19,243 +24,286 @@ pub fn html(slots_json: &str) -> String {
 {css}</style>
 </head>
 <body>
-<div class="container">
-  <div class="octopus">@@OCTOPUS_BRAND@@</div>
+<main class="container">
+  <div class="octopus" aria-hidden="true">@@OCTOPUS_BRAND@@</div>
   <h1>Welcome to Octoweb</h1>
-  <p class="subtitle">Press <kbd class="kbd">⌘⇧P</kbd> to navigate anywhere</p>
+  <div class="address-wrap">
+    <input id="address" type="text" placeholder="Search or enter address" aria-label="Search or enter address" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </div>
+  <p class="subtitle">Press <kbd class="kbd" id="palette-shortcut"></kbd> to navigate anywhere</p>
   <div class="slots" id="slots"></div>
   <p class="hint">
-    <kbd class="kbd">⌘1</kbd>–<kbd class="kbd">⌘0</kbd> open slots &nbsp;·&nbsp;
-    <kbd class="kbd">⌘⇧1</kbd>–<kbd class="kbd">⌘⇧0</kbd> save current page
+    <span><kbd class="kbd">⌘1</kbd>–<kbd class="kbd">⌘0</kbd> open slots</span>
+    <span><kbd class="kbd">⌘⇧1</kbd>–<kbd class="kbd">⌘⇧0</kbd> save current page</span>
   </p>
-</div>
+</main>
 <script>
 (function() {{
-  const slots = {slots_json};
+  let slots = {slots_json};
   const container = document.getElementById('slots');
-  for (let i = 0; i < 10; i++) {{
-    const s = slots[i];
-    const card = document.createElement('a');
-    card.className = 'slot-card' + (s ? '' : ' slot-empty');
-    card.href = '#';
-    card.addEventListener('click', function(e) {{
-      e.preventDefault();
-      if (s) {{
-        window.ipc.postMessage(JSON.stringify({{ type: 'quickslot_open', slot: i }}));
-      }} else {{
-        window.ipc.postMessage(JSON.stringify({{ type: 'quickslot_save', slot: i }}));
-      }}
-    }});
+  const address = document.getElementById('address');
+  const defaultPlaceholder = 'Search or enter address';
+  let saveSlot = null;
 
-    const badge = document.createElement('span');
-    badge.className = 'card-badge kbd';
-    badge.textContent = (i + 1) % 10;
-    card.appendChild(badge);
-
-    if (s) {{
-      if (s.favicon) {{
-        const img = document.createElement('img');
-        img.className = 'card-favicon';
-        img.src = s.favicon;
-        card.appendChild(img);
-      }}
-
-      const info = document.createElement('div');
-      info.className = 'card-info';
-
-      const title = document.createElement('div');
-      title.className = 'card-title';
-      try {{
-        const u = new URL(s.url);
-        title.textContent = s.title || u.hostname.replace(/^www\./, '');
-      }} catch(_) {{
-        title.textContent = s.title || s.url;
-      }}
-      info.appendChild(title);
-
-      const url = document.createElement('div');
-      url.className = 'card-url';
-      url.textContent = s.url;
-      info.appendChild(url);
-
-      card.appendChild(info);
-    }} else {{
-      const plus = document.createElement('span');
-      plus.className = 'card-plus';
-      plus.innerHTML = '@@ICON_PLUS@@';
-      card.appendChild(plus);
-
-      const hint = document.createElement('div');
-      hint.className = 'card-info';
-      const title = document.createElement('div');
-      title.className = 'card-title empty-hint';
-      title.textContent = 'Save current page';
-      hint.appendChild(title);
-      const shortcut = document.createElement('div');
-      shortcut.className = 'card-url kbd';
-      shortcut.textContent = '\u2318\u21e7' + ((i + 1) % 10);
-      hint.appendChild(shortcut);
-      card.appendChild(hint);
-    }}
-    container.appendChild(card);
+  function ipc(message) {{
+    window.ipc.postMessage(JSON.stringify(message));
   }}
+
+  function focusAddressForSlot(slot) {{
+    saveSlot = slot;
+    address.value = '';
+    address.placeholder = 'Enter an address to save it to slot ' + ((slot + 1) % 10);
+    address.focus();
+  }}
+
+  function resetAddress() {{
+    saveSlot = null;
+    address.value = '';
+    address.placeholder = defaultPlaceholder;
+  }}
+
+  window.__slotSaved = function() {{
+    resetAddress();
+    address.focus();
+  }};
+
+  address.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') {{
+      e.preventDefault();
+      resetAddress();
+      return;
+    }}
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+    const raw = address.value.trim();
+    if (!raw) return;
+    e.preventDefault();
+    if (saveSlot === null) {{
+      ipc({{ type: 'newtab_navigate', url: raw }});
+    }} else {{
+      ipc({{ type: 'quickslot_save_url', slot: saveSlot, url: raw }});
+    }}
+  }});
+
+  function renderSlots() {{
+    container.replaceChildren();
+    for (let i = 0; i < 10; i++) {{
+      const s = slots[i];
+      const wrap = document.createElement('div');
+      wrap.className = 'slot-wrap' + (s ? '' : ' slot-empty');
+
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'slot-card';
+      if (!s) card.setAttribute('aria-label', 'Set slot ' + ((i + 1) % 10));
+      card.addEventListener('click', function() {{
+        if (s) {{
+          ipc({{ type: 'quickslot_open', slot: i }});
+        }} else {{
+          focusAddressForSlot(i);
+        }}
+      }});
+
+      const badge = document.createElement('span');
+      badge.className = 'card-badge kbd';
+      badge.textContent = (i + 1) % 10;
+      card.appendChild(badge);
+
+      if (s) {{
+        if (s.favicon) {{
+          const img = document.createElement('img');
+          img.className = 'card-favicon';
+          img.src = s.favicon;
+          img.alt = '';
+          card.appendChild(img);
+        }}
+
+        const info = document.createElement('span');
+        info.className = 'card-info';
+        const title = document.createElement('span');
+        title.className = 'card-title';
+        const host = document.createElement('span');
+        host.className = 'card-url';
+        try {{
+          const u = new URL(s.url);
+          const hostname = u.hostname.replace(/^www\./, '');
+          title.textContent = s.title || hostname;
+          host.textContent = hostname;
+        }} catch (_) {{
+          title.textContent = s.title || s.url;
+          host.textContent = s.url;
+        }}
+        card.setAttribute('aria-label', 'Open slot ' + ((i + 1) % 10) + ': ' + title.textContent);
+        info.appendChild(title);
+        info.appendChild(host);
+        card.appendChild(info);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'slot-remove';
+        remove.setAttribute('aria-label', 'Remove slot ' + ((i + 1) % 10));
+        remove.textContent = '×';
+        remove.addEventListener('click', function() {{
+          ipc({{ type: 'quickslot_remove', slot: i }});
+        }});
+        wrap.appendChild(remove);
+      }} else {{
+        const empty = document.createElement('span');
+        empty.className = 'card-title empty-label';
+        empty.textContent = 'Empty';
+        card.appendChild(empty);
+      }}
+
+      wrap.prepend(card);
+      container.appendChild(wrap);
+    }}
+  }}
+
+  window.__updateSlots = function(nextSlots) {{
+    slots = Array.isArray(nextSlots) ? nextSlots : [];
+    renderSlots();
+  }};
+
+  window.__setShortcuts = function(data) {{
+    const actions = data && Array.isArray(data.actions) ? data.actions : [];
+    const action = actions.find(function(item) {{ return item.id === 'command_palette'; }});
+    document.getElementById('palette-shortcut').textContent = action && Array.isArray(action.keys)
+      ? action.keys.join('')
+      : '';
+  }};
+
+  document.addEventListener('visibilitychange', function() {{
+    if (!document.hidden && !address.value) address.focus();
+  }});
+
+  renderSlots();
+  window.__setShortcuts({keybindings_json});
+  if (!document.hidden) requestAnimationFrame(function() {{ address.focus(); }});
 }})();
 </script>
 </body>
 </html>"#,
         css = NEWTAB_CSS,
-        slots_json = slots_json,
+        slots_json = safe_slots_json,
+        keybindings_json = keybindings_json,
     )
     .replace("/*@@THEME@@*/", crate::theme::CSS)
     .replace("@@OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
-    .replace("@@ICON_PLUS@@", crate::icons::PLUS)
 }
 
 const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0; }
 
   html, body {
-    width: 100%; height: 100%;
+    width: 100%;
+    min-height: 100%;
     background: var(--canvas);
     font-family: var(--font-text);
     -webkit-font-smoothing: antialiased;
     color: var(--label);
   }
 
-  /* Overflow-safe centering: margin:auto centers when the content fits but
-     top-aligns and scrolls when it's taller than the window — align-items:
-     center would push the container's top out of reach (page appears stuck
-     at the bottom). */
-  body { display: flex; overflow-y: auto; }
+  body { display: flex; overflow-y: auto; padding: 48px 24px; }
 
   .container {
+    width: min(100%, 600px);
     margin: auto;
     text-align: center;
-    max-width: 600px;
-    padding: 40px 24px;
     animation: newTabIn var(--t-pop) var(--spring);
   }
   @keyframes newTabIn {
-    from { opacity: 0; transform: translateY(8px) scale(0.985); }
+    from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: none; }
   }
 
   .octopus {
-    width: 64px;
-    height: 64px;
+    width: 40px;
+    height: 40px;
     margin: 0 auto 12px;
-    animation: float 3s var(--ease) infinite;
     color: color-mix(in srgb, var(--err) 65%, var(--warn));
     display: flex;
     align-items: center;
     justify-content: center;
   }
   .octopus svg { width: 100%; height: 100%; }
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-6px); }
-  }
 
   h1 {
     font-family: var(--font-display);
-    font-size: 32px;
-    font-weight: 700;
-    letter-spacing: -0.04em;
-    margin-bottom: 6px;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    margin-bottom: 16px;
   }
 
-  .subtitle {
-    font-size: 15px;
-    color: var(--label-2);
-    margin-bottom: 32px;
-  }
+  .address-wrap { max-width: 480px; margin: 0 auto; }
 
-  kbd.kbd {
-    font-size: 11px;
-    padding: 2px 6px;
+  #address {
+    width: 100%;
+    height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: var(--r-capsule);
+    background: var(--glass-thin);
+    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
+    color: var(--label);
+    font: 15px var(--font-text);
   }
+  #address::placeholder { color: var(--label-2); }
+  #address:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .subtitle { margin: 8px 0 28px; font-size: 11px; color: var(--label-2); }
+
+  kbd.kbd, .card-badge { font-size: 11px; }
+  kbd.kbd { padding: 2px 6px; }
 
   .slots {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
   }
 
+  .slot-wrap { position: relative; min-width: 0; }
+
   .slot-card {
+    width: 100%;
+    min-height: 44px;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
-    min-height: 44px;
+    padding: 10px 40px 10px 14px;
+    border: 0;
     border-radius: var(--r-card);
     background: var(--glass-thin);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
-    text-decoration: none;
     color: inherit;
-    transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease),
-                transform var(--t-fast) var(--ease);
+    font-family: inherit;
+    cursor: pointer;
     min-width: 0;
+    transition: background var(--t-fast) var(--ease);
   }
+  .slot-card:hover { background: color-mix(in srgb, var(--glass-thick) 88%, var(--fill-hover)); }
+  .slot-card:active { background: color-mix(in srgb, var(--glass-thick) 84%, var(--fill-press)); }
+  .slot-card:focus-visible,
+  .slot-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .slot-card:hover {
-    background: color-mix(in srgb, var(--glass-thick) 88%, var(--fill-hover));
-    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine),
-                0 8px 24px color-mix(in srgb, black 14%, transparent);
-    transform: translateY(-1px);
-  }
-
-  .slot-card:active { background: color-mix(in srgb, var(--glass-thick) 84%, var(--fill-press)); transform: scale(0.98); }
-
-  .slot-card.slot-empty {
+  .slot-empty .slot-card {
+    padding-right: 14px;
     background: transparent;
     box-shadow: none;
     border: 1px dashed var(--hairline);
-    opacity: 0.5;
-    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease),
-                transform var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease);
   }
-
-  .slot-card.slot-empty:hover {
-    opacity: 0.85;
-    background: var(--glass-thin);
-    border-color: transparent;
-    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
-  }
-
-  .empty-hint {
-    color: var(--label-3) !important;
-    font-style: normal;
-    font-weight: 500;
-  }
-
-  .slot-card.slot-empty .card-info { opacity: 0; transition: opacity var(--t-fast) var(--ease); max-width: 0; overflow: hidden; }
-  .slot-card.slot-empty:hover .card-info { opacity: 1; max-width: 240px; }
-  .slot-card.slot-empty:hover .card-plus { opacity: 0; max-width: 0; }
-
-  .card-plus {
-    flex-shrink: 0;
-    width: 16px; height: 16px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--label-3);
-    opacity: 0.7;
-    transition: opacity var(--t-fast) var(--ease), max-width var(--t-fast) var(--ease);
-    overflow: hidden;
-  }
-  .card-plus svg { width: 100%; height: 100%; }
+  .slot-empty .slot-card:hover { background: var(--glass-thin); }
 
   .card-badge {
     flex-shrink: 0;
-    width: 20px; height: 20px;
+    width: 20px;
+    height: 20px;
     border-radius: 5px;
     background: var(--fill);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 11px;
     font-weight: 600;
     color: var(--label-2);
     font-variant-numeric: tabular-nums;
@@ -263,17 +311,16 @@ const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0;
 
   .card-favicon {
     flex-shrink: 0;
-    width: 16px; height: 16px;
+    width: 16px;
+    height: 16px;
     border-radius: 3px;
     object-fit: contain;
   }
 
-  .card-info {
-    min-width: 0;
-    text-align: left;
-  }
+  .card-info { min-width: 0; display: flex; flex-direction: column; text-align: left; }
 
   .card-title {
+    display: block;
     font-size: 13px;
     font-weight: 500;
     white-space: nowrap;
@@ -281,17 +328,47 @@ const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0;
     text-overflow: ellipsis;
   }
 
+  .empty-label { color: var(--label-2); }
+
   .card-url {
+    display: block;
+    max-width: 180px;
     font-size: 11px;
-    color: var(--label-3);
+    color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 180px;
   }
 
-  .hint {
-    font-size: 12px;
-    color: var(--label-3);
+  .slot-remove {
+    position: absolute;
+    z-index: 1;
+    top: 50%;
+    right: 9px;
+    width: 22px;
+    height: 22px;
+    transform: translateY(-50%);
+    border: 0;
+    border-radius: var(--r-capsule);
+    background: transparent;
+    color: var(--label-2);
+    font: 17px/22px var(--font-text);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
   }
+  .slot-wrap:hover .slot-remove,
+  .slot-wrap:focus-within .slot-remove { opacity: 1; }
+  .slot-remove:hover { background: var(--fill-hover); color: var(--label); }
+
+  .hint {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--label-2);
+  }
+
+  @media (prefers-reduced-motion: reduce) { .container { animation: none; } }
 "#;

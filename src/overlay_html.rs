@@ -24,9 +24,7 @@ pub fn html() -> String {
   #backdrop {
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at top, color-mix(in srgb, var(--label) 8%, transparent), color-mix(in srgb, var(--label) 20%, transparent));
-    backdrop-filter: blur(12px) saturate(180%);
-    -webkit-backdrop-filter: blur(12px) saturate(180%);
+    background: transparent;
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -38,7 +36,7 @@ pub fn html() -> String {
     background: var(--glass);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
-    border-radius: 24px;
+    border-radius: var(--r-panel);
     box-shadow: var(--shadow-float), var(--glass-shine);
     overflow: hidden;
     animation: reveal var(--t-pop) var(--spring);
@@ -77,7 +75,7 @@ pub fn html() -> String {
     border: none;
     outline: none;
     color: var(--label);
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 400;
     letter-spacing: -0.01em;
     caret-color: var(--accent);
@@ -125,7 +123,7 @@ pub fn html() -> String {
     gap: 10px;
     min-height: 40px;
     padding: 8px 10px;
-    border-radius: var(--r-ctl);
+    border-radius: calc(var(--r-panel) - 6px);
     cursor: default;
     transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
   }
@@ -190,8 +188,8 @@ pub fn html() -> String {
   .item-url {
     margin-top: 1px;
     font-size: 11px;
-    font-family: var(--font-mono);
-    color: var(--label-3);
+    font-family: var(--font-text);
+    color: var(--label-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -205,7 +203,7 @@ pub fn html() -> String {
   }
 
   .kind-pill {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     color: var(--label-2);
     background: var(--fill);
@@ -220,7 +218,7 @@ pub fn html() -> String {
     border: 0;
     border-radius: 50%;
     background: transparent;
-    color: var(--label-3);
+    color: var(--label-2);
     font-size: 14px;
     line-height: 22px;
     cursor: pointer;
@@ -232,6 +230,7 @@ pub fn html() -> String {
   .item.selected .close-btn {
     opacity: 1;
   }
+  .close-btn:focus-visible { opacity: 1; }
 
   .close-btn:hover {
     background: color-mix(in srgb, var(--err) 14%, transparent);
@@ -240,10 +239,10 @@ pub fn html() -> String {
   .close-btn:active { background: color-mix(in srgb, var(--err) 22%, transparent); transform: scale(0.9); }
 
   .shortcut-badge {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     font-family: inherit;
-    color: var(--label-3);
+    color: var(--label-2);
     background: var(--fill);
     box-shadow: 0 0 0 0.5px var(--hairline);
     border-radius: var(--r-capsule);
@@ -256,7 +255,7 @@ pub fn html() -> String {
     padding: 10px 14px;
     text-align: center;
     font-size: 11px;
-    color: var(--label-3);
+    color: var(--label-2);
     letter-spacing: 0.01em;
   }
 
@@ -272,11 +271,11 @@ pub fn html() -> String {
       <svg id="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
       </svg>
-      <input id="query" type="text" autocomplete="off" spellcheck="false" placeholder="Search tabs, history, or enter URL" />
+      <input id="query" type="text" autocomplete="off" spellcheck="false" placeholder="Search tabs, history, or enter URL" role="combobox" aria-expanded="true" aria-controls="results" aria-activedescendant="result-0" />
       <div id="action-badge">↵ Open</div>
     </div>
-    <div id="results"></div>
-    <div id="hint"><span class="kbd">↑↓</span> navigate · <span class="kbd">⏎</span> open · <span class="kbd">esc</span> dismiss</div>
+    <div id="results" role="listbox"></div>
+    <div id="hint"><span class="kbd">↑↓</span> navigate&nbsp;&nbsp;&nbsp;<span class="kbd">↵</span> open&nbsp;&nbsp;&nbsp;<span class="kbd">esc</span> dismiss</div>
   </div>
 </div>
 
@@ -361,7 +360,7 @@ pub fn html() -> String {
       const searchAction = { kind: 'search', title: 'Search ' + engineName(), url: raw, query: raw, subtitle: raw, pill: 'Search' };
       const askAction = { kind: 'ask', title: 'Ask AI', url: '', query: raw, subtitle: raw, pill: 'AI' };
       const actions = urlLike ? [openAction, searchAction, askAction] : [searchAction, openAction, askAction];
-      filtered = [...list, ...actions].slice(0, 14);
+      filtered = [...list.slice(0, 14 - actions.length), ...actions];
     }
     // Clamp selection to new list size, keep position if possible
     sel = Math.min(sel, Math.max(filtered.length - 1, 0));
@@ -369,11 +368,16 @@ pub fn html() -> String {
     updateBadge();
   };
 
-  queryEl.addEventListener('input', () => {
-    userQuery = queryEl.value;
-    render(queryEl.value);
-  });
+  queryEl.addEventListener('input', () => updateQuery(queryEl.value));
   queryEl.addEventListener('keydown', onInputKeyDown);
+
+  // Escape remains available when focus moves from the combobox to a row action.
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeOverlay();
+    }
+  });
 
   document.getElementById('backdrop').addEventListener('mousedown', e => {
     if (e.target === e.currentTarget) closeOverlay();
@@ -389,6 +393,7 @@ pub fn html() -> String {
       e.preventDefault();
       move(-1);
     } else if (e.key === 'Enter') {
+      if (e.isComposing) return;
       e.preventDefault();
       if (e.metaKey && e.shiftKey) {
         // ⌘⇧Enter → Ask AI
@@ -399,9 +404,6 @@ pub fn html() -> String {
       } else {
         confirmSelection();
       }
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      closeOverlay();
     } else if (e.key === 'Home') {
       e.preventDefault();
       setCursor(0);
@@ -465,17 +467,13 @@ pub fn html() -> String {
     if (key === 'k') {
       e.preventDefault();
       const start = queryEl.selectionStart;
-      queryEl.value = queryEl.value.slice(0, start);
-      setCursor(start);
-      render(queryEl.value);
+      updateQuery(queryEl.value.slice(0, start), start);
       return true;
     }
     if (key === 'u') {
       e.preventDefault();
       const end = queryEl.selectionEnd;
-      queryEl.value = queryEl.value.slice(end);
-      setCursor(0);
-      render(queryEl.value);
+      updateQuery(queryEl.value.slice(end), 0);
       return true;
     }
 
@@ -497,6 +495,13 @@ pub fn html() -> String {
     queryEl.setSelectionRange(pos, pos);
   }
 
+  function updateQuery(value, caret) {
+    queryEl.value = value;
+    userQuery = value;
+    render(value);
+    if (typeof caret === 'number') setCursor(Math.min(caret, value.length));
+  }
+
   function closeOverlay() {
     window.ipc.postMessage(JSON.stringify({ type: 'overlay_close' }));
     window.ipc.postMessage(JSON.stringify({ type: 'close' }));
@@ -504,7 +509,7 @@ pub fn html() -> String {
 
   function confirmSelection() {
     if (filtered.length === 0) {
-      const q = queryEl.value.trim();
+      const q = userQuery.trim();
       if (!q) {
         closeOverlay();
         return;
@@ -537,7 +542,7 @@ pub fn html() -> String {
   }
 
   function forceNavigate() {
-    const q = queryEl.value.trim();
+    const q = userQuery.trim();
     if (!q) return;
     if (isLikelyUrl(q)) {
       navigate(toNavigableUrl(q));
@@ -547,7 +552,7 @@ pub fn html() -> String {
   }
 
   function askAI() {
-    const q = queryEl.value.trim();
+    const q = userQuery.trim();
     if (!q) return;
     window.ipc.postMessage(JSON.stringify({ type: 'ask_ai', text: q }));
   }
@@ -582,25 +587,12 @@ pub fn html() -> String {
     return false;
   }
 
-  function autofillFromSelected() {
-    if (filtered.length === 0) return;
-    const item = filtered[sel];
-    if (!item) return;
-    // Show the URL for tab/history items, restore user query for action items.
-    // Skip autofill if the item has no URL (e.g. a tab still loading).
-    const isNavigable = item.kind === 'tab' || item.kind === 'history';
-    const fill = isNavigable && item.url ? item.url : userQuery;
-    queryEl.value = fill;
-    queryEl.setSelectionRange(fill.length, fill.length);
-  }
-
   function move(dir) {
     if (filtered.length === 0) return;
     sel = (sel + dir + filtered.length) % filtered.length;
     pointerActive = false;
-    renderItems();
+    updateSelection();
     updateBadge();
-    autofillFromSelected();
   }
 
   function render(rawQuery) {
@@ -656,7 +648,7 @@ pub fn html() -> String {
     };
 
     const actions = urlLike ? [openAction, searchAction, askAction] : [searchAction, openAction, askAction];
-    filtered = [...list, ...actions].slice(0, 14);
+    filtered = [...list.slice(0, 14 - actions.length), ...actions];
     sel = 0;
     renderItems();
     updateBadge();
@@ -679,7 +671,8 @@ pub fn html() -> String {
     resultsEl.innerHTML = '';
 
     if (filtered.length === 0) {
-      resultsEl.innerHTML = '<div style="padding:24px;color:var(--label-3);font-size:13px;text-align:center;">No matches found</div>';
+      resultsEl.innerHTML = '<div style="padding:24px;color:var(--label-2);font-size:13px;text-align:center;">No matches found</div>';
+      queryEl.removeAttribute('aria-activedescendant');
       return;
     }
 
@@ -705,9 +698,7 @@ pub fn html() -> String {
         if (sel === idx) return;
         sel = idx;
         // Update highlight only — do not rewrite input on mouse hover
-        resultsEl.querySelectorAll('.item').forEach((r, i) => {
-          r.classList.toggle('selected', i === sel);
-        });
+        updateSelection();
         updateBadge();
       });
       row.addEventListener('mousedown', e => {
@@ -719,8 +710,7 @@ pub fn html() -> String {
     });
 
     resultsEl.querySelectorAll('.close-btn').forEach(btn => {
-      btn.addEventListener('mousedown', e => {
-        e.preventDefault();
+      btn.addEventListener('click', e => {
         e.stopPropagation();
         const tabId = Number(btn.getAttribute('data-tab-id'));
         if (Number.isFinite(tabId) && tabId > 0) {
@@ -733,6 +723,24 @@ pub fn html() -> String {
         }
       });
     });
+
+    updateSelection();
+  }
+
+  function updateSelection(scroll) {
+    const rows = resultsEl.querySelectorAll('.item');
+    rows.forEach((row, idx) => {
+      const selected = idx === sel;
+      row.classList.toggle('selected', selected);
+      row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    const selectedRow = rows[sel];
+    if (!selectedRow) {
+      queryEl.removeAttribute('aria-activedescendant');
+      return;
+    }
+    queryEl.setAttribute('aria-activedescendant', selectedRow.id);
+    if (scroll !== false) selectedRow.scrollIntoView({ block: 'nearest' });
   }
 
   function renderItem(item, idx) {
@@ -751,10 +759,10 @@ pub fn html() -> String {
       ? 'data-tab-id="' + item.tab_id + '"'
       : 'data-history-url="' + esc(item.url) + '"';
     const closeHtml = canClose
-      ? '<button class="close-btn" ' + closeAttr + ' title="Remove">×</button>'
+      ? '<button class="close-btn" ' + closeAttr + ' title="Close tab" aria-label="Close tab">×</button>'
       : '';
 
-    return '<div class="item' + selected + '" data-idx="' + idx + '">' +
+    return '<div class="item' + selected + '" id="result-' + idx + '" role="option" aria-selected="' + (idx === sel ? 'true' : 'false') + '" data-idx="' + idx + '">' +
       iconHtml(item) +
       '<div class="item-text">' +
         '<div class="item-title">' + esc(rawTitle) + '</div>' +
@@ -781,7 +789,7 @@ pub fn html() -> String {
             : ICONS.search;
     }
     var cls = 'icon-slot' + (item.hibernated ? ' hibernated' : '');
-    return '<span class="' + cls + '" title="' + (item.hibernated ? 'Hibernated · click to wake' : '') + '">' + inner + '</span>';
+    return '<span class="' + cls + '" title="' + (item.hibernated ? 'Hibernated, click to wake' : '') + '">' + inner + '</span>';
   }
 
   function kindLabelFor(item) {

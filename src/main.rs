@@ -83,6 +83,9 @@ enum AppEvent {
     PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
     NextTab,                 // Ctrl+N — switch to next tab in MRU order
     ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
+    SidebarResize(u32),      // live drag/keyboard width update (logical px)
+    SidebarResizeEnd(u32),   // final width update — persist to config
+    SidebarResizeReset,      // restore the default logical width
     OpenNotifiedSession,     // user clicked the notification toast
     ToggleFullscreen,        // ⌘Return — toggle native macOS fullscreen on the chrome window
     ToggleSidebarFullscreen, // ⌘⇧Return / icon — sidebar expands to full window width inside chrome
@@ -108,31 +111,33 @@ enum AppEvent {
     // login). Foregrounded only when the source is the visible tab or None — so a
     // page the agent drives in a BACKGROUND tab can't yank the user's view/focus.
     OpenInNewTab(String, Option<usize>),
-    PageLoadStarted(usize),                 // (tab_id) — show progress bar
-    PageLoadFinished(usize),                // (tab_id) — hide progress bar
-    NavigationError(usize, String, String), // (tab_id, url, error) — show error page
-    Reload,                                 // Cmd+R — reload current page
-    MediaPlaying(usize, bool),              // (tab_id, is_playing) — audio/video state changed
+    PageLoadStarted(usize),                     // (tab_id) — show progress bar
+    PageLoadFinished(usize),                    // (tab_id) — hide progress bar
+    NavigationError(usize, String, String),     // (tab_id, url, error) — show error page
+    Reload,                                     // Cmd+R — reload current page
+    MediaPlaying(usize, bool),                  // (tab_id, is_playing) — audio/video state changed
     PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
     RemoveHistory(String),     // URL to remove from history
     QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
+    QuickSlotSaveUrl(usize, usize, String), // origin tab, slot, raw URL from new-tab card
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
+    InternalPageIpc(usize, InternalPageAction), // restricted IPC from new-tab/error pages
     TogglePin,                 // ⌘⇧N — pin/unpin current tab to quickslots
     AcpWake,                   // lightweight wake — ACP thread pokes event loop
     AcpReconnect(u64, u64), // (session_id, gen) — scheduled reconnection attempt for given session
     AcpSignIn(u64),         // sidebar "Sign in" button — start `/login` for the session
     AcpRefreshAccount(u64), // re-probe `/usage` (login poller tick, or manual refresh)
     DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
-    DownloadCompleted(String, bool), // (filename, success) — show notification toast
-    DismissNotification,            // user clicked X on notification toast
-    ToggleSettings,                 // ⌘, — toggle settings modal
-    HideSettings,                   // JS Esc / backdrop click in settings modal
-    UpdateConfig(String, String),   // (key, value) — config field changed in settings UI
-    ToggleWorkspaces,               // ⌘⇧O — toggle workspace switcher popover
-    HideWorkspaces,                 // JS Esc / backdrop click in workspace switcher
-    SwitchWorkspace(String),        // (workspace_id) — switch active workspace
-    SwitchWorkspaceByIndex(usize),  // ⌘1–⌘0 while the popover is open
+    DownloadCompleted(String, Option<String>, bool), // (filename, saved path, success) — show notification toast
+    DismissNotification,                             // user clicked X on notification toast
+    ToggleSettings,                                  // ⌘, — toggle settings modal
+    HideSettings,                                    // JS Esc / backdrop click in settings modal
+    UpdateConfig(String, String), // (key, value) — config field changed in settings UI
+    ToggleWorkspaces,             // ⌘⇧O — toggle workspace switcher popover
+    HideWorkspaces,               // JS Esc / backdrop click in workspace switcher
+    SwitchWorkspace(String),      // (workspace_id) — switch active workspace
+    SwitchWorkspaceByIndex(usize), // ⌘1–⌘0 while the popover is open
     JumpToTab(usize), // switcher "live" row — activate a tab in whichever workspace owns it
     CreateWorkspace,  // "+ New Workspace" row
     RenameWorkspace(String, String), // (workspace_id, name)
@@ -182,6 +187,23 @@ enum AppEvent {
     Quit,
 }
 
+#[derive(Debug)]
+enum InternalPageAction {
+    Navigate(String),
+    CopyText(String),
+    QuickSlotOpen(usize),
+    QuickSlotSave(usize),
+    QuickSlotSaveUrl(usize, String),
+    QuickSlotRemove(usize),
+}
+
+#[derive(Clone, Copy)]
+enum PanelFocusTarget {
+    AddressBar,
+    Sidebar,
+    ActiveTab,
+}
+
 /// The tab currently painted in the browser window. During a deferred swap,
 /// `active_wv_id` already names the loading tab while the old tab remains
 /// visible and interactive.
@@ -215,6 +237,7 @@ fn keybind_to_event(
     find: bool,
     inline: bool,
     sidebar: bool,
+    address_edit: bool,
 ) -> Option<AppEvent> {
     use keybindings::Action as A;
     Some(match action {
@@ -237,14 +260,14 @@ fn keybind_to_event(
                 AppEvent::CloseTab(0)
             }
         }
-        A::PrevTab if !overlay && !inline && !sidebar => {
+        A::PrevTab if !overlay && !inline && !sidebar && !address_edit => {
             if find {
                 AppEvent::FindPrev
             } else {
                 AppEvent::PrevTab
             }
         }
-        A::NextTab if !overlay && !inline && !sidebar => {
+        A::NextTab if !overlay && !inline && !sidebar && !address_edit => {
             if find {
                 AppEvent::FindNext
             } else {
@@ -514,6 +537,8 @@ fn main() {
     let proxy = event_loop.create_proxy();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
+    // Address bar in URL edit mode: Ctrl+N/P navigate suggestions, not tabs.
+    let address_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     let inline_edit_hotkey_visible = Arc::new(AtomicBool::new(false));
     let sidebar_hotkey_visible = Arc::new(AtomicBool::new(false));
     // True while the settings panel is recording a new keybinding: the monitor
@@ -735,7 +760,26 @@ fn main() {
                             }
                             Some("error_retry") => {
                                 if let Some(url) = v["url"].as_str() {
-                                    let _ = p3.send_event(AppEvent::NavigateTo(url.to_string()));
+                                    let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                        tab_id,
+                                        InternalPageAction::Navigate(url.to_string()),
+                                    ));
+                                }
+                            }
+                            Some("copy_text") => {
+                                if let Some(text) = v["text"].as_str() {
+                                    let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                        tab_id,
+                                        InternalPageAction::CopyText(text.to_string()),
+                                    ));
+                                }
+                            }
+                            Some("newtab_navigate") => {
+                                if let Some(url) = v["url"].as_str() {
+                                    let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                        tab_id,
+                                        InternalPageAction::Navigate(url.to_string()),
+                                    ));
                                 }
                             }
                             Some("media:playing") => {
@@ -746,12 +790,55 @@ fn main() {
                             }
                             Some("quickslot_open") => {
                                 if let Some(slot) = v["slot"].as_u64() {
-                                    let _ = p3.send_event(AppEvent::QuickSlotOpen(slot as usize));
+                                    if slot < 10 {
+                                        let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                            tab_id,
+                                            InternalPageAction::QuickSlotOpen(slot as usize),
+                                        ));
+                                    } else {
+                                        tracing::warn!(slot, "ignoring out-of-range quickslot_open IPC");
+                                    }
                                 }
                             }
                             Some("quickslot_save") => {
                                 if let Some(slot) = v["slot"].as_u64() {
-                                    let _ = p3.send_event(AppEvent::QuickSlotSave(slot as usize));
+                                    if slot < 10 {
+                                        let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                            tab_id,
+                                            InternalPageAction::QuickSlotSave(slot as usize),
+                                        ));
+                                    } else {
+                                        tracing::warn!(slot, "ignoring out-of-range quickslot_save IPC");
+                                    }
+                                }
+                            }
+                            Some("quickslot_save_url") => {
+                                if let (Some(slot), Some(url)) =
+                                    (v["slot"].as_u64(), v["url"].as_str())
+                                {
+                                    if slot < 10 {
+                                        let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                            tab_id,
+                                            InternalPageAction::QuickSlotSaveUrl(
+                                                slot as usize,
+                                                url.to_string(),
+                                            ),
+                                        ));
+                                    } else {
+                                        tracing::warn!(slot, "ignoring out-of-range quickslot_save_url IPC");
+                                    }
+                                }
+                            }
+                            Some("quickslot_remove") => {
+                                if let Some(slot) = v["slot"].as_u64() {
+                                    if slot < 10 {
+                                        let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                            tab_id,
+                                            InternalPageAction::QuickSlotRemove(slot as usize),
+                                        ));
+                                    } else {
+                                        tracing::warn!(slot, "ignoring out-of-range quickslot_remove IPC");
+                                    }
                                 }
                             }
                             Some("page_info") => {
@@ -854,10 +941,20 @@ fn main() {
                     true // allow the download
                 })
                 .with_download_completed_handler(move |_url, path, success| {
-                    let filename = path
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                        .unwrap_or_default();
-                    let _ = p6.send_event(AppEvent::DownloadCompleted(filename, success));
+                    let (filename, saved_path) = match path {
+                        Some(path) => (
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                            Some(path.to_string_lossy().into_owned()),
+                        ),
+                        None => (String::new(), None),
+                    };
+                    let _ = p6.send_event(AppEvent::DownloadCompleted(
+                        filename,
+                        saved_path,
+                        success,
+                    ));
                 });
             // Per-workspace cookie/localStorage/cache isolation. `None` (the
             // default workspace) omits the call entirely — WebKit falls back
@@ -979,6 +1076,10 @@ fn main() {
     // BrowserUrlChanged events carrying "about:blank" are suppressed so the
     // real URL in TabManager is not clobbered by the transient snapshot load.
     let mut restoring_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Tabs currently displaying our load_html error document. Their TabManager
+    // URL may still be the failed external URL, so URL alone cannot authorize
+    // the error page's retry/copy IPC.
+    let mut error_page_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // MCP navigate: tab_id → (inserted_at, pending oneshot response).
     // Stored when browser_navigate is called; resolved when PageLoadFinished fires
     // and the DOM stabilises (SPA hydration complete).
@@ -1356,10 +1457,25 @@ fn main() {
 
     // ── Sidebar WebView (child of browser_win, right-edge panel) ──────────
     // Hidden by default; shown/hidden via ToggleSidebar.
-    // SIDEBAR_W is in logical points; scale to physical pixels for bounds arithmetic.
-    const SIDEBAR_W_LOGICAL: f64 = 440.0;
-    let sidebar_w = (SIDEBAR_W_LOGICAL * browser_win.scale_factor()) as u32;
+    // Sidebar width is persisted in logical points and converted to physical
+    // pixels only for WebView bounds. Keep at least 320pt for both the sidebar
+    // and the page whenever the window is wide enough to accommodate both.
+    const SIDEBAR_W_LOGICAL: u32 = 440;
+    const SIDEBAR_MIN_W_LOGICAL: u32 = 320;
+    const PAGE_MIN_W_LOGICAL: u32 = 320;
+    let clamp_sidebar_width = |width: u32, window_width: u32, scale_factor: f64| {
+        let window_logical_width = (f64::from(window_width) / scale_factor) as u32;
+        let max_width = window_logical_width
+            .saturating_sub(PAGE_MIN_W_LOGICAL)
+            .max(SIDEBAR_MIN_W_LOGICAL);
+        width.clamp(SIDEBAR_MIN_W_LOGICAL, max_width)
+    };
+    let sidebar_width_physical =
+        |width: u32, scale_factor: f64| (f64::from(width) * scale_factor) as u32;
     let sz0 = browser_win.inner_size();
+    let mut sidebar_width_logical =
+        clamp_sidebar_width(cfg.sidebar_width, sz0.width, browser_win.scale_factor());
+    let sidebar_w = sidebar_width_physical(sidebar_width_logical, browser_win.scale_factor());
 
     // Notification margin from right edge (logical 12pt)
     const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
@@ -1459,6 +1575,25 @@ fn main() {
                         Some("sidebar_fullscreen_toggle") => {
                             let _ = p.send_event(AppEvent::ToggleSidebarFullscreen);
                         }
+                        Some("sidebar_resize") => {
+                            if let Some(width) = v["width"]
+                                .as_u64()
+                                .and_then(|width| u32::try_from(width).ok())
+                            {
+                                let _ = p.send_event(AppEvent::SidebarResize(width));
+                            }
+                        }
+                        Some("sidebar_resize_end") => {
+                            if let Some(width) = v["width"]
+                                .as_u64()
+                                .and_then(|width| u32::try_from(width).ok())
+                            {
+                                let _ = p.send_event(AppEvent::SidebarResizeEnd(width));
+                            }
+                        }
+                        Some("sidebar_resize_reset") => {
+                            let _ = p.send_event(AppEvent::SidebarResizeReset);
+                        }
                         Some("acp_set_agent") => {
                             let sid = v["session_id"].as_u64().unwrap_or(0);
                             if let Some(tag) = v["tag"].as_str() {
@@ -1525,27 +1660,7 @@ fn main() {
                         }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
-                                unsafe {
-                                    use objc2::runtime::AnyObject;
-                                    use objc2::{class, msg_send};
-                                    let pb: *mut AnyObject =
-                                        msg_send![class!(NSPasteboard), generalPasteboard];
-                                    let _: () = msg_send![pb, clearContents];
-                                    let ns_str: *mut AnyObject = msg_send![class!(NSString), alloc];
-                                    let ns_str: *mut AnyObject = msg_send![
-                                        ns_str,
-                                        initWithBytes: text.as_ptr(),
-                                        length: text.len(),
-                                        encoding: 4u64 // NSUTF8StringEncoding
-                                    ];
-                                    let ns_str = objc2::rc::Retained::from_raw(ns_str)
-                                        .expect("NSString initWithBytes failed");
-                                    let arr: *mut AnyObject = msg_send![
-                                        class!(NSArray),
-                                        arrayWithObject: &*ns_str
-                                    ];
-                                    let _: bool = msg_send![pb, writeObjects: arr];
-                                }
+                                webview_utils::copy_text_to_pasteboard(text);
                             }
                         }
                         _ => {}
@@ -1603,27 +1718,7 @@ fn main() {
                         }
                         Some("copy_text") => {
                             if let Some(text) = v["text"].as_str() {
-                                unsafe {
-                                    use objc2::runtime::AnyObject;
-                                    use objc2::{class, msg_send};
-                                    let pb: *mut AnyObject =
-                                        msg_send![class!(NSPasteboard), generalPasteboard];
-                                    let _: () = msg_send![pb, clearContents];
-                                    let ns_str: *mut AnyObject = msg_send![class!(NSString), alloc];
-                                    let ns_str: *mut AnyObject = msg_send![
-                                        ns_str,
-                                        initWithBytes: text.as_ptr(),
-                                        length: text.len(),
-                                        encoding: 4u64 // NSUTF8StringEncoding
-                                    ];
-                                    let ns_str = objc2::rc::Retained::from_raw(ns_str)
-                                        .expect("NSString initWithBytes failed");
-                                    let arr: *mut AnyObject = msg_send![
-                                        class!(NSArray),
-                                        arrayWithObject: &*ns_str
-                                    ];
-                                    let _: bool = msg_send![pb, writeObjects: arr];
-                                }
+                                webview_utils::copy_text_to_pasteboard(text);
                             }
                         }
                         Some("toggle_settings") => {
@@ -1725,11 +1820,11 @@ fn main() {
     let _ = progress_wv.set_visible(false);
 
     let mut progress_visible = false;
-    // Instant when __finish was called — we hide progress_wv after the CSS fade (400ms)
+    // Instant when __complete was called — hide progress_wv after the CSS fade.
     let mut progress_hide_at: Option<std::time::Instant> = None;
 
     // ── Find bar WebView (⌘F — pill-shaped bar at top-right) ──────────────
-    const FIND_BAR_W_LOGICAL: f64 = 320.0;
+    const FIND_BAR_W_LOGICAL: f64 = 360.0;
     const FIND_BAR_H_LOGICAL: f64 = 36.0;
     let find_bar_w = (FIND_BAR_W_LOGICAL * browser_win.scale_factor()) as u32;
     let find_bar_h = (FIND_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
@@ -1910,6 +2005,12 @@ fn main() {
                         Some("dismiss_notification") => {
                             let _ = p.send_event(AppEvent::DismissNotification);
                         }
+                        Some("reveal_file") => {
+                            if let Some(path) = v["path"].as_str() {
+                                webview_utils::reveal_file_in_finder(path);
+                            }
+                            let _ = p.send_event(AppEvent::DismissNotification);
+                        }
                         _ => {}
                     }
                 }
@@ -1963,8 +2064,18 @@ fn main() {
     // Initialize footer with saved slots
     {
         let json = quickslots::to_json(&workspace_manager.active().quick_slots);
+        let active_url = workspace_manager
+            .active()
+            .tabs
+            .lock()
+            .unwrap()
+            .active_tab()
+            .map(|tab| tab.url.clone())
+            .unwrap_or_default();
+        let active_url_json =
+            serde_json::to_string(&active_url).unwrap_or_else(|_| "\"\"".to_string());
         let _ = footer_wv.evaluate_script(&format!(
-            "window.__updateSlots && window.__updateSlots({json})"
+            "window.__updateSlots && window.__updateSlots({json}, {active_url_json})"
         ));
     }
 
@@ -2184,6 +2295,12 @@ fn main() {
     // keystroke; remapping from the settings panel takes a write lock and
     // rebuilds it, so changes apply on the next keypress without a restart.
     let keymap = Arc::new(std::sync::RwLock::new(keybindings::Keymap::load()));
+    if let Ok(k) = keymap.read() {
+        let _ = address_bar_wv.evaluate_script(&format!(
+            "window.__setShortcuts && window.__setShortcuts({})",
+            k.ui_json()
+        ));
+    }
     let _key_monitor: *mut objc2::runtime::AnyObject = {
         use block2::RcBlock;
         use objc2::runtime::AnyObject;
@@ -2208,6 +2325,7 @@ fn main() {
         let capturing = Arc::clone(&keybind_capturing);
         let overlay_state = Arc::clone(&overlay_hotkey_visible);
         let find_bar_state = Arc::clone(&find_bar_hotkey_visible);
+        let address_edit_state = Arc::clone(&address_edit_hotkey_visible);
         let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
         let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
         let workspaces_state = Arc::clone(&workspace_switcher_visible);
@@ -2259,6 +2377,7 @@ fn main() {
                     find_bar_state.load(Ordering::Relaxed),
                     inline_edit_state.load(Ordering::Relaxed),
                     sidebar_state.load(Ordering::Relaxed),
+                    address_edit_state.load(Ordering::Relaxed),
                 ) {
                     let _ = p.send_event(ev);
                     return consume;
@@ -2321,10 +2440,79 @@ fn main() {
     // to full window height so the autocomplete dropdown and backdrop can
     // paint outside the 32 px titlebar strip without being clipped.
     let mut address_bar_editing = false;
+    let mut overlay_focus_target = PanelFocusTarget::ActiveTab;
+    let mut settings_focus_target = PanelFocusTarget::ActiveTab;
+    let mut shortcuts_focus_target = PanelFocusTarget::ActiveTab;
+    let mut workspaces_focus_target = PanelFocusTarget::ActiveTab;
     let mut icon_set = false;
     let mut zoom_level: f64 = 1.0;
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
+
+    macro_rules! capture_panel_focus {
+        () => {{
+            let chrome_is_key = unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                let is_key: bool = msg_send![ns_win, isKeyWindow];
+                is_key
+            };
+            if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
+                PanelFocusTarget::Sidebar
+            } else if address_bar_editing {
+                PanelFocusTarget::AddressBar
+            } else {
+                PanelFocusTarget::ActiveTab
+            }
+        }};
+    }
+
+    macro_rules! restore_panel_focus {
+        ($target:expr) => {{
+            if is_app_active() {
+                match $target {
+                    PanelFocusTarget::Sidebar
+                        if sidebar_visible && sidebar_owns_key.load(Ordering::Relaxed) =>
+                    {
+                        unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                            let _: () = msg_send![ns_win, makeKeyWindow];
+                        }
+                        let _ = sidebar_wv.focus();
+                        let _ = sidebar_wv.evaluate_script(
+                            "(function(){var el=document.getElementById('prompt-input');\
+                             if(el)el.focus()})()",
+                        );
+                    }
+                    PanelFocusTarget::AddressBar => {
+                        unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let ns_win: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
+                            let _: () = msg_send![ns_win, makeKeyWindow];
+                        }
+                        let _ = address_bar_wv.focus();
+                        let _ = address_bar_wv
+                            .evaluate_script("window.__urlEditFocus && window.__urlEditFocus()");
+                    }
+                    _ => {
+                        unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let ns_win: *mut AnyObject = browser_win.ns_window() as *mut AnyObject;
+                            let _: () = msg_send![ns_win, makeKeyWindow];
+                        }
+                        if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                            let _ = wv.focus();
+                        }
+                    }
+                }
+            }
+        }};
+    }
 
     /// Push the current keybindings into both the settings panel (so the
     /// Keybindings tab re-renders) and the shortcuts overlay (so the help
@@ -2346,6 +2534,29 @@ fn main() {
                     "window.__setShortcuts && window.__setShortcuts({})",
                     json
                 ));
+                let _ = address_bar_wv.evaluate_script(&format!(
+                    "window.__setShortcuts && window.__setShortcuts({})",
+                    json
+                ));
+                for ws in workspace_manager.list() {
+                    let new_tab_ids: std::collections::HashSet<usize> = ws
+                        .tabs
+                        .lock()
+                        .unwrap()
+                        .tabs()
+                        .iter()
+                        .filter(|tab| tab.url == "about:blank")
+                        .map(|tab| tab.id)
+                        .collect();
+                    for (&tid, wv) in ws.webviews.iter() {
+                        if new_tab_ids.contains(&tid) {
+                            let _ = wv.evaluate_script(&format!(
+                                "window.__setShortcuts && window.__setShortcuts({})",
+                                json
+                            ));
+                        }
+                    }
+                }
             }
         }};
     }
@@ -2643,6 +2854,7 @@ fn main() {
             commit_tab_visibility!(target);
             // Hide progress bar when switching away from a loading tab
             if progress_visible {
+                let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
@@ -2725,6 +2937,11 @@ fn main() {
             let escaped_title = webview_utils::escape_js_template(&raw_title);
             let _ = address_bar_wv.evaluate_script(&format!(
                 "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, {pb}, {pt})"
+            ));
+            let active_url_json =
+                serde_json::to_string(u).unwrap_or_else(|_| "\"\"".to_string());
+            let _ = footer_wv.evaluate_script(&format!(
+                "window.__setActiveUrl && window.__setActiveUrl({active_url_json})"
             ));
             // Suggestions are NOT pushed here: this macro fires on every
             // navigation / SPA route change / tab switch, and the snapshot is
@@ -2824,6 +3041,7 @@ fn main() {
                 inline_edit_response.clear();
             }
             if progress_visible {
+                let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
@@ -3090,8 +3308,18 @@ fn main() {
     macro_rules! sync_quickslots_ui {
         () => {{
             let json = quickslots::to_json(&workspace_manager.active().quick_slots);
+            let active_url = workspace_manager
+                .active()
+                .tabs
+                .lock()
+                .unwrap()
+                .active_tab()
+                .map(|tab| tab.url.clone())
+                .unwrap_or_default();
+            let active_url_json =
+                serde_json::to_string(&active_url).unwrap_or_else(|_| "\"\"".to_string());
             let _ = footer_wv.evaluate_script(&format!(
-                "window.__updateSlots && window.__updateSlots({json})"
+                "window.__updateSlots && window.__updateSlots({json}, {active_url_json})"
             ));
             for (&tid, wv) in workspace_manager.active().webviews.iter() {
                 let tab_url = workspace_manager
@@ -3104,10 +3332,11 @@ fn main() {
                     .find(|t| t.id == tid)
                     .map(|t| t.url.clone());
                 if tab_url.as_deref() == Some("about:blank") {
-                    let html = newtab_html::html(&quickslots::to_json(
-                        &workspace_manager.active().quick_slots,
-                    ));
-                    let _ = wv.load_html(&html);
+                    let update = format!("window.__updateSlots({json})");
+                    if wv.evaluate_script(&update).is_err() {
+                        let html = newtab_html::html(&json);
+                        let _ = wv.load_html(&html);
+                    }
                 }
             }
         }};
@@ -3148,6 +3377,7 @@ fn main() {
         // Hide progress bar after CSS fade completes
         if let Some(hide_at) = progress_hide_at {
             if std::time::Instant::now() >= hide_at {
+                let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
                 let _ = progress_wv.set_visible(false);
                 progress_visible = false;
                 progress_hide_at = None;
@@ -3165,6 +3395,7 @@ fn main() {
                     commit_tab_visibility!(new_id);
                 }
                 if progress_visible {
+                    let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
                     let _ = progress_wv.set_visible(false);
                     progress_visible = false;
                     progress_hide_at = None;
@@ -3894,6 +4125,17 @@ fn main() {
                         );
                     }
                     let escaped = webview_utils::escape_js_template(&err);
+                    let _ = inline_edit_wv.set_visible(true);
+                    inline_edit_visible = true;
+                    inline_edit_pending = false;
+                    inline_edit_hotkey_visible.store(true, Ordering::Relaxed);
+                    unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                        let _: () = msg_send![ns_win, makeKeyWindow];
+                    }
+                    let _ = inline_edit_wv.focus();
                     let _ = inline_edit_wv.evaluate_script(&format!(
                         "window.__setError && window.__setError(`{escaped}`)"
                     ));
@@ -5161,12 +5403,14 @@ fn main() {
                 overlay_win.set_visible(false);
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                restore_panel_focus!(overlay_focus_target);
             }
 
             // ── Hide shortcuts overlay (from JS Esc / backdrop click) ─────
             Event::UserEvent(AppEvent::HideShortcuts) => {
                 shortcuts_win.set_visible(false);
                 shortcuts_visible = false;
+                restore_panel_focus!(shortcuts_focus_target);
             }
 
             // ── Address bar URL edit: grow just enough for the dropdown ───────
@@ -5174,6 +5418,7 @@ fn main() {
             // rows below the 32 px titlebar strip so the dropdown is visible.
             Event::UserEvent(AppEvent::UrlEditExpand(expanded)) => {
                 address_bar_editing = expanded;
+                address_edit_hotkey_visible.store(expanded, Ordering::Relaxed);
                 let sz = browser_win.inner_size();
                 let scale = browser_win.scale_factor();
                 let expanded_extra: u32 = if expanded {
@@ -5225,7 +5470,9 @@ fn main() {
                     settings_win.set_visible(false);
                     settings_visible = false;
                     keybind_capturing.store(false, Ordering::Relaxed);
+                    restore_panel_focus!(settings_focus_target);
                 } else {
+                    settings_focus_target = capture_panel_focus!();
                     let sz = browser_win.inner_size();
                     settings_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
                     if let Ok(pos) = browser_win.outer_position() {
@@ -5252,6 +5499,7 @@ fn main() {
                 settings_win.set_visible(false);
                 settings_visible = false;
                 keybind_capturing.store(false, Ordering::Relaxed);
+                restore_panel_focus!(settings_focus_target);
             }
 
             // ── Workspace switcher popover (⌘⇧O) ─────────────────────────
@@ -5259,7 +5507,9 @@ fn main() {
                 if workspace_switcher_visible.load(Ordering::Relaxed) {
                     workspace_switcher_win.set_visible(false);
                     workspace_switcher_visible.store(false, Ordering::Relaxed);
+                    restore_panel_focus!(workspaces_focus_target);
                 } else {
+                    workspaces_focus_target = capture_panel_focus!();
                     let sz = browser_win.inner_size();
                     workspace_switcher_win
                         .set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
@@ -5275,6 +5525,7 @@ fn main() {
             Event::UserEvent(AppEvent::HideWorkspaces) => {
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible.store(false, Ordering::Relaxed);
+                restore_panel_focus!(workspaces_focus_target);
             }
             Event::UserEvent(AppEvent::SwitchWorkspaceByIndex(idx)) => {
                 // Resolve here, then re-enter the normal switch path — the key
@@ -5609,7 +5860,9 @@ fn main() {
                 if shortcuts_visible {
                     shortcuts_win.set_visible(false);
                     shortcuts_visible = false;
+                    restore_panel_focus!(shortcuts_focus_target);
                 } else {
+                    shortcuts_focus_target = capture_panel_focus!();
                     let sz = browser_win.inner_size();
                     shortcuts_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
                     if let Ok(pos) = browser_win.outer_position() {
@@ -5618,6 +5871,10 @@ fn main() {
                     // Reflect live keybindings in the Global column.
                     if let Ok(k) = keymap.read() {
                         let _ = shortcuts_wv.evaluate_script(&format!(
+                            "window.__setShortcuts && window.__setShortcuts({})",
+                            k.ui_json()
+                        ));
+                        let _ = address_bar_wv.evaluate_script(&format!(
                             "window.__setShortcuts && window.__setShortcuts({})",
                             k.ui_json()
                         ));
@@ -5635,7 +5892,9 @@ fn main() {
                     overlay_win.set_visible(false);
                     overlay_visible = false;
                     overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                    restore_panel_focus!(overlay_focus_target);
                 } else {
+                    overlay_focus_target = capture_panel_focus!();
                     let sz = browser_win.inner_size();
                     overlay_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
                     if let Ok(pos) = browser_win.outer_position() {
@@ -5869,6 +6128,12 @@ fn main() {
                 if let Some(id) = id {
                     let selected_id = active_wv_id;
                     let render_successor = close_affects_display(id, active_wv_id, pending_swap);
+                    if render_successor && progress_visible {
+                        let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
+                        let _ = progress_wv.set_visible(false);
+                        progress_visible = false;
+                        progress_hide_at = None;
+                    }
                     // Cancel any pending swap involving this tab
                     if let Some((old_id, new_id)) = pending_swap.take() {
                         if id == new_id {
@@ -6023,6 +6288,15 @@ fn main() {
                     // WebView receives keyboard input again.
                     browser_win.set_focus();
                 } else {
+                    sidebar_width_logical = clamp_sidebar_width(
+                        sidebar_width_logical,
+                        sz.width,
+                        browser_win.scale_factor(),
+                    );
+                    let sidebar_w = sidebar_width_physical(
+                        sidebar_width_logical,
+                        browser_win.scale_factor(),
+                    );
                     let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
                     let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
                     let _ = sidebar_wv.set_bounds(wry::Rect {
@@ -6031,6 +6305,10 @@ fn main() {
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setSidebarFullscreen && window.__setSidebarFullscreen({})",
+                        sidebar_fullscreen
+                    ));
                     sidebar_hotkey_visible.store(true, Ordering::Relaxed);
                     sidebar_owns_key.store(true, Ordering::Relaxed);
                     // Seed sidebar with persisted AI prompt history so older prompts
@@ -6109,6 +6387,79 @@ fn main() {
                 }
             }
 
+            Event::UserEvent(AppEvent::SidebarResize(width)) => {
+                let sz = browser_win.inner_size();
+                sidebar_width_logical = clamp_sidebar_width(
+                    width,
+                    sz.width,
+                    browser_win.scale_factor(),
+                );
+                if sidebar_visible && !sidebar_fullscreen {
+                    let sidebar_w = sidebar_width_physical(
+                        sidebar_width_logical,
+                        browser_win.scale_factor(),
+                    );
+                    let _ = sidebar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(sidebar_w),
+                            0u32,
+                        )
+                        .into(),
+                        size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
+                    });
+                }
+            }
+
+            Event::UserEvent(AppEvent::SidebarResizeEnd(width)) => {
+                let sz = browser_win.inner_size();
+                sidebar_width_logical = clamp_sidebar_width(
+                    width,
+                    sz.width,
+                    browser_win.scale_factor(),
+                );
+                if sidebar_visible && !sidebar_fullscreen {
+                    let sidebar_w = sidebar_width_physical(
+                        sidebar_width_logical,
+                        browser_win.scale_factor(),
+                    );
+                    let _ = sidebar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(sidebar_w),
+                            0u32,
+                        )
+                        .into(),
+                        size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
+                    });
+                }
+                cfg.sidebar_width = sidebar_width_logical;
+                cfg.save();
+            }
+
+            Event::UserEvent(AppEvent::SidebarResizeReset) => {
+                let sz = browser_win.inner_size();
+                sidebar_width_logical = clamp_sidebar_width(
+                    SIDEBAR_W_LOGICAL,
+                    sz.width,
+                    browser_win.scale_factor(),
+                );
+                if sidebar_visible && !sidebar_fullscreen {
+                    let sidebar_w = sidebar_width_physical(
+                        sidebar_width_logical,
+                        browser_win.scale_factor(),
+                    );
+                    let _ = sidebar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            sz.width.saturating_sub(sidebar_w),
+                            0u32,
+                        )
+                        .into(),
+                        size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
+                    });
+                }
+                cfg.sidebar_width = SIDEBAR_W_LOGICAL;
+                cfg.save();
+            }
+
             // ── Toggle native macOS fullscreen on the browser window (⌘Return) ─
             // chrome_win is a borderless child — fullscreen-primary lives on
             // browser_win, fullscreen-auxiliary on chrome_win (set at creation).
@@ -6133,6 +6484,15 @@ fn main() {
                 } else {
                     sidebar_fullscreen = !sidebar_fullscreen;
                     let sz = browser_win.inner_size();
+                    sidebar_width_logical = clamp_sidebar_width(
+                        sidebar_width_logical,
+                        sz.width,
+                        browser_win.scale_factor(),
+                    );
+                    let sidebar_w = sidebar_width_physical(
+                        sidebar_width_logical,
+                        browser_win.scale_factor(),
+                    );
                     let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
                     let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
                     let _ = sidebar_wv.set_bounds(wry::Rect {
@@ -6598,7 +6958,59 @@ fn main() {
             // ── Quick-slot: open saved URL ────────────────────────────────
             // If a tab with this URL is already open → switch to it.
             // Otherwise → open in a new tab (preserves current tab, e.g. music).
+            // Only bundled new-tab/error documents may invoke clipboard,
+            // navigation, or quick-slot mutations through a tab WebView.
+            Event::UserEvent(AppEvent::InternalPageIpc(tab_id, action)) => {
+                let tab_url = workspace_manager.index_of_tab(tab_id).and_then(|owner| {
+                    workspace_manager
+                        .at(owner)
+                        .tabs
+                        .lock()
+                        .unwrap()
+                        .tabs()
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .map(|tab| tab.url.clone())
+                });
+                let is_internal = tab_url.as_deref() == Some("about:blank")
+                    || error_page_tabs.contains(&tab_id);
+                if !is_internal {
+                    tracing::warn!(
+                        tab_id,
+                        url = tab_url.as_deref().unwrap_or("<unknown>"),
+                        ?action,
+                        "ignoring restricted IPC from non-internal page"
+                    );
+                    return;
+                }
+                match action {
+                    InternalPageAction::Navigate(url) => {
+                        let _ = proxy.send_event(AppEvent::NavigateTo(url));
+                    }
+                    InternalPageAction::CopyText(text) => {
+                        webview_utils::copy_text_to_pasteboard(&text);
+                    }
+                    InternalPageAction::QuickSlotOpen(slot) => {
+                        let _ = proxy.send_event(AppEvent::QuickSlotOpen(slot));
+                    }
+                    InternalPageAction::QuickSlotSave(slot) => {
+                        let _ = proxy.send_event(AppEvent::QuickSlotSave(slot));
+                    }
+                    InternalPageAction::QuickSlotSaveUrl(slot, url) => {
+                        let _ = proxy.send_event(AppEvent::QuickSlotSaveUrl(tab_id, slot, url));
+                    }
+                    InternalPageAction::QuickSlotRemove(slot) => {
+                        let _ = proxy.send_event(AppEvent::QuickSlotRemove(slot));
+                    }
+                }
+            }
+
             Event::UserEvent(AppEvent::QuickSlotOpen(slot)) => {
+                let slot_count = workspace_manager.active().quick_slots.len();
+                if slot >= slot_count {
+                    tracing::warn!(slot, slot_count, "ignoring out-of-range QuickSlotOpen");
+                    return;
+                }
                 let saved = workspace_manager.active().quick_slots[slot]
                     .as_ref()
                     .map(|qs| qs.url.clone());
@@ -6620,6 +7032,11 @@ fn main() {
 
             // ── Quick-slot: save current page to slot ─────────────────────
             Event::UserEvent(AppEvent::QuickSlotSave(slot)) => {
+                let slot_count = workspace_manager.active().quick_slots.len();
+                if slot >= slot_count {
+                    tracing::warn!(slot, slot_count, "ignoring out-of-range QuickSlotSave");
+                    return;
+                }
                 let info = {
                     let tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.active_tab().map(|t| (t.url.clone(), t.title.clone()))
@@ -6644,8 +7061,39 @@ fn main() {
                 }
             }
 
+            // ── Quick-slot: save an address entered on the new-tab page ───
+            Event::UserEvent(AppEvent::QuickSlotSaveUrl(origin_tab_id, slot, raw)) => {
+                let slot_count = workspace_manager.active().quick_slots.len();
+                if slot >= slot_count {
+                    tracing::warn!(slot, slot_count, "ignoring out-of-range QuickSlotSaveUrl");
+                    return;
+                }
+                if !raw.trim().is_empty() {
+                    let resolved = url::resolve_url(&raw, &search_engine);
+                    workspace_manager.active_mut().quick_slots[slot] =
+                        Some(quickslots::QuickSlot {
+                            url: resolved.clone(),
+                            title: String::new(),
+                            favicon: None,
+                        });
+                    save_quickslots!();
+                    sync_quickslots_ui!();
+                    if let Some(wv) = workspace_manager.active().webviews.get(&origin_tab_id) {
+                        let _ = wv.evaluate_script(
+                            "window.__slotSaved && window.__slotSaved()",
+                        );
+                    }
+                    let _ = proxy.send_event(AppEvent::NavigateTo(resolved));
+                }
+            }
+
             // ── Quick-slot: remove slot ───────────────────────────────────
             Event::UserEvent(AppEvent::QuickSlotRemove(slot)) => {
+                let slot_count = workspace_manager.active().quick_slots.len();
+                if slot >= slot_count {
+                    tracing::warn!(slot, slot_count, "ignoring out-of-range QuickSlotRemove");
+                    return;
+                }
                 workspace_manager.active_mut().quick_slots[slot] = None;
                 save_quickslots!();
                 sync_quickslots_ui!();
@@ -6956,7 +7404,7 @@ fn main() {
             }
 
             // ── Download completed — show notification toast ─────────────────
-            Event::UserEvent(AppEvent::DownloadCompleted(filename, success)) => {
+            Event::UserEvent(AppEvent::DownloadCompleted(filename, saved_path, success)) => {
                 let (msg, icon) = if success {
                     (format!("Downloaded: {filename}"), "\u{2705}")
                 } else {
@@ -6969,8 +7417,14 @@ fn main() {
                     let _ = notification_wv.set_visible(true);
                     notification_visible = true;
                 }
+                let options = if success {
+                    serde_json::json!({ "revealPath": saved_path }).to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let auto_dismiss_ms = if success { 4000 } else { 0 };
                 let _ = notification_wv.evaluate_script(&format!(
-                    "window.__show && window.__show(`{escaped}`, `{icon}`, `Download`, 4000)"
+                    "window.__show && window.__show(`{escaped}`, `{icon}`, `Download`, {auto_dismiss_ms}, {options})"
                 ));
             }
 
@@ -7015,6 +7469,9 @@ fn main() {
             Event::UserEvent(AppEvent::BrowserUrlChanged(tab_id, url)) => {
                 tracing::debug!(tab_id, %url, "BrowserUrlChanged");
                 tab_nav::bump(tab_id);
+                if url != "about:blank" {
+                    error_page_tabs.remove(&tab_id);
+                }
                 // During snapshot restore, suppress about:blank URL changes so the
                 // real URL in TabManager is not clobbered by the transient snapshot load.
                 if restoring_tabs.contains(&tab_id) {
@@ -7149,7 +7606,9 @@ fn main() {
                     return;
                 }
                 if tab_id == active_wv_id && progress_visible {
-                    let _ = progress_wv.evaluate_script("window.__finish && window.__finish()");
+                    let _ = progress_wv.evaluate_script(
+                        "window.__complete && window.__complete()",
+                    );
                     // Hide after CSS fade completes (width 0.2s + opacity 0.3s delay 0.1s = 600ms, +50ms buffer)
                     progress_hide_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(650));
                 }
@@ -7204,6 +7663,12 @@ fn main() {
                             tracing::warn!(tab_id, %url, %error, "noise nav failure on loading tab — completed deferred swap");
                         }
                     }
+                    if tab_id == active_wv_id && progress_visible {
+                        let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
+                        let _ = progress_wv.set_visible(false);
+                        progress_visible = false;
+                        progress_hide_at = None;
+                    }
                     return;
                 }
                 // Fail pending MCP navigate
@@ -7212,6 +7677,7 @@ fn main() {
                 }
                 // Hide progress bar immediately on error (only if active tab)
                 if tab_id == active_wv_id && progress_visible {
+                    let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
                     let _ = progress_wv.set_visible(false);
                     progress_visible = false;
                     progress_hide_at = None;
@@ -7219,7 +7685,9 @@ fn main() {
                 // Load error page directly into the failing browser WebView
                 if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
                     let error_html = error_page_html::html(&url, &error);
-                    let _ = wv.load_html(&error_html);
+                    if wv.load_html(&error_html).is_ok() {
+                        error_page_tabs.insert(tab_id);
+                    }
                 }
                 // Abandon any deferred snapshot restore — error page replaces it
                 deferred_nav.remove(&tab_id);
@@ -7434,16 +7902,33 @@ fn main() {
                     format!("{}\n<text>{}</text>", prompt, inline_edit_selected_text)
                 };
                 inline_edit_response.clear();
-                inline_edit_acp = acp::AcpHandle::connect(
+                let start_error = match acp::AcpHandle::connect(
                     "octomind acp octoweb:editor",
                     workspace_manager.active().mcp_token.clone(),
                     { let p = acp_proxy.clone(); move || { let _ = p.send_event(AppEvent::AcpWake); } }
-                ).ok();
-                if let Some(ref h) = inline_edit_acp {
-                    h.send_prompt(formatted, vec![]);
-                }
-                // Auto-hide modal if configured
-                if cfg.ai_edit_auto_hide {
+                ) {
+                    Ok(handle) => {
+                        if handle.send_prompt(formatted, vec![]) {
+                            inline_edit_acp = Some(handle);
+                            None
+                        } else {
+                            Some("The editor connection closed before the request was sent.".to_string())
+                        }
+                    }
+                    Err(err) => Some(format!("Could not connect to the editor: {err}")),
+                };
+                if let Some(err) = start_error {
+                    tracing::warn!(error = %err, "inline edit ACP start failed");
+                    inline_edit_acp = None;
+                    inline_edit_response.clear();
+                    let escaped = webview_utils::escape_js_template(&err);
+                    let _ = inline_edit_wv.evaluate_script(&format!(
+                        "window.__setError && window.__setError(`{escaped}`)"
+                    ));
+                    let _ = inline_edit_wv.focus();
+                } else if cfg.ai_edit_auto_hide {
+                    // Auto-hide only after the prompt was accepted by ACP. Any
+                    // asynchronous error reopens this editor with the prompt intact.
                     let _ = inline_edit_wv.set_visible(false);
                     inline_edit_visible = false;
                     inline_edit_pending = false;
@@ -7643,9 +8128,18 @@ fn main() {
                     if workspace_switcher_visible.load(Ordering::Relaxed) {
                         workspace_switcher_win.set_inner_size(*sz);
                     }
+                    sidebar_width_logical = clamp_sidebar_width(
+                        sidebar_width_logical,
+                        sz.width,
+                        browser_win.scale_factor(),
+                    );
                     // Resize sidebar to track window height and stay at right edge
                     // (or full-width when sidebar_fullscreen is set).
                     if sidebar_visible {
+                        let sidebar_w = sidebar_width_physical(
+                            sidebar_width_logical,
+                            browser_win.scale_factor(),
+                        );
                         let w = if sidebar_fullscreen { sz.width } else { sidebar_w };
                         let x = if sidebar_fullscreen { 0u32 } else { sz.width.saturating_sub(sidebar_w) };
                         let _ = sidebar_wv.set_bounds(wry::Rect {

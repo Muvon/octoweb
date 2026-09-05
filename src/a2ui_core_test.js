@@ -115,7 +115,7 @@ eq(opened.length, 1, 'openUrl rejects data: scheme');
 eq(a2uiToStr(null), '', 'toStr null');
 eq(a2uiToStr(['a', 'b']), 'a, b', 'toStr array');
 eq(a2uiToStr({ text: 'hi' }), 'hi', 'toStr drills text');
-eq(a2uiToStr('line\\nbreak'), 'line\nbreak', 'toStr unescapes over-escaped newline');
+eq(a2uiToStr('line\\nbreak'), 'line\\nbreak', 'toStr preserves literal backslash sequences');
 
 // markdown
 eq(a2uiRenderMarkdown('### Head').indexOf('<h3>Head</h3>') >= 0, true, 'markdown heading');

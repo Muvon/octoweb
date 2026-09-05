@@ -50,6 +50,8 @@ pub fn html() -> String {
   }
   #ghost-wrap:hover { background: var(--fill-hover); }
   #ghost-wrap:focus-within { background: var(--fill-press); }
+  #ghost-wrap.multiline,
+  #ghost-wrap.multiline #input { border-radius: var(--r-ctl); }
 
   #input {
     width: 100%;
@@ -59,7 +61,7 @@ pub fn html() -> String {
     outline: none;
     background: transparent;
     border-radius: var(--r-capsule);
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 18px;
     letter-spacing: -0.01em;
     color: var(--label);
@@ -70,18 +72,18 @@ pub fn html() -> String {
     position: relative;
     z-index: 1;
   }
-  #input::placeholder { color: var(--label-3); }
+  #input::placeholder { color: var(--label-2); }
   #input:disabled { opacity: 0.5; }
 
   #ghost {
     position: absolute;
     top: 0; left: 0; right: 0;
     min-height: 22px;
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 18px;
     letter-spacing: -0.01em;
     font-family: inherit;
-    color: var(--label-3);
+    color: var(--label-2);
     pointer-events: none;
     padding: 2px 8px;
     white-space: pre-wrap;
@@ -119,6 +121,14 @@ pub fn html() -> String {
   }
   #spinner.active { display: block; }
 
+  #working {
+    display: none;
+    flex-shrink: 0;
+    padding: 0 4px;
+    font-size: 13px;
+    color: var(--label-2);
+  }
+
   @keyframes spin { to { transform: rotate(360deg); } }
 
   #error-msg {
@@ -131,6 +141,16 @@ pub fn html() -> String {
     max-width: 200px;
     padding: 0 4px;
   }
+
+  #apply {
+    min-width: 52px;
+    padding: 0 10px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 13px;
+  }
+  #apply:hover { background: color-mix(in srgb, var(--accent) 90%, var(--fill-hover)); color: var(--on-accent); }
+  #apply:disabled { opacity: 0.55; cursor: default; }
 
   button {
     display: flex;
@@ -149,8 +169,6 @@ pub fn html() -> String {
   button:hover { background: var(--fill-hover); color: var(--label); }
   button:active { background: var(--fill-press); transform: scale(0.96); }
 
-  .submit-hint { margin: 0 2px; flex-shrink: 0; }
-
   button svg {
     width: 9px; height: 9px;
     stroke: currentColor;
@@ -158,6 +176,17 @@ pub fn html() -> String {
     stroke-width: 2.2;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #bar { animation: none; }
+    #spinner.active { display: none; }
+    #working.active { display: block; }
   }
 </style>
 </head>
@@ -168,9 +197,10 @@ pub fn html() -> String {
     <div id="ghost" aria-hidden="true"></div>
   </div>
   <div class="controls">
-    <div id="spinner"></div>
-    <span id="error-msg"></span>
-    <span class="submit-hint kbd" title="Submit">⏎</span>
+    <div id="spinner" role="status" aria-label="Working"></div>
+    <span id="working" role="status">Working…</span>
+    <span id="error-msg" role="status" aria-live="polite"></span>
+    <button id="apply" type="button">Apply</button>
     <div class="sep"></div>
     <button id="hide" title="Hide (keep processing)" style="display:none">
       <svg viewBox="0 0 10 10"><polyline points="1,4 5,8 9,4"/></svg>
@@ -185,9 +215,11 @@ pub fn html() -> String {
 (function() {
   var input = document.getElementById('input');
   var spinner = document.getElementById('spinner');
+  var working = document.getElementById('working');
   var errorMsg = document.getElementById('error-msg');
   var bar = document.getElementById('bar');
   var hideBtn = document.getElementById('hide');
+  var applyBtn = document.getElementById('apply');
   var ghost = document.getElementById('ghost');
   var lastH = 0;
 
@@ -201,7 +233,9 @@ pub fn html() -> String {
 
   function autoResize() {
     input.style.height = '22px';
-    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    var contentHeight = input.scrollHeight;
+    input.style.height = Math.min(contentHeight, 120) + 'px';
+    document.getElementById('ghost-wrap').classList.toggle('multiline', contentHeight > 22);
     var h = bar.offsetHeight + 8;
     if (h !== lastH) {
       lastH = h;
@@ -212,6 +246,12 @@ pub fn html() -> String {
   // ── Prompt history (shared module) ──────────────────────────────────────
   /* PROMPT_HISTORY_JS */
   var _ph = createPromptHistory(input, ghost, 'How should I edit this?', autoResize);
+
+  function submit() {
+    var prompt = input.value.trim();
+    if (!prompt || input.disabled) return;
+    ipc({ type: 'inline_edit_submit', prompt: prompt });
+  }
 
   // ── Keyboard handler (non-history keys) ─────────────────────────────────
   input.addEventListener('keydown', function(e) {
@@ -228,9 +268,11 @@ pub fn html() -> String {
       input.scrollTop = input.scrollHeight;
     } else if (e.key === 'Enter' && !e.shiftKey && input.value.trim()) {
       e.preventDefault();
-      ipc({ type: 'inline_edit_submit', prompt: input.value.trim() });
+      submit();
     }
   });
+
+  applyBtn.addEventListener('click', submit);
 
   document.getElementById('close').addEventListener('click', function() {
     ipc({ type: 'inline_edit_close' });
@@ -248,8 +290,11 @@ pub fn html() -> String {
   window.__clear = function() {
     input.value = '';
     input.style.height = '22px';
+    document.getElementById('ghost-wrap').classList.remove('multiline');
     input.disabled = false;
     spinner.classList.remove('active');
+    working.classList.remove('active');
+    applyBtn.disabled = false;
     hideBtn.style.display = 'none';
     errorMsg.style.display = 'none';
     lastH = 0;
@@ -259,16 +304,22 @@ pub fn html() -> String {
   window.__setProcessing = function(on) {
     input.disabled = on;
     spinner.classList.toggle('active', on);
+    working.classList.toggle('active', on);
+    applyBtn.disabled = on;
     hideBtn.style.display = on ? '' : 'none';
     errorMsg.style.display = 'none';
   };
 
   window.__setError = function(msg) {
     spinner.classList.remove('active');
+    working.classList.remove('active');
     input.disabled = false;
+    applyBtn.disabled = false;
+    hideBtn.style.display = 'none';
     errorMsg.textContent = msg;
     errorMsg.style.display = 'block';
-    setTimeout(function() { errorMsg.style.display = 'none'; }, 4000);
+    input.focus();
+    input.select();
   };
 
   window.__setHistory = _ph.setHistory;

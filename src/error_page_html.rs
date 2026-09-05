@@ -1,47 +1,48 @@
 /// Returns the HTML for a custom error page (WKWebView load failure).
 /// The URL and error code are baked directly into the HTML so no JS call is needed after load.
-/// Light/dark adaptive via prefers-color-scheme.
 pub fn html(url: &str, error_code: &str) -> String {
-    // Map NSURLError codes to human-readable messages and names
-    let (message, error_name) = match error_code {
-        "-1001" => (
-            "The request timed out. The server might be slow or unreachable.",
-            "Timeout",
+    let (reason, is_certificate_error) = match error_code {
+        "-1001" => ("The request timed out before the page responded.", false),
+        "-1003" => ("The server for this address could not be found.", false),
+        "-1004" => ("Octoweb could not connect to the server.", false),
+        "-1005" => (
+            "The network connection was lost while loading the page.",
+            false,
         ),
-        "-1003" => (
-            "Cannot find server. Check the address or your internet connection.",
-            "DNS Failure",
+        "-1009" => ("Your Mac appears to be offline.", false),
+        "-1100" => (
+            "The address refers to a missing file or a URL Octoweb cannot open.",
+            false,
         ),
-        "-1004" => (
-            "Could not connect to the server. It might be down.",
-            "Connection Refused",
+        "-1200" => (
+            "A secure connection to the server could not be established.",
+            false,
         ),
-        "-1005" => ("The network connection was lost.", "Network Lost"),
-        "-1009" => (
-            "You appear to be offline. Check your internet connection.",
-            "Offline",
+        "-1201" => (
+            "The website’s certificate has expired or is not yet valid.",
+            true,
         ),
-        "-1100" => ("The URL is not valid.", "Invalid URL"),
-        "-1200" => ("A secure connection could not be established.", "SSL Error"),
-        "-1201" => ("The certificate is not trusted.", "Certificate Untrusted"),
-        "-1202" => ("The certificate has expired.", "Certificate Expired"),
-        "-1203" => (
-            "The certificate domain does not match.",
-            "Certificate Mismatch",
-        ),
+        "-1202" => ("The website’s certificate is not trusted.", true),
+        "-1203" => ("The website’s certificate has an unknown root.", true),
         _ => (
-            "The page couldn't be loaded. Even the best swimmers get caught in currents sometimes.",
-            "Unknown",
+            "The page could not be loaded because of an unknown error.",
+            false,
         ),
     };
 
-    // Escape for safe HTML embedding
     let safe_url = html_escape(url);
     let safe_code = html_escape(error_code);
-    let safe_msg = html_escape(message);
-    let safe_name = html_escape(error_name);
-    // JSON-encode URL for the retry button script
-    let json_url = js_string_escape(url);
+    let safe_reason = html_escape(reason);
+    let json_url = serde_json::to_string(url)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
+    let back_button = if is_certificate_error {
+        r#"<button class="secondary-btn" id="backBtn" type="button">Go back</button>"#
+    } else {
+        ""
+    };
 
     format!(
         r#"<!DOCTYPE html>
@@ -54,139 +55,153 @@ pub fn html(url: &str, error_code: &str) -> String {
 {css}</style>
 </head>
 <body>
-<div class="card">
-  <div class="octopus">@@OCTOPUS_BRAND@@</div>
-  <h1>Oops! Tentacles got tangled</h1>
-  <p class="message">{safe_msg}</p>
-  <div class="error-code">{safe_url}</div>
-  <div class="error-detail">{safe_name} ({safe_code})</div>
-  <button class="retry-btn" id="retryBtn">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-      <path d="M3 3v5h5"/>
-    </svg>
-    Try Again
-  </button>
-</div>
+<main class="card">
+  <div class="error-symbol" aria-hidden="true">@@ERROR_SYMBOL@@</div>
+  <h1>This page can't be opened</h1>
+  <p class="message">{safe_reason}</p>
+  <div class="address-row">
+    <span class="address">{safe_url}</span>
+    <button class="copy-btn" id="copyBtn" type="button">Copy address</button>
+  </div>
+  <p class="error-detail">Error {safe_code}</p>
+  <div class="actions">
+    <button class="primary-btn" id="retryBtn" type="button">Try again</button>
+    {back_button}
+  </div>
+</main>
 <script>
 document.getElementById('retryBtn').addEventListener('click', function() {{
-  window.ipc.postMessage(JSON.stringify({{ type: 'error_retry', url: '{json_url}' }}));
+  window.ipc.postMessage(JSON.stringify({{ type: 'error_retry', url: {json_url} }}));
 }});
+document.getElementById('copyBtn').addEventListener('click', function() {{
+  window.ipc.postMessage(JSON.stringify({{ type: 'copy_text', text: {json_url} }}));
+}});
+var backBtn = document.getElementById('backBtn');
+if (backBtn) backBtn.addEventListener('click', function() {{ history.back(); }});
 </script>
 </body>
 </html>"#,
         css = ERROR_PAGE_CSS,
-        safe_msg = safe_msg,
+        safe_reason = safe_reason,
         safe_url = safe_url,
-        safe_name = safe_name,
         safe_code = safe_code,
         json_url = json_url,
+        back_button = back_button,
     )
     .replace("/*@@THEME@@*/", crate::theme::CSS)
-    .replace("@@OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
+    .replace("@@ERROR_SYMBOL@@", crate::icons::SHIELD_ALERT)
 }
 
-// Static CSS kept separate to avoid escaping all braces in format!
 const ERROR_PAGE_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0; }
 
   html, body {
     width: 100%;
-    height: 100%;
+    min-height: 100%;
     background: var(--canvas);
     font-family: var(--font-text);
     -webkit-font-smoothing: antialiased;
     color: var(--label);
+  }
+
+  body {
     display: flex;
-    align-items: center;
-    justify-content: center;
+    min-height: 100vh;
+    overflow-y: auto;
+    padding: 48px 24px;
   }
 
   .card {
-    padding: 40px 48px;
-    max-width: 420px;
+    width: min(100%, 520px);
+    margin: auto;
     text-align: center;
     animation: errorIn var(--t-pop) var(--spring);
   }
   @keyframes errorIn {
-    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: none; }
   }
-  .octopus {
-    width: 72px;
-    height: 72px;
-    margin: 0 auto 16px;
-    color: color-mix(in srgb, var(--err) 65%, var(--warn));
-    animation: float 3s var(--ease) infinite;
+
+  .error-symbol {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 14px;
+    color: var(--warn);
   }
-  .octopus svg { width: 100%; height: 100%; }
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-8px); }
-  }
+  .error-symbol svg { width: 100%; height: 100%; }
 
   h1 {
     font-family: var(--font-display);
-    font-size: 28px;
-    font-weight: 650;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.025em;
     margin-bottom: 8px;
-    letter-spacing: -0.035em;
   }
 
   .message {
-    font-size: 15px;
+    font-size: 13px;
+    line-height: 1.45;
     color: var(--label-2);
-    margin-bottom: 24px;
-    line-height: 1.5;
-  }
-
-  .error-code {
-    font-size: 12px;
-    font-family: var(--font-mono);
-    color: var(--label-2);
-    background: var(--fill);
-    padding: 6px 12px;
-    border-radius: var(--r-ctl);
-    margin-bottom: 8px;
-    word-break: break-all;
-  }
-
-  .error-detail {
-    font-size: 11px;
-    font-family: var(--font-mono);
-    color: var(--err);
-    background: color-mix(in srgb, var(--err) 9%, transparent);
-    padding: 4px 10px;
-    border-radius: var(--r-ctl);
     margin-bottom: 20px;
   }
 
-  .retry-btn {
-    display: inline-flex;
+  .address-row {
+    display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 36px;
-    background: var(--accent);
-    color: var(--on-accent);
-    border: none;
-    border-radius: var(--r-capsule);
-    padding: 12px 24px;
-    font-size: 15px;
-    font-weight: 500;
-    cursor: pointer;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 30%, transparent),
-                0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
-    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease),
-                box-shadow var(--t-fast) var(--ease);
+    width: 100%;
+    min-width: 0;
+    margin-bottom: 8px;
+    padding: 8px 8px 8px 12px;
+    border-radius: var(--r-ctl);
+    background: var(--fill);
   }
 
-  .retry-btn:hover {
-    background: color-mix(in srgb, var(--accent) 92%, var(--fill-hover));
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 32%, transparent),
-                0 6px 18px color-mix(in srgb, var(--accent) 42%, transparent);
-    transform: translateY(-1px);
+  .address {
+    flex: 1;
+    min-width: 0;
+    font: 13px var(--font-text);
+    color: var(--label);
+    overflow-wrap: anywhere;
+    text-align: left;
   }
-  .retry-btn:active { background: color-mix(in srgb, var(--accent) 86%, var(--fill-press)); transform: scale(0.97); }
-  .retry-btn svg { width: 16px; height: 16px; }
+
+  button {
+    min-height: 22px;
+    border: 0;
+    font: 13px var(--font-text);
+    cursor: pointer;
+  }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .copy-btn {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border-radius: var(--r-ctl);
+    background: transparent;
+    color: var(--accent);
+  }
+  .copy-btn:hover { background: var(--fill-hover); }
+
+  .error-detail {
+    margin-bottom: 20px;
+    font-size: 11px;
+    color: var(--label-2);
+  }
+
+  .actions { display: flex; justify-content: center; gap: 8px; }
+
+  .primary-btn,
+  .secondary-btn {
+    min-height: 32px;
+    padding: 6px 16px;
+    border-radius: var(--r-capsule);
+  }
+  .primary-btn { background: var(--accent); color: var(--on-accent); }
+  .primary-btn:hover { background: color-mix(in srgb, var(--accent) 90%, var(--fill-hover)); }
+  .secondary-btn { background: var(--fill); color: var(--label); }
+  .secondary-btn:hover { background: var(--fill-hover); }
+
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
 "#;
 
 fn html_escape(s: &str) -> String {
@@ -194,12 +209,4 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-fn js_string_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
 }

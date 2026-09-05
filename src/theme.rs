@@ -33,6 +33,13 @@ pub const CSS: &str = r#"
     --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
     --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
 
+    --fs-body: 13px;
+    --fs-caption: 11px;
+    --fs-title: 15px;
+    --fs-sheet: 17px;
+    --fs-hero: 22px;
+    --ctl-min: 22px;
+
     --label:   rgba(0, 0, 0, 0.85);
     --label-2: rgba(0, 0, 0, 0.50);
     --label-3: rgba(0, 0, 0, 0.26);
@@ -76,8 +83,10 @@ pub const CSS: &str = r#"
     --t-pop: 0.2s;
   }
 
+  /* AccentColorText resolves to black in WKWebView regardless of accent, so
+     text on accent stays white; only the accent itself follows the system. */
   @supports (color: AccentColor) {
-    :root { --accent: AccentColor; --on-accent: AccentColorText; }
+    :root { --accent: AccentColor; }
   }
 
   @media (prefers-color-scheme: dark) {
@@ -110,12 +119,16 @@ pub const CSS: &str = r#"
 
   @media (prefers-contrast: more) {
     :root {
+      --label-2: rgba(0, 0, 0, 0.70);
+      --label-3: rgba(0, 0, 0, 0.50);
       --hairline: rgba(0, 0, 0, 0.35);
       --glass-thin:  rgba(248, 248, 250, 0.85);
     }
   }
   @media (prefers-contrast: more) and (prefers-color-scheme: dark) {
     :root {
+      --label-2: rgba(255, 255, 255, 0.70);
+      --label-3: rgba(255, 255, 255, 0.50);
       --hairline: rgba(255, 255, 255, 0.40);
       --glass-thin:  rgba(30, 30, 34, 0.88);
     }
@@ -147,9 +160,10 @@ pub const CSS: &str = r#"
     align-items: center;
     justify-content: center;
     min-width: 17px;
-    padding: 1px 5px;
+    min-height: 18px;
+    padding: 1px 4px;
     font-family: var(--font-text);
-    font-size: 10px;
+    font-size: var(--fs-caption);
     font-weight: 500;
     letter-spacing: 0.2px;
     color: var(--label-2);

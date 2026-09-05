@@ -381,22 +381,33 @@ pub const CORE: &str = r##"
     }).join('');
   }
 
+  function a2uiNormalizeRelativePath(path) {
+    return path.replace(/^\.\//, '');
+  }
+
   function a2uiResolveValue(v, scope) {
     if (v == null) return v;
     if (typeof v !== 'object') return v;
     if (Array.isArray(v)) return v.map(x => a2uiResolveValue(x, scope));
     if (typeof v.path === 'string') {
       const p = v.path;
+      // List scopes carry an absolute path as well as the initially resolved
+      // item. Re-read through that path so replacing a scalar item does not
+      // leave derived outputs observing the stale pre-edit value.
+      const hasModelPath = scope && typeof scope.modelPath === 'string';
+      const local = hasModelPath ? a2uiPtrGet(scope.root, scope.modelPath)
+        : scope && scope.local;
+      const hasLocal = hasModelPath || (scope && scope.local != null);
       // Inside a List iteration scope, treat "/", "." and "" as "the current
       // item" — that's the natural way to bind a scalar item (e.g. a string
       // in a string[]) into a Text/Image. Without this, agents that write
       // `{path: "/"}` on a list template end up dumping the whole root model
       // into every row.
-      if (scope.local != null && (p === '' || p === '/' || p === '.')) {
-        return scope.local;
+      if (hasLocal && (p === '' || p === '/' || p === '.')) {
+        return local;
       }
       if (p.charAt(0) === '/') return a2uiPtrGet(scope.root, p);
-      if (scope.local != null) return a2uiPtrGet(scope.local, '/' + p);
+      if (hasLocal) return a2uiPtrGet(local, '/' + a2uiNormalizeRelativePath(p));
       return undefined;
     }
     if (typeof v.call === 'string') {
@@ -410,11 +421,20 @@ pub const CORE: &str = r##"
     return v;
   }
 
-  function a2uiPathOf(v) {
-    if (v && typeof v === 'object' && typeof v.path === 'string' && v.path.charAt(0) === '/') {
-      return v.path;
+  function a2uiPathOf(v, scope) {
+    if (!v || typeof v !== 'object' || typeof v.path !== 'string') return null;
+    const path = v.path;
+    // A list row carries the absolute JSON-Pointer path of its local model.
+    // Mirror a2uiResolveValue's special handling of the item root, then join
+    // ordinary relative bindings onto that path so edits can write back.
+    if (scope && typeof scope.modelPath === 'string') {
+      if (path === '' || path === '/' || path === '.') return scope.modelPath;
+      if (path.charAt(0) !== '/') {
+        const base = scope.modelPath === '/' ? '' : scope.modelPath.replace(/\/$/, '');
+        return base + '/' + a2uiNormalizeRelativePath(path);
+      }
     }
-    return null;
+    return path.charAt(0) === '/' ? path : null;
   }
 
   // Stringify a resolved value for display in a text/input slot. Avoids the
@@ -423,15 +443,10 @@ pub const CORE: &str = r##"
   // back to compact JSON, and only ever pass scalars through unchanged.
   function a2uiToStr(v) {
     if (v == null) return '';
-    if (typeof v === 'string') {
-      // Defensive: some models over-escape and put the literal 2-char "\n"
-      // (backslash + n) instead of a real newline. Same for \r\n and \t.
-      // Idempotent — if the string already has real newlines, no-op.
-      if (v.indexOf('\\') !== -1) {
-        return v.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-      }
-      return v;
-    }
+    // JSON.parse has already decoded JSON escapes. Any backslash sequences
+    // still present are literal user/model data (often code or a regex) and
+    // must survive rendering byte-for-byte.
+    if (typeof v === 'string') return v;
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
     if (Array.isArray(v)) return v.map(a2uiToStr).join(', ');
     if (typeof v === 'object') {
@@ -455,14 +470,8 @@ pub const CORE: &str = r##"
       c === '"' ? '&quot;' : '&#39;');
   }
   function a2uiRenderMarkdown(src) {
-    // Some models over-escape newlines/tabs when writing JSON, sending the
-    // literal 2-char sequence "\n" (backslash + n) where they meant a real
-    // newline. JSON.parse decodes those to literal backslash-n in the JS
-    // string, which leaks into rendered prose / code blocks / blockquotes.
-    // Convert defensively before markdown parsing.
-    if (typeof src === 'string' && src.indexOf('\\') !== -1) {
-      src = src.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    }
+    // Preserve the decoded string exactly. Literal backslash-n/backslash-t
+    // sequences may be meaningful source code or regular-expression input.
     let s = a2uiEscapeHtml(src);
     // Use a placeholder that can't collide with prose ("CB0" did, as you
     // saw at end-of-input where the space-bounded marker matcher failed).

@@ -1,30 +1,9 @@
-/// Keyboard shortcuts help overlay — compact 3-column frosted glass panel.
+/// Keyboard shortcuts help overlay — compact three-column frosted glass panel.
 ///
 /// Shown via `⌘/` or the `?` button in the address bar.
 /// IPC: `{ type: "shortcuts_close" }` on Esc or backdrop click.
 ///
-/// ## Layout rules
-///
-/// Three columns inside a single `.shortcuts` flex box: **Global** (left),
-/// **Command Palette** (middle), and **AI Editor** (right).
-/// All columns are `flex: 1` — always equal width.
-///
-/// **Row alignment rule:**
-/// - If the same key binding has an action in BOTH columns, place it on the
-///   SAME row index in both `.shortcuts-col` lists so they visually align.
-/// - If a key only exists in one column, add it after the shared rows —
-///   columns may have different lengths, no placeholder rows needed.
-///
-/// **Ordering convention:**
-/// 1. Shared-key rows first (both columns filled on the same row).
-/// 2. Column-specific rows after — each column lists its own extras.
-///
-/// Currently shared: `⌘W` (row 1), `⌃N/P` (row 2), `⌘1–9` (row 3).
-/// When adding a new shortcut that exists in both contexts, insert it in the
-/// shared block at the top and keep both column lists in sync by row position.
-///
-/// **Compactness rule:** related pairs share a row with `/` separator
-/// (e.g. "Scroll ↕" for ⌃D/⌃U). Keeps the panel tight.
+/// Each column owns an independent list so separators stop at its final row.
 pub fn html() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -45,12 +24,10 @@ pub fn html() -> String {
   #backdrop {
     position: fixed;
     inset: 0;
-    background: color-mix(in srgb, var(--canvas) 28%, rgba(0, 0, 0, 0.52));
+    background: rgba(0, 0, 0, 0.10);
     display: flex;
     align-items: center;
     justify-content: center;
-    -webkit-backdrop-filter: blur(8px);
-    backdrop-filter: blur(8px);
     animation: fadeIn var(--t-fast) var(--ease);
   }
 
@@ -75,7 +52,7 @@ pub fn html() -> String {
   }
 
   #title {
-    font: 600 14px/1.2 var(--font-display);
+    font: 600 17px/1.2 var(--font-display);
     color: var(--label);
     letter-spacing: -0.02em;
   }
@@ -100,39 +77,26 @@ pub fn html() -> String {
 
   #columns {
     display: flex;
-    gap: 0;
+    align-items: flex-start;
+    gap: 10px;
   }
 
-  .col {
+  .shortcut-column {
     flex: 1;
     min-width: 0;
   }
 
-  .col + .col {
-    border-left: 0.5px solid var(--hairline);
-  }
-
   .col-title {
-    font: 600 11px/1.2 var(--font-display);
-    color: var(--label-2);
-    padding: 0 10px 8px;
+    font: 600 13px/1.2 var(--font-display);
+    color: var(--label);
+    padding: 0 6px 8px;
   }
 
-  .shortcuts {
+  .shortcut-list {
     background: var(--glass-thin);
     box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
     border-radius: var(--r-card);
     overflow: hidden;
-    display: flex;
-  }
-
-  .shortcuts-col {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .shortcuts-col + .shortcuts-col {
-    border-left: 0.5px solid var(--hairline);
   }
 
   .row {
@@ -149,15 +113,11 @@ pub fn html() -> String {
   }
 
   .row-label {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--label);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .row-label.dim {
-    color: var(--label-3);
   }
 
   .keys {
@@ -172,15 +132,16 @@ pub fn html() -> String {
     height: 18px;
     white-space: nowrap;
     user-select: none;
+    font-size: 11px;
   }
 </style>
 </head>
 <body>
 <div id="backdrop">
-  <div id="panel" class="glass-panel">
+  <div id="panel" class="glass-panel" role="dialog" aria-modal="true" aria-labelledby="title">
     <div id="header">
-      <span id="title">Keyboard Shortcuts</span>
-      <button id="close-btn" title="Close (Esc)">
+      <span id="title">Keyboard shortcuts</span>
+      <button id="close-btn" title="Close (Esc)" aria-label="Close keyboard shortcuts">
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
@@ -189,31 +150,29 @@ pub fn html() -> String {
       </button>
     </div>
     <div id="columns">
-      <div class="shortcuts">
-        <!-- Left column: Global — populated live from the keymap via __setShortcuts -->
-        <div class="shortcuts-col">
-          <div class="col-title">Global</div>
-          <div id="global-list"></div>
-        </div>
-        <!-- Middle column: Command Palette — shared-key rows aligned to left column -->
-        <div class="shortcuts-col">
-          <div class="col-title">Command Palette <span id="cp-trigger" class="kbd">⌘⇧P</span></div>
+      <!-- Each column has its own list so short columns never render blank stripes. -->
+      <div class="shortcut-column">
+        <div class="col-title">Global</div>
+        <div class="shortcut-list" id="global-list"></div>
+      </div>
+      <div class="shortcut-column">
+        <div class="col-title">Command palette <span id="cp-trigger" class="kbd">⌘⇧P</span></div>
+        <div class="shortcut-list">
           <div class="row"><span class="row-label">Remove item</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">W</kbd></span></div>
           <div class="row"><span class="row-label">Move down / up</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">N</kbd>/<kbd class="kbd">P</kbd></span></div>
-          <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>
+          <div class="row"><span class="row-label">Jump to item</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>, <kbd class="kbd">0</kbd></span></div>
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd class="kbd">↵</kbd></span></div>
-          <div class="row"><span class="row-label">Force open</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Open as URL</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">↵</kbd></span></div>
           <div class="row"><span class="row-label">Ask AI</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">↵</kbd></span></div>
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd class="kbd">Esc</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">A</kbd>/<kbd class="kbd">E</kbd></span></div>
           <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">K</kbd>/<kbd class="kbd">U</kbd></span></div>
         </div>
-        <!-- Right column: AI Editor — shared-key rows aligned -->
-        <div class="shortcuts-col">
-          <div class="col-title">AI Editor <span id="ie-trigger" class="kbd">⌘⇧E</span></div>
-          <div class="row"><span class="row-label dim">&nbsp;</span></div>
+      </div>
+      <div class="shortcut-column">
+        <div class="col-title">AI editor <span id="ie-trigger" class="kbd">⌘⇧E</span></div>
+        <div class="shortcut-list">
           <div class="row"><span class="row-label">History older / newer</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">P</kbd>/<kbd class="kbd">N</kbd></span></div>
-          <div class="row"><span class="row-label dim">&nbsp;</span></div>
           <div class="row"><span class="row-label">Submit</span><span class="keys"><kbd class="kbd">↵</kbd></span></div>
           <div class="row"><span class="row-label">Reverse search</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">R</kbd></span></div>
           <div class="row"><span class="row-label">Accept completion</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">E</kbd></span></div>
@@ -236,6 +195,13 @@ pub fn html() -> String {
   document.getElementById('close-btn').addEventListener('click', close);
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') { e.preventDefault(); close(); }
+    if (e.key === 'Tab') {
+      var focusable = Array.prototype.slice.call(document.querySelectorAll('#panel button:not([disabled]), #panel input:not([disabled])'));
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
   });
 
   function esc(s) {
@@ -255,10 +221,10 @@ pub fn html() -> String {
     var list = document.getElementById('global-list');
     if (!list || !data || !data.actions) return;
     var html = data.actions.map(function(a) { return row(a.label, a.keys); }).join('');
-    html += '<div class="row"><span class="row-label">Open slot 1–9</span>' +
-            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>';
-    html += '<div class="row"><span class="row-label">Save to slot 1–9</span>' +
-            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd></span></div>';
+    html += '<div class="row"><span class="row-label">Open slot 1–9, 0</span>' +
+            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>, <kbd class="kbd">0</kbd></span></div>';
+    html += '<div class="row"><span class="row-label">Save to slot 1–9, 0</span>' +
+            '<span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>, <kbd class="kbd">0</kbd></span></div>';
     list.innerHTML = html;
     // Keep the context-column trigger badges in sync with their global chords.
     var find = function(id) {
@@ -268,6 +234,7 @@ pub fn html() -> String {
     var cp = find('command_palette'), ie = find('inline_edit');
     if (cp) { document.getElementById('cp-trigger').textContent = cp; }
     if (ie) { document.getElementById('ie-trigger').textContent = ie; }
+    requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
 })();
 </script>

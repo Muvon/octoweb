@@ -242,7 +242,12 @@ function createPromptHistory(inputEl, ghostEl, defaultPlaceholder, onResize) {
   }
 
   inputEl.addEventListener('keydown', function(e) {
-    handleKeydown(e);
+    if (handleKeydown(e)) {
+      // This module is registered before each surface's own key handler.
+      // Stop later listeners on the same input from submitting an accepted
+      // reverse-search result or closing after search-mode Escape.
+      e.stopImmediatePropagation();
+    }
   });
 
   // ── Public API ────────────────────────────────────────────────────────

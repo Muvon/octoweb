@@ -21,13 +21,15 @@ pub fn html() -> String {
 
   #bar {
     position: fixed;
-    top: 4px; right: 6px;
+    top: 4px; right: 6px; left: 6px;
+    overflow: hidden;
     display: flex;
     align-items: center;
     gap: 1px;
     height: 30px;
     padding: 0 3px 0 5px;
     border-radius: var(--r-card);
+    box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 0 0 0.5px var(--hairline);
     animation: findIn var(--t-pop) var(--spring);
   }
 
@@ -37,13 +39,15 @@ pub fn html() -> String {
   }
 
   #input {
-    width: 116px;
+    flex: 1 1 120px;
+    min-width: 96px;
+    width: auto;
     height: 24px;
     border: none;
-    outline: none;
+    outline: 2px solid transparent;
     background: var(--fill);
     border-radius: var(--r-capsule);
-    font-size: 12.5px;
+    font-size: var(--fs-body);
     letter-spacing: -0.01em;
     color: var(--label);
     font-family: inherit;
@@ -51,16 +55,23 @@ pub fn html() -> String {
     transition: background var(--t-fast) var(--ease);
   }
   #input:hover { background: var(--fill-hover); }
-  #input:focus { background: var(--fill-press); }
-  #input::placeholder { color: var(--label-3); }
+  #input:focus {
+    background: var(--fill-press);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  #input::placeholder { color: var(--label-2); }
 
   #count {
-    font-size: 11px;
+    flex: 0 0 auto;
+    font-size: var(--fs-caption);
     font-variant-numeric: tabular-nums;
     color: var(--label-2);
     white-space: nowrap;
-    min-width: 32px;
-    text-align: center;
+    min-width: 44px;
+    max-width: 88px;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
     padding: 0 3px;
     letter-spacing: -0.01em;
   }
@@ -74,10 +85,11 @@ pub fn html() -> String {
   }
 
   button {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-width: 24px; height: 24px;
+    min-width: var(--ctl-min); height: var(--ctl-min);
     border: none;
     background: transparent;
     border-radius: var(--r-capsule);
@@ -110,16 +122,14 @@ pub fn html() -> String {
 </head>
 <body>
 <div id="bar" class="glass-panel">
-  <input id="input" type="text" placeholder="Find on page" autocomplete="off" spellcheck="false">
-  <span id="count"></span>
+  <input id="input" type="text" aria-label="Find in page" placeholder="Find on page" autocomplete="off" spellcheck="false">
+  <span id="count" aria-live="polite"></span>
   <div class="sep"></div>
-  <button id="prev" title="Previous (⇧Enter / ⌃P)" disabled>
+  <button id="prev" title="Previous (⇧Enter / ⌃P)" aria-keyshortcuts="Shift+Enter Control+P" disabled>
     <svg viewBox="0 0 12 12"><polyline points="2,8 6,4 10,8"/></svg>
-    <span class="kbd">⇧⏎</span>
   </button>
-  <button id="next" title="Next (Enter / ⌃N)" disabled>
+  <button id="next" title="Next (Enter / ⌃N)" aria-keyshortcuts="Enter Control+N" disabled>
     <svg viewBox="0 0 12 12"><polyline points="2,4 6,8 10,4"/></svg>
-    <span class="kbd">⏎</span>
   </button>
   <div class="sep"></div>
   <button id="close" title="Close (Esc)">
@@ -144,6 +154,9 @@ pub fn html() -> String {
     const v = input.value;
     if (v === lastSent) return;
     lastSent = v;
+    count.textContent = '';
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
     ipc({ type: 'find_query', query: v });
   });
 
@@ -171,7 +184,7 @@ pub fn html() -> String {
       count.textContent = current + '/' + total;
       count.style.color = '';
     } else {
-      count.textContent = '';
+      count.textContent = input.value ? 'No matches' : '';
       count.style.color = '';
     }
     prevBtn.disabled = total === 0;
