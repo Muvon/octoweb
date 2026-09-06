@@ -6914,11 +6914,13 @@ fn main() {
                 // the user has no reason to read.
                 let shown = display.unwrap_or_else(|| text.clone());
                 // Hand the agent the tab it is being asked about, up front —
-                // except for slash commands. The agent decides those by looking
-                // at the first character, so prefixing the browser state turns
+                // except for slash commands. octomind intercepts those with
+                // `input.trim_start().starts_with('/')` (acp/agent.rs) *before*
+                // the AI pipeline, so prefixing the browser state turns
                 // `/model …` into an ordinary prompt it forwards to the model.
+                // The test below must stay identical to theirs.
                 let agent_text = match build_browser_context(&workspace_manager, active_wv_id) {
-                    Some(ctx) if !text.starts_with('/') => format!("{ctx}\n\n{text}"),
+                    Some(ctx) if !text.trim_start().starts_with('/') => format!("{ctx}\n\n{text}"),
                     _ => text.clone(),
                 };
                 // Record prompt in shared AI history (MRU, dedup) so it persists
