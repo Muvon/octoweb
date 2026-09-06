@@ -8,7 +8,7 @@
 
 Built on WebKit and Rust. No Electron. No Chrome. No mouse required.
 
-🏠 [Product page](https://octomind.run/product/octoweb/) · [Changelog](CHANGELOG.md)
+🏠 [Website](https://octoweb.xyz) · [Releases](https://github.com/muvon/octoweb/releases) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -43,7 +43,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 ## Features
 
 - **Command palette** (`⌘⇧P`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
-- **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access. Footer bar shows all slots.
+- **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access, one set per workspace. Footer bar shows all slots.
 - **Tab pinning** (`⌘⇧N`) — Pin the current tab to the fast-access bar with one keystroke.
 - **Workspaces** (`⌘⇧O`) — Isolated browser profiles: each workspace has its own tabs, history, AI sessions, and a dedicated WebKit data store, so cookies, localStorage, and cache never leak between them. Switch with `⌘1`–`⌘0` while the popover is open.
 - **Configurable keybindings** — Remap any shortcut in Settings (`⌘,`). Changes apply on the next keystroke, no restart.
@@ -107,7 +107,7 @@ octomind fetches the `octoweb:assistant` agent manifest from the tap, installs a
 
 ### Changing the agent
 
-The agent tag in the sidebar header defaults to `octoweb:assistant`. You can type any tag your octomind instance knows about — `developer:rust`, `assistant`, your own custom agents — and the sidebar reconnects to that agent immediately.
+The agent tag in the sidebar header defaults to `octoweb:assistant`. You can type any tag your octomind instance knows about — `developer:rust`, `assistant`, your own custom agents — the new-session picker autocompletes as you type, and the sidebar reconnects to that agent immediately.
 
 Shipped tags include `octoweb:assistant` (sidebar chat), `octoweb:editor` (inline text transformation, used by `⌘⇧E`), `octoweb:learning` (background learning), and `octoweb:trend` (live social trend research) — see the [tap registry](https://github.com/muvon/octomind-tap).
 
@@ -254,7 +254,7 @@ Pin any page to a numbered slot and jump back to it instantly — one keystroke 
 - **`⌘⇧1`–`⌘⇧9` / `⌘⇧0`** — save the current page to slot 1–9 / 10
 - **`⌘1`–`⌘9`** — navigate to the saved URL in that slot
 
-Slots persist across restarts. An empty slot does nothing.
+Slots persist across restarts and are scoped per workspace — pinning in one workspace never touches another's. An empty slot does nothing.
 
 `⌘0` defaults to zoom reset and wins over slot 10 — rebind zoom reset in Settings if you want `⌘0` to open slot 10. `⌘⇧0` still saves to slot 10.
 
