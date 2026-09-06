@@ -49,11 +49,26 @@ pub const EFFECT_MS: u64 = 450;
 /// unmet. Matches the feel of an explicit wait without a separate call.
 pub const SETTLE_MS: u64 = 6000;
 
+/// Ceiling on waiting for trusted keystrokes to reach the page. Only hit when
+/// a keyup never arrives (the page swallowed it, or the character had no key
+/// code); normal typing clears in well under a tenth of this.
+pub const KEY_WAIT_MS: u64 = 3000;
+
 /// Effect-capture helpers, shared by the harness and the standalone effect
 /// probe. Installs `window.__octoweb_pre` with a `diff()` method.
 const EFFECT_PRE_JS: &str = r#"
   function __pre() {
     try { if (window.__octoweb_pre && window.__octoweb_pre.mo) window.__octoweb_pre.mo.disconnect(); } catch (e) {}
+    // Trusted keystrokes (native_input::type_text) reach the page one IPC
+    // round trip at a time, and evaluateJavaScript overtakes that queue — so
+    // an effect probe sent right after typing reads a half-typed field, and so
+    // does the caller's next tool call. Counting keyups on a stable global
+    // (capture phase, so a handler calling stopPropagation cannot hide them)
+    // lets settle wait for the last one instead of racing it.
+    if (!window.__octoweb_keys) {
+      window.__octoweb_keys = { want: 0, got: 0 };
+      document.addEventListener('keyup', function () { window.__octoweb_keys.got++; }, true);
+    }
     function dialogs() { return document.querySelectorAll('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open]'); }
     function dialogText() { var d = dialogs(); if (!d.length) return ''; return (d[d.length - 1].innerText || '').trim().replace(/\s+/g, ' ').substring(0, 160); }
     function focusDesc() {
@@ -152,13 +167,21 @@ const EFFECT_PRE_JS: &str = r#"
     st.settle = function (exp, baseMs, maxMs) {
       var self = this;
       return new Promise(function (res) {
-        var start = performance.now();
         function fin(met) { res({ diff: self.diff(), met: met, expect: exp ? (exp.kind + ':' + exp.value) : null }); }
-        if (!exp) { setTimeout(function () { fin(true); }, baseMs); return; }
-        (function poll() {
-          if (self.check(exp)) return fin(true);
-          if (performance.now() - start >= maxMs) return fin(false);
-          setTimeout(poll, 100);
+        function measure() {
+          if (!exp) { setTimeout(function () { fin(true); }, baseMs); return; }
+          var start = performance.now();
+          (function poll() {
+            if (self.check(exp)) return fin(true);
+            if (performance.now() - start >= maxMs) return fin(false);
+            setTimeout(poll, 100);
+          })();
+        }
+        var k = window.__octoweb_keys, until = performance.now() + __KEY_WAIT_MS__;
+        (function keys() {
+          if (!k) return measure();
+          if (k.got >= k.want || performance.now() >= until) { k.want = 0; return measure(); }
+          setTimeout(keys, 20);
         })();
       });
     };
@@ -309,6 +332,7 @@ fn build(
         .replace("__PRE__", EFFECT_PRE_JS)
         .replace("__EFFECT_MS__", &EFFECT_MS.to_string())
         .replace("__SETTLE_MS__", &SETTLE_MS.to_string())
+        .replace("__KEY_WAIT_MS__", &KEY_WAIT_MS.to_string())
         .replace("__EXPECT__", expect_json)
         .replace("__GATE__", gate)
         .replace("__STABILITY__", if stability { "true" } else { "false" })
@@ -456,7 +480,7 @@ pub fn dismiss_overlay_script() -> String {
     // `return` would trip ASI into `return;` and drop the Promise.
     format!(
         "(function(){{{pre}\nreturn ({body});}})()",
-        pre = EFFECT_PRE_JS,
+        pre = EFFECT_PRE_JS.replace("__KEY_WAIT_MS__", &KEY_WAIT_MS.to_string()),
         body = DISMISS_BODY
     )
 }
@@ -582,6 +606,20 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     // prototype setters, so HTMLInputElement's setter throws on <textarea>.
     let act = r#"
     var TXT = __TXT__, KEYS_ONLY = __KEYS_ONLY__;
+    // One keyup per character Rust is about to send — `\r` is the only one it
+    // drops. Absolute target, not a reset, so a stray keyup cannot uncount it.
+    function armKeys() {
+      var k = window.__octoweb_keys;
+      if (!k) return;
+      // A keyup for a field inside an iframe lands in that frame's document,
+      // where the top-level listener never sees it.
+      var d = el.ownerDocument;
+      if (d !== document && !d.__octoweb_keys_bound) {
+        d.__octoweb_keys_bound = true;
+        d.addEventListener('keyup', function () { k.got++; }, true);
+      }
+      k.want = k.got + String(TXT).replace(/\r/g, '').length;
+    }
     try { el.focus(); } catch (e) {}
     if (el.isContentEditable) {
       var doc = el.ownerDocument;
@@ -600,7 +638,7 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       var orig = norm(host.textContent);
       selAll();
       try { doc.execCommand('delete', false, null); } catch (e) {}
-      if (KEYS_ONLY) return __resolve('keys');
+      if (KEYS_ONLY) { armKeys(); return __resolve('keys'); }
       var want = norm(TXT), probe = want.substring(0, 24);
       if (TXT === '') return __done('true');
       var before = norm(host.textContent).length, mutated = 0, mo = null;
@@ -615,7 +653,7 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       }
       function finish(ok) {
         try { if (mo) mo.disconnect(); } catch (e) {}
-        if (!ok) return __resolve('keys');
+        if (!ok) { armKeys(); return __resolve('keys'); }
         // landed() only proves the first 24 characters arrived. Check the whole
         // string here: a rich editor that truncated at its character limit, or
         // dropped the tail, is the difference between a posted draft and a
@@ -667,6 +705,7 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     if (KEYS_ONLY) {
       if (setter) setter.call(el, ''); else el.value = '';
       fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
+      armKeys();
       return __resolve('keys');
     }
     if (setter) setter.call(el, TXT); else el.value = TXT;
@@ -800,9 +839,13 @@ mod tests {
             dismiss_overlay_script(),
         ] {
             assert!(!s.trim_end().ends_with(';'), "trailing semicolon in {s}");
+            // Placeholders are `__UPPER__`; every runtime name in these scripts
+            // (__resolve, __done, __vfy, __octoweb_pre) is lowercase after the
+            // underscores. Scanning beats a list nobody remembers to extend.
             assert!(
-                !s.contains("__ACT__") && !s.contains("__PRE__") && !s.contains("__EFFECT__"),
-                "unreplaced placeholder"
+                !s.match_indices("__")
+                    .any(|(i, _)| s[i + 2..].starts_with(|c: char| c.is_ascii_uppercase())),
+                "unreplaced placeholder in {s}"
             );
         }
     }
