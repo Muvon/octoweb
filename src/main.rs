@@ -419,6 +419,22 @@ const OCTOMIND_TAP_NAME: &str = "muvon/octoweb";
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
 
+/// Messages replayed into the sidebar when it mounts. It renders
+/// `HISTORY_WINDOW` of them and back-fills upward from this slice, so this is
+/// how far "N earlier messages" can scroll — not how much is persisted
+/// (`max_acp_session_messages` governs that).
+const REPLAY_TAIL: usize = 120;
+
+/// Width in points for the frozen tab snapshot shown while a hibernated tab
+/// reloads. It is stretched to fill the viewport and swapped for the real page
+/// within a few hundred ms, so it only has to be recognisable.
+const SNAPSHOT_WIDTH: f64 = 640.0;
+
+/// Favicons above this are not worth caching: they are almost always a
+/// full-size PNG served as an icon, and the cache is both written to disk and
+/// pushed into the address bar as a JS data URI.
+const FAVICON_MAX_BYTES: usize = 64 * 1024;
+
 const WORKSPACE_PALETTE: &[&str] = &[
     "#06B6D4", "#F97316", "#EC4899", "#22C55E", "#EAB308", "#3B82F6", "#EF4444", "#6366F1",
 ];
@@ -1187,7 +1203,15 @@ fn main() {
             // Every other tab — this workspace's own background tabs, and
             // every tab of every non-active workspace — is stored in
             // pending_tabs and loaded on demand.
-            if is_overall_active_ws && st.url == overall_active_url {
+            //
+            // The match is on URL, and duplicate URLs are ordinary (ten tabs on
+            // the same feed, fifteen new-tab pages). Without the once-guard
+            // every one of them took the eager path, so a cold start built N
+            // WebViews and fired N simultaneous loads before first paint — and
+            // nothing ever hid the surplus, since tab WebViews are only hidden
+            // by the switch/close/hibernate arms.
+            if is_overall_active_ws && restored_active_id.is_none() && st.url == overall_active_url
+            {
                 // Active tab — create WebView immediately
                 let wv = make_webview(tab_id, &st.url, ws.data_store_id);
                 if st.url == "about:blank" {
@@ -2168,7 +2192,7 @@ fn main() {
     // the user actually switches to it) — keeps cold-start fast and baseline
     // CPU/RAM low, and matches stage 3's "assistant sticks to the workspace"
     // requirement (a background workspace shouldn't be running agents).
-    let persisted_acp = config::load_acp_history();
+    let mut persisted_acp = config::load_acp_history();
     // Session ids are minted from a single process-wide counter (not
     // per-workspace — see `next_acp_session_id`'s doc comment), so it must
     // start past the highest id used ANYWHERE in the persisted file, not
@@ -2216,14 +2240,19 @@ fn main() {
     let startup_active_workspace_id = workspace_manager.active().id.clone();
     for ws in workspace_manager.list_mut() {
         let is_startup_active_ws = ws.id == startup_active_workspace_id;
+        // Taken, not borrowed: the arm below moves each snapshot's message Vec
+        // straight into the live session. Cloning first copied every message
+        // (and its tool payloads) before the cap was applied two lines later,
+        // on the main thread ahead of first paint.
         let persisted = persisted_acp
-            .as_ref()
-            .and_then(|h| h.workspaces.get(&ws.id));
+            .as_mut()
+            .and_then(|h| h.workspaces.remove(&ws.id));
         let (built_sessions, active_id) = match persisted {
             Some(h) if !h.sessions.is_empty() => {
                 let cap = cfg.max_acp_session_messages;
                 let mut built: Vec<AcpSession> = Vec::with_capacity(h.sessions.len());
-                for mut snap in h.sessions.iter().cloned() {
+                let persisted_active_id = h.active_id;
+                for mut snap in h.sessions {
                     // Defensive cap on load — if the file was hand-edited or
                     // the cap was lowered between runs, we don't want to
                     // bring oversized history back into memory. FIFO drop
@@ -2269,8 +2298,8 @@ fn main() {
                         octomind_pid: None,
                     });
                 }
-                let active = if built.iter().any(|s| s.id == h.active_id) {
-                    h.active_id
+                let active = if built.iter().any(|s| s.id == persisted_active_id) {
+                    persisted_active_id
                 } else {
                     built[0].id
                 };
@@ -3358,7 +3387,12 @@ fn main() {
                     ));
                 }
                 if !s.messages.is_empty() {
-                    if let Ok(msgs_json) = serde_json::to_string(&s.messages) {
+                    // Tail only. The sidebar mounts HISTORY_WINDOW (40) records
+                    // and back-fills in chunks from what it was given, so the
+                    // rest of a 500-message log is built, escaped, shipped over
+                    // XPC and parsed by JSC purely to back a scroll-up button.
+                    let tail = &s.messages[s.messages.len().saturating_sub(REPLAY_TAIL)..];
+                    if let Ok(msgs_json) = serde_json::to_string(tail) {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
                         ));
@@ -3757,6 +3791,7 @@ fn main() {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
                     nav_error_patch::unregister_termination(wv_ptr);
+                    dialog_patch::unregister(wv_ptr);
                 }
                 workspace_manager.active_mut().webviews.remove(&victim_id);
                 media_playing_tabs.remove(&victim_id);
@@ -3965,7 +4000,7 @@ fn main() {
                         let ekind = webview_utils::escape_js_template(&kind);
                         let raw_input_json = raw_input
                             .as_ref()
-                            .and_then(|v| serde_json::to_string(v).ok())
+                            .and_then(|v| serde_json::to_string(&cap_tool_json(v)).ok())
                             .unwrap_or_else(|| "null".to_string());
                         let locations_json = serde_json::to_string(&locations).unwrap_or_else(|_| "[]".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
@@ -3994,9 +4029,12 @@ fn main() {
                         let eid = webview_utils::escape_js_template(&id);
                         let etitle = webview_utils::escape_js_template(title.as_deref().unwrap_or(""));
                         let estatus = webview_utils::escape_js_template(&status);
+                        // Same cap as the persisted copy above: a page dump or an
+                        // MCP fetch can be megabytes, and the sidebar keeps every
+                        // tool record in `s.log` for the life of the session.
                         let raw_output_json = raw_output
                             .as_ref()
-                            .and_then(|v| serde_json::to_string(v).ok())
+                            .and_then(|v| serde_json::to_string(&cap_tool_json(v)).ok())
                             .unwrap_or_else(|| "null".to_string());
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__toolUpdate && window.__toolUpdate({sid},`{eid}`,`{etitle}`,`{estatus}`,{raw_output_json})"
@@ -6875,10 +6913,13 @@ fn main() {
                 // prompts (an A2UI click), where the agent needs instructions
                 // the user has no reason to read.
                 let shown = display.unwrap_or_else(|| text.clone());
-                // Hand the agent the tab it is being asked about, up front.
+                // Hand the agent the tab it is being asked about, up front —
+                // except for slash commands. The agent decides those by looking
+                // at the first character, so prefixing the browser state turns
+                // `/model …` into an ordinary prompt it forwards to the model.
                 let agent_text = match build_browser_context(&workspace_manager, active_wv_id) {
-                    Some(ctx) => format!("{ctx}\n\n{text}"),
-                    None => text.clone(),
+                    Some(ctx) if !text.starts_with('/') => format!("{ctx}\n\n{text}"),
+                    _ => text.clone(),
                 };
                 // Record prompt in shared AI history (MRU, dedup) so it persists
                 // across restarts and seeds future sessions. Synthesized prompts
@@ -7866,6 +7907,14 @@ fn main() {
             // Only update + save when we get a new/changed entry (avoids redundant writes).
             // FIFO eviction at FAVICON_CAP keeps memory bounded.
             Event::UserEvent(AppEvent::FaviconFetched(domain, data_uri)) => {
+                // The count cap alone let a handful of sites dominate the cache:
+                // one 6.4 MB "favicon" is bigger than the other 499 entries put
+                // together, and it gets shipped to the address bar as JS source
+                // every time that domain is the active tab.
+                if data_uri.len() > FAVICON_MAX_BYTES {
+                    tracing::debug!(%domain, bytes = data_uri.len(), "favicon too large, not cached");
+                    return;
+                }
                 let mut fc = favicon_cache.lock().unwrap();
                 if fc.get(&domain).map(|s| s.as_str()) != Some(&data_uri) {
                     let is_new = !fc.contains_key(&domain);
@@ -8476,8 +8525,9 @@ fn main() {
             // ── Frozen tab snapshot captured (async callback) ──────────────────
             Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri))
                 // Discard suspiciously small snapshots (likely blank/hidden WebView).
-                // A real page snapshot is typically >5 KB as base64 PNG.
-                if data_uri.len() > 5_000 =>
+                // Threshold tracks SNAPSHOT_WIDTH — at 640pt a real page is still
+                // tens of KB as base64 PNG, but a blank one is only a couple.
+                if data_uri.len() > 2_000 =>
             {
                 tab_snapshots.insert(tab_id, data_uri);
             }
@@ -8485,7 +8535,13 @@ fn main() {
             // ── Favicon cache loaded from disk (background thread) ──────────────
             Event::UserEvent(AppEvent::FaviconCacheLoaded(cache)) => {
                 let mut fc = favicon_cache.lock().unwrap();
+                // Drops oversized entries written by earlier builds, so the
+                // on-disk file shrinks on the next save instead of persisting
+                // megabytes forever.
                 for (domain, data) in cache {
+                    if data.len() > FAVICON_MAX_BYTES {
+                        continue;
+                    }
                     fc.entry(domain.clone()).or_insert_with(|| {
                         favicon_order.push_back(domain);
                         data
@@ -8760,12 +8816,26 @@ fn capture_tab_snapshot(
 
     unsafe {
         let wv_obj: *mut objc2::runtime::AnyObject = wv_ptr as *mut objc2::runtime::AnyObject;
-        let nil: *const objc2::runtime::AnyObject = std::ptr::null();
+        // A nil configuration means the full viewport at device scale — on a
+        // retina window that is ~19 MB of RGBA to PNG-deflate and base64, on
+        // every tab switch, retained until the tab closes. The restore path
+        // stretches the snapshot to fill the viewport and replaces it with the
+        // real page a few hundred ms later, so it only has to read as "the page
+        // you left".
+        let snap_cfg: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(WKSnapshotConfiguration), new];
+        let width: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::class!(NSNumber), numberWithDouble: SNAPSHOT_WIDTH];
+        let _: () = objc2::msg_send![snap_cfg, setSnapshotWidth: width];
         let _: () = objc2::msg_send![
             &*wv_obj,
-            takeSnapshotWithConfiguration: nil,
+            takeSnapshotWithConfiguration: snap_cfg as *const objc2::runtime::AnyObject,
             completionHandler: &*handler
         ];
+        // `new` hands back a +1 reference and there is no ARC here. WebKit reads
+        // the configuration before this call returns, so releasing now is safe
+        // and matches what the scope exit would do under ARC.
+        let _: () = objc2::msg_send![snap_cfg, release];
     }
 }
 

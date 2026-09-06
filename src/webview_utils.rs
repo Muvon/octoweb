@@ -628,7 +628,11 @@ pub const COMBINED_SCRIPT: &str = r#"
           rec(res.status);
           try {
             var ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
-            if (entry && textyType(ct)) {
+            // event-stream matches /text/ but never resolves: the truncation to
+            // BODY_CAP happens inside the callback, so the clone's buffer grows
+            // for the life of the connection. AI chat UIs are exactly this
+            // traffic, and .text() never delivered a usable body for them anyway.
+            if (entry && textyType(ct) && !/event-stream/i.test(ct || '')) {
               res.clone().text().then(function (t) { if (entry) entry.body = String(t).substring(0, BODY_CAP); }).catch(function () {});
             }
           } catch (e) {}

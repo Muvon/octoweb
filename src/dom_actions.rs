@@ -78,6 +78,9 @@ const EFFECT_PRE_JS: &str = r#"
           var r = rs[i];
           if (r.type === 'characterData') { pushText(r.target.data); continue; }
           st.added += r.addedNodes.length; st.removed += r.removedNodes.length;
+          // The text budget fills after ~4 entries; past that the innerText
+          // read per added node is pure waste on a busy SPA route change.
+          if (st.textLen > 400) continue;
           for (var j = 0; j < r.addedNodes.length; j++) {
             var n = r.addedNodes[j];
             if (n.nodeType === 1) { if (n.tagName !== 'SCRIPT' && n.tagName !== 'STYLE') pushText(n.innerText); }
@@ -127,9 +130,12 @@ const EFFECT_PRE_JS: &str = r#"
     // Is an expectation currently satisfied? `exp` is {kind, value} or null.
     st.check = function (exp) {
       if (!exp) return true;
-      var v = exp.value, body = document.body ? document.body.innerText : '';
-      if (exp.kind === 'text') return body.indexOf(v) !== -1;
-      if (exp.kind === 'text_gone') return body.indexOf(v) === -1;
+      // innerText forces a layout flush and walks the document — only the two
+      // text kinds need it, and this polls every 100ms for up to maxMs.
+      var v = exp.value;
+      function body() { return document.body ? document.body.innerText : ''; }
+      if (exp.kind === 'text') return body().indexOf(v) !== -1;
+      if (exp.kind === 'text_gone') return body().indexOf(v) === -1;
       if (exp.kind === 'url') return location.href.indexOf(v) !== -1;
       if (exp.kind === 'selector') { try { return !!document.querySelector(v); } catch (e) { return false; } }
       if (exp.kind === 'selector_gone') { try { return !document.querySelector(v); } catch (e) { return false; } }
