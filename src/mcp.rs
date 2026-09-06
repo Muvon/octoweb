@@ -160,7 +160,10 @@ pub enum McpCommand {
         offset: usize,
         /// Max characters to return; 0 means uncapped.
         limit: usize,
-        response: oneshot::Sender<Result<String, String>>,
+        /// `(paging note, page text)`. The note travels out-of-band: deriving
+        /// it from the first line of the reply let a page whose own text opened
+        /// with `[showing characters …]` plant a line above the untrusted fence.
+        response: oneshot::Sender<Result<(Option<String>, String), String>>,
         /// Internal: true when re-issued by a watchdog after the first eval's
         /// callback was discarded. Suppresses a second retry so we don't loop.
         is_retry: bool,
@@ -172,10 +175,10 @@ pub enum McpCommand {
         full_page: bool,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Scroll the page, or the scrollable container of `selector`
-    /// Scroll the window, or an element's scrollable container. Ok carries the
-    /// resulting position so the caller can tell a scroll that moved from one
-    /// that hit the end.
+    /// Scroll the window, or the scrollable container of `selector`. For the
+    /// window, Ok carries the resulting position so the caller can tell a
+    /// scroll that moved from one that hit the end; the element-scoped path
+    /// goes through the actionability harness and reports nothing extra.
     Scroll {
         tab_id: Option<usize>,
         direction: String,
@@ -1078,7 +1081,7 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL. Blocks until the page stops changing, then reports where it actually landed (`url`) and how it settled (`readiness`: 'ready'/'live' rendered, 'partial' hit the 8s ceiling still rendering, 'shell' the document loaded but the app never mounted — that one will not improve on retry). Returns the tab ID.\n\nDefault (url only): opens a NEW tab in the background. Pass tab_id to navigate an existing tab in-place instead (errors if it no longer exists — omit tab_id to get a fresh one).\n\nNavigation NEVER changes what the user sees. To show a tab to the user, call browser_switch_tab with the returned tab ID. To navigate the tab the user is viewing, pass the id from browser_get_current_tab."
+        description = "Navigate to a URL. Blocks until the page stops changing, then reports where it actually landed (`url`) and how it settled (`readiness`: 'ready'/'live' rendered, 'partial' hit the 8s ceiling still rendering). Returns the tab ID.\n\nDefault (url only): opens a NEW tab in the background. Pass tab_id to navigate an existing tab in-place instead (errors if it no longer exists — omit tab_id to get a fresh one).\n\nNavigation NEVER changes what the user sees. To show a tab to the user, call browser_switch_tab with the returned tab ID. To navigate the tab the user is viewing, pass the id from browser_get_current_tab."
     )]
     async fn browser_navigate(
         &self,
@@ -1328,20 +1331,14 @@ impl McpServer {
             })
             .await?
         );
-        // `page_content_window` prefixes a paging note. Keep it outside the
-        // fence — it is the browser talking, and it carries the resume offset.
-        let (note, body) = match content.split_once('\n') {
-            Some((first, rest)) if first.starts_with("[showing characters ") => {
-                (format!("{first}\n"), rest)
-            }
-            Some((first, rest)) if first.starts_with("[end of page ") => {
-                (format!("{first}\n"), rest)
-            }
-            _ => (String::new(), content.as_str()),
-        };
+        // The paging note is the browser talking and carries the resume
+        // offset, so it stays outside the fence — but it arrives as its own
+        // value, never parsed back out of page bytes.
+        let (note, body) = content;
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "{note}{}",
-            fence_untrusted(body)
+            "{}{}",
+            note.map(|n| format!("{n}\n")).unwrap_or_default(),
+            fence_untrusted(&body)
         ))]))
     }
 
@@ -1607,10 +1604,16 @@ impl McpServer {
             })
             .await?
         );
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Scrolled {} — {outcome}",
-            req.direction
-        ))]))
+        // Only the window path reports a position; the element-scoped path
+        // resolves bare through the actionability harness, and a dangling
+        // "Scrolled down — " reads like the readback was lost.
+        Ok(CallToolResult::success(vec![Content::text(
+            if outcome.is_empty() {
+                format!("Scrolled {}", req.direction)
+            } else {
+                format!("Scrolled {} — {outcome}", req.direction)
+            },
+        )]))
     }
 
     #[tool(
@@ -2063,8 +2066,8 @@ impl ServerHandler for McpServer {
                 single keys use browser_press_key, not browser_type.\n\
                 \n\
                 Waiting: browser_navigate blocks until the page goes quiet and reports how it settled in \
-                its `readiness` field — 'ready'/'live' mean it rendered, 'shell' means the document loaded \
-                but the app never mounted and retrying will not fix it. \
+                its `readiness` field — 'ready'/'live' mean it rendered, 'partial' means it hit the 8s \
+                ceiling still changing. \
                 Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \
                 so you rarely need explicit waits; after an action reports a route change, re-snapshot or \
                 browser_wait with a CSS selector for the new content. A tool reporting a navigation means \

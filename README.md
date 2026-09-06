@@ -178,7 +178,7 @@ Claude Desktop / octomind / any MCP client
 | `browser_fill_form` | Fill several fields — and optionally submit — in one call |
 | `browser_dismiss_overlay` | Dismiss cookie/consent overlays — prefers Reject/Decline, never auto-accepts |
 | `browser_hover` | Hover with full pointer + mouse event sequence |
-| `browser_scroll` | Scroll the window, or an element's scrollable container via `selector` — returns the resulting position and whether it hit the bottom |
+| `browser_scroll` | Scroll the window, or an element's scrollable container via `selector`. Scrolling the window returns the resulting position and whether it hit the bottom |
 | `browser_press_key` | Press a key; Enter on a form input submits like a real keypress |
 | `browser_select_option` | Select an option in a `<select>` by value or label |
 | `browser_screenshot` | Take a screenshot (`full_page: true` for entire page) |

@@ -432,7 +432,7 @@ def navigate_reports_where_it_landed_and_how_settled():
         expect("url" in info, f"browser_navigate response has no url: {info!r}")
         expect(info["url"].endswith("basic.html"),
                f"navigate reported the wrong landing url: {info['url']!r}")
-        expect(info.get("readiness") in ("ready", "live", "partial", "shell")
+        expect(info.get("readiness") in ("ready", "live", "partial")
                or str(info.get("readiness", "")).startswith("probe-error"),
                f"unexpected readiness verdict: {info.get('readiness')!r}")
     finally:
@@ -578,7 +578,7 @@ def type_reports_what_the_field_actually_holds():
         })
         expect("ok" in ok, f"could not create probe input: {ok!r}")
         clean = tool_text("browser_type", {"tab_id": tab_id, "selector": "#octoweb_probe",
-                                           "value": "hello world"})
+                                           "text": "hello world"})
         expect("TEXT DID NOT STICK" not in clean,
                f"a field that accepted the value was flagged: {clean!r}")
 
@@ -589,7 +589,7 @@ def type_reports_what_the_field_actually_holds():
                       "i.addEventListener('input',function(){i.value='';});return 'armed';})()",
         })
         reverted = tool_text("browser_type", {"tab_id": tab_id, "selector": "#octoweb_probe",
-                                              "value": "this will be thrown away"})
+                                              "text": "this will be thrown away"})
         expect("TEXT DID NOT STICK" in reverted,
                f"a reverted value was reported as typed: {reverted!r}")
     finally:

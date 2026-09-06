@@ -5479,6 +5479,12 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     // beginProgrammaticMessagesScroll(): the scroll listener below must see
     // them and update atBottom / back-fill history exactly as a wheel would.
     if (where === 'down' || where === 'up') {
+      // A wheel clears programmaticMessagesScroll via noteUserMessagesScroll;
+      // this path never reaches that listener (Rust consumes the chord and
+      // calls straight in), so without it the flag stays latched, atBottom is
+      // never recomputed, and the next streamed chunk yanks the view back down.
+      noteUserMessagesScroll();
+      if (where === 'up' && active) active.atBottom = false;
       const delta = (where === 'down' ? 1 : -1) * messagesHost.clientHeight;
       messagesHost.scrollBy({ top: delta, behavior: 'smooth' });
       return;
@@ -6100,6 +6106,11 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     // and calls preventDefault, so this only fires when nothing else claimed
     // the key. stop-mode on the send button IS "a turn is running".
     if (e.key === 'Escape') {
+      // Chat search binds Escape to its input, but the panel is designed to
+      // outlive that focus (⌘F reopens it, cs-next steals focus, selecting
+      // text in a bubble blurs it). Closing it must outrank cancelling a turn:
+      // one is recoverable, the other destroys in-flight work.
+      if (csOpen) { e.preventDefault(); closeChatSearch(); return; }
       if (sendBtn.classList.contains('stop-mode')) { e.preventDefault(); stop(); }
       return;
     }

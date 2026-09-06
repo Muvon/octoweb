@@ -125,6 +125,11 @@ const EFFECT_PRE_JS: &str = r#"
           }
         }
       } catch (e) {}
+      // Arm-once. The marker exists to catch the action that immediately
+      // follows the typing; leaving it set meant a later SPA route change --
+      // where the text is legitimately gone because it was already sent --
+      // reported it as lost.
+      try { delete window.__octoweb_typed; } catch (e) {}
       return out;
     };
     // Is an expectation currently satisfied? `exp` is {kind, value} or null.
@@ -741,6 +746,10 @@ pub fn scroll_script(selector: &str, direction: &str, pixels: Option<i32>) -> St
     else if (DIR === 'bottom') c.scrollTop = c.scrollHeight;
     else if (DIR === 'up') c.scrollTop -= amt;
     else c.scrollTop += amt;
+    // Resolves bare 'true': `interpret_dom_result` treats anything else as a
+    // failure status, so a position readback would have to travel as a
+    // 'true|<effect>' payload through `format_effect`, which is a diff format,
+    // not free text. Element-scoped scrolls therefore report no position.
     __resolve('true');
 "#
     .replace("__DIR__", &json(direction))

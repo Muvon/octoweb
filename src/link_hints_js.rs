@@ -62,6 +62,15 @@ pub const SCRIPT: &str = r#"(function () {
   function visible(el, doc, off) {
     var r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) return null;
+    // Clip against the element's own view first. An element scrolled out of a
+    // short iframe still has a frame-local rect inside the top viewport once
+    // the frame offset is added, so without this it gets a badge painted over
+    // whatever is really at those coordinates. No-op for the top document.
+    var fw = doc.defaultView;
+    if (fw !== window) {
+      if (r.left >= fw.innerWidth || r.top >= fw.innerHeight) return null;
+      if (r.left + r.width <= 0 || r.top + r.height <= 0) return null;
+    }
     var x = r.left + off.x, y = r.top + off.y;
     if (x + r.width <= 0 || y + r.height <= 0) return null;
     if (x >= window.innerWidth || y >= window.innerHeight) return null;

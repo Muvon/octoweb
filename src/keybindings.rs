@@ -281,6 +281,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 ];
 
 impl Action {
+    /// Every remappable action, in display order. Test-only: production code
+    /// walks `ACTION_TABLE` directly.
+    #[cfg(test)]
+    pub fn all() -> Vec<Action> {
+        ACTION_TABLE.iter().map(|e| e.0).collect()
+    }
+
     pub fn id(self) -> &'static str {
         ACTION_TABLE
             .iter()
