@@ -704,16 +704,18 @@ fn main() {
     // Address bar lives in the macOS titlebar zone (32pt actual height). Tab WebViews start at y=0;
     // fullsize_content_view handles the titlebar inset natively.
     const ADDRESS_BAR_H_LOGICAL: f64 = 32.0;
-    let address_bar_h = (ADDRESS_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
-
     const FOOTER_H_LOGICAL: f64 = 36.0;
-    let footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
+    // Physical pixels, so they depend on the display the window is on. Frozen
+    // at startup they were wrong for the rest of the session after a move to a
+    // display with a different scale — and a footer strip narrower than the
+    // footer WebView means the page paints underneath it. Recomputed on
+    // ScaleFactorChanged; `mut` exists for that.
+    let mut address_bar_h = (ADDRESS_BAR_H_LOGICAL * browser_win.scale_factor()) as u32;
+    let mut footer_h = (FOOTER_H_LOGICAL * browser_win.scale_factor()) as u32;
 
     let make_webview = {
         let browser_win = Arc::clone(&browser_win);
         let proxy = proxy.clone();
-        let bar_h = address_bar_h;
-        let ft_h = footer_h;
         // `data_store_id` is NOT captured here — it must be re-derived from
         // whichever workspace is active at CALL time (an earlier version
         // captured it once at closure-creation time, before the switcher UI
@@ -728,6 +730,9 @@ fn main() {
             let p5 = proxy.clone();
             let p6 = proxy.clone();
             let sz = browser_win.inner_size();
+            let scale = browser_win.scale_factor();
+            let bar_h = (ADDRESS_BAR_H_LOGICAL * scale) as u32;
+            let ft_h = (FOOTER_H_LOGICAL * scale) as u32;
             let bounds = wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(0u32, bar_h).into(),
                 size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(bar_h + ft_h))
@@ -2835,6 +2840,25 @@ fn main() {
     /// poisoned until restart (clicks misclassified as background opens,
     /// palette navigations landing invisibly). Hiding all non-target tab
     /// webviews is idempotent and immune to that drift.
+    /// The rectangle a tab WebView may paint into: below the address bar,
+    /// ABOVE the footer strip. One definition, recomputed from the live window
+    /// size every time — every show path must use it, because a tab shown with
+    /// bounds computed at some earlier moment paints under the footer and the
+    /// user cannot see or click what is behind it.
+    macro_rules! tab_bounds {
+        () => {{
+            let sz = browser_win.inner_size();
+            wry::Rect {
+                position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                size: tao::dpi::PhysicalSize::new(
+                    sz.width,
+                    sz.height.saturating_sub(address_bar_h + footer_h),
+                )
+                .into(),
+            }
+        }};
+    }
+
     macro_rules! commit_tab_visibility {
         ($target:expr) => {{
             let target = $target;
@@ -2846,15 +2870,7 @@ fn main() {
             if let Some(wv) = workspace_manager.active().webviews.get(&target) {
                 // Re-pin bounds on every show — a tab created for a previous
                 // window size keeps stale bounds otherwise.
-                let sz = browser_win.inner_size();
-                let _ = wv.set_bounds(wry::Rect {
-                    position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
-                    size: tao::dpi::PhysicalSize::new(
-                        sz.width,
-                        sz.height.saturating_sub(address_bar_h + footer_h),
-                    )
-                    .into(),
-                });
+                let _ = wv.set_bounds(tab_bounds!());
                 let _ = wv.set_visible(true);
             }
             active_wv_id = target;
@@ -6275,8 +6291,12 @@ fn main() {
                             active_wv_id = old_id;
                             pending_swap_at = None;
                         } else if id == old_id {
-                            // Closing the old visible tab — show the new one
+                            // Closing the old visible tab — show the new one.
+                            // Re-pin first: this path used to show a tab with
+                            // whatever bounds it was born with, so a window
+                            // resize since then left it painting under the footer.
                             if let Some(wv) = workspace_manager.active().webviews.get(&new_id) {
+                                let _ = wv.set_bounds(tab_bounds!());
                                 let _ = wv.set_visible(true);
                             }
                             pending_swap_at = None;
@@ -8329,6 +8349,39 @@ fn main() {
                     }
                 }
 
+                // Moving to a display with a different scale changes what a
+                // physical pixel is. Without this the chrome heights kept the
+                // old display's values for the rest of the session: too small,
+                // and the page paints under the footer; too large, and a strip
+                // of dead space sits above it. tao follows this with a Resized,
+                // which re-lays everything out using the corrected heights.
+                WindowEvent::ScaleFactorChanged { scale_factor, .. }
+                    if window_id == browser_win_id =>
+                {
+                    address_bar_h = (ADDRESS_BAR_H_LOGICAL * *scale_factor) as u32;
+                    footer_h = (FOOTER_H_LOGICAL * *scale_factor) as u32;
+                    let sz = browser_win.inner_size();
+                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                        let _ = wv.set_bounds(tab_bounds!());
+                    }
+                    let _ = address_bar_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, address_bar_h).into(),
+                    });
+                    let _ = footer_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(
+                            0u32,
+                            sz.height.saturating_sub(footer_h),
+                        )
+                        .into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, footer_h).into(),
+                    });
+                    let _ = progress_wv.set_bounds(wry::Rect {
+                        position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                        size: tao::dpi::PhysicalSize::new(sz.width, 3u32).into(),
+                    });
+                }
+
                 WindowEvent::Resized(sz) if window_id == browser_win_id => {
                     // Keep chrome overlay window in sync — both size AND position.
                     // During native-fullscreen transitions browser_win moves to a
@@ -8407,12 +8460,8 @@ fn main() {
                         size: tao::dpi::PhysicalSize::new(notif_w, notif_h).into(),
                     });
                     // Resize active tab to full width (offset below address bar)
-                    let bounds = wry::Rect {
-                        position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
-                        size: tao::dpi::PhysicalSize::new(sz.width, sz.height.saturating_sub(address_bar_h + footer_h)).into(),
-                    };
                     if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
-                        let _ = wv.set_bounds(bounds);
+                        let _ = wv.set_bounds(tab_bounds!());
                     }
                     // Resize footer bar to full width (pinned to bottom)
                     let _ = footer_wv.set_bounds(wry::Rect {
