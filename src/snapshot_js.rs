@@ -199,7 +199,17 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     if (el.required) parts.push('required');
     if (el.readOnly) parts.push('readonly');
     if (el.name) parts.push('name=' + el.name);
-    if (el.isContentEditable && tag !== 'input' && tag !== 'textarea') parts.push('contenteditable');
+    if (el.isContentEditable && tag !== 'input' && tag !== 'textarea') {
+      parts.push('contenteditable');
+      // getText prefers aria-label, so a rich editor's line was byte-identical
+      // whether it held a 280-character draft or nothing at all. Inputs and
+      // textareas get val= above; give the editors the same, or "re-read each
+      // part before you submit" is not executable on the sites that use them.
+      if (!isSensitiveInput(el)) {
+        var ce = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        parts.push('val=' + (ce.length > 40 ? ce.substring(0, 40) + '…' : ce));
+      }
+    }
     return parts.length ? ' ' + parts.join(' ') : '';
   }
 
@@ -358,8 +368,9 @@ const SNAPSHOT_TEMPLATE: &str = r#"
   var meta = 'page: ' + location.href.substring(0, 150)
     + (document.title ? ' | title: ' + clean(document.title, 80) : '')
     + (WITHIN !== null ? ' | within: ' + WITHIN : '')
-    + ' | ' + sc.name + ' ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + se.clientHeight)
-    + ' of ' + Math.round(se.scrollHeight) + 'px';
+    + ' | viewport ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + se.clientHeight)
+    + ' of ' + Math.round(se.scrollHeight) + 'px'
+    + (sc.name === 'page' ? '' : ' in ' + sc.name);
 
   var header;
   if (DIFF) {
@@ -390,13 +401,13 @@ mod tests {
     #[test]
     fn root_expression_by_mode() {
         // No `within` → scans the whole document.
-        assert!(snapshot_script(None, false).contains("var root = document;"));
+        assert!(snapshot_script(None, false, None, 200).contains("var root = document;"));
         // CSS selector → querySelector, JSON-escaped.
-        let css = snapshot_script(Some(".dialog"), false);
+        let css = snapshot_script(Some(".dialog"), false, None, 200);
         assert!(css.contains("document.querySelector(\".dialog\")"));
         assert!(css.contains("var WITHIN = \".dialog\";"));
         // @ref → resolved through the live ref map.
-        let refd = snapshot_script(Some("@7"), true);
+        let refd = snapshot_script(Some("@7"), true, None, 200);
         assert!(refd.contains("window.__octoweb_refs.get(\"@7\")"));
         assert!(refd.contains("var DIFF = true;"));
     }
@@ -404,12 +415,16 @@ mod tests {
     #[test]
     fn is_a_bare_expression() {
         for s in [
-            snapshot_script(None, false),
-            snapshot_script(Some("#form"), true),
+            snapshot_script(None, false, None, 200),
+            snapshot_script(Some("#form"), true, Some("save"), 0),
         ] {
             assert!(!s.trim_end().ends_with(';'), "trailing semicolon");
             assert!(
-                !s.contains("__ROOT__") && !s.contains("__DIFF__") && !s.contains("__WITHIN__")
+                !s.contains("__ROOT__")
+                    && !s.contains("__DIFF__")
+                    && !s.contains("__WITHIN__")
+                    && !s.contains("__FIND__")
+                    && !s.contains("__LIMIT__")
             );
         }
     }

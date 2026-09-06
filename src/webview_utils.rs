@@ -580,9 +580,25 @@ pub const COMBINED_SCRIPT: &str = r#"
         return orig.apply(console, arguments);
       }, orig);
     });
+    // CAPTURE phase, deliberately: element-level error events on <script>,
+    // <img>, <link> and <iframe> do not bubble, so a two-argument listener here
+    // saw script-load failures not at all — the one class of failure where the
+    // page is dead and nothing else in this ring will ever fire, because no
+    // page JS ran to call console.*.
     window.addEventListener('error', function (e) {
+      var t = e.target;
+      if (!e.message && t && t !== window && (t.src || t.href)) {
+        con.push2({ level: 'error', text: ('Failed to load ' + (t.tagName || '?') + ' ' + (t.src || t.href)).substring(0, 500), ts: Date.now() });
+        return;
+      }
       con.push2({ level: 'error', text: ('Uncaught: ' + e.message + ' @' + (e.filename || '') + ':' + (e.lineno || 0)).substring(0, 500), ts: Date.now() });
-    });
+    }, true);
+    // A blocked inline script (nonce mismatch, missing directive) reports only
+    // to the engine's own console, which WKWebView exposes no delegate for —
+    // this event is the only programmatic way to see it.
+    document.addEventListener('securitypolicyviolation', function (e) {
+      con.push2({ level: 'error', text: ('CSP blocked ' + (e.effectiveDirective || e.violatedDirective || '?') + ': ' + (e.blockedURI || 'inline') + ' @' + (e.sourceFile || '') + ':' + (e.lineNumber || 0)).substring(0, 500), ts: Date.now() });
+    }, true);
     window.addEventListener('unhandledrejection', function (e) {
       var r; try { r = String((e.reason && e.reason.message) || e.reason); } catch (err) { r = '?'; }
       con.push2({ level: 'error', text: ('Unhandled rejection: ' + r).substring(0, 500), ts: Date.now() });

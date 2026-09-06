@@ -10109,4 +10109,29 @@ mod chrome_js_syntax_tests {
             ),
         );
     }
+
+    #[test]
+    fn every_dom_action_script_parses() {
+        // These are assembled from a shared harness plus a per-action body, so a
+        // syntax error in one placeholder breaks several tools at once and only
+        // ever shows up as an MCP error from a live page.
+        use crate::dom_actions as d;
+        let cases: Vec<(&str, String)> = vec![
+            ("click_locate", d::click_locate_script("@1")),
+            ("hover_locate", d::hover_locate_script("#a")),
+            ("key_focus_sel", d::key_focus_script(Some("@2"))),
+            ("key_focus_none", d::key_focus_script(None)),
+            ("dismiss_overlay", d::dismiss_overlay_script()),
+            ("effect_plain", d::effect_script(None)),
+            ("effect_expect", d::effect_script(Some("text:Saved"))),
+            ("type_plain", d::type_script("@3", "hello world", None, false)),
+            ("type_long", d::type_script("#c", &"x".repeat(120), Some("text:Posted"), false)),
+            ("type_keys_only", d::type_script("@4", "abc", None, true)),
+            ("select_option", d::select_option_script("@5", "v", None)),
+            ("scroll", d::scroll_script("@6", "down", Some(200))),
+        ];
+        for (name, script) in cases {
+            assert_parses(name, &format!("void ({script});"));
+        }
+    }
 }

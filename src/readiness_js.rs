@@ -30,6 +30,11 @@
 //!   rendered shape, waiting longer won't help).
 //! - `"partial"` — 8 s ceiling reached. Returns *something* on pathological
 //!   sites instead of hanging the navigate.
+//! - `"shell"` — the document loaded but the page's own app never mounted:
+//!   no LCP candidate, no structural mutation, and almost no text, three
+//!   seconds in. Every other verdict here means "quiet", and a dead page is
+//!   the quietest of all — without this it reported `ready` and an agent
+//!   retrying it was told the page was fine every single time.
 //!
 //! The constant is a bare *expression* (no trailing `;`): `async_eval` wraps it
 //! as `return (<expr>);`, so a trailing semicolon is a SyntaxError that makes
@@ -68,7 +73,17 @@ new Promise(function(r){
       var domOk=recent<=3||steady;
       var lcpOk=s.lcp?(n-s.lcp)>=500:elapsed>=1000;
       var lngOk=!s.lng||(n-s.lng)>=300;
-      if(domOk&&lcpOk&&lngOk){finish(steady&&recent>3?'live':'ready');return;}
+      if(domOk&&lcpOk&&lngOk){
+        // A page whose app never mounted is the quietest page there is: no
+        // paint, no mutations, no long tasks — it satisfies every "settled"
+        // test above and used to resolve 'ready'. Distinguish it, or an agent
+        // retrying a dead shell gets a green light on every attempt.
+        // Held to 3s so a merely slow SPA is not slandered: a real app paints
+        // or mutates something well inside that.
+        if(elapsed>=3000&&!s.lcp&&s.muts.length===0&&(document.body?document.body.innerText:'').trim().length<200){finish('shell');return;}
+        if(!s.lcp&&s.muts.length===0){setTimeout(tick,200);return;}
+        finish(steady&&recent>3?'live':'ready');return;
+      }
     }
     setTimeout(tick,200);
   }

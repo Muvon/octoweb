@@ -104,6 +104,24 @@ const EFFECT_PRE_JS: &str = r#"
       if (d > st.dialogs) out.dialog = dialogText();
       var f = focusDesc();
       if (f !== st.focus) out.focus = f || 'none';
+      // Did this action throw away text the caller typed? An SPA route change
+      // can remount a composer and silently discard everything in it, and the
+      // only trace in `out` is an anonymous '+2100/-1800 nodes' that reads
+      // exactly like "the new view rendered" — which is also true. Only warn
+      // when the text is genuinely no longer anywhere in the document, so a
+      // click that legitimately consumed it (a search suggestion, a submit)
+      // stays quiet.
+      try {
+        var typed = window.__octoweb_typed;
+        if (typed && out.url) {
+          var body = document.body ? document.body.innerText : '';
+          var live = document.body ? document.body.innerHTML : '';
+          if (body.indexOf(typed.probe) === -1 && live.indexOf(typed.probe) === -1) {
+            out.lost = { sel: typed.sel, len: typed.len, head: typed.head };
+            delete window.__octoweb_typed;
+          }
+        }
+      } catch (e) {}
       return out;
     };
     // Is an expectation currently satisfied? `exp` is {kind, value} or null.
@@ -150,11 +168,23 @@ new Promise(function(__resolve){
   var lastErr = 'missing';
   var prevRect = null;
   __PRE__
+  // Actions that WRITE something (currently browser_type) leave a verifier on
+  // window.__octoweb_verify. It runs after the settle window, not immediately,
+  // because that is when a controlled React input has reverted the value or a
+  // remount has thrown the field away. Setting a value and reporting success is
+  // an assertion; this is the observation.
+  function __vfy() {
+    var f = window.__octoweb_verify;
+    try { delete window.__octoweb_verify; } catch (e) { window.__octoweb_verify = null; }
+    if (!f) return undefined;
+    try { return f(); } catch (e) { return { ok: false, err: String((e && e.message) || e) }; }
+  }
   function __done(v) {
-    if (!__EFFECT__ || v !== 'true') return __resolve(v);
+    if (!__EFFECT__ || v !== 'true') { __vfy(); return __resolve(v); }
     var p = window.__octoweb_pre;
-    if (!p) return __resolve('true|' + JSON.stringify({ diff: {}, met: !__EXPECT__ }));
+    if (!p) return __resolve('true|' + JSON.stringify({ diff: {}, met: !__EXPECT__, val: __vfy() }));
     p.settle(__EXPECT__, __EFFECT_MS__, __SETTLE_MS__).then(function (r) {
+      r.val = __vfy();
       __resolve('true|' + JSON.stringify(r));
     });
   }
@@ -574,7 +604,28 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       }
       function finish(ok) {
         try { if (mo) mo.disconnect(); } catch (e) {}
-        return ok ? __done('true') : __resolve('keys');
+        if (!ok) return __resolve('keys');
+        // landed() only proves the first 24 characters arrived. Check the whole
+        // string here: a rich editor that truncated at its character limit, or
+        // dropped the tail, is the difference between a posted draft and a
+        // silently mangled one.
+        window.__octoweb_verify = function () {
+          var live = host.isConnected;
+          var now = live ? norm(host.textContent) : '';
+          return {
+            ok: live && (want === '' || now.indexOf(want) !== -1),
+            connected: live,
+            got: (live ? String(host.textContent || '') : '').substring(0, 60),
+            len: now.length,
+            want: want.length
+          };
+        };
+        window.__octoweb_typed = (function () {
+          var t = String(TXT || '');
+          if (t.length < 40) { try { delete window.__octoweb_typed; } catch (e) {} return undefined; }
+          return { sel: String(SEL), len: t.length, probe: t.substring(0, 24), head: t.substring(0, 60) };
+        })();
+        return __done('true');
       }
       try {
         var dt = new DataTransfer(); dt.setData('text/plain', TXT);
@@ -610,6 +661,22 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     if (setter) setter.call(el, TXT); else el.value = TXT;
     fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
     fire(el, new Event('change', { bubbles: true }));
+    window.__octoweb_verify = function () {
+      var live = el.isConnected;
+      var now = live ? String(el.value == null ? '' : el.value) : '';
+      return {
+        ok: live && now === TXT,
+        connected: live,
+        got: now.substring(0, 60),
+        len: now.length,
+        want: String(TXT).length
+      };
+    };
+    window.__octoweb_typed = (function () {
+      var t = String(TXT || '');
+      if (t.length < 40) { try { delete window.__octoweb_typed; } catch (e) {} return undefined; }
+      return { sel: String(SEL), len: t.length, probe: t.substring(0, 24), head: t.substring(0, 60) };
+    })();
     __done('true');
 "#
     .replace("__TXT__", &json(text))

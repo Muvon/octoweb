@@ -336,22 +336,52 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
     let parsed = serde_json::from_str::<serde_json::Value>(payload_json).ok();
     // Settle shape carries the diff under "diff"; otherwise treat the whole
     // object as the diff.
-    let (diff, met, expect) = match parsed {
+    let (diff, met, expect, val) = match parsed {
         Some(serde_json::Value::Object(o)) if o.contains_key("diff") => (
             o.get("diff").and_then(|d| d.as_object().cloned()),
             o.get("met").and_then(|m| m.as_bool()),
             o.get("expect").and_then(|e| e.as_str()).map(str::to_string),
+            o.get("val").and_then(|v| v.as_object().cloned()),
         ),
-        Some(serde_json::Value::Object(o)) => (Some(o), None, None),
-        _ => (None, None, None),
+        Some(serde_json::Value::Object(o)) => (Some(o), None, None, None),
+        _ => (None, None, None, None),
     };
+    // A write's readback, taken after the settle window. This goes FIRST and
+    // loudly: "Typed into @12" used to be an assertion about what we sent, and
+    // a value the page reverted, truncated, or threw away with the element read
+    // exactly like one that stuck.
+    let value_note = val.and_then(|v| {
+        let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        if ok {
+            return None;
+        }
+        let connected = v.get("connected").and_then(|x| x.as_bool()).unwrap_or(true);
+        let got = v.get("got").and_then(|x| x.as_str()).unwrap_or("");
+        let len = v.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
+        let want = v.get("want").and_then(|x| x.as_u64()).unwrap_or(0);
+        Some(if !connected {
+            "⚠ TEXT DID NOT STICK: the field was removed from the page after typing — \
+             the value is gone. Re-snapshot and type into the new element."
+                .to_string()
+        } else {
+            format!(
+                "⚠ TEXT DID NOT STICK: the field now holds {len} chars, not the {want} sent \
+                 (starts \"{got}\"). The page rejected, truncated, or rewrote the value — \
+                 do not submit assuming it is correct."
+            )
+        })
+    });
     let Some(obj) = diff else {
-        return match download {
-            Some(name) => format!(" → download started: {name} (saved to ~/Downloads)"),
-            None => String::new(),
+        return match (value_note, download) {
+            (Some(note), _) => format!(" → {note}"),
+            (None, Some(name)) => format!(" → download started: {name} (saved to ~/Downloads)"),
+            (None, None) => String::new(),
         };
     };
     let mut parts: Vec<String> = Vec::new();
+    if let Some(note) = value_note {
+        parts.push(note);
+    }
     match (&expect, met) {
         (Some(e), Some(true)) => parts.push(format!("✓ expected {e} — met")),
         (Some(e), Some(false)) => parts.push(format!(
@@ -362,6 +392,19 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
     }
     if let Some(name) = download {
         parts.push(format!("download started: {name} (saved to ~/Downloads)"));
+    }
+    // Loudest thing in the line, and first: an action that navigated away from
+    // text the caller typed destroyed work, and every other signal for it is an
+    // anonymous node count that reads like a successful render.
+    if let Some(lost) = obj.get("lost").and_then(|l| l.as_object()) {
+        let sel = lost.get("sel").and_then(|x| x.as_str()).unwrap_or("the field");
+        let len = lost.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
+        let head = lost.get("head").and_then(|x| x.as_str()).unwrap_or("");
+        parts.push(format!(
+            "⚠ TEXT LOST: the {len} chars you typed into {sel} (\"{head}…\") are no longer \
+             anywhere in this document — this action discarded them. Retype into the new \
+             element before submitting."
+        ));
     }
     let str_of = |k: &str| obj.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
     if let Some(u) = str_of("url") {
@@ -1032,7 +1075,7 @@ impl McpServer {
     // ── Navigation ──────────────────────────────────────────────────
 
     #[tool(
-        description = "Navigate to a URL. Blocks until the page (including SPA bootstrap) is fully loaded — no follow-up browser_wait needed. Returns the tab ID.\n\nDefault (url only): opens a NEW tab in the background. Pass tab_id to navigate an existing tab in-place instead (errors if it no longer exists — omit tab_id to get a fresh one).\n\nNavigation NEVER changes what the user sees. To show a tab to the user, call browser_switch_tab with the returned tab ID. To navigate the tab the user is viewing, pass the id from browser_get_current_tab."
+        description = "Navigate to a URL. Blocks until the page stops changing, then reports where it actually landed (`url`) and how it settled (`readiness`: 'ready'/'live' rendered, 'partial' hit the 8s ceiling still rendering, 'shell' the document loaded but the app never mounted — that one will not improve on retry). Returns the tab ID.\n\nDefault (url only): opens a NEW tab in the background. Pass tab_id to navigate an existing tab in-place instead (errors if it no longer exists — omit tab_id to get a fresh one).\n\nNavigation NEVER changes what the user sees. To show a tab to the user, call browser_switch_tab with the returned tab ID. To navigate the tab the user is viewing, pass the id from browser_get_current_tab."
     )]
     async fn browser_navigate(
         &self,
@@ -1300,7 +1343,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Compact map of the page: header with URL, title, headings and any alert/status/dialog text (where 'Request sent' / 'Access denied' / validation errors live), then every interactive element with a @N ref you pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option — much cheaper than guessing CSS. Refs are STABLE: the same element keeps its @N across snapshots of this tab (until navigation). Form controls carry their <label> text; radios/checkboxes show checked state. Includes same-origin iframes and open shadow DOM. A '+N present-but-hidden controls' note means an auto-hiding toolbar: browser_hover the page and re-snapshot. Use `find:\"text\"` to return just the controls matching a label, `within` (a CSS selector or @ref) to scan just one dialog/form/list, and `diff:true` to get only what changed since the last snapshot — on a busy SPA that is far cheaper than re-scanning the whole page. Start here on an unfamiliar page and re-snapshot to verify state instead of reading the DOM with browser_execute_js.",
+        description = "Compact map of the page: header with URL, title, headings and any alert/status/dialog text (where 'Request sent' / 'Access denied' / validation errors live), then every interactive element with a @N ref you pass directly to browser_click / browser_type / browser_hover / browser_press_key / browser_select_option — much cheaper than guessing CSS. Refs are STABLE: the same element keeps its @N across snapshots of this tab (until navigation). Form controls carry their <label> text; radios/checkboxes show checked state. Includes same-origin iframes and open shadow DOM. A '+N present-but-hidden controls' note means an auto-hiding toolbar: browser_hover the page and re-snapshot. Use `find:\"text\"` to return just the controls matching a label, `within` (a CSS selector or @ref) to scan just one dialog/form/list, and `diff:true` to get only what changed since the last snapshot — on a busy SPA that is far cheaper than re-scanning the whole page. Start here on an unfamiliar page, and re-snapshot to see how the page changed rather than reading the DOM with browser_execute_js. Alert/status text in the header is what the page CLAIMS — a 'Saved' toast belongs here and is not evidence a write landed.",
         annotations(read_only_hint = true)
     )]
     async fn browser_snapshot(
@@ -1368,7 +1411,7 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, waits until it is stable and unobstructed, then delivers a TRUSTED native click (isTrusted=true, real user gesture — works on sites that ignore synthetic events, and grants popup/clipboard/fullscreen permissions). The result tells you what happened: navigation, SPA URL change, new text that appeared (toasts, confirmations, errors), dialogs opened, network requests fired, DOM/focus changes — or explicitly 'no observable change'. Trust that line instead of re-reading the page. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone; occluded → dismiss the named overlay. Defaults to the visible tab."
+        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, waits until it is stable and unobstructed, then delivers a TRUSTED native click (isTrusted=true, real user gesture — works on sites that ignore synthetic events, and grants popup/clipboard/fullscreen permissions). The result tells you what happened: navigation, SPA URL change, new text that appeared (toasts, confirmations, errors), dialogs opened, network requests fired, DOM/focus changes — or explicitly 'no observable change'. Trust that line for what happened ON THIS PAGE; it says nothing about whether a server accepted anything, so verify a created artifact by loading it fresh. If the click navigates while you have unsubmitted typed text in the tab, the result says so — that text is gone and must be retyped in the new document. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone; occluded → dismiss the named overlay. Defaults to the visible tab."
     )]
     async fn browser_click(
         &self,
@@ -1450,7 +1493,9 @@ impl McpServer {
         }
         let mut lines = Vec::with_capacity(req.fields.len());
         let mut filled = 0usize;
-        for f in &req.fields {
+        let mut aborted = false;
+        let last_idx = req.fields.len() - 1;
+        for (idx, f) in req.fields.iter().enumerate() {
             let r = self
                 .send_command(|tx| McpCommand::Type {
                     tab_id: req.tab_id,
@@ -1462,14 +1507,45 @@ impl McpServer {
                 })
                 .await?;
             match r {
-                Ok(_) => {
-                    filled += 1;
-                    lines.push(format!("✓ {}", f.selector));
+                // Do NOT discard the per-field effect. `✓ <selector>` said only
+                // "the Type command returned no error status", which is the same
+                // claim-instead-of-observation this tool surface is being cured
+                // of — and it is the shape that hid a value the page threw away.
+                Ok(effect) => {
+                    let stuck = !effect.contains("TEXT DID NOT STICK");
+                    if stuck {
+                        filled += 1;
+                    }
+                    lines.push(format!(
+                        "{} {}{}",
+                        if stuck { "✓" } else { "⚠" },
+                        f.selector,
+                        effect
+                    ));
                 }
                 Err(e) => lines.push(format!("✗ {}: {e}", f.selector)),
             }
+            // Fields are typed one after another into a document that can change
+            // underneath them. If one of them navigated the tab, everything after
+            // it lands in a different document and the submit fires on a form the
+            // caller never filled — stop instead.
+            if idx < last_idx && lines.last().is_some_and(|l| l.contains("url → ")) {
+                lines.push(
+                    "⏹ stopped: filling this field navigated the tab, so the remaining fields \
+                     would land in a different document and submit would fire on a form you \
+                     did not fill. Re-snapshot and start again on the new page."
+                        .to_string(),
+                );
+                aborted = true;
+                break;
+            }
         }
-        let submit_line = if let Some(sub) = &req.submit {
+        let submit_line = if aborted {
+            match &req.submit {
+                Some(_) => "\nsubmit: SKIPPED — the tab navigated mid-fill".to_string(),
+                None => String::new(),
+            }
+        } else if let Some(sub) = &req.submit {
             let r = self
                 .send_command(|tx| McpCommand::Click {
                     tab_id: req.tab_id,
@@ -1650,7 +1726,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Recent network requests made by the page. Returns a JSON array [{method,url,status,type,ms,ts,error?}], newest last. type=fetch|xhr carry a real status (0 + error = failed); other types (beacon, img, script, iframe, link, other — from resource timing) prove the request fired but may report status 0. Use to debug missing data, failed submissions, or to discover the API behind a UI. Captured from page load (last 200 of each kind kept). Defaults to the visible tab.",
+        description = "Recent network requests made by the page. Returns a JSON array [{method,url,status,type,ms,ts,error?}], newest last. type=fetch|xhr carry a real status (0 + error = failed); other types (beacon, img, script, iframe, link, other — from resource timing) prove the request fired. Their status is 0 whenever the server did not send a matching Timing-Allow-Origin header, which is the norm for cross-origin CDN assets — a 0 there means 'masked by spec', NOT 'failed', even for a resource that loaded perfectly. Never read a wall of zeros as a network failure; check browser_console_messages for 'Failed to load' lines, which are ground truth. Use to debug missing data, failed submissions, or to discover the API behind a UI. Captured from page load (last 200 of each kind kept). Defaults to the visible tab.",
         annotations(read_only_hint = true)
     )]
     async fn browser_network_requests(
@@ -1947,15 +2023,35 @@ impl ServerHandler for McpServer {
                 Reading pages: browser_snapshot shows page state (title, headings, alerts, dialogs) plus \
                 actionable elements; browser_get_page_content gives the full text. Use browser_execute_js \
                 only for data the other tools cannot express (return value is JSON-encoded; wrap \
-                multi-statement code in an IIFE) — never just to check whether an action worked.\n\
+                multi-statement code in an IIFE). Reach for browser_snapshot or \
+                browser_get_page_content first when you are checking an outcome — they are cheaper and \
+                already carry page state.\n\
                 \n\
                 Actions are real input: browser_click, browser_hover and browser_press_key deliver trusted \
                 native events (isTrusted=true, user gesture), so sites that ignore synthetic events work. \
                 Every action returns a one-line effect summary — navigation, URL change, new text (toasts, \
                 confirmations, errors), dialogs, requests fired, DOM/focus changes, or 'no observable \
-                change'. Read that line; do not re-read the page to find out what happened. 'No observable \
+                change'. Read that line instead of re-snapshotting to learn what the PAGE did. 'No observable \
                 change' after a click is real information: try the control's other trigger (Enter/Space via \
                 browser_press_key, a hover first), or check browser_console_messages.\n\
+                \n\
+                Acknowledgement is not proof. An effect summary, an `expect` ✓, and an alert/status line in \
+                a snapshot all tell you the page REACTED — a toast rendered, a modal closed, a request \
+                fired. None of them tells you a server stored anything. All three read the same document \
+                you just acted on, within a few seconds, and 'Posted' / 'Saved' / 'Sent' toasts fire \
+                optimistically: before the write lands, and sometimes instead of it. Whenever an action \
+                creates something that outlives the page — a post, comment, message, order, upload — do not \
+                stop at the toast. Load the artifact fresh: browser_navigate to its canonical URL (that \
+                opens a background tab and blocks until it is loaded) and browser_get_page_content it, then \
+                check the thing you meant to create is there AND complete. If you composed something in \
+                several parts, count the parts. Report what you verified, not what you attempted.\n\
+                \n\
+                Typed text is fragile. Setting a value is not the same as it surviving: a click that \
+                navigates or re-routes an SPA can remount the composer and discard everything typed into it, \
+                and a controlled React input can reject or truncate a value after you set it. browser_type \
+                reads the field back and tells you what it actually holds — if that does not match what you \
+                sent, the value did not stick, and continuing will submit something you did not write. In a \
+                multi-part compose flow, re-read each part before you submit the whole.\n\
                 \n\
                 Typing & submitting: browser_type sets a value (replaces, doesn't append) and fires \
                 input+change; rich editors get a paste, then editing commands, then trusted keystrokes, \
@@ -1963,7 +2059,9 @@ impl ServerHandler for McpServer {
                 follow with browser_press_key(key=\"Enter\") — a native Enter that submits the form. For \
                 single keys use browser_press_key, not browser_type.\n\
                 \n\
-                Waiting: browser_navigate already blocks until the page is idle — no follow-up wait needed. \
+                Waiting: browser_navigate blocks until the page goes quiet and reports how it settled in \
+                its `readiness` field — 'ready'/'live' mean it rendered, 'shell' means the document loaded \
+                but the app never mounted and retrying will not fix it. \
                 Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \
                 so you rarely need explicit waits; after an action reports a route change, re-snapshot or \
                 browser_wait with a CSS selector for the new content. A tool reporting a navigation means \
@@ -1974,9 +2072,11 @@ impl ServerHandler for McpServer {
                 (fetch/XHR with status; pass include_body=true to read the JSON API behind a UI, plus \
                 beacons/images/scripts that fired) before retrying blindly.\n\
                 \n\
-                One-call efficiency — prefer these over act-then-poll-then-verify chains: give any \
-                action an `expect` (\"text:Saved\", \"gone:Loading\", \"url:/done\", \"selector:.ok\") and it \
-                waits up to 6s for that outcome and reports ✓/✗ — no separate browser_wait. Fill a whole \
+                One-call efficiency — these save a round-trip WITHIN a page, they do not replace \
+                verifying the artifact afterwards: give any action an `expect` (\"text:Saved\", \
+                \"gone:Loading\", \"url:/done\", \"selector:.ok\") and it waits up to 6s for that outcome and \
+                reports ✓/✗ — no separate browser_wait. An `expect` ✓ means the page changed as predicted, \
+                which is not the same as the write landing. Fill a whole \
                 form with browser_fill_form (fields + submit + expect in one call). @refs are STABLE \
                 across snapshots, so after a change use browser_snapshot(diff:true) to see only what moved, \
                 or browser_snapshot(within:\"@ref\") to read just one dialog/form. browser_wait also takes \

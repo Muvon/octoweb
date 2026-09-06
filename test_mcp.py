@@ -432,7 +432,7 @@ def navigate_reports_where_it_landed_and_how_settled():
         expect("url" in info, f"browser_navigate response has no url: {info!r}")
         expect(info["url"].endswith("basic.html"),
                f"navigate reported the wrong landing url: {info['url']!r}")
-        expect(info.get("readiness") in ("ready", "live", "partial")
+        expect(info.get("readiness") in ("ready", "live", "partial", "shell")
                or str(info.get("readiness", "")).startswith("probe-error"),
                f"unexpected readiness verdict: {info.get('readiness')!r}")
     finally:
@@ -454,7 +454,17 @@ def page_content_pages_instead_of_dumping_everything():
         expect(head.index("<untrusted>") > head.index(first_line),
                "the paging note must sit outside the untrusted fence")
         full = tool_text("browser_get_page_content", {"tab_id": tab_id, "limit": 0})
-        expect(len(full) >= len(head), "limit:0 should return at least as much")
+        expect(not full.startswith("[showing characters "),
+               f"limit:0 must not be truncated: {full[:120]!r}")
+        # Compare the page text itself, not the replies: only the truncated one
+        # carries a paging note, which on a short fixture is longer than the
+        # content it withheld.
+        def body(reply):
+            start = reply.index("<untrusted>") + len("<untrusted>")
+            return reply[start:reply.index("</untrusted>")].strip()
+        expect(len(body(full)) > len(body(head)),
+               f"limit:0 should return more page text than limit:20 "
+               f"({len(body(full))} vs {len(body(head))})")
     finally:
         close_tab(tab_id)
 
@@ -552,6 +562,81 @@ def cross_origin_pages_cannot_drive_the_browser():
                f"expected the Origin to be rejected, got HTTP {exc.code}")
         return
     raise TestFailure(f"cross-origin request was served: {body[:200]!r}")
+
+
+@test
+def type_reports_what_the_field_actually_holds():
+    """Setting a value is an assertion; reading it back is the observation."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        # A field that accepts the value cleanly must NOT be flagged.
+        ok = tool_text("browser_execute_js", {
+            "tab_id": tab_id,
+            "script": "(function(){var i=document.createElement('input');i.id='octoweb_probe';"
+                      "document.body.appendChild(i);return 'ok';})()",
+        })
+        expect("ok" in ok, f"could not create probe input: {ok!r}")
+        clean = tool_text("browser_type", {"tab_id": tab_id, "selector": "#octoweb_probe",
+                                           "value": "hello world"})
+        expect("TEXT DID NOT STICK" not in clean,
+               f"a field that accepted the value was flagged: {clean!r}")
+
+        # A field whose value the page reverts must be flagged, not reported as typed.
+        tool_text("browser_execute_js", {
+            "tab_id": tab_id,
+            "script": "(function(){var i=document.getElementById('octoweb_probe');"
+                      "i.addEventListener('input',function(){i.value='';});return 'armed';})()",
+        })
+        reverted = tool_text("browser_type", {"tab_id": tab_id, "selector": "#octoweb_probe",
+                                              "value": "this will be thrown away"})
+        expect("TEXT DID NOT STICK" in reverted,
+               f"a reverted value was reported as typed: {reverted!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def snapshot_shows_contenteditable_content():
+    """Without val= a rich editor reads identically full or empty."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        tool_text("browser_execute_js", {
+            "tab_id": tab_id,
+            "script": "(function(){var d=document.createElement('div');d.contentEditable='true';"
+                      "d.id='octoweb_ce';d.textContent='DRAFTBODY';document.body.appendChild(d);"
+                      "return 'ok';})()",
+        })
+        snap = tool_text("browser_snapshot", {"tab_id": tab_id, "find": "DRAFTBODY"})
+        expect("DRAFTBODY" in snap,
+               f"contenteditable content missing from snapshot: {snap[:300]!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def fill_form_reports_per_field_effects_not_just_ticks():
+    """A bare tick is the same claim-instead-of-observation shape as browser_type's."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        tool_text("browser_execute_js", {
+            "tab_id": tab_id,
+            "script": "(function(){var i=document.createElement('input');i.id='octoweb_ff';"
+                      "i.addEventListener('input',function(){i.value='';});"
+                      "document.body.appendChild(i);return 'ok';})()",
+        })
+        text = tool_text("browser_fill_form", {
+            "tab_id": tab_id,
+            "fields": [{"selector": "#octoweb_ff", "value": "value the page rejects"}],
+        })
+        expect("TEXT DID NOT STICK" in text,
+               f"fill_form hid a rejected value behind a tick: {text!r}")
+        expect("Filled 0/1" in text,
+               f"a rejected field must not count as filled: {text!r}")
+    finally:
+        close_tab(tab_id)
 
 
 @test
@@ -990,9 +1075,10 @@ def snapshot_scroll_header():
         snap = snapshot(tab)
         lines = [ln for ln in snap.splitlines() if ln.strip()]
         expect(lines, "snapshot is empty")
-        header = lines[0].lower()
-        expect(re.search(r"viewport \d+-\d+ of \d+px", header) is not None,
-               f"snapshot header lacks scroll/height info: {lines[0]!r}")
+        # Line 0 is the <untrusted> fence; the meta line is the one naming the page.
+        meta = next((ln for ln in lines if ln.lower().startswith("page: ")), "")
+        expect(re.search(r"viewport \d+-\d+ of \d+px", meta.lower()) is not None,
+               f"snapshot header lacks scroll/height info: {meta!r}")
 
 
 @test
