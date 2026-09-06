@@ -23,7 +23,9 @@ jobs:
       feature-flags: '--all-features'
       test-os: '["macos-15"]'
       test-includes: '[]'
-      test-script: 'RUST_LOG=trace cargo test --locked --all'
+      # OCTOWEB_REQUIRE_NODE turns the JS syntax gate from "skip if node is
+      # missing" into a hard failure — a vacuous pass is worse than no gate.
+      test-script: 'OCTOWEB_REQUIRE_NODE=1 RUST_LOG=trace cargo test --locked --all'
       doc: false
       coverage: false
 
@@ -45,14 +47,13 @@ jobs:
       - name: Build release
         run: cargo build --locked --release
 
-  build-multiarch:
-    name: Build (all platforms)
+  e2e:
+    name: MCP end-to-end
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-15-arm64, macos-15-x86_64]
-
+    # Not required to merge: it drives a real WebView and a real network stack,
+    # so a flake must not block the queue. It is still the only thing in the
+    # repo that loads a page and calls a tool.
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,8 +65,37 @@ jobs:
 
       - name: Build release
         run: cargo build --locked --release
-        env:
-          CARGO_BUILD_JOBS: 4
+
+      - name: Run octoweb headless on an isolated profile
+        run: |
+          mkdir -p "$RUNNER_TEMP/octoweb-profile"
+          # OCTOWEB_BACKGROUND keeps it off the Dock and stops it stealing focus;
+          # the port and config dir isolate it from anything else on the runner.
+          OCTOWEB_BACKGROUND=1 \
+          OCTOWEB_MCP_PORT=3435 \
+          OCTOWEB_CONFIG_DIR="$RUNNER_TEMP/octoweb-profile" \
+          RUST_LOG=info \
+          ./target/release/octoweb > "$RUNNER_TEMP/octoweb.log" 2>&1 &
+          echo "OCTOWEB_PID=$!" >> $GITHUB_ENV
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null -X POST http://127.0.0.1:3435/mcp \
+                 -H 'Content-Type: application/json' \
+                 -H 'Accept: application/json, text/event-stream' \
+                 -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'; then
+              echo "MCP server is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::MCP server never came up"; cat "$RUNNER_TEMP/octoweb.log"; exit 1
+
+      - name: Run the MCP e2e suite
+        run: python3 test_mcp.py --mcp-url http://127.0.0.1:3435/mcp
+
+      - name: Octoweb log
+        if: always()
+        run: |
+          kill "$OCTOWEB_PID" 2>/dev/null || true
+          tail -200 "$RUNNER_TEMP/octoweb.log" || true
 
   brief:
     uses: muvon/ci-workflow/.github/workflows/brief.yml@master

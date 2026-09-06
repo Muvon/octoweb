@@ -20,7 +20,7 @@ allowed_tools = ["octoweb:*"]
 [[mcp.servers]]
 name = "octoweb"
 type = "http"
-url = "http://localhost:3434/mcp"
+url = "http://localhost:{{ENV:OCTOWEB_MCP_PORT}}/mcp"
 timeout_seconds = 2000
 tools = []
 headers = { "X-Octoweb-Workspace" = "{{ENV:OCTOWEB_MCP_TOKEN}}" }

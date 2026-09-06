@@ -24,6 +24,12 @@ pub fn html(url: &str, error_code: &str) -> String {
         ),
         "-1202" => ("The website’s certificate is not trusted.", true),
         "-1203" => ("The website’s certificate has an unknown root.", true),
+        // Not a WebKit code — octoweb's own, for a page whose renderer keeps
+        // dying. See AppEvent::WebContentTerminated.
+        "renderer-crash" => (
+            "This page repeatedly crashed the renderer process. Reload to try again.",
+            false,
+        ),
         _ => (
             "The page could not be loaded because of an unknown error.",
             false,

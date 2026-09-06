@@ -16,7 +16,7 @@ use agent_client_protocol::schema::v1::{
     ExtRequest, ImageContent, Implementation, InitializeRequest, NewSessionRequest,
     PermissionOptionId, PermissionOptionKind, PromptRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome, SessionId,
-    SessionNotification, SessionUpdate, TextContent,
+    SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
@@ -441,6 +441,11 @@ async fn init_session(
     if let Some(token) = mcp_token {
         child.env("OCTOWEB_MCP_TOKEN", token);
     }
+    // The capability manifest templates this into the MCP server URL. Always
+    // set it, including on the default port: an agent that resolved a hardcoded
+    // 3434 would drive whichever instance owns that port, not the one that
+    // spawned it.
+    child.env("OCTOWEB_MCP_PORT", crate::mcp::port().to_string());
     let mut child = child
         .args(&args)
         .stdin(std::process::Stdio::piped())
@@ -637,7 +642,30 @@ async fn init_session(
                                     let _ = tx.send(AgentEvent::Cancelled);
                                 } else {
                                     match res {
-                                        Ok(_) => { let _ = tx.send(AgentEvent::Done); }
+                                        Ok(resp) => {
+                                            // A turn that hit a token cap or was refused
+                                            // otherwise renders identically to one that
+                                            // finished — the reply just stops mid-thought
+                                            // and the user re-asks. Say what happened.
+                                            let note = match resp.stop_reason {
+                                                StopReason::MaxTokens => Some(
+                                                    "\n\n_Stopped: the agent hit its token limit — \
+                                                     the answer above is incomplete._",
+                                                ),
+                                                StopReason::MaxTurnRequests => Some(
+                                                    "\n\n_Stopped: the agent hit its limit on tool \
+                                                     calls for one turn — ask it to continue._",
+                                                ),
+                                                StopReason::Refusal => Some(
+                                                    "\n\n_The agent declined to continue this turn._",
+                                                ),
+                                                _ => None,
+                                            };
+                                            if let Some(note) = note {
+                                                let _ = tx.send(AgentEvent::Chunk(note.to_string()));
+                                            }
+                                            let _ = tx.send(AgentEvent::Done);
+                                        }
                                         Err(e) => { let _ = tx.send(AgentEvent::Error(e.to_string())); }
                                     }
                                 }

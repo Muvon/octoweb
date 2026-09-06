@@ -59,6 +59,10 @@ pub enum Action {
     Fullscreen,
     TogglePin,
     ToggleWorkspaces,
+    Back,
+    Forward,
+    NewTab,
+    StopLoad,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -99,6 +103,34 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Reload page",
         "Tabs & Navigation",
         "cmd+r",
+    ),
+    (
+        Action::Back,
+        "back",
+        "Back",
+        "Tabs & Navigation",
+        "cmd+bracketleft",
+    ),
+    (
+        Action::Forward,
+        "forward",
+        "Forward",
+        "Tabs & Navigation",
+        "cmd+bracketright",
+    ),
+    (
+        Action::NewTab,
+        "new_tab",
+        "New tab",
+        "Tabs & Navigation",
+        "cmd+n",
+    ),
+    (
+        Action::StopLoad,
+        "stop_load",
+        "Stop loading",
+        "Tabs & Navigation",
+        "cmd+period",
     ),
     (
         Action::UrlEdit,

@@ -186,8 +186,10 @@ def rpc(method, params=None, notify=False, timeout=DEFAULT_TIMEOUT):
 
 
 def mcp_initialize():
+    # rmcp negotiates DOWN to whatever the client asks for, so a client stuck on
+    # 2024-11-05 never sees the spec revision that defines tool annotations.
     result = rpc("initialize", {
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": "2025-11-25",
         "capabilities": {},
         "clientInfo": {"name": "octoweb-e2e", "version": "1.0.0"},
     })
@@ -328,6 +330,228 @@ TESTS = []
 def test(fn):
     TESTS.append(fn)
     return fn
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Protocol surface — the tool list, its annotations, and the negotiated
+# spec revision. Nothing pinned these, so a refactor that dropped a tool,
+# flipped a readOnlyHint back to the destructive default, or renamed a
+# response field shipped green.
+# ──────────────────────────────────────────────────────────────────────
+
+EXPECTED_TOOLS = {
+    "browser_navigate", "browser_go_back", "browser_go_forward", "browser_reload",
+    "browser_wait", "browser_get_tabs", "browser_get_current_tab", "browser_switch_tab",
+    "browser_close_tab", "browser_snapshot", "browser_get_page_info",
+    "browser_get_page_content", "browser_execute_js", "browser_click", "browser_type",
+    "browser_fill_form", "browser_dismiss_overlay", "browser_hover", "browser_scroll",
+    "browser_press_key", "browser_select_option", "browser_screenshot",
+    "browser_console_messages", "browser_network_requests", "browser_handle_dialog",
+    "browser_upload_file", "browser_get_history", "browser_get_playing_tabs", "render_ui",
+}
+
+# Tools a host must be able to auto-approve. If any of these loses
+# readOnlyHint, cautious clients start prompting on every page read and
+# unattended runs stall at step 2.
+READ_ONLY_TOOLS = {
+    "browser_snapshot", "browser_get_page_content", "browser_get_page_info",
+    "browser_get_tabs", "browser_get_current_tab", "browser_get_history",
+    "browser_get_playing_tabs", "browser_screenshot", "browser_console_messages",
+    "browser_network_requests", "browser_wait",
+}
+
+
+def _tools_by_name():
+    listing = rpc("tools/list", {})
+    return {t["name"]: t for t in listing.get("tools", [])}
+
+
+@test
+def tools_list_surface_is_pinned():
+    """Every documented tool is present and nothing extra crept in."""
+    tools = _tools_by_name()
+    missing = EXPECTED_TOOLS - set(tools)
+    extra = set(tools) - EXPECTED_TOOLS
+    expect(not missing, f"tools/list is missing: {sorted(missing)}")
+    expect(not extra, f"tools/list has undocumented tools: {sorted(extra)}")
+
+
+@test
+def read_tools_are_annotated_read_only():
+    """readOnlyHint is what lets a host stop prompting on every page read."""
+    tools = _tools_by_name()
+    for name in sorted(READ_ONLY_TOOLS):
+        ann = tools.get(name, {}).get("annotations") or {}
+        expect(ann.get("readOnlyHint") is True,
+               f"{name} must be annotated readOnlyHint=true, got {ann!r}")
+    # Acting tools must NOT claim to be read-only.
+    for name in ("browser_click", "browser_type", "browser_execute_js", "browser_close_tab"):
+        ann = tools.get(name, {}).get("annotations") or {}
+        expect(ann.get("readOnlyHint") is not True,
+               f"{name} must not be annotated read-only, got {ann!r}")
+
+
+@test
+def initialize_negotiates_a_spec_that_defines_annotations():
+    """2024-11-05 predates tool annotations — the server must offer newer."""
+    result = mcp_initialize()
+    version = result.get("protocolVersion", "")
+    expect(version >= "2025-03-26",
+           f"server negotiated {version!r}; annotations need 2025-03-26 or later")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Agent-safety and context-budget behaviour
+# ──────────────────────────────────────────────────────────────────────
+
+@test
+def navigate_refuses_javascript_and_data_urls():
+    """An agent takes URLs from pages it just read — these are code, not pages."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        for bad in ("javascript:window.__pwn=1",
+                    "data:text/html,<h1>pwn</h1>",
+                    "JavaScript:window.__pwn=1"):
+            is_err, _, text = call_tool("browser_navigate", {"tab_id": tab_id, "url": bad})
+            expect(is_err, f"browser_navigate accepted {bad!r}: {text[:200]!r}")
+        # The page was never touched.
+        val = tool_text("browser_execute_js",
+                        {"tab_id": tab_id, "script": "String(window.__pwn)"})
+        expect("undefined" in val, f"javascript: URL executed in the page: {val!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def navigate_reports_where_it_landed_and_how_settled():
+    """A redirect into a login wall must not look like a clean load."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        expect("url" in info, f"browser_navigate response has no url: {info!r}")
+        expect(info["url"].endswith("basic.html"),
+               f"navigate reported the wrong landing url: {info['url']!r}")
+        expect(info.get("readiness") in ("ready", "live", "partial")
+               or str(info.get("readiness", "")).startswith("probe-error"),
+               f"unexpected readiness verdict: {info.get('readiness')!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def page_content_pages_instead_of_dumping_everything():
+    """One call must not be able to eat the caller's whole context window."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        head = tool_text("browser_get_page_content", {"tab_id": tab_id, "limit": 20})
+        first_line = head.split("\n", 1)[0]
+        expect(first_line.startswith("[showing characters "),
+               f"truncated content must lead with a paging note: {head[:200]!r}")
+        expect("offset:" in first_line,
+               f"paging note must carry the resume offset: {first_line!r}")
+        expect(head.index("<untrusted>") > head.index(first_line),
+               "the paging note must sit outside the untrusted fence")
+        full = tool_text("browser_get_page_content", {"tab_id": tab_id, "limit": 0})
+        expect(len(full) >= len(head), "limit:0 should return at least as much")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def snapshot_find_and_limit_narrow_the_map():
+    """find/limit are how an agent avoids paying for the whole page."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        capped = tool_text("browser_snapshot", {"tab_id": tab_id, "limit": 1})
+        expect(capped.count("@") >= 1, f"limit:1 returned nothing usable: {capped[:200]!r}")
+        nomatch = tool_text("browser_snapshot",
+                            {"tab_id": tab_id, "find": "zzz-no-such-control-zzz"})
+        expect("no elements matching" in nomatch,
+               f"find with no matches should say so: {nomatch[:200]!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def page_derived_text_is_fenced_as_untrusted():
+    """The agent can click and type — it must know which bytes are the page's."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        for tool in ("browser_get_page_content", "browser_snapshot"):
+            text = tool_text(tool, {"tab_id": tab_id})
+            expect("<untrusted>" in text and "</untrusted>" in text,
+                   f"{tool} output is not fenced: {text[:200]!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def scroll_reports_the_resulting_position():
+    """Without this an agent paging a feed has no termination condition."""
+    info = navigate(fixture_url("basic.html"))
+    tab_id = info["tab_id"]
+    try:
+        text = tool_text("browser_scroll", {"tab_id": tab_id, "direction": "bottom"})
+        expect("scrollTop" in text, f"scroll must report position, got {text!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def unknown_workspace_token_is_refused_not_silently_defaulted():
+    """A bad token must never fall through to the user's real workspace."""
+    payload = {
+        "jsonrpc": "2.0", "id": 999999, "method": "tools/call",
+        "params": {"name": "browser_get_tabs", "arguments": {}},
+    }
+    req = urllib.request.Request(
+        MCP_URL, data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "X-Octoweb-Workspace": "deadbeef" * 4,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError:
+        return  # rejected at the transport — also correct
+    result = body.get("result", {})
+    text = "\n".join(c.get("text", "") for c in result.get("content", []))
+    expect(body.get("error") or result.get("isError"),
+           f"unknown workspace token was accepted: {text[:200]!r}")
+
+
+@test
+def cross_origin_pages_cannot_drive_the_browser():
+    """Any site the user visits could otherwise fetch() this endpoint."""
+    payload = {
+        "jsonrpc": "2.0", "id": 999998, "method": "tools/call",
+        "params": {"name": "browser_get_tabs", "arguments": {}},
+    }
+    req = urllib.request.Request(
+        MCP_URL, data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Origin": "https://evil.example",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        expect(exc.code in (400, 403),
+               f"expected the Origin to be rejected, got HTTP {exc.code}")
+        return
+    raise TestFailure(f"cross-origin request was served: {body[:200]!r}")
 
 
 @test

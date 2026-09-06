@@ -35,6 +35,19 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
+      - name: Check version consistency
+        run: |
+          TAG="${{ github.ref_name }}"
+          CARGO_VER=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          PLIST_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" assets/Info.plist)
+          # acp.rs reports CARGO_PKG_VERSION as the MCP serverInfo the agent sees,
+          # and the bundle takes its version from the tag — a mismatch ships an app
+          # whose own identity disagrees with its label.
+          if [ "$TAG" != "$CARGO_VER" ] || [ "$TAG" != "$PLIST_VER" ]; then
+            echo "::error::version mismatch — tag=$TAG Cargo.toml=$CARGO_VER Info.plist=$PLIST_VER"
+            exit 1
+          fi
+
       - name: Build release
         run: |
           cargo build --release --locked
@@ -55,11 +68,22 @@ jobs:
           cp "assets/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
           cp "assets/icon.icns" "$APP_BUNDLE/Contents/Resources/icon.icns"
 
+          # Octomind tap — the octoweb: agents and the octoweb capability.
+          # Without it macos::bundled_tap_dir() only warns and octoweb:assistant
+          # never resolves, so a released build has an AI sidebar with no tools.
+          # build.sh does this; this workflow did not, so every release shipped broken.
+          cp -R "tap" "$APP_BUNDLE/Contents/Resources/tap"
+
           # Update Info.plist with version
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ github.ref_name }}" "$APP_BUNDLE/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$APP_BUNDLE/Contents/Info.plist"
 
-          # Sign (if cert available)
+          # Sign (if cert available). The skip is deliberate but must be visible:
+          # an unsigned build hits Gatekeeper on every user's first launch, and
+          # this step used to pass silently green with the secret unset.
+          if [ -z "${{ secrets.CERTIFICATE_FOR_MACOS }}" ]; then
+            echo "::warning::CERTIFICATE_FOR_MACOS is not set — shipping an UNSIGNED, un-notarized bundle"
+          fi
           if [ -n "${{ secrets.CERTIFICATE_FOR_MACOS }}" ]; then
             echo "${{ secrets.CERTIFICATE_FOR_MACOS }}" | base64 --decode -o certificate.p12
             echo "${{ secrets.CERTIFICATE_PASSWORD }}" | \
@@ -74,6 +98,23 @@ jobs:
             codesign --force --sign "${{ env.SIGN_IDENTITY }}" \
               "$APP_BUNDLE"
           fi
+
+      - name: Verify app bundle
+        run: |
+          APP_BUNDLE="${{ runner.temp }}/${{ env.APP_NAME }}.app"
+          fail() { echo "::error::$1"; exit 1; }
+
+          [ -x "$APP_BUNDLE/Contents/MacOS/${{ env.BINARY_NAME }}" ] || fail "binary missing or not executable"
+          [ -f "$APP_BUNDLE/Contents/Resources/tap/capabilities/octoweb/octoweb.toml" ] \
+            || fail "Resources/tap is missing — the AI sidebar would ship with no browser tools"
+          [ -d "$APP_BUNDLE/Contents/Resources/tap/agents/octoweb" ] || fail "tap agents missing"
+
+          if [ -n "${{ secrets.CERTIFICATE_FOR_MACOS }}" ]; then
+            codesign --verify --deep --strict "$APP_BUNDLE" || fail "signature does not verify"
+            codesign -d --entitlements - "$APP_BUNDLE/Contents/MacOS/${{ env.BINARY_NAME }}" \
+              | grep -q . || fail "binary carries no entitlements"
+          fi
+          echo "bundle verified"
 
       - name: Create archive
         run: |

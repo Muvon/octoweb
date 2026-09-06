@@ -8,7 +8,7 @@
   {"trigger":{"url-filter":"adservice\\.google\\."},"action":{"type":"block"}},
   {"trigger":{"url-filter":"pagead2\\.googlesyndication\\.com"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"connect\\.facebook\\.net"},"action":{"type":"block"}},
-  {"trigger":{"url-filter":"facebook\\.com\\/tr\\b"},"action":{"type":"block"}},
+  {"trigger":{"url-filter":"facebook\\.com\\/tr[?\\/]"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"bat\\.bing\\.com"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"c\\.clarity\\.ms"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"amazon-adsystem\\.com"},"action":{"type":"block"}},

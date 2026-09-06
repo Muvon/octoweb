@@ -424,8 +424,13 @@ pub struct Config {
     /// are dropped from disk (FIFO) once a session exceeds this cap.
     #[serde(default = "default_max_acp_session_messages")]
     pub max_acp_session_messages: usize,
-    /// Enable proactive background learning from browsing history
-    #[serde(default = "default_true")]
+    /// Enable proactive background learning from browsing history.
+    ///
+    /// Off by default: it runs an agent that reads the user's open tabs, history
+    /// and page text every 30 minutes and writes durable inferences about them.
+    /// That is a reasonable thing to opt into and not a reasonable thing to have
+    /// happen without being asked. Turn it on in Settings (⌘,).
+    #[serde(default)]
     pub proactive_learning: bool,
     /// How often to run the learning agent, in minutes
     #[serde(default = "default_learning_interval")]
@@ -464,10 +469,6 @@ fn default_max_tabs() -> usize {
     500
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_learning_interval() -> u64 {
     30
 }
@@ -485,7 +486,7 @@ impl Default for Config {
             max_prompt_history: 50,
             max_ai_prompt_history: 50,
             max_acp_session_messages: 500,
-            proactive_learning: true,
+            proactive_learning: false,
             learning_interval_min: 30,
             aggressive_hibernation: false,
             max_tabs: 500,

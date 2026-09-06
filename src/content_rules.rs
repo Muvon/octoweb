@@ -110,7 +110,13 @@ fn compile(store: &WKContentRuleListStore, identifier: &NSString) {
                 } else {
                     unsafe { msg_send![error, localizedDescription] }
                 };
-                tracing::warn!(?desc, "content rules: compilation failed");
+                // A single malformed rule rejects the entire list, leaving the
+                // browser with no blocking at all — never let that pass quietly.
+                tracing::error!(
+                    ?desc,
+                    "content rules: compilation FAILED — ad/tracker blocking is DISABLED. \
+                     One bad rule rejects the whole list; fix assets/blocklist.json"
+                );
                 return;
             }
             tracing::debug!("content rules: compilation succeeded");

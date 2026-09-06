@@ -539,6 +539,13 @@ pub(crate) fn run_node(name: &str, source: &str, flags: &[&str]) -> Option<std::
     {
         Ok(out) => Some(out),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Skipping keeps `cargo test` usable on a machine without node, but
+            // a skip in CI is a gate that passes without checking anything.
+            assert!(
+                std::env::var_os("OCTOWEB_REQUIRE_NODE").is_none(),
+                "OCTOWEB_REQUIRE_NODE is set but node is not installed — \
+                 the JS syntax gate would pass vacuously"
+            );
             eprintln!("skipping {name}: node is not installed");
             None
         }

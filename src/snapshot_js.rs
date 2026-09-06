@@ -22,10 +22,20 @@
 //!   returns only elements that appeared/changed/left since the last snapshot —
 //!   on a busy SPA that's the difference between 8 lines and 200.
 
+/// Default cap on emitted element lines. A dense SPA yields several hundred;
+/// past this the map costs more context than the task it is supporting.
+pub const DEFAULT_LIMIT: usize = 200;
+
 /// Build the snapshot expression. `within` is an optional CSS selector or `@ref`
 /// to scope the scan; `diff` limits output to changes since the previous
-/// snapshot of the same tab.
-pub fn snapshot_script(within: Option<&str>, diff: bool) -> String {
+/// snapshot of the same tab; `find` keeps only lines containing that text; and
+/// `limit` caps how many lines are emitted (0 = uncapped).
+pub fn snapshot_script(
+    within: Option<&str>,
+    diff: bool,
+    find: Option<&str>,
+    limit: usize,
+) -> String {
     let root_expr = match within {
         Some(sel) if sel.starts_with('@') => {
             let s = serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into());
@@ -41,16 +51,24 @@ pub fn snapshot_script(within: Option<&str>, diff: bool) -> String {
         Some(sel) => serde_json::to_string(sel).unwrap_or_else(|_| "\"\"".into()),
         None => "null".into(),
     };
+    let find_expr = match find.filter(|f| !f.trim().is_empty()) {
+        Some(f) => serde_json::to_string(f).unwrap_or_else(|_| "null".into()),
+        None => "null".into(),
+    };
     SNAPSHOT_TEMPLATE
         .replace("__ROOT__", &root_expr)
         .replace("__WITHIN__", &within_desc)
         .replace("__DIFF__", if diff { "true" } else { "false" })
+        .replace("__FIND__", &find_expr)
+        .replace("__LIMIT__", &limit.to_string())
 }
 
 const SNAPSHOT_TEMPLATE: &str = r#"
 (function() {
   var DIFF = __DIFF__;
   var WITHIN = __WITHIN__;
+  var FIND = __FIND__;
+  var LIMIT = __LIMIT__;
   var root = __ROOT__;
   if (WITHIN !== null && !root) {
     return 'within: no element matched ' + WITHIN + ' — re-snapshot without `within`, or fix the selector.';
@@ -77,6 +95,8 @@ const SNAPSHOT_TEMPLATE: &str = r#"
   var cur = {};               // ref -> line
   var order = [];             // refs in document order
   var hiddenControls = 0;
+  var crossFrames = 0;        // iframes we could not see into (cross-origin)
+  var crossFrameUrls = [];
 
   function isVisible(el) {
     if (el.tagName === 'INPUT' && el.type === 'hidden') return true;
@@ -210,7 +230,13 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     }
     var iframes = node.querySelectorAll('iframe');
     for (var j = 0; j < iframes.length; j++) {
-      try { if (iframes[j].contentDocument) scan(iframes[j].contentDocument); } catch(e) {}
+      var cd = null;
+      try { cd = iframes[j].contentDocument; } catch(e) { cd = null; }
+      // Cross-origin: contentDocument is null or throws. Count it — silently
+      // skipping is how a payment form or consent dialog goes missing from the
+      // map with nothing telling the caller to look elsewhere.
+      if (cd) scan(cd);
+      else { crossFrames++; if (crossFrameUrls.length < 3) { try { crossFrameUrls.push(iframes[j].src || '(no src)'); } catch(e) {} } }
     }
     var tagged = window.__octoweb_listeners;
     var all = node.querySelectorAll('*');
@@ -255,10 +281,27 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     liveSeen++;
   }
 
-  Object.defineProperty(window, '__octoweb_refs', { value: refs, configurable: true });
+  var prev = window.__octoweb_snaplines || {};
+  var prevRefs = window.__octoweb_refs;
+
+  // A `within` scan sees only one container. Replacing the registries wholesale
+  // would stale every ref outside it and make the next diff report the rest of
+  // the page as brand new — so a scoped snapshot merges instead of overwriting.
+  var nextRefs = refs;
+  var nextLines = cur;
+  if (WITHIN !== null) {
+    if (prevRefs && prevRefs.forEach) {
+      nextRefs = new Map();
+      prevRefs.forEach(function (v, k) { nextRefs.set(k, v); });
+      refs.forEach(function (v, k) { nextRefs.set(k, v); });
+    }
+    nextLines = {};
+    for (var bk in prev) { if (Object.prototype.hasOwnProperty.call(prev, bk)) nextLines[bk] = prev[bk]; }
+    for (var ck in cur) { if (Object.prototype.hasOwnProperty.call(cur, ck)) nextLines[ck] = cur[ck]; }
+  }
+  Object.defineProperty(window, '__octoweb_refs', { value: nextRefs, configurable: true });
 
   // Diff against the previous snapshot of this tab, then store the new baseline.
-  var prev = window.__octoweb_snaplines || {};
   var outLines, removed = [];
   if (DIFF) {
     outLines = [];
@@ -266,30 +309,71 @@ const SNAPSHOT_TEMPLATE: &str = r#"
       var rref = order[oi];
       if (cur[rref] !== prev[rref]) outLines.push(cur[rref]);
     }
-    for (var pk in prev) { if (Object.prototype.hasOwnProperty.call(prev, pk) && !(pk in cur)) removed.push(pk); }
+    // Under `within` the unscanned rest of the page is absent from `cur` but
+    // was never removed — only a full scan can tell the difference.
+    if (WITHIN === null) {
+      for (var pk in prev) { if (Object.prototype.hasOwnProperty.call(prev, pk) && !(pk in cur)) removed.push(pk); }
+    }
   } else {
     outLines = order.map(function (r) { return cur[r]; });
   }
-  Object.defineProperty(window, '__octoweb_snaplines', { value: cur, configurable: true });
+  Object.defineProperty(window, '__octoweb_snaplines', { value: nextLines, configurable: true });
 
-  var se = document.scrollingElement || document.documentElement;
+  // Filter, then cap. Both are about the caller's context budget: a dense app
+  // yields hundreds of lines, and an agent that spends its window on the map
+  // has none left for the task.
+  var matched = outLines.length;
+  if (FIND) {
+    var needle = FIND.toLowerCase();
+    outLines = outLines.filter(function (l) { return l.toLowerCase().indexOf(needle) !== -1; });
+    matched = outLines.length;
+  }
+  var dropped = 0;
+  if (LIMIT > 0 && outLines.length > LIMIT) {
+    dropped = outLines.length - LIMIT;
+    outLines = outLines.slice(0, LIMIT);
+  }
+
+  // The document scroller is often not the one that scrolls: app shells put the
+  // real extent on an inner div, and reporting the window's 900px of 900px told
+  // an agent paging a feed that it had already reached the end.
+  function scroller() {
+    var se = document.scrollingElement || document.documentElement;
+    var best = se, bestExtra = se.scrollHeight - se.clientHeight, name = 'page';
+    var all = document.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var e = all[i];
+      var extra = e.scrollHeight - e.clientHeight;
+      if (extra <= bestExtra) continue;   // cheap test first — style lookup is not
+      var ov = getComputedStyle(e).overflowY;
+      if (ov !== 'auto' && ov !== 'scroll') continue;
+      best = e; bestExtra = extra;
+      name = e.tagName.toLowerCase()
+        + (e.id ? '#' + e.id : (e.classList && e.classList[0] ? '.' + e.classList[0] : ''));
+    }
+    return { el: best, name: name };
+  }
+  var sc = scroller();
+  var se = sc.el;
   var meta = 'page: ' + location.href.substring(0, 150)
     + (document.title ? ' | title: ' + clean(document.title, 80) : '')
     + (WITHIN !== null ? ' | within: ' + WITHIN : '')
-    + ' | viewport ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + window.innerHeight)
+    + ' | ' + sc.name + ' ' + Math.round(se.scrollTop) + '-' + Math.round(se.scrollTop + se.clientHeight)
     + ' of ' + Math.round(se.scrollHeight) + 'px';
 
   var header;
   if (DIFF) {
-    header = outLines.length === 0 && removed.length === 0
+    header = matched === 0 && removed.length === 0
       ? '(no changes since last snapshot)'
-      : outLines.length + ' new/changed' + (removed.length ? ', ' + removed.length + ' removed (' + removed.join(' ') + ')' : '') + ' — refs stable across snapshots:';
+      : matched + ' new/changed' + (removed.length ? ', ' + removed.length + ' removed (' + removed.join(' ') + ')' : '') + ' — refs stable across snapshots:';
   } else {
-    header = order.length === 0
-      ? '(no interactive elements found)'
-      : order.length + ' elements (refs stable until navigation):';
+    header = matched === 0
+      ? (FIND ? '(no elements matching find: ' + FIND + ')' : '(no interactive elements found)')
+      : matched + ' elements' + (FIND ? ' matching ' + FIND : '') + ' (refs stable until navigation):';
   }
+  if (dropped) header += ' — showing first ' + LIMIT + ', +' + dropped + ' more (narrow with find:"text" or within:"<selector>", or raise limit)';
   if (hiddenControls) header += ' +' + hiddenControls + ' present-but-hidden controls (auto-hiding UI: browser_hover a visible element or the page centre to reveal, then re-snapshot)';
+  if (crossFrames) header += ' +' + crossFrames + ' cross-origin frame(s) NOT scannable' + (crossFrameUrls.length ? ' (' + crossFrameUrls.join(' ') + ')' : '') + ' — browser_navigate to the frame URL to work inside it';
 
   var out = [meta];
   if (state.length) out.push(state.join('\n'));

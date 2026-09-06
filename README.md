@@ -49,7 +49,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **Configurable keybindings** — Remap any shortcut in Settings (`⌘,`). Changes apply on the next keystroke, no restart.
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
-- **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. Enabled by default, configurable interval — disable in Settings (`⌘,`).
+- **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. **Off by default** — it reads your tabs, history and page text, so you turn it on deliberately in Settings (`⌘,`).
 - **MCP server** — 29 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
 - **Find-in-page** (`⌘F`) — Full-text search with highlighting.
 - **Page zoom** — `+`/`-` to zoom, `⌘0` to reset.
@@ -121,7 +121,7 @@ Octoweb speaks [A2UI v1.0](https://a2ui.org/specification/v1.0-a2ui/) and render
 
 ### Proactive Learning
 
-Octoweb runs a background agent that periodically analyzes your browsing patterns and memorizes insights. This is enabled by default — turn it off in Settings (`⌘,`).
+Octoweb runs a background agent that periodically analyzes your browsing patterns and memorizes insights. It is **off by default** — it reads your open tabs, history and the active page's text, which is a thing to opt into rather than discover. Turn it on in Settings (`⌘,`).
 
 **How it works:**
 
@@ -133,7 +133,7 @@ Octoweb runs a background agent that periodically analyzes your browsing pattern
 **Configuration:**
 
 ```toml
-proactive_learning    = true    # enable background learning
+proactive_learning    = false   # enable background learning (default: off)
 learning_interval_min = 30     # minutes between runs (floored to 5 on load)
 ```
 
@@ -160,7 +160,7 @@ Claude Desktop / octomind / any MCP client
 
 | Tool | What it does |
 |------|--------------|
-| `browser_navigate` | Navigate to a URL — always in the background (new tab, or in-place via `tab_id`); never steals focus |
+| `browser_navigate` | Navigate to a URL — always in the background (new tab, or in-place via `tab_id`); never steals focus. Reports the URL it actually landed on and how settled the page is. `javascript:`/`data:`/`blob:`/`file:` are refused |
 | `browser_go_back` | Go back in history |
 | `browser_go_forward` | Go forward in history |
 | `browser_reload` | Reload current page |
@@ -169,16 +169,16 @@ Claude Desktop / octomind / any MCP client
 | `browser_get_current_tab` | Get the tab the user is viewing |
 | `browser_switch_tab` | Show a tab to the user (the only tool that changes focus) |
 | `browser_close_tab` | Close a tab by ID |
-| `browser_snapshot` | Map of interactive elements with `@N` refs — pierces iframes, shadow DOM, and listener-only clickables |
+| `browser_snapshot` | Map of interactive elements with `@N` refs — pierces iframes, shadow DOM, and listener-only clickables. `find` filters to matching controls, `limit` caps the map (default 200), and the header reports what was dropped and any cross-origin frames it could not see into |
 | `browser_get_page_info` | Get title, URL, meta description |
-| `browser_get_page_content` | Get page text content (innerText) |
+| `browser_get_page_content` | Get page text content (innerText) — first 20 000 characters by default, with the total and a resume `offset` |
 | `browser_execute_js` | Run JavaScript in the page (Promises are awaited) |
 | `browser_click` | Click an element — auto-retries until present, stable, and unobstructed; reports what covers it |
 | `browser_type` | Set an input/textarea/contenteditable value (React-safe) |
 | `browser_fill_form` | Fill several fields — and optionally submit — in one call |
 | `browser_dismiss_overlay` | Dismiss cookie/consent overlays — prefers Reject/Decline, never auto-accepts |
 | `browser_hover` | Hover with full pointer + mouse event sequence |
-| `browser_scroll` | Scroll the window, or an element's scrollable container via `selector` |
+| `browser_scroll` | Scroll the window, or an element's scrollable container via `selector` — returns the resulting position and whether it hit the bottom |
 | `browser_press_key` | Press a key; Enter on a form input submits like a real keypress |
 | `browser_select_option` | Select an option in a `<select>` by value or label |
 | `browser_screenshot` | Take a screenshot (`full_page: true` for entire page) |
@@ -192,7 +192,9 @@ Claude Desktop / octomind / any MCP client
 
 **Workspace routing:** one server serves every workspace. A request's `X-Octoweb-Workspace` token says which workspace it acts on; callers that send no token fall through to the first workspace. The sidebar's agent sessions carry their token automatically, so an agent driving tabs in a background workspace never disturbs the one you're looking at.
 
-Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch. Set `OCTOWEB_MCP_PORT` / `OCTOWEB_CONFIG_DIR` to run an isolated second instance (e.g. for the e2e suite: `python3 test_mcp.py --mcp-url http://127.0.0.1:3435/mcp`).
+Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
+
+**Safety.** The endpoint validates the `Origin` header, so a page you happen to be visiting cannot `fetch()` it and drive your logged-in browser; command-line clients, which send no `Origin`, are unaffected. Read tools carry `readOnlyHint` so a host can auto-approve them instead of prompting on every page read. Everything a page authored — `browser_get_page_content`, `browser_snapshot`, `browser_console_messages`, `browser_network_requests` — comes back inside an `<untrusted>` fence, because an agent that can click and type should know which bytes are the page's. Set `OCTOWEB_MCP_PORT` / `OCTOWEB_CONFIG_DIR` to run an isolated second instance (e.g. for the e2e suite: `python3 test_mcp.py --mcp-url http://127.0.0.1:3435/mcp`).
 
 ### Using octomind as the MCP client
 
@@ -219,6 +221,10 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘W` | Close tab / session |
 | `⌘T` | New AI session |
 | `⌘R` | Reload current page |
+| `⌘[` | Back |
+| `⌘]` | Forward |
+| `⌘N` | New tab |
+| `⌘.` | Stop loading |
 | `⌘E` | Edit address |
 | `⌘S` | Screenshot (viewport) — copy to clipboard |
 | `⌘⇧S` | Screenshot (full page) — copy to clipboard |
@@ -375,7 +381,7 @@ ai_edit_auto_hide        = false      # auto-hide inline edit after submit
 max_prompt_history       = 50         # editor prompt history size
 max_ai_prompt_history    = 50         # sidebar prompt history size
 max_acp_session_messages = 500        # chat messages retained per AI session (FIFO)
-proactive_learning       = true       # enable background learning agent
+proactive_learning       = false      # enable background learning agent (default: off)
 learning_interval_min    = 30         # minutes between learning runs (floored to 5 on load)
 aggressive_hibernation   = false      # aggressive tab-hibernation curve for tight-RAM machines
 max_tabs                 = 500        # max open tabs (0 = no limit)
