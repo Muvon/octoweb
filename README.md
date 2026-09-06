@@ -233,11 +233,16 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘,` | Settings |
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
+| `⌘⇧E` | AI edit selection |
 | `⌘⇧I` | Toggle DevTools |
 | `⌘↵` | Fullscreen window |
 | `⌘⇧↵` | Fullscreen AI sidebar |
 | `⌘⇧N` | Pin/unpin tab |
 | `⌘⇧O` | Toggle workspace switcher |
+| `⌘⇧M` | Move current tab to another workspace |
+| `⌘=` | Zoom in |
+| `⌘-` | Zoom out |
+| `⌘0` | Reset zoom |
 | `⌘1` – `⌘9` | Open fast-access slot 1–9 |
 | `⌘⇧1` – `⌘⇧9`, `⌘⇧0` | Save current page to slot 1–10 |
 | `⌃N` | Next tab (MRU order) |
@@ -257,6 +262,20 @@ Pin any page to a numbered slot and jump back to it instantly — one keystroke 
 Slots persist across restarts and are scoped per workspace — pinning in one workspace never touches another's. An empty slot does nothing.
 
 `⌘0` defaults to zoom reset and wins over slot 10 — rebind zoom reset in Settings if you want `⌘0` to open slot 10. `⌘⇧0` still saves to slot 10.
+
+### Workspaces (`⌘⇧O`)
+
+The switcher popover lists every workspace with its tab count; the one you are in is highlighted.
+
+| Shortcut | Action |
+|---|---|
+| `⌃N` / `⌃P` | Move selection down / up |
+| `↵` | Switch to the selected workspace |
+| `N` | New workspace |
+| `⌘1` – `⌘9`, `⌘0` | Switch to workspace 1–10 |
+| `Esc` | Close |
+
+`⌘⇧M` opens the same popover to pick a destination for the current tab. Selecting one moves the tab there and reloads it — workspaces have separate cookie and storage stores, so nothing of the live page carries across. If it was the workspace's last tab, a fresh one takes its place.
 
 ### Command palette (`⌘⇧P`)
 

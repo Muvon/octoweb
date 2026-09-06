@@ -144,8 +144,7 @@ pub fn init_env() {
 /// # The fix
 ///
 /// We install a no-op `interpretKeyEvents:` on the `TaoView` ObjC class. Tao's
-/// `keyDown:` still runs end-to-end (so `WindowEvent::KeyboardInput` is still
-/// queued — used for `Cmd+[` / `Cmd+]` history-nav), but the call to
+/// `keyDown:` still runs end-to-end, but the call to
 /// `[self interpretKeyEvents:array]` becomes a no-op. The macOS text-input
 /// system never gets invoked from tao, so the duplicate `insertText:` to the
 /// WKWebView never happens.
@@ -159,9 +158,9 @@ pub fn init_env() {
 /// - octoweb does not consume `WindowEvent::ReceivedImeText` anywhere — all
 ///   text input lives inside WKWebViews. Suppressing tao's IME path loses
 ///   nothing observable to the user.
-/// - Tao's `WindowEvent::KeyboardInput` (used for `Cmd+[` / `Cmd+]` shortcuts
-///   in the main event loop) is queued *after* the `interpretKeyEvents:` call
-///   in tao's `keyDown:`, so it remains intact.
+/// - Nothing reads tao's keyboard events: every shortcut is dispatched from the
+///   NSEvent local monitor in `main.rs` against the configurable keymap, so no
+///   binding depends on tao's keyboard path.
 ///
 /// Must be called once at startup, after the first tao window is built (which
 /// is when the `TaoView` ObjC class is registered). Idempotent.

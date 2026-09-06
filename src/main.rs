@@ -52,7 +52,6 @@ use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopBuilder},
-    keyboard::{KeyCode, ModifiersState},
     platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS},
     window::WindowBuilder,
 };
@@ -2472,7 +2471,6 @@ fn main() {
         monitor
     };
 
-    let mut modifiers = ModifiersState::default();
     let mut overlay_visible = false;
     let mut sidebar_visible = false;
     let mut sidebar_fullscreen = false; // sidebar takes the full chrome window width when true
@@ -8648,32 +8646,6 @@ fn main() {
                 // stay glued to the parent window's content area.
                 WindowEvent::Moved(pos) if window_id == browser_win_id => {
                     chrome_win.set_outer_position(*pos);
-                }
-
-                WindowEvent::ModifiersChanged(mods) => {
-                    modifiers = *mods;
-                }
-
-
-                WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                } => {
-                    use tao::event::ElementState;
-                    if key_event.state != ElementState::Pressed {
-                        return;
-                    }
-                    let cmd = modifiers.super_key();
-                    if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
-                        match key_event.physical_key {
-                            KeyCode::BracketLeft if cmd => {
-                                let _ = wv.evaluate_script("history.back()");
-                            }
-                            KeyCode::BracketRight if cmd => {
-                                let _ = wv.evaluate_script("history.forward()");
-                            }
-                            _ => {}
-                        }
-                    }
                 }
 
                 _ => {}
