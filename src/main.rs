@@ -276,8 +276,10 @@ fn keybind_to_event(
         }
         A::ScrollDown if !overlay && !inline && !sidebar => AppEvent::ScrollDown,
         A::ScrollUp if !overlay && !inline && !sidebar => AppEvent::ScrollUp,
-        A::ScrollTop if !overlay && !inline && !sidebar => AppEvent::ScrollTop,
-        A::ScrollBottom if !overlay && !inline && !sidebar => AppEvent::ScrollBottom,
+        // ⌃T / ⌃B follow focus like ⌘F: the assistant jumps its conversation,
+        // the page jumps the page.
+        A::ScrollTop if !overlay && !inline => AppEvent::ScrollTop,
+        A::ScrollBottom if !overlay && !inline => AppEvent::ScrollBottom,
         A::Reload if !overlay => AppEvent::Reload,
         A::Screenshot if !overlay => AppEvent::Screenshot,
         A::ScreenshotFull if !overlay => AppEvent::ScreenshotFullPage,
@@ -7769,12 +7771,18 @@ fn main() {
                 }
             }
             Event::UserEvent(AppEvent::ScrollTop) => {
-                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                if sidebar_visible && sidebar_owns_key.load(Ordering::Relaxed) {
+                    let _ = sidebar_wv
+                        .evaluate_script("window.__scrollMessages && window.__scrollMessages('top')");
+                } else if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollTo({top:0,behavior:'smooth'})");
                 }
             }
             Event::UserEvent(AppEvent::ScrollBottom) => {
-                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                if sidebar_visible && sidebar_owns_key.load(Ordering::Relaxed) {
+                    let _ = sidebar_wv
+                        .evaluate_script("window.__scrollMessages && window.__scrollMessages('bottom')");
+                } else if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})");
                 }
             }

@@ -5473,6 +5473,14 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
   }
 
+  // ⌃T / ⌃B from the native shell while the assistant has key.
+  window.__scrollMessages = function(where) {
+    const top = where === 'top';
+    beginProgrammaticMessagesScroll();
+    messagesHost.scrollTo({ top: top ? 0 : messagesHost.scrollHeight, behavior: 'smooth' });
+    if (active) active.atBottom = !top;
+  };
+
   // Scrolling to the top back-fills the next chunk of history.
   messagesHost.addEventListener('scroll', () => {
     if (!active) return;
