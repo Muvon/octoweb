@@ -59,6 +59,7 @@ pub enum Action {
     Fullscreen,
     TogglePin,
     ToggleWorkspaces,
+    MoveTab,
     Back,
     Forward,
     NewTab,
@@ -253,6 +254,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Workspaces",
         "Tabs & Navigation",
         "cmd+shift+o",
+    ),
+    (
+        Action::MoveTab,
+        "move_tab",
+        "Move tab to workspace",
+        "Tabs & Navigation",
+        "cmd+shift+m",
     ),
 ];
 

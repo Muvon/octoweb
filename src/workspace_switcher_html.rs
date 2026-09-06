@@ -52,6 +52,16 @@ pub fn html() -> String {
     padding: 4px 8px 6px;
   }
 
+  /* Move mode only: which tab is being moved. */
+  #subtitle {
+    font-size: 12px;
+    color: var(--label);
+    padding: 0 8px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .ws-row {
     display: flex;
     align-items: center;
@@ -213,16 +223,19 @@ pub fn html() -> String {
   .ws-create.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
   .ws-create-icon { display: inline-flex; width: 14px; height: 14px; }
   .ws-create-icon svg { width: 100%; height: 100%; }
+  .ws-create-label { flex: 1; min-width: 0; }
 </style>
 </head>
 <body>
 <div id="backdrop">
   <div id="panel" class="glass-panel">
     <div id="title">Workspaces</div>
+    <div id="subtitle" hidden></div>
     <div id="ws-list" role="listbox" aria-label="Workspaces">
       <div class="ws-create" id="ws-create-row" role="option" aria-selected="false" tabindex="-1" data-row-key="create">
         <span class="ws-create-icon">@@ICON_PLUS@@</span>
-        <span>Create workspace</span>
+        <span class="ws-create-label">New workspace</span>
+        <span class="ws-kbd">N</span>
       </div>
     </div>
   </div>
@@ -243,6 +256,10 @@ pub fn html() -> String {
   var lastData = [];
   var selectedKey = null;
   var pendingFocusKey = null;
+  // 'switch' (Cmd+Shift+O) or 'move' (Cmd+Shift+M — pick where the current tab
+  // goes). Rust sets it on every open; rename/delete re-renders keep it.
+  var viewMode = 'switch';
+  var movingTitle = '';
 
   function selectableRows() {
     return Array.prototype.slice.call(document.querySelectorAll('[data-row-key]'));
@@ -264,7 +281,9 @@ pub fn html() -> String {
   function activateRow(row) {
     if (!row) return;
     if (row.dataset.kind === 'workspace') {
-      ipc({ type: 'workspace_switch', id: row.dataset.workspaceId });
+      ipc(viewMode === 'move'
+        ? { type: 'workspace_move_tab', id: row.dataset.workspaceId }
+        : { type: 'workspace_switch', id: row.dataset.workspaceId });
     } else if (row.dataset.kind === 'live') {
       ipc({ type: 'workspace_jump_tab', tab_id: Number(row.dataset.tabId) });
     } else if (row.dataset.kind === 'create') {
@@ -289,6 +308,10 @@ pub fn html() -> String {
       if (e.target.closest('button')) return;
       e.preventDefault();
       activateRow(rows[current]);
+    } else if ((e.key === 'n' || e.key === 'N') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Bare N is the New-workspace shortcut; Ctrl+N above still moves down.
+      var create = rows.find(function(row) { return row.dataset.kind === 'create'; });
+      if (create) { e.preventDefault(); activateRow(create); }
     }
   });
 
@@ -365,6 +388,13 @@ pub fn html() -> String {
     check.className = ws.active ? 'ws-check' : 'ws-check-spacer';
     if (ws.active) check.innerHTML = '@@ICON_CHECK@@';
     row.appendChild(check);
+
+    // Editing a workspace is meaningless while picking a move destination.
+    if (viewMode === 'move') {
+      row.addEventListener('click', function() { setSelection(row, false); activateRow(row); });
+      row.addEventListener('focus', function() { setSelection(row, false); });
+      return row;
+    }
 
     var rename = document.createElement('button');
     rename.className = 'ws-icon-btn ws-rename';
@@ -454,8 +484,13 @@ pub fn html() -> String {
     icon.innerHTML = '@@ICON_PLUS@@';
     row.appendChild(icon);
     var label = document.createElement('span');
-    label.textContent = 'Create workspace';
+    label.className = 'ws-create-label';
+    label.textContent = 'New workspace';
     row.appendChild(label);
+    var kbd = document.createElement('span');
+    kbd.className = 'ws-kbd';
+    kbd.textContent = 'N';
+    row.appendChild(kbd);
     row.addEventListener('click', function() { setSelection(row, false); activateRow(row); });
     row.addEventListener('focus', function() { setSelection(row, false); });
     return row;
@@ -463,18 +498,28 @@ pub fn html() -> String {
 
   function render(data, requestedFocusKey) {
     lastData = data;
+    var moving = viewMode === 'move';
+    document.getElementById('title').textContent = moving ? 'Move tab to workspace' : 'Workspaces';
+    var subtitle = document.getElementById('subtitle');
+    subtitle.hidden = !moving;
+    subtitle.textContent = movingTitle;
     var list = document.getElementById('ws-list');
     list.innerHTML = '';
     var onlyOne = data.length <= 1;
     data.forEach(function(ws, idx) {
+      // The tab is already here — and the Cmd-digit badges stay tied to the
+      // real list index, so skipping a row must not renumber the rest.
+      if (moving && ws.active) return;
       list.appendChild(wsRow(ws, idx, onlyOne));
-      (ws.live || []).forEach(function(t) { list.appendChild(liveRow(t)); });
+      if (!moving) (ws.live || []).forEach(function(t) { list.appendChild(liveRow(t)); });
     });
-    var separator = document.createElement('div');
-    separator.className = 'ws-sep';
-    separator.setAttribute('role', 'presentation');
-    list.appendChild(separator);
-    list.appendChild(createRow());
+    if (!moving) {
+      var separator = document.createElement('div');
+      separator.className = 'ws-sep';
+      separator.setAttribute('role', 'presentation');
+      list.appendChild(separator);
+      list.appendChild(createRow());
+    }
 
     var focusKey = requestedFocusKey || pendingFocusKey;
     pendingFocusKey = null;
@@ -483,19 +528,31 @@ pub fn html() -> String {
     // The active workspace outranks `selectedKey`: that variable survives a
     // close, so without this the popover reopened on wherever the cursor
     // happened to be last instead of on the workspace you are actually in.
-    // An explicit focusKey (set by rename/create flows) still wins.
-    if (!target) {
+    // An explicit focusKey (set by rename/create flows) still wins. In move
+    // mode there is no active row and any carried-over selectedKey is stale,
+    // so the first destination wins instead.
+    if (!target && !moving) {
       var active = data.find(function(ws) { return ws.active; });
       if (active) target = rows.find(function(row) { return row.dataset.rowKey === 'workspace-' + active.id; });
+      if (!target && selectedKey) target = rows.find(function(row) { return row.dataset.rowKey === selectedKey; });
     }
-    if (!target && selectedKey) target = rows.find(function(row) { return row.dataset.rowKey === selectedKey; });
     target = target || rows[0];
     setSelection(target, Boolean(focusKey));
   }
 
+  // Called by Rust immediately before every fresh open. The popover window is
+  // only hidden, never torn down, so both the module cursor and the DOM focus
+  // survive a close and would otherwise reopen on a stale row.
+  window.__resetSelection = function() {
+    selectedKey = null;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  };
+
   // Rust pushes the current workspace list on open and after every edit.
-  window.__setWorkspaces = function(data) {
+  window.__setWorkspaces = function(data, mode, tabTitle) {
     if (!Array.isArray(data)) return;
+    viewMode = mode === 'move' ? 'move' : 'switch';
+    movingTitle = tabTitle || '';
     var activeRow = document.activeElement.closest && document.activeElement.closest('[data-row-key]');
     var focusKey = activeRow ? activeRow.dataset.rowKey : pendingFocusKey;
     render(data, focusKey);

@@ -146,6 +146,8 @@ enum AppEvent {
     CreateWorkspace,  // "+ New Workspace" row
     RenameWorkspace(String, String), // (workspace_id, name)
     DeleteWorkspace(String), // (workspace_id)
+    MoveTabPicker,    // ⌘⇧M — open the switcher in "move current tab" mode
+    MoveTabToWorkspace(String), // (workspace_id) — move the active tab there and reload it
     ToggleShortcuts,  // ⌘/ — toggle keyboard shortcuts overlay
     HideShortcuts,    // JS Esc / backdrop click in shortcuts overlay
     ToggleFindBar,    // ⌘F — toggle find-in-page bar
@@ -252,6 +254,7 @@ fn keybind_to_event(
         A::Settings => AppEvent::ToggleSettings,
         A::Shortcuts => AppEvent::ToggleShortcuts,
         A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
+        A::MoveTab if !overlay && !inline && !sidebar && !address_edit => AppEvent::MoveTabPicker,
         A::Quit => AppEvent::Quit,
         A::SidebarFullscreen if !overlay && !inline => AppEvent::ToggleSidebarFullscreen,
         A::Fullscreen if !overlay && !inline && !find => AppEvent::ToggleFullscreen,
@@ -1463,6 +1466,11 @@ fn main() {
                                 let _ = p.send_event(AppEvent::JumpToTab(tab_id as usize));
                             }
                         }
+                        Some("workspace_move_tab") => {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = p.send_event(AppEvent::MoveTabToWorkspace(id.to_string()));
+                            }
+                        }
                         Some("workspace_create") => {
                             let _ = p.send_event(AppEvent::CreateWorkspace);
                         }
@@ -2484,6 +2492,10 @@ fn main() {
     let mut settings_focus_target = PanelFocusTarget::ActiveTab;
     let mut shortcuts_focus_target = PanelFocusTarget::ActiveTab;
     let mut workspaces_focus_target = PanelFocusTarget::ActiveTab;
+    // The popover is showing move-a-tab destinations rather than a switch list.
+    // Only read while it is visible, and every open path sets it, so it can
+    // never be consulted stale.
+    let mut workspace_move_mode = false;
     let mut icon_set = false;
     let mut zoom_level: f64 = 1.0;
 
@@ -3022,8 +3034,16 @@ fn main() {
     }
 
     /// Push the current workspace list into the switcher popover.
+    /// `mode` is `"switch"` (⌘⇧O) or `"move"` (⌘⇧M — pick a destination for the
+    /// current tab); `tab_title` labels what is being moved and is ignored in
+    /// switch mode.
     macro_rules! refresh_workspace_switcher {
-        () => {{
+        () => {
+            refresh_workspace_switcher!("switch", "")
+        };
+        ($mode:expr, $tab_title:expr) => {{
+            let mode_json = serde_json::to_string($mode).unwrap_or_else(|_| "\"switch\"".into());
+            let title_json = serde_json::to_string($tab_title).unwrap_or_else(|_| "\"\"".into());
             let active_id = workspace_manager.active().id.clone();
             let list: Vec<serde_json::Value> = workspace_manager
                 .list()
@@ -3053,8 +3073,29 @@ fn main() {
                 .collect();
             let json = serde_json::to_string(&list).unwrap_or_default();
             let _ = workspace_switcher_wv.evaluate_script(&format!(
-                "window.__setWorkspaces && window.__setWorkspaces({json})"
+                "window.__setWorkspaces && window.__setWorkspaces({json}, {mode_json}, {title_json})"
             ));
+        }};
+    }
+
+    /// Position, fill, and show the workspace popover in the given mode.
+    macro_rules! open_workspace_popover {
+        ($mode:expr, $tab_title:expr) => {{
+            workspaces_focus_target = capture_panel_focus!();
+            let sz = browser_win.inner_size();
+            workspace_switcher_win.set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
+            if let Ok(pos) = browser_win.outer_position() {
+                workspace_switcher_win.set_outer_position(pos);
+            }
+            // The popover window is only hidden on close, so the previous
+            // cursor row keeps DOM focus and would win over the active
+            // workspace on the next open.
+            let _ = workspace_switcher_wv
+                .evaluate_script("window.__resetSelection && window.__resetSelection()");
+            refresh_workspace_switcher!($mode, $tab_title);
+            workspace_switcher_win.set_visible(true);
+            workspace_switcher_win.set_focus();
+            workspace_switcher_visible.store(true, Ordering::Relaxed);
         }};
     }
 
@@ -5659,18 +5700,35 @@ fn main() {
                     workspace_switcher_visible.store(false, Ordering::Relaxed);
                     restore_panel_focus!(workspaces_focus_target);
                 } else {
-                    workspaces_focus_target = capture_panel_focus!();
-                    let sz = browser_win.inner_size();
-                    workspace_switcher_win
-                        .set_inner_size(tao::dpi::PhysicalSize::new(sz.width, sz.height));
-                    if let Ok(pos) = browser_win.outer_position() {
-                        workspace_switcher_win.set_outer_position(pos);
-                    }
-                    refresh_workspace_switcher!();
-                    workspace_switcher_win.set_visible(true);
-                    workspace_switcher_win.set_focus();
-                    workspace_switcher_visible.store(true, Ordering::Relaxed);
+                    workspace_move_mode = false;
+                    open_workspace_popover!("switch", "");
                 }
+            }
+            // ── ⌘⇧M: same popover, but picking a destination for this tab ──
+            Event::UserEvent(AppEvent::MoveTabPicker) => {
+                if workspace_switcher_visible.load(Ordering::Relaxed) {
+                    workspace_switcher_win.set_visible(false);
+                    workspace_switcher_visible.store(false, Ordering::Relaxed);
+                    restore_panel_focus!(workspaces_focus_target);
+                    return;
+                }
+                if workspace_manager.list().len() < 2 {
+                    return; // nowhere to move it
+                }
+                let label = {
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
+                    tm.active_tab()
+                        .map(|t| {
+                            if t.title.is_empty() {
+                                t.url.clone()
+                            } else {
+                                t.title.clone()
+                            }
+                        })
+                        .unwrap_or_default()
+                };
+                workspace_move_mode = true;
+                open_workspace_popover!("move", &label);
             }
             Event::UserEvent(AppEvent::HideWorkspaces) => {
                 workspace_switcher_win.set_visible(false);
@@ -5679,10 +5737,15 @@ fn main() {
             }
             Event::UserEvent(AppEvent::SwitchWorkspaceByIndex(idx)) => {
                 // Resolve here, then re-enter the normal switch path — the key
-                // monitor has no view of the workspace list.
+                // monitor has no view of the workspace list, nor of which mode
+                // the popover is in.
                 if let Some(ws) = workspace_manager.list().get(idx) {
                     let id = ws.id.clone();
-                    let _ = proxy.send_event(AppEvent::SwitchWorkspace(id));
+                    let _ = proxy.send_event(if workspace_move_mode {
+                        AppEvent::MoveTabToWorkspace(id)
+                    } else {
+                        AppEvent::SwitchWorkspace(id)
+                    });
                 }
             }
             Event::UserEvent(AppEvent::JumpToTab(tab_id)) => {
@@ -5909,6 +5972,111 @@ fn main() {
                     save_quickslots!();
                     refresh_workspace_switcher!();
                 }
+            }
+
+            // ── ⌘⇧M destination chosen: detach the tab here, re-open it there ──
+            Event::UserEvent(AppEvent::MoveTabToWorkspace(ws_id)) => {
+                workspace_switcher_win.set_visible(false);
+                workspace_switcher_visible.store(false, Ordering::Relaxed);
+                workspace_move_mode = false;
+                let Some(target_i) = workspace_manager.index_of(&ws_id) else {
+                    return; // workspace deleted since the popover was rendered
+                };
+                if target_i == workspace_manager.active_index() {
+                    restore_panel_focus!(workspaces_focus_target);
+                    return;
+                }
+                let moved = {
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
+                    tm.active_tab()
+                        .map(|t| (t.id, t.url.clone(), t.title.clone()))
+                };
+                let Some((tab_id, url, title)) = moved else {
+                    return;
+                };
+                if progress_visible {
+                    let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
+                    let _ = progress_wv.set_visible(false);
+                    progress_visible = false;
+                    progress_hide_at = None;
+                }
+                // A swap in flight only ever involves tabs of the active
+                // workspace, and the tab being moved is the visible one, so
+                // either half of the pair makes the swap meaningless.
+                if pending_swap.is_some_and(|(old, new)| old == tab_id || new == tab_id) {
+                    pending_swap = None;
+                    pending_swap_at = None;
+                }
+                // Detach — the same teardown as CloseTab, minus its
+                // quit-when-the-last-tab-goes rule.
+                workspace_manager.active().tabs.lock().unwrap().close(tab_id);
+                tab_nav::forget(tab_id);
+                if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
+                    let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+                    nav_error_patch::unregister(wv_ptr);
+                    nav_error_patch::unregister_termination(wv_ptr);
+                    dialog_patch::unregister(wv_ptr);
+                }
+                workspace_manager.active_mut().webviews.remove(&tab_id);
+                media_playing_tabs.remove(&tab_id);
+                pending_tabs.remove(&tab_id);
+                tab_snapshots.remove(&tab_id);
+                deferred_nav.remove(&tab_id);
+                restoring_tabs.remove(&tab_id);
+                webcontent_crashes.remove(&tab_id);
+                if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
+                    let _ = response.send(Err("Tab moved to another workspace".into()));
+                }
+                workspace_manager.active_mut().mru.retain(|&x| x != tab_id);
+
+                // Re-attach. Workspaces have separate WKWebsiteDataStores, so
+                // no cookies, storage, or back/forward history can come along —
+                // the tab is registered as pending and loads from scratch the
+                // first time its new workspace is shown.
+                let new_tab_id = workspace_manager
+                    .at(target_i)
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .open_with_title(url.clone(), title);
+                pending_tabs.insert(new_tab_id, url);
+                macos::mru_push(&mut workspace_manager.at_mut(target_i).mru, new_tab_id);
+
+                // Show a successor here, or seed a fresh tab when that was the
+                // last one — a workspace with no tabs has no way back.
+                match workspace_manager.active().mru.first().copied() {
+                    Some(next) => {
+                        workspace_manager.active().tabs.lock().unwrap().switch(next);
+                        switch_visible_tab!(next);
+                    }
+                    None => {
+                        let home = cfg.home_page.clone();
+                        let seeded =
+                            workspace_manager.active().tabs.lock().unwrap().open(home.clone());
+                        spawn_tab_webview!(seeded, &home);
+                        commit_tab_visibility!(seeded);
+                        macos::mru_push(&mut workspace_manager.active_mut().mru, seeded);
+                        update_address_bar_url!(home);
+                    }
+                }
+                focus_active_webview!();
+                history_save_at.get_or_insert(
+                    std::time::Instant::now() + std::time::Duration::from_secs(60),
+                );
+                refresh_overlay!();
+                // The tab vanishing from view is the only other feedback, and it
+                // looks exactly like a close.
+                let msg = format!("Moved to {}", workspace_manager.at(target_i).name);
+                let escaped = webview_utils::escape_js_template(&msg);
+                let icon = "\u{1F4E6}";
+                notif_origin = None;
+                if !notification_visible {
+                    let _ = notification_wv.set_visible(true);
+                    notification_visible = true;
+                }
+                let _ = notification_wv.evaluate_script(&format!(
+                    "window.__show && window.__show(`{escaped}`, `{icon}`, `Tab moved`, 3000)"
+                ));
             }
 
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
