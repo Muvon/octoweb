@@ -397,7 +397,10 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
     // text the caller typed destroyed work, and every other signal for it is an
     // anonymous node count that reads like a successful render.
     if let Some(lost) = obj.get("lost").and_then(|l| l.as_object()) {
-        let sel = lost.get("sel").and_then(|x| x.as_str()).unwrap_or("the field");
+        let sel = lost
+            .get("sel")
+            .and_then(|x| x.as_str())
+            .unwrap_or("the field");
         let len = lost.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
         let head = lost.get("head").and_then(|x| x.as_str()).unwrap_or("");
         parts.push(format!(

@@ -65,6 +65,12 @@ pub fn html() -> String {
   .ws-row:hover { background: var(--fill-hover); }
   .ws-row:active { background: var(--fill-press); }
   .ws-row.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  /* The row you are ON (.selected, the keyboard cursor) and the workspace you
+     are IN (.current) are different things and both need to be visible at once:
+     a checkmark alone was too quiet to find while moving the cursor around. */
+  .ws-row.current { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .ws-row.current .ws-name { font-weight: 600; color: var(--accent); }
+  .ws-row.current.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 
   .ws-dot {
     width: 10px; height: 10px;
@@ -273,9 +279,11 @@ pub fn html() -> String {
     if (!rows.length) return;
     var current = rows.indexOf(document.activeElement.closest && document.activeElement.closest('[data-row-key]'));
     if (current < 0) current = Math.max(0, rows.findIndex(function(row) { return row.dataset.rowKey === selectedKey; }));
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    var down = e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'n' || e.key === 'N'));
+    var up = e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'p' || e.key === 'P'));
+    if (down || up) {
       e.preventDefault();
-      var delta = e.key === 'ArrowDown' ? 1 : -1;
+      var delta = down ? 1 : -1;
       setSelection(rows[(current + delta + rows.length) % rows.length], true);
     } else if (e.key === 'Enter') {
       if (e.target.closest('button')) return;
@@ -350,6 +358,8 @@ pub fn html() -> String {
       kbd.className = 'ws-kbd-spacer';
     }
     row.appendChild(kbd);
+
+    if (ws.active) row.classList.add('current');
 
     var check = document.createElement('span');
     check.className = ws.active ? 'ws-check' : 'ws-check-spacer';
@@ -470,11 +480,15 @@ pub fn html() -> String {
     pendingFocusKey = null;
     var rows = selectableRows();
     var target = focusKey && rows.find(function(row) { return row.dataset.rowKey === focusKey; });
-    if (!target && selectedKey) target = rows.find(function(row) { return row.dataset.rowKey === selectedKey; });
+    // The active workspace outranks `selectedKey`: that variable survives a
+    // close, so without this the popover reopened on wherever the cursor
+    // happened to be last instead of on the workspace you are actually in.
+    // An explicit focusKey (set by rename/create flows) still wins.
     if (!target) {
       var active = data.find(function(ws) { return ws.active; });
       if (active) target = rows.find(function(row) { return row.dataset.rowKey === 'workspace-' + active.id; });
     }
+    if (!target && selectedKey) target = rows.find(function(row) { return row.dataset.rowKey === selectedKey; });
     target = target || rows[0];
     setSelection(target, Boolean(focusKey));
   }

@@ -242,6 +242,7 @@ fn keybind_to_event(
     inline: bool,
     sidebar: bool,
     address_edit: bool,
+    workspaces: bool,
 ) -> Option<AppEvent> {
     use keybindings::Action as A;
     Some(match action {
@@ -264,14 +265,14 @@ fn keybind_to_event(
                 AppEvent::CloseTab(0)
             }
         }
-        A::PrevTab if !overlay && !inline && !sidebar && !address_edit => {
+        A::PrevTab if !overlay && !inline && !sidebar && !address_edit && !workspaces => {
             if find {
                 AppEvent::FindPrev
             } else {
                 AppEvent::PrevTab
             }
         }
-        A::NextTab if !overlay && !inline && !sidebar && !address_edit => {
+        A::NextTab if !overlay && !inline && !sidebar && !address_edit && !workspaces => {
             if find {
                 AppEvent::FindNext
             } else {
@@ -2416,6 +2417,7 @@ fn main() {
                     inline_edit_state.load(Ordering::Relaxed),
                     sidebar_state.load(Ordering::Relaxed),
                     address_edit_state.load(Ordering::Relaxed),
+                    workspaces_state.load(Ordering::Relaxed),
                 ) {
                     let _ = p.send_event(ev);
                     return consume;
@@ -10124,8 +10126,14 @@ mod chrome_js_syntax_tests {
             ("dismiss_overlay", d::dismiss_overlay_script()),
             ("effect_plain", d::effect_script(None)),
             ("effect_expect", d::effect_script(Some("text:Saved"))),
-            ("type_plain", d::type_script("@3", "hello world", None, false)),
-            ("type_long", d::type_script("#c", &"x".repeat(120), Some("text:Posted"), false)),
+            (
+                "type_plain",
+                d::type_script("@3", "hello world", None, false),
+            ),
+            (
+                "type_long",
+                d::type_script("#c", &"x".repeat(120), Some("text:Posted"), false),
+            ),
             ("type_keys_only", d::type_script("@4", "abc", None, true)),
             ("select_option", d::select_option_script("@5", "v", None)),
             ("scroll", d::scroll_script("@6", "down", Some(200))),
