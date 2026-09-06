@@ -461,7 +461,15 @@ pub fn html() -> String {
     }
     if (key === 'e') {
       e.preventDefault();
-      setCursor(queryEl.value.length);
+      // Fill the input with the highlighted item's URL so it can be edited;
+      // if it's already there (or nothing fillable), act as end-of-line.
+      const hit = filtered[sel];
+      const url = hit && (hit.kind === 'tab' || hit.kind === 'history') ? hit.url : '';
+      if (url && url !== queryEl.value) {
+        updateQuery(url, url.length);
+      } else {
+        setCursor(queryEl.value.length);
+      }
       return true;
     }
     if (key === 'k') {
