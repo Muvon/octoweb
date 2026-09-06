@@ -18,6 +18,7 @@ mod hibernation;
 mod icons;
 mod inline_edit_html;
 mod keybindings;
+mod link_hints_js;
 mod macos;
 mod mcp;
 mod native_input;
@@ -117,8 +118,10 @@ enum AppEvent {
     Back,                                       // ⌘[ — history back in the focused tab
     Forward,                                    // ⌘] — history forward in the focused tab
     NewTab,                                     // ⌘N — open the home page in a new foreground tab
-    StopLoad,                                   // ⌘. — stop the current load
-    MediaPlaying(usize, bool),                  // (tab_id, is_playing) — audio/video state changed
+    ReopenTab,                 // ⌘⇧T — reopen the last tab closed in this workspace
+    FollowLink,                // ⌘⇧F — toggle the keyboard link-hint overlay
+    StopLoad,                  // ⌘. — stop the current load
+    MediaPlaying(usize, bool), // (tab_id, is_playing) — audio/video state changed
     PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
     RemoveHistory(String),     // URL to remove from history
     QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
@@ -281,10 +284,10 @@ fn keybind_to_event(
                 AppEvent::NextTab
             }
         }
-        A::ScrollDown if !overlay && !inline && !sidebar => AppEvent::ScrollDown,
-        A::ScrollUp if !overlay && !inline && !sidebar => AppEvent::ScrollUp,
-        // ⌃T / ⌃B follow focus like ⌘F: the assistant jumps its conversation,
-        // the page jumps the page.
+        // All four scroll keys follow focus like ⌘F: the assistant scrolls its
+        // conversation, the page scrolls the page.
+        A::ScrollDown if !overlay && !inline => AppEvent::ScrollDown,
+        A::ScrollUp if !overlay && !inline => AppEvent::ScrollUp,
         A::ScrollTop if !overlay && !inline => AppEvent::ScrollTop,
         A::ScrollBottom if !overlay && !inline => AppEvent::ScrollBottom,
         A::Reload if !overlay => AppEvent::Reload,
@@ -293,6 +296,8 @@ fn keybind_to_event(
         A::Back if !overlay && !inline && !sidebar && !address_edit => AppEvent::Back,
         A::Forward if !overlay && !inline && !sidebar && !address_edit => AppEvent::Forward,
         A::NewTab if !overlay && !inline => AppEvent::NewTab,
+        A::ReopenTab if !overlay && !inline => AppEvent::ReopenTab,
+        A::FollowLink if !overlay && !inline && !sidebar && !address_edit => AppEvent::FollowLink,
         A::StopLoad if !overlay && !inline => AppEvent::StopLoad,
         A::Screenshot if !overlay => AppEvent::Screenshot,
         A::ScreenshotFull if !overlay => AppEvent::ScreenshotFullPage,
@@ -410,6 +415,9 @@ pub const MAX_SESSIONS: usize = 10;
 /// Name the bundled tap registers under. `octomind tap` addresses taps as
 /// `user/repo`, and capability references reach this one as `muvon/<name>`.
 const OCTOMIND_TAP_NAME: &str = "muvon/octoweb";
+
+/// How many closed tabs per workspace ⌘⇧T can walk back through.
+const CLOSED_TAB_HISTORY: usize = 16;
 
 const WORKSPACE_PALETTE: &[&str] = &[
     "#06B6D4", "#F97316", "#EC4899", "#22C55E", "#EAB308", "#3B82F6", "#EF4444", "#6366F1",
@@ -6473,6 +6481,23 @@ fn main() {
                             pending_swap = Some((old_id, new_id));
                         }
                     }
+                    // Remember it for ⌘⇧T. Blank and new-tab pages are skipped:
+                    // reopening one restores nothing the user lost.
+                    let closed_url = {
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        tm.tabs()
+                            .iter()
+                            .find(|t| t.id == id)
+                            .map(|t| t.url.clone())
+                            .filter(|u| !u.is_empty() && u != "about:blank")
+                    };
+                    if let Some(url) = closed_url {
+                        let stack = &mut workspace_manager.active_mut().closed_tabs;
+                        stack.push(url);
+                        if stack.len() > CLOSED_TAB_HISTORY {
+                            stack.remove(0);
+                        }
+                    }
                     workspace_manager.active().tabs.lock().unwrap().close(id);
                     tab_nav::forget(id);
                     if let Some(wv) = workspace_manager.active().webviews.get(&id) {
@@ -8112,12 +8137,18 @@ fn main() {
 
             // ── Page scroll (⌃D / ⌃U / ⌃T / ⌃B) ─────────────────────────────
             Event::UserEvent(AppEvent::ScrollDown) => {
-                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                if sidebar_visible && sidebar_owns_key.load(Ordering::Relaxed) {
+                    let _ = sidebar_wv
+                        .evaluate_script("window.__scrollMessages && window.__scrollMessages('down')");
+                } else if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollBy({top:window.innerHeight,behavior:'smooth'})");
                 }
             }
             Event::UserEvent(AppEvent::ScrollUp) => {
-                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                if sidebar_visible && sidebar_owns_key.load(Ordering::Relaxed) {
+                    let _ = sidebar_wv
+                        .evaluate_script("window.__scrollMessages && window.__scrollMessages('up')");
+                } else if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     let _ = wv.evaluate_script("window.scrollBy({top:-window.innerHeight,behavior:'smooth'})");
                 }
             }
@@ -8385,6 +8416,27 @@ fn main() {
             // ── New tab (⌘N) ───────────────────────────────────────────────
             Event::UserEvent(AppEvent::NewTab) => {
                 let _ = proxy.send_event(AppEvent::NavigateTo(cfg.home_page.clone()));
+            }
+
+            // ── Reopen closed tab (⌘⇧T) ────────────────────────────────────
+            Event::UserEvent(AppEvent::ReopenTab) => {
+                // `None` source = a UI surface asked, so it opens foregrounded
+                // through the same path as any other chrome-initiated open.
+                if let Some(url) = workspace_manager.active_mut().closed_tabs.pop() {
+                    let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                }
+            }
+
+            // ── Link hints (⌘⇧F) ───────────────────────────────────────────
+            Event::UserEvent(AppEvent::FollowLink) => {
+                // The overlay reads its own keystrokes, so the page must be
+                // first responder — the chord is guarded off while any chrome
+                // surface owns key, but a click on chrome can leave the window
+                // focused with the WebView not responding.
+                focus_active_webview!();
+                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
+                    let _ = wv.evaluate_script(link_hints_js::SCRIPT);
+                }
             }
 
             // ── Stop loading (⌘.) ──────────────────────────────────────────
@@ -10232,6 +10284,7 @@ mod chrome_js_syntax_tests {
         // capture, network capture, snapshots or navigate's readiness probe —
         // and the failure surfaces as a confusing MCP error, not a build break.
         assert_parses("combined_script", crate::webview_utils::COMBINED_SCRIPT);
+        assert_parses("link_hints", crate::link_hints_js::SCRIPT);
         assert_parses(
             "readiness",
             &format!("void ({});", crate::readiness_js::READINESS_JS),

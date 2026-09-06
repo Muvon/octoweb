@@ -224,11 +224,13 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘[` | Back |
 | `⌘]` | Forward |
 | `⌘N` | New tab |
+| `⌘⇧T` | Reopen last closed tab |
 | `⌘.` | Stop loading |
 | `⌘E` | Edit address |
 | `⌘S` | Screenshot (viewport) — copy to clipboard |
 | `⌘⇧S` | Screenshot (full page) — copy to clipboard |
 | `⌘F` | Toggle find-in-page bar |
+| `⌘⇧F` | Follow a link on the page by keyboard |
 | `⌘/` | Show keyboard shortcuts |
 | `⌘,` | Settings |
 | `⌘Q` | Quit |
@@ -277,6 +279,19 @@ The switcher popover lists every workspace with its tab count; the one you are i
 
 `⌘⇧M` opens the same popover to pick a destination for the current tab. Selecting one moves the tab there and reloads it — workspaces have separate cookie and storage stores, so nothing of the live page carries across. If it was the workspace's last tab, a fresh one takes its place.
 
+### Follow link (`⌘⇧F`)
+
+Reaching content *inside* a page without a mouse. Press `⌘⇧F` and every clickable thing in the viewport — links, buttons, form fields, ARIA controls — gets a short home-row label. Type the label to activate it.
+
+| Shortcut | Action |
+|---|---|
+| `a`–`l` | Type the label to activate that element |
+| `⇧` + last letter | Open that link in a new tab and switch to it |
+| `Backspace` | Undo the last letter |
+| `Esc` / `⌘⇧F` | Dismiss |
+
+Labels are one character for up to 9 targets and two beyond that. Only what is on screen is labelled — scroll and press again. Elements hidden behind a modal or cookie banner are skipped, since a click would not reach them either. Same-origin iframes are included; cross-origin ones cannot be reached.
+
 ### Command palette (`⌘⇧P`)
 
 The main interface. Type a URL, a search query, or any fragment of a page title or URL you've visited — it fuzzy-matches across open tabs and history instantly, ranked by match quality and visit frequency.
@@ -307,6 +322,9 @@ The sidebar overlays the page on the right — the page content underneath is no
 |----------|--------|
 | `↵` | Send prompt |
 | `⇧↵` | Insert newline |
+| `Esc` | Stop the running turn |
+| `⌃D` / `⌃U` | Scroll the conversation down / up |
+| `⌃T` / `⌃B` | Jump to start / end of the conversation |
 | `↵` *(agent input)* | Apply agent tag |
 | `Esc` *(agent input)* | Show agent chip |
 

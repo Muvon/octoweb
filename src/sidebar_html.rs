@@ -5473,8 +5473,16 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
   }
 
-  // ⌃T / ⌃B from the native shell while the assistant has key.
+  // ⌃D / ⌃U / ⌃T / ⌃B from the native shell while the assistant has key.
   window.__scrollMessages = function(where) {
+    // Ctrl+D / Ctrl+U are the user scrolling by hand, so they deliberately skip
+    // beginProgrammaticMessagesScroll(): the scroll listener below must see
+    // them and update atBottom / back-fill history exactly as a wheel would.
+    if (where === 'down' || where === 'up') {
+      const delta = (where === 'down' ? 1 : -1) * messagesHost.clientHeight;
+      messagesHost.scrollBy({ top: delta, behavior: 'smooth' });
+      return;
+    }
     const top = where === 'top';
     beginProgrammaticMessagesScroll();
     messagesHost.scrollTo({ top: top ? 0 : messagesHost.scrollHeight, behavior: 'smooth' });
@@ -6084,8 +6092,17 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     return true;
   }
   document.addEventListener('keydown', e => {
-    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+    if (e.key !== 'Tab' && e.key !== 'Escape') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
     if (e.target && e.target.closest && e.target.closest('.a2ui-body, #session-create-panel, .session-rename')) return;
+    // Esc stops a turn in flight. Every nested Esc handler (slash-command
+    // dropdown, tag suggestions, chat search, A2UI modal, rename) runs first
+    // and calls preventDefault, so this only fires when nothing else claimed
+    // the key. stop-mode on the send button IS "a turn is running".
+    if (e.key === 'Escape') {
+      if (sendBtn.classList.contains('stop-mode')) { e.preventDefault(); stop(); }
+      return;
+    }
     if (cycleSession(e.shiftKey)) e.preventDefault();
   });
   input.addEventListener('keydown', e => {

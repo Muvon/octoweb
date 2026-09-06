@@ -52,6 +52,12 @@ pub struct Workspace {
     /// Pinned quick-slots (⌘1–⌘0) for this workspace. Seeded by main.rs at
     /// startup from `quickslots::load_all()`.
     pub quick_slots: QuickSlots,
+    /// URLs of tabs closed in this workspace, most recent last, popped by ⌘⇧T.
+    /// Per-workspace for the same reason `mru` is: reopening must not
+    /// resurrect a tab into a workspace it never belonged to. Deliberately
+    /// not persisted — session restore already brings back the tabs that were
+    /// open at quit.
+    pub closed_tabs: Vec<String>,
     /// This workspace's MCP token. Agents spawned here send it in
     /// `mcp::WORKSPACE_HEADER`, so their tool calls act on this workspace's
     /// tabs no matter which workspace is on screen.
@@ -77,6 +83,7 @@ impl Workspace {
             acp_active_session_id: 0,
             mru: Vec::new(),
             quick_slots: Default::default(),
+            closed_tabs: Vec::new(),
             mcp_token: None,
         }
     }

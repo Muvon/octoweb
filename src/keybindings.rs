@@ -60,6 +60,8 @@ pub enum Action {
     TogglePin,
     ToggleWorkspaces,
     MoveTab,
+    FollowLink,
+    ReopenTab,
     Back,
     Forward,
     NewTab,
@@ -261,6 +263,20 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Move tab to workspace",
         "Tabs & Navigation",
         "cmd+shift+m",
+    ),
+    (
+        Action::ReopenTab,
+        "reopen_tab",
+        "Reopen closed tab",
+        "Tabs & Navigation",
+        "cmd+shift+t",
+    ),
+    (
+        Action::FollowLink,
+        "follow_link",
+        "Follow link on page",
+        "Tools",
+        "cmd+shift+f",
     ),
 ];
 
