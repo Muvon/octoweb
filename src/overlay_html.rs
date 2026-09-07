@@ -340,6 +340,7 @@ pub fn html() -> String {
     const q = userQuery.trim().toLowerCase();
     if (!q) {
       // Empty query: same sort logic as render()
+      const later = items.filter(i => i.kind === 'later').sort((a, b) => (b.visited_at || 0) - (a.visited_at || 0));
       const candidates = items.filter(i => i.kind === 'tab' || i.kind === 'history');
       candidates.sort((a, b) => {
         const recencyA = a.kind === 'tab' ? Date.now() / 1000 : (a.visited_at || 0);
@@ -350,7 +351,7 @@ pub fn html() -> String {
         if (Math.abs(ageDiffSecs) > 86400) return ageDiffSecs > 0 ? 1 : -1;
         return freqB - freqA;
       });
-      filtered = candidates.slice(0, 12);
+      filtered = [...later.slice(0, 4), ...candidates].slice(0, 12);
     } else {
       // Non-empty query: re-run fuzzy search, keep action items
       const list = fuzzyRrf(q, items);
@@ -439,6 +440,8 @@ pub fn html() -> String {
           window.ipc.postMessage(JSON.stringify({ type: 'close_tab', tab_id: item.tab_id }));
         } else if (item.kind === 'history') {
           window.ipc.postMessage(JSON.stringify({ type: 'remove_history', url: item.url }));
+        } else if (item.kind === 'later') {
+          window.ipc.postMessage(JSON.stringify({ type: 'remove_later', url: item.url }));
         }
       }
       return true;
@@ -550,7 +553,8 @@ pub fn html() -> String {
       return;
     }
 
-    navigate(item.url, isolated);
+    // Opening a Later item consumes it.
+    navigate(item.url, isolated, item.kind === 'later');
   }
 
   function forceNavigate() {
@@ -569,8 +573,8 @@ pub fn html() -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'ask_ai', text: q }));
   }
 
-  function navigate(url, isolated) {
-    window.ipc.postMessage(JSON.stringify({ type: 'navigate', url, isolated: !!isolated }));
+  function navigate(url, isolated, fromLater) {
+    window.ipc.postMessage(JSON.stringify({ type: 'navigate', url, isolated: !!isolated, later: !!fromLater }));
   }
 
   function searchUrl(q) {
@@ -637,6 +641,7 @@ pub fn html() -> String {
     if (!raw) {
       // Empty query: show tabs + recent history combined, sorted by recency then frequency.
       // Tabs get a small boost since they're already open and immediately actionable.
+      const later = items.filter(i => i.kind === 'later').sort((a, b) => (b.visited_at || 0) - (a.visited_at || 0));
       const candidates = items.filter(i => i.kind === 'tab' || i.kind === 'history');
       candidates.sort((a, b) => {
         const recencyA = a.kind === 'tab' ? Date.now() / 1000 : (a.visited_at || 0);
@@ -649,7 +654,7 @@ pub fn html() -> String {
         // Secondary: frequency within the same recency band
         return freqB - freqA;
       });
-      filtered = candidates.slice(0, 12);
+      filtered = [...later.slice(0, 4), ...candidates].slice(0, 12);
       sel = 0;
       renderItems();
       updateBadge();
@@ -752,6 +757,11 @@ pub fn html() -> String {
           window.ipc.postMessage(JSON.stringify({ type: 'close_tab', tab_id: tabId }));
           return;
         }
+        const laterUrl = btn.getAttribute('data-later-url');
+        if (laterUrl) {
+          window.ipc.postMessage(JSON.stringify({ type: 'remove_later', url: laterUrl }));
+          return;
+        }
         const histUrl = btn.getAttribute('data-history-url');
         if (histUrl) {
           window.ipc.postMessage(JSON.stringify({ type: 'remove_history', url: histUrl }));
@@ -783,7 +793,7 @@ pub fn html() -> String {
     const rawTitle = (item.title && item.title !== item.url) ? item.title : hostname;
     const kindLabel = esc(item.pill || (item.incognito ? 'Private' : kindLabelFor(item)));
     const selected = idx === sel ? ' selected' : '';
-    const isJumpable = item.kind === 'tab' || item.kind === 'history';
+    const isJumpable = item.kind === 'tab' || item.kind === 'history' || item.kind === 'later';
     const shortcutNum = isJumpable ? (idx >= 1 && idx <= 9 ? String(idx) : idx === 10 ? '0' : '') : '';
     const actionShortcut = (item.kind === 'search' || item.kind === 'url') ? '⌘↵' : '';
     const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>'
@@ -792,6 +802,8 @@ pub fn html() -> String {
     const canClose = isJumpable;
     const closeAttr = item.kind === 'tab'
       ? 'data-tab-id="' + item.tab_id + '"'
+      : item.kind === 'later'
+      ? 'data-later-url="' + esc(item.url) + '"'
       : 'data-history-url="' + esc(item.url) + '"';
     const closeHtml = canClose
       ? '<button class="close-btn" ' + closeAttr + ' title="Close tab" aria-label="Close tab">×</button>'
@@ -815,12 +827,12 @@ pub fn html() -> String {
 
   function iconHtml(item) {
     var inner;
-    if (item.favicon && (item.kind === 'tab' || item.kind === 'history')) {
+    if (item.favicon && (item.kind === 'tab' || item.kind === 'history' || item.kind === 'later')) {
       const fallback = item.kind === 'tab' ? ICONS.tab : ICONS.history;
       inner = '<img class="item-favicon" src="' + esc(item.favicon) + '" onerror="this.outerHTML=\'' + fallback.replace(/"/g, "'") + '\'" />';
     } else {
       inner = item.kind === 'tab' ? ICONS.tab
-            : item.kind === 'history' ? ICONS.history
+            : item.kind === 'history' || item.kind === 'later' ? ICONS.history
             : item.kind === 'url' ? ICONS.globe
             : item.kind === 'ask' ? ICONS.ai
             : ICONS.search;
@@ -832,6 +844,7 @@ pub fn html() -> String {
   function kindLabelFor(item) {
     if (item.kind === 'tab') return 'Tab';
     if (item.kind === 'history') return 'History';
+    if (item.kind === 'later') return 'Later';
     if (item.kind === 'url') return 'URL';
     if (item.kind === 'ask') return 'AI';
     return 'Search';

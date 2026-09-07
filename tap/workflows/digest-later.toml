@@ -1,0 +1,61 @@
+# Title: Digest Later — What You Saved and Never Opened, in Three Lines Each
+#
+# Input: optional focus ("only work stuff", "skip news"). Reads the user's
+# save-for-later queue (browser_get_later), pulls each page's text from page
+# memory (browser_search_history_content) or by opening it in a background
+# tab, and writes one three-line entry per item: what it is, the one thing
+# worth knowing, whether it is still worth the user's time. Items expire on
+# their own after `later_days`; this digest is what "later" turns into when
+# later never came. A verify step checks every entry links to a queued URL.
+
+name        = "digest-later"
+description = "Read the save-for-later queue, pull each page's text from page memory or a background tab, and write a three-line digest per item (what it is, the one takeaway, still worth your time?). Verified: every entry links to a queued URL."
+
+# ── 1. Digest ─────────────────────────────────────────────────────────────
+[[steps]]
+name    = "digest"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 600
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab.
+
+Focus (may be empty):
+{{input}}
+
+1. `browser_get_later`. Empty → output exactly "LATER QUEUE EMPTY" and stop.
+2. For each item (newest first, at most 20): get its text. First `browser_search_history_content` with 2–3 distinctive words from the title; use the hit whose URL matches. No hit → `browser_navigate` the URL (background tab), `browser_get_page_content`, then `browser_close_tab`. A page that fails to load gets the line "could not load" as its takeaway — never invent content.
+3. Apply the focus if given (skip items outside it, say how many you skipped).
+
+Output exactly, one block per item:
+- [<title>](<url>) · saved <YYYY-MM-DD>
+  WHAT: <one line — what this page is>
+  TAKEAWAY: <one line — the single most useful fact, number, or claim, quoted or paraphrased from the text>
+  VERDICT: READ | SKIM | DROP — <why, one clause>
+
+End with:
+COUNT: <items digested> / <items in queue>
+"""
+
+# ── 2. Verify — every entry points at a queued URL ────────────────────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
+
+  [[steps.run]]
+  name    = "check"
+  role    = "octoweb:assistant"
+  timeout = 180
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui.
+
+Digest:
+{{digest}}
+
+It is "LATER QUEUE EMPTY" → output "RESULT: VERIFIED" then that line.
+
+Otherwise call `browser_get_later` and check every `[title](url)` entry's URL is in the queue and that no queued item (within the focus) is missing. All good → output "RESULT: VERIFIED" then the digest verbatim. Otherwise output "RESULT: NOT VERIFIED", the corrected digest (drop entries whose URL is not queued; add a "could not load" entry for missing ones), and one line naming what you fixed.
+"""

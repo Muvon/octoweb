@@ -444,6 +444,10 @@ pub struct Config {
     /// automatically — their pages remain reachable via history. 0 disables.
     #[serde(default = "default_max_tabs")]
     pub max_tabs: usize,
+    /// Days a "save for later" item stays in the queue before it drops out.
+    /// Its page text remains searchable in page memory. 0 keeps items forever.
+    #[serde(default = "default_later_days")]
+    pub later_days: usize,
     /// Whether the first-run welcome toast has been shown. Internal flag.
     #[serde(default)]
     pub first_run_completed: bool,
@@ -463,6 +467,10 @@ fn default_max_ai_prompt_history() -> usize {
 
 fn default_max_acp_session_messages() -> usize {
     500
+}
+
+fn default_later_days() -> usize {
+    14
 }
 
 fn default_max_tabs() -> usize {
@@ -490,6 +498,7 @@ impl Default for Config {
             learning_interval_min: 30,
             aggressive_hibernation: false,
             max_tabs: 500,
+            later_days: 14,
             first_run_completed: false,
         }
     }

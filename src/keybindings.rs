@@ -67,6 +67,9 @@ pub enum Action {
     NewTab,
     StopLoad,
     AskSelection,
+    CopyLink,
+    CopyLinkMarkdown,
+    SaveLater,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -184,6 +187,27 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     ),
     // Tools
     (Action::Find, "find", "Find in page", "Tools", "cmd+f"),
+    (
+        Action::CopyLink,
+        "copy_link",
+        "Copy URL, or selection with URL",
+        "Tools",
+        "cmd+shift+c",
+    ),
+    (
+        Action::CopyLinkMarkdown,
+        "copy_link_md",
+        "Copy as markdown: selection quote, or whole page",
+        "Tools",
+        "cmd+opt+c",
+    ),
+    (
+        Action::SaveLater,
+        "save_later",
+        "Save for later / remove",
+        "Tools",
+        "cmd+shift+l",
+    ),
     (
         Action::Screenshot,
         "screenshot",

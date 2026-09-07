@@ -200,6 +200,8 @@ pub fn html() -> String {
   .copy-btn.copied { color: var(--ok); }
   .copy-btn.copied .copy-icon { display: none; }
   .copy-btn.copied .copy-check { display: inline; }
+  .copy-btn.later-on { visibility: visible; color: var(--accent); }
+  .copy-btn.later-on .later-fill { fill: currentColor; }
 
   /* URL input — shown only while editing; replaces the copyable URL display. */
   #url-input {
@@ -489,6 +491,9 @@ pub fn html() -> String {
           <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
           <svg class="copy-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 12 10 18 20 6"/></svg>
         </button>
+        <button id="later-btn" class="copy-btn" type="button" aria-label="Save for later" title="Save for later" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path class="later-fill" d="M6 3h12v18l-6-4-6 4z"/></svg>
+        </button>
         <input id="url-input" type="text" role="combobox" aria-label="Address" aria-autocomplete="list" aria-expanded="false" aria-controls="url-suggest" spellcheck="false" autocomplete="off" autocapitalize="off">
       </div>
     </div>
@@ -555,12 +560,14 @@ pub fn html() -> String {
   const urlRow       = document.getElementById('url-row');
   const urlCopy      = document.getElementById('url-copy');
   const urlCopyBtn   = document.getElementById('url-copy-btn');
+  const laterBtn     = document.getElementById('later-btn');
   const urlInput     = document.getElementById('url-input');
   const urlSuggest   = document.getElementById('url-suggest');
   const copyStatus   = document.getElementById('copy-status');
 
   let currentUrl   = '';
   let currentTitle = '';
+  let laterUrls    = new Set();
 
   window.__setShortcuts = function(data) {
     const actions = data && Array.isArray(data.actions) ? data.actions : [];
@@ -571,7 +578,8 @@ pub fn html() -> String {
       command_palette: ['spotlight-btn', 'Search'],
       close_tab: ['close-tab-btn', 'Close tab'],
       sidebar: ['ai-btn', 'AI sidebar'],
-      url_edit: ['url-copy', 'Edit address']
+      url_edit: ['url-copy', 'Edit address'],
+      save_later: ['later-btn', 'Save for later']
     };
     Object.keys(titles).forEach(function(id) {
       const target = titles[id];
@@ -688,6 +696,7 @@ pub fn html() -> String {
     currentTitle = title || '';
     titleEl.textContent = currentTitle;
     renderUrl(url);
+    updateLaterBtn();
     updateLock(url, secure);
     updateStats(sizeBytes, timeMs);
   };
@@ -766,8 +775,30 @@ pub fn html() -> String {
     copyFromButton(e, titleCopyBtn, currentTitle, 'Title copied');
   });
 
+  // Plain URL by default; ⌥-click copies a markdown link for Slack/docs.
   urlCopyBtn.addEventListener('click', function(e) {
-    copyFromButton(e, urlCopyBtn, currentUrl, 'Address copied');
+    if (e.altKey && currentTitle) {
+      copyFromButton(e, urlCopyBtn, '[' + currentTitle + '](' + currentUrl + ')', 'Markdown link copied');
+    } else {
+      copyFromButton(e, urlCopyBtn, currentUrl, 'Address copied');
+    }
+  });
+  urlCopyBtn.title = 'Copy address (⌥ markdown link)';
+
+  function normUrl(u) { return String(u || '').replace(/\/+$/, ''); }
+  function updateLaterBtn() {
+    const on = laterUrls.has(normUrl(currentUrl));
+    laterBtn.classList.toggle('later-on', on);
+    laterBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    laterBtn.title = on ? 'Remove from Later' : 'Save for later';
+  }
+  window.__setLaterUrls = function(items) {
+    laterUrls = new Set((Array.isArray(items) ? items : []).map(function(i) { return normUrl(i.url); }));
+    updateLaterBtn();
+  };
+  laterBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    window.ipc.postMessage(JSON.stringify({ type: 'later_toggle' }));
   });
 
   function restoreRowFocusOnEscape(button, rowControl) {

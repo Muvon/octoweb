@@ -7,9 +7,13 @@
 ///   { type: "quickslot_open", slot: 0-9 }
 ///   { type: "quickslot_save_url", slot: 0-9, url: string }
 ///   { type: "quickslot_remove", slot: 0-9 }
-pub fn html(slots_json: &str) -> String {
+pub fn html(slots_json: &str, later_json: &str) -> String {
     let keybindings_json = crate::keybindings::Keymap::load().ui_json().to_string();
     let safe_slots_json = slots_json
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
+    let safe_later_json = later_json
         .replace('<', "\\u003c")
         .replace('>', "\\u003e")
         .replace('&', "\\u0026");
@@ -36,10 +40,15 @@ pub fn html(slots_json: &str) -> String {
     <span><kbd class="kbd">⌘1</kbd>–<kbd class="kbd">⌘0</kbd> open slots</span>
     <span><kbd class="kbd">⌘⇧1</kbd>–<kbd class="kbd">⌘⇧0</kbd> save current page</span>
   </p>
+  <section class="later" id="later" hidden>
+    <h2 class="later-title">Later <span id="later-count"></span> <span class="later-hint"><kbd class="kbd">⌘⇧L</kbd> saves the current page</span></h2>
+    <div id="later-list"></div>
+  </section>
 </main>
 <script>
 (function() {{
   let slots = {slots_json};
+  let later = {later_json};
   const container = document.getElementById('slots');
   const address = document.getElementById('address');
   const defaultPlaceholder = 'Search or enter address';
@@ -163,6 +172,47 @@ pub fn html(slots_json: &str) -> String {
     renderSlots();
   }};
 
+  function renderLater() {{
+    const section = document.getElementById('later');
+    const list = document.getElementById('later-list');
+    list.replaceChildren();
+    const items = Array.isArray(later) ? later.slice().sort(function(a, b) {{ return (b.saved_at || 0) - (a.saved_at || 0); }}) : [];
+    section.hidden = items.length === 0;
+    document.getElementById('later-count').textContent = items.length ? '(' + items.length + ')' : '';
+    items.forEach(function(it) {{
+      const row = document.createElement('div');
+      row.className = 'later-row';
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'later-link';
+      let host = it.url;
+      try {{ host = new URL(it.url).hostname.replace(/^www\./, ''); }} catch (_) {{}}
+      const t = document.createElement('span');
+      t.className = 'later-text';
+      t.textContent = it.title || host;
+      const h = document.createElement('span');
+      h.className = 'later-host';
+      h.textContent = host;
+      open.appendChild(t);
+      open.appendChild(h);
+      open.addEventListener('click', function() {{ ipc({{ type: 'later_open', url: it.url }}); }});
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'later-remove';
+      remove.setAttribute('aria-label', 'Remove from Later');
+      remove.textContent = '×';
+      remove.addEventListener('click', function() {{ ipc({{ type: 'later_remove', url: it.url }}); }});
+      row.appendChild(open);
+      row.appendChild(remove);
+      list.appendChild(row);
+    }});
+  }}
+
+  window.__updateLater = function(next) {{
+    later = Array.isArray(next) ? next : [];
+    renderLater();
+  }};
+
   window.__setShortcuts = function(data) {{
     const actions = data && Array.isArray(data.actions) ? data.actions : [];
     const action = actions.find(function(item) {{ return item.id === 'command_palette'; }});
@@ -176,6 +226,7 @@ pub fn html(slots_json: &str) -> String {
   }});
 
   renderSlots();
+  renderLater();
   window.__setShortcuts({keybindings_json});
   if (!document.hidden) requestAnimationFrame(function() {{ address.focus(); }});
 }})();
@@ -184,6 +235,7 @@ pub fn html(slots_json: &str) -> String {
 </html>"#,
         css = NEWTAB_CSS,
         slots_json = safe_slots_json,
+        later_json = safe_later_json,
         keybindings_json = keybindings_json,
     )
     .replace("/*@@THEME@@*/", crate::theme::CSS)
@@ -260,6 +312,25 @@ const NEWTAB_CSS: &str = r#"  * { box-sizing: border-box; margin: 0; padding: 0;
     gap: 8px;
     margin-bottom: 20px;
   }
+
+  .later { margin-top: 4px; text-align: left; }
+  .later-title { font-size: 12px; font-weight: 600; color: var(--label-2); margin: 0 0 6px 8px; display: flex; align-items: baseline; gap: 8px; }
+  .later-hint { font-weight: 400; margin-left: auto; margin-right: 8px; }
+  .later-row { display: flex; align-items: center; gap: 4px; }
+  .later-link {
+    flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px;
+    padding: 7px 10px; border: 0; border-radius: var(--r-card); background: transparent;
+    color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .later-link:hover { background: var(--glass-thin); }
+  .later-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .later-host { flex-shrink: 0; font-size: 11px; color: var(--label-2); }
+  .later-remove {
+    width: 24px; height: 24px; border: 0; border-radius: var(--r-card); background: transparent;
+    color: var(--label-2); font: inherit; cursor: pointer; opacity: 0;
+  }
+  .later-row:hover .later-remove, .later-remove:focus-visible { opacity: 1; }
+  .later-remove:hover { background: var(--fill-hover); color: var(--label); }
 
   .slot-wrap { position: relative; min-width: 0; }
 

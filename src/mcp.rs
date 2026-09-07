@@ -13,7 +13,7 @@
 //! Tabs:
 //! - `browser_navigate` (always background: new tab, or in-place via tab_id; never moves focus)
 //! - `browser_get_tabs` / `browser_get_current_tab` / `browser_switch_tab` / `browser_close_tab`
-//! - `browser_get_history` / `browser_search_history_content` / `browser_get_playing_tabs`
+//! - `browser_get_history` / `browser_search_history_content` / `browser_get_later` / `browser_get_playing_tabs`
 //! - `browser_go_back` / `browser_go_forward` / `browser_reload`
 //!
 //! Interaction (selector accepts a CSS selector or a `@N` ref from snapshot;
@@ -143,6 +143,10 @@ pub enum McpCommand {
     GetHistory {
         limit: Option<usize>,
         response: oneshot::Sender<Result<Vec<HistoryInfo>, String>>,
+    },
+    /// Save-for-later queue of the workspace
+    GetLater {
+        response: oneshot::Sender<Result<Vec<crate::later::LaterItem>, String>>,
     },
     /// Full-text search over the text of visited pages
     SearchPageText {
@@ -489,6 +493,7 @@ impl McpCommand {
             Self::GoForward { .. } => "GoForward",
             Self::GetHistory { .. } => "GetHistory",
             Self::SearchPageText { .. } => "SearchPageText",
+            Self::GetLater { .. } => "GetLater",
             Self::GetPlayingTabs { .. } => "GetPlayingTabs",
             Self::Reload { .. } => "Reload",
             Self::GetPageContent { .. } => "GetPageContent",
@@ -1713,6 +1718,20 @@ impl McpServer {
             .await?
         );
         let json = serde_json::to_string(&hits)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Pages the user saved for later (⌘⇧L) and has not opened yet: title, URL, saved time. Items expire after a configurable number of days.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_get_later(&self) -> Result<CallToolResult, McpError> {
+        let items = browser_try!(
+            self.send_command(|tx| McpCommand::GetLater { response: tx })
+                .await?
+        );
+        let json = serde_json::to_string(&items)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }

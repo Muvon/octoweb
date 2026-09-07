@@ -12,6 +12,7 @@
 //! `WorkspaceManager::active()` until stage 2 added switching.
 
 use crate::browser::TabManager;
+use crate::later::LaterItem;
 use crate::quickslots::QuickSlots;
 use crate::AcpSession;
 use std::collections::HashMap;
@@ -52,6 +53,8 @@ pub struct Workspace {
     /// Pinned quick-slots (⌘1–⌘0) for this workspace. Seeded by main.rs at
     /// startup from `quickslots::load_all()`.
     pub quick_slots: QuickSlots,
+    /// Save-for-later queue (⌘⇧L). Seeded by main.rs from `later::load_all()`.
+    pub later: Vec<LaterItem>,
     /// URLs of tabs closed in this workspace, most recent last, popped by ⌘⇧T.
     /// Per-workspace for the same reason `mru` is: reopening must not
     /// resurrect a tab into a workspace it never belonged to. Deliberately
@@ -83,6 +86,7 @@ impl Workspace {
             acp_active_session_id: 0,
             mru: Vec::new(),
             quick_slots: Default::default(),
+            later: Vec::new(),
             closed_tabs: Vec::new(),
             mcp_token: None,
         }

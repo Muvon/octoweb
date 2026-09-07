@@ -728,8 +728,21 @@ pub fn build_items_json(
     favicons: &HashMap<String, String>,
     hibernated: &std::collections::HashSet<usize>,
     rss_mb: &HashMap<usize, u64>,
+    later: &[crate::later::LaterItem],
 ) -> String {
     let mut items: Vec<serde_json::Value> = Vec::new();
+
+    // ── Later queue — pinned to the top of the empty-query list ─────────────
+    for it in later {
+        items.push(serde_json::json!({
+            "kind": "later",
+            "title": it.title,
+            "url": it.url,
+            "favicon": favicon_ref(&it.url, favicons),
+            "visit_count": 0u32,
+            "visited_at": it.saved_at,
+        }));
+    }
 
     // ── Tabs ──────────────────────────────────────────────────────────────────
     let open_urls: std::collections::HashSet<&str> =

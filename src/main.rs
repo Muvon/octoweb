@@ -18,8 +18,10 @@ mod hibernation;
 mod icons;
 mod inline_edit_html;
 mod keybindings;
+mod later;
 mod link_hints_js;
 mod macos;
+mod markdown_js;
 mod mcp;
 mod native_input;
 mod nav_error_patch;
@@ -107,10 +109,14 @@ enum AppEvent {
     SidebarReFocus,           // sidebar window became key — restore textarea focus
     AskAI(String),            // overlay Ask AI row — open sidebar + send prompt
     AskSelectionRequest,      // ⌘⇧K — capture the page selection for the sidebar
-    AskSelection(usize, String), // (tab_id, selected text) — build the sidebar prompt
-    PageText(usize, String),  // (tab_id, visible text) — feed the full-text history index
-    ContentSearch(String),    // palette `/query` — search page text, push results back
-    ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
+    SelectionCaptured(usize, String, String, bool), // (tab_id, text, purpose ask|copy|copy_md, whole_page)
+    CopyRequest(bool),   // ⌘⇧C / ⌥⌘C — copy URL or selection; markdown when true
+    LaterToggle,         // ⌘⇧L / address-bar flag — save or unsave the active page
+    LaterRemove(String), // (url) — drop from the Later queue
+    LaterOpen(String),   // (url) — open from the Later queue and drop it
+    PageText(usize, String), // (tab_id, visible text) — feed the full-text history index
+    ContentSearch(String), // palette `/query` — search page text, push results back
+    ToggleDevTools,      // Cmd+Shift+I — open devtools for active tab
     // Open URL in a new tab. Second field = the tab that requested it (a page's
     // window.open / target=_blank), or None for UI surfaces (sidebar, A2UI, ACP
     // login). Foregrounded only when the source is the visible tab or None — so a
@@ -208,6 +214,8 @@ enum InternalPageAction {
     QuickSlotSave(usize),
     QuickSlotSaveUrl(usize, String),
     QuickSlotRemove(usize),
+    LaterOpen(String),
+    LaterRemove(String),
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +295,13 @@ fn keybind_to_event(
         A::Fullscreen if !overlay && !inline && !find => AppEvent::ToggleFullscreen,
         A::InlineEdit if !overlay => AppEvent::InlineEditRequest,
         A::AskSelection if !overlay && !inline => AppEvent::AskSelectionRequest,
+        A::CopyLink if !overlay && !inline && !sidebar && !address_edit => {
+            AppEvent::CopyRequest(false)
+        }
+        A::CopyLinkMarkdown if !overlay && !inline && !sidebar && !address_edit => {
+            AppEvent::CopyRequest(true)
+        }
+        A::SaveLater if !overlay && !inline && !address_edit => AppEvent::LaterToggle,
         A::UrlEdit if !overlay && !inline && !find && !sidebar => AppEvent::UrlEditRequest,
         A::NewSession if sidebar && !overlay => AppEvent::AcpSessionCreatePanel,
         A::CloseTab if !overlay => {
@@ -503,7 +518,19 @@ fn terminate_octomind_pids(pids: &[u32]) {
 const PAGE_TEXT_JS: &str = "setTimeout(function(){try{if(!/^https?:$/.test(location.protocol))return;var t=(document.body&&document.body.innerText)||'';window.ipc.postMessage(JSON.stringify({type:'page_text',text:t.slice(0,6000)}))}catch(e){}},1500)";
 
 /// Posts the current selection back to Rust for "ask AI about selection".
-const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.ipc.postMessage(JSON.stringify({type:'selection_text',text:s.trim().slice(0,4000)}))})()";
+const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.ipc.postMessage(JSON.stringify({type:'selection_text',purpose:'ask',text:s.trim().slice(0,4000)}))})()";
+
+/// Posts what ⌘⇧C should copy: the selection, or for the markdown variant
+/// with no selection, the whole page rendered by `markdown_js`.
+fn copy_js(markdown: bool) -> String {
+    let md = if markdown { "true" } else { "false" };
+    format!(
+        "(function(){{var s='';try{{s=String(window.getSelection()||'').trim()}}catch(e){{}}\
+         var md={md};var page=false;var text=s;\
+         if(md&&!s&&window.__octowebMarkdown){{text=window.__octowebMarkdown();page=true;}}\
+         window.ipc.postMessage(JSON.stringify({{type:'selection_text',purpose:md?'copy_md':'copy',page:page,text:text.slice(0,400000)}}))}})()"
+    )
+}
 
 fn main() {
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
@@ -874,6 +901,22 @@ fn main() {
                                     ));
                                 }
                             }
+                            Some("later_open") => {
+                                if let Some(url) = v["url"].as_str() {
+                                    let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                        tab_id,
+                                        InternalPageAction::LaterOpen(url.to_string()),
+                                    ));
+                                }
+                            }
+                            Some("later_remove") => {
+                                if let Some(url) = v["url"].as_str() {
+                                    let _ = p3.send_event(AppEvent::InternalPageIpc(
+                                        tab_id,
+                                        InternalPageAction::LaterRemove(url.to_string()),
+                                    ));
+                                }
+                            }
                             Some("media:playing") => {
                                 let _ = p3.send_event(AppEvent::MediaPlaying(tab_id, true));
                             }
@@ -976,7 +1019,9 @@ fn main() {
                             }
                             Some("selection_text") => {
                                 let text = v["text"].as_str().unwrap_or("").to_string();
-                                let _ = p3.send_event(AppEvent::AskSelection(tab_id, text));
+                                let purpose = v["purpose"].as_str().unwrap_or("ask").to_string();
+                                let page = v["page"].as_bool().unwrap_or(false);
+                                let _ = p3.send_event(AppEvent::SelectionCaptured(tab_id, text, purpose, page));
                             }
                             Some("page_text") => {
                                 if let Some(text) = v["text"].as_str() {
@@ -1207,6 +1252,7 @@ fn main() {
         ),
     > = HashMap::new();
     let mut all_quick_slots = quickslots::load_all();
+    let mut all_later = later::load_all();
 
     // Restore previous session if available, otherwise open home page.
     // `session` was already loaded above (before the workspace was built) —
@@ -1233,6 +1279,8 @@ fn main() {
     let mut restored_active_id: Option<usize> = None;
     for ws in workspace_manager.list_mut() {
         ws.quick_slots = all_quick_slots.remove(&ws.id).unwrap_or_default();
+        ws.later = all_later.remove(&ws.id).unwrap_or_default();
+        later::prune(&mut ws.later, cfg.later_days);
         let is_overall_active_ws = ws.id == overall_active_workspace_id;
         let session_tabs: Vec<config::SessionTab> = session
             .as_ref()
@@ -1271,7 +1319,10 @@ fn main() {
                 // Isolated tabs are never written to the session file.
                 let wv = make_webview(tab_id, &st.url, ws.data_store_id, false);
                 if st.url == "about:blank" {
-                    let html = newtab_html::html(&quickslots::to_json(&ws.quick_slots));
+                    let html = newtab_html::html(
+                        &quickslots::to_json(&ws.quick_slots),
+                        &later::to_json(&ws.later),
+                    );
                     let _ = wv.load_html(&html);
                 }
                 let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -1373,6 +1424,10 @@ fn main() {
                         Some("navigate") => {
                             dismiss();
                             if let Some(url) = v["url"].as_str() {
+                                // Opening from the Later list consumes the entry.
+                                if v["later"].as_bool() == Some(true) {
+                                    let _ = p.send_event(AppEvent::LaterRemove(url.to_string()));
+                                }
                                 let isolated = v["isolated"].as_bool().unwrap_or(false);
                                 let _ =
                                     p.send_event(AppEvent::NavigateTo(url.to_string(), isolated));
@@ -1392,6 +1447,11 @@ fn main() {
                         Some("remove_history") => {
                             if let Some(url) = v["url"].as_str() {
                                 let _ = p.send_event(AppEvent::RemoveHistory(url.to_string()));
+                            }
+                        }
+                        Some("remove_later") => {
+                            if let Some(url) = v["url"].as_str() {
+                                let _ = p.send_event(AppEvent::LaterRemove(url.to_string()));
                             }
                         }
                         Some("ask_ai") => {
@@ -1885,6 +1945,9 @@ fn main() {
                             // can paint below the 32 px titlebar without being clipped.
                             let expanded = v["expanded"].as_bool().unwrap_or(false);
                             let _ = p.send_event(AppEvent::UrlEditExpand(expanded));
+                        }
+                        Some("later_toggle") => {
+                            let _ = p.send_event(AppEvent::LaterToggle);
                         }
                         Some("navigate") => {
                             // Submitted URL/query from the address bar edit field.
@@ -2784,7 +2847,7 @@ fn main() {
                     let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id, incognito);
                     if !has_snapshot && url == "about:blank" {
                         let html =
-                            newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots));
+                            newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots), &later::to_json(&workspace_manager.at(ws_i).later));
                         let _ = wv.load_html(&html);
                     }
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -3096,6 +3159,7 @@ fn main() {
                         &favicon_cache.lock().unwrap(),
                         &hib,
                         &rss,
+                        &workspace_manager.active().later,
                     )
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
@@ -3551,13 +3615,70 @@ fn main() {
                 if tab_url.as_deref() == Some("about:blank") {
                     let update = format!("window.__updateSlots({json})");
                     if wv.evaluate_script(&update).is_err() {
-                        let html = newtab_html::html(&json);
+                        let html = newtab_html::html(
+                            &json,
+                            &later::to_json(&workspace_manager.active().later),
+                        );
                         let _ = wv.load_html(&html);
                     }
                 }
             }
         }};
     }
+
+    macro_rules! save_later {
+        () => {{
+            later::save_all(
+                &workspace_manager
+                    .list()
+                    .iter()
+                    .map(|w| (w.id.clone(), w.later.clone()))
+                    .collect(),
+            );
+        }};
+    }
+
+    /// Sync the Later queue UI: address-bar flag state + any newtab pages.
+    macro_rules! sync_later_ui {
+        () => {{
+            let json = later::to_json(&workspace_manager.active().later);
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__setLaterUrls && window.__setLaterUrls({json})"
+            ));
+            for (&tid, wv) in workspace_manager.active().webviews.iter() {
+                let is_newtab = workspace_manager
+                    .active()
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .tabs()
+                    .iter()
+                    .any(|t| t.id == tid && t.url == "about:blank");
+                if is_newtab {
+                    let _ = wv.evaluate_script(&format!(
+                        "window.__updateLater && window.__updateLater({json})"
+                    ));
+                }
+            }
+        }};
+    }
+
+    /// Small confirmation toast, same surface as "Tab moved".
+    macro_rules! toast {
+        ($text:expr, $icon:expr, $title:expr) => {{
+            let escaped = webview_utils::escape_js_template(&$text);
+            notif_origin = None;
+            if !notification_visible {
+                let _ = notification_wv.set_visible(true);
+                notification_visible = true;
+            }
+            let _ = notification_wv.evaluate_script(&format!(
+                "window.__show && window.__show(`{escaped}`, `{}`, `{}`, 2500)",
+                $icon, $title
+            ));
+        }};
+    }
+    sync_later_ui!();
 
     // ── Event loop ────────────────────────────────────────────────────────
     event_loop.run(move |event, _, control_flow| {
@@ -5082,6 +5203,9 @@ fn main() {
                     McpCommand::SearchPageText { query, limit, response } => {
                         let _ = response.send(Ok(page_index.search(&query, limit.unwrap_or(10))));
                     }
+                    McpCommand::GetLater { response } => {
+                        let _ = response.send(Ok(workspace_manager.at(ws_idx).later.clone()));
+                    }
                     McpCommand::GetPlayingTabs { response } => {
                         let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let active = tm.active_id();
@@ -5797,6 +5921,7 @@ fn main() {
                         &favicon_cache.lock().unwrap(),
                         &hib,
                         &rss,
+                        &workspace_manager.active().later,
                     )
                 };
                 let _ = address_bar_wv.evaluate_script(&format!(
@@ -5961,6 +6086,7 @@ fn main() {
                 push_acp_sessions_to_sidebar!();
                 relive_pending_a2ui!();
                 sync_quickslots_ui!();
+                sync_later_ui!();
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible.store(false, Ordering::Relaxed);
                 focus_active_webview!();
@@ -6023,6 +6149,7 @@ fn main() {
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
                 sync_quickslots_ui!();
+                sync_later_ui!();
                 refresh_workspace_switcher!();
                 workspace_switcher_win.set_visible(false);
                 workspace_switcher_visible.store(false, Ordering::Relaxed);
@@ -6099,6 +6226,7 @@ fn main() {
                     relive_pending_a2ui!();
                     save_quickslots!();
                     sync_quickslots_ui!();
+                sync_later_ui!();
                     refresh_workspace_switcher!();
                     workspace_switcher_win.set_visible(false);
                     workspace_switcher_visible.store(false, Ordering::Relaxed);
@@ -6395,6 +6523,7 @@ fn main() {
                             &favicon_cache.lock().unwrap(),
                             &hib,
                             &rss,
+                            &workspace_manager.active().later,
                         )
                     };
                     let se = webview_utils::escape_js_template(&search_engine);
@@ -7494,19 +7623,105 @@ fn main() {
                     }
                     // Hibernated or blank tab — nothing to select, ask about the page.
                     None => {
-                        let _ = proxy.send_event(AppEvent::AskSelection(active_wv_id, String::new()));
+                        let _ = proxy.send_event(AppEvent::SelectionCaptured(active_wv_id, String::new(), "ask".into(), false));
                     }
                 }
             }
-            Event::UserEvent(AppEvent::AskSelection(tab_id, text)) => {
+            Event::UserEvent(AppEvent::SelectionCaptured(tab_id, text, purpose, whole_page)) => {
                 let (title, url) = tab_title_url(&workspace_manager, tab_id);
-                let url = sanitize::sanitize_url(&url);
-                let prompt = if text.is_empty() {
-                    format!("Explain this page: {title} — {url}")
+                match purpose.as_str() {
+                    // ⌘⇧C: plain text for chat boxes and commit messages.
+                    "copy" => {
+                        let (out, what) = if text.is_empty() {
+                            (url.clone(), "Address copied")
+                        } else {
+                            (format!("{text}\n\n{url}"), "Selection copied with address")
+                        };
+                        webview_utils::copy_text_to_pasteboard(&out);
+                        toast!(what.to_string(), "\u{1F4CB}", "Copied");
+                    }
+                    // ⌥⌘C: markdown for Slack, docs, notes, and prompts.
+                    "copy_md" => {
+                        let (out, what) = if whole_page && !text.is_empty() {
+                            let words = text.split_whitespace().count();
+                            (text, format!("Page copied as markdown ({words} words)"))
+                        } else if text.is_empty() {
+                            (format!("[{title}]({url})"), "Markdown link copied".to_string())
+                        } else {
+                            let quote = text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
+                            (format!("{quote}\n\n— [{title}]({url})"), "Quote copied with link".to_string())
+                        };
+                        webview_utils::copy_text_to_pasteboard(&out);
+                        toast!(what, "\u{1F4CB}", "Copied");
+                    }
+                    _ => {
+                        let url = sanitize::sanitize_url(&url);
+                        let prompt = if text.is_empty() {
+                            format!("Explain this page: {title} — {url}")
+                        } else {
+                            format!("Explain this, from {title} ({url}):\n\n{text}")
+                        };
+                        let _ = proxy.send_event(AppEvent::AskAI(prompt));
+                    }
+                }
+            }
+            Event::UserEvent(AppEvent::CopyRequest(markdown)) => {
+                match workspace_manager.active().webviews.get(&active_wv_id) {
+                    Some(wv) => {
+                        if markdown {
+                            let _ = wv.evaluate_script(markdown_js::INSTALL);
+                        }
+                        let _ = wv.evaluate_script(&copy_js(markdown));
+                    }
+                    None => {
+                        let purpose = if markdown { "copy_md" } else { "copy" };
+                        let _ = proxy.send_event(AppEvent::SelectionCaptured(active_wv_id, String::new(), purpose.into(), false));
+                    }
+                }
+            }
+
+            // ── Save for later (⌘⇧L, address-bar flag) ───────────────────
+            Event::UserEvent(AppEvent::LaterToggle) => {
+                let (title, url) = tab_title_url(&workspace_manager, active_wv_id);
+                if !url.starts_with("http") {
+                    return;
+                }
+                let saved = later::toggle(&mut workspace_manager.active_mut().later, &url, &title);
+                save_later!();
+                sync_later_ui!();
+                if saved {
+                    toast!(title, "\u{1F516}", "Saved for later");
                 } else {
-                    format!("Explain this, from {title} ({url}):\n\n{text}")
+                    toast!(title, "\u{1F516}", "Removed from Later");
+                }
+            }
+            Event::UserEvent(AppEvent::LaterRemove(url)) => {
+                if later::remove(&mut workspace_manager.active_mut().later, &url) {
+                    save_later!();
+                    sync_later_ui!();
+                    refresh_overlay!();
+                }
+            }
+            Event::UserEvent(AppEvent::LaterOpen(url)) => {
+                if later::remove(&mut workspace_manager.active_mut().later, &url) {
+                    save_later!();
+                    sync_later_ui!();
+                }
+                let existing_tab = {
+                    let tm = workspace_manager.active().tabs.lock().unwrap();
+                    let normalized = url.trim_end_matches('/');
+                    tm.tabs().iter()
+                        .find(|t| t.url.trim_end_matches('/') == normalized)
+                        .map(|t| t.id)
                 };
-                let _ = proxy.send_event(AppEvent::AskAI(prompt));
+                match existing_tab {
+                    Some(tab_id) => {
+                        let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
+                    }
+                    None => {
+                        let _ = proxy.send_event(AppEvent::NavigateTo(url, false));
+                    }
+                }
             }
 
             // ── Full-text history index ──────────────────────────────────
@@ -7588,6 +7803,12 @@ fn main() {
                     InternalPageAction::QuickSlotRemove(slot) => {
                         let _ = proxy.send_event(AppEvent::QuickSlotRemove(slot));
                     }
+                    InternalPageAction::LaterOpen(url) => {
+                        let _ = proxy.send_event(AppEvent::LaterOpen(url));
+                    }
+                    InternalPageAction::LaterRemove(url) => {
+                        let _ = proxy.send_event(AppEvent::LaterRemove(url));
+                    }
                 }
             }
 
@@ -7644,6 +7865,7 @@ fn main() {
                     }
                     save_quickslots!();
                     sync_quickslots_ui!();
+                sync_later_ui!();
                 }
             }
 
@@ -7664,6 +7886,7 @@ fn main() {
                         });
                     save_quickslots!();
                     sync_quickslots_ui!();
+                sync_later_ui!();
                     if let Some(wv) = workspace_manager.active().webviews.get(&origin_tab_id) {
                         let _ = wv.evaluate_script(
                             "window.__slotSaved && window.__slotSaved()",
@@ -7683,6 +7906,7 @@ fn main() {
                 workspace_manager.active_mut().quick_slots[slot] = None;
                 save_quickslots!();
                 sync_quickslots_ui!();
+                sync_later_ui!();
             }
 
             // ── Pin/unpin current tab (⌘⇧N) ───────────────────────────────
@@ -7717,6 +7941,7 @@ fn main() {
                         }
                         save_quickslots!();
                         sync_quickslots_ui!();
+                sync_later_ui!();
                     }
                 }
             }
@@ -10888,7 +11113,7 @@ mod chrome_js_syntax_tests {
             ),
             ("find_bar", crate::find_bar_html::html()),
             ("inline_edit", crate::inline_edit_html::html()),
-            ("newtab", crate::newtab_html::html("[]")),
+            ("newtab", crate::newtab_html::html("[]", "[]")),
             ("notification", crate::notification_html::html()),
             ("overlay", crate::overlay_html::html()),
             ("progress_bar", crate::progress_bar_html::html()),
