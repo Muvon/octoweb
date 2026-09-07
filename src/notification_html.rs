@@ -38,6 +38,9 @@ pub fn html() -> String {
     padding: 4px 8px 4px 12px;
     border-radius: var(--r-card);
     user-select: none;
+    /* No drop shadow: the 60px blur of --shadow-float is clipped by the
+       toast webview bounds and leaves hard dark edges over the page. */
+    box-shadow: var(--glass-shine);
 
     opacity: 0;
     transition: transform var(--t-pop) var(--spring),
