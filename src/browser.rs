@@ -22,6 +22,10 @@ pub struct Tab {
     pub is_playing_audio: bool,
     pub page_bytes: u64,
     pub page_time_ms: u64,
+
+    /// Isolated (incognito) tab — own in-memory data store; never recorded
+    /// in history or the saved session.
+    pub incognito: bool,
     /// When this tab was last the active (visible) tab.
     pub last_active_at: Instant,
 }
@@ -70,6 +74,25 @@ impl TabManager {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            incognito: false,
+            last_active_at: Instant::now(),
+        });
+        self.active_id = Some(id);
+        id
+    }
+
+    /// Register a new isolated (incognito) tab — its WebView gets its own
+    /// non-persistent data store, and its navigations never touch history.
+    pub fn open_incognito(&mut self, url: String) -> usize {
+        let id = next_tab_id();
+        self.tabs.push(Tab {
+            id,
+            title: String::new(),
+            url,
+            is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
+            incognito: true,
             last_active_at: Instant::now(),
         });
         self.active_id = Some(id);
@@ -87,6 +110,28 @@ impl TabManager {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            incognito: false,
+            last_active_at: Instant::now(),
+        });
+        // First tab ever: something must be active.
+        if self.active_id.is_none() {
+            self.active_id = Some(id);
+        }
+        id
+    }
+
+    /// As `open_incognito`, without making the tab active — background
+    /// popups (target=_blank) from an isolated tab must stay isolated.
+    pub fn open_incognito_background(&mut self, url: String) -> usize {
+        let id = next_tab_id();
+        self.tabs.push(Tab {
+            id,
+            title: String::new(),
+            url,
+            is_playing_audio: false,
+            page_bytes: 0,
+            page_time_ms: 0,
+            incognito: true,
             last_active_at: Instant::now(),
         });
         // First tab ever: something must be active.
@@ -106,6 +151,7 @@ impl TabManager {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            incognito: false,
             last_active_at: Instant::now(),
         });
         self.active_id = Some(id);
@@ -138,12 +184,16 @@ impl TabManager {
 
     /// Update the title of a tab; backfills the most recent history entry for its URL.
     pub fn update_title(&mut self, id: usize, title: String) -> bool {
-        let url = if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+        let (incognito, url) = if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
             tab.title = title.clone();
-            tab.url.clone()
+            (tab.incognito, tab.url.clone())
         } else {
             return false;
         };
+        // Isolated tabs never backfill the shared history deque.
+        if incognito {
+            return false;
+        }
         if let Some(entry) = self.history.iter_mut().rev().find(|e| e.url == url) {
             entry.title = title;
             true
@@ -163,6 +213,15 @@ impl TabManager {
             }
             // Don't pollute history with blank/internal pages
             if url == "about:blank" || url.is_empty() {
+                tab.url = url;
+                tab.title = String::new();
+                tab.page_bytes = 0;
+                tab.page_time_ms = 0;
+                return false;
+            }
+            // Isolated (incognito) tabs update their own URL but leave no
+            // trace in the shared history deque.
+            if tab.incognito {
                 tab.url = url;
                 tab.title = String::new();
                 tab.page_bytes = 0;
@@ -325,5 +384,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Isolated tabs navigate normally but must never write history —
+    /// no upserts on URL change, no title backfill.
+    #[test]
+    fn incognito_tabs_never_record_history() {
+        let mut tm = TabManager::new(10);
+        let id = tm.open_incognito("https://private.example".into());
+        assert!(!tm.update_url(id, "https://private.example/page".into()));
+        assert!(tm.history().is_empty());
+        // The tab's own URL must still update (address bar shows it).
+        assert_eq!(
+            tm.tabs().iter().find(|t| t.id == id).unwrap().url,
+            "https://private.example/page"
+        );
+        assert!(!tm.update_title(id, "Secret Page".into()));
+        assert!(tm.history().is_empty());
     }
 }

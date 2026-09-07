@@ -43,6 +43,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 ## Features
 
 - **Command palette** (`⌘⇧P`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
+- **Private tabs** (`⌘⇧↵` in the palette) — Open any result in an isolated tab with in-memory cookies and storage. Nothing is written to history, the session file, or the favicon cache; closing the tab discards everything.
 - **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access, one set per workspace. Footer bar shows all slots.
 - **Tab pinning** (`⌘⇧N`) — Pin the current tab to the fast-access bar with one keystroke.
 - **Workspaces** (`⌘⇧O`) — Isolated browser profiles: each workspace has its own tabs, history, AI sessions, and a dedicated WebKit data store, so cookies, localStorage, and cache never leak between them. Switch with `⌘1`–`⌘0` while the popover is open.
@@ -304,7 +305,7 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 | `⌃N` / `⌃P` | Move selection (Emacs-style) |
 | `↵` | Confirm selection (open / switch / search) |
 | `⌘↵` | Force navigate: open as URL if it looks like one, otherwise search |
-| `⌘⇧↵` | Send query to AI sidebar |
+| `⌘⇧↵` | Open selection in an isolated (incognito) tab — own cookies/storage, no history |
 | `⌘W` | Close selected tab / remove selected history entry |
 | `⌘1` – `⌘9`, `⌘0` | Jump directly to result 1–10 (tabs and history only) |
 | `Esc` | Close palette |
@@ -313,6 +314,8 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 | `⌃K` | Delete from cursor to end of line |
 | `⌃U` | Delete from cursor to start of line |
 | `⌘V` | Paste from clipboard |
+
+`⌘⇧↵` opens whatever is selected — an open tab, a history entry, a typed URL, or a search — in a **private tab**. It gets its own in-memory WebKit data store, so cookies, localStorage, and cache are separate from the workspace and vanish when the tab closes. Private tabs never write to history, the session file, the favicon cache, or the `⌘⇧T` reopen list, and popups they open stay private. They show a `Private` pill in the palette and are not restored on restart.
 
 ### AI sidebar (`⌘⇧A`)
 

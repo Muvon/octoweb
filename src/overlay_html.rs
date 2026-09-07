@@ -396,8 +396,8 @@ pub fn html() -> String {
       if (e.isComposing) return;
       e.preventDefault();
       if (e.metaKey && e.shiftKey) {
-        // ⌘⇧Enter → Ask AI
-        askAI();
+        // ⌘⇧Enter → open the selection in an isolated (incognito) tab
+        confirmSelection(true);
       } else if (e.metaKey) {
         // ⌘Enter → force navigate (URL → open, else → search)
         forceNavigate();
@@ -515,7 +515,7 @@ pub fn html() -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'close' }));
   }
 
-  function confirmSelection() {
+  function confirmSelection(isolated) {
     if (filtered.length === 0) {
       const q = userQuery.trim();
       if (!q) {
@@ -523,21 +523,25 @@ pub fn html() -> String {
         return;
       }
       if (isLikelyUrl(q)) {
-        navigate(toNavigableUrl(q));
+        navigate(toNavigableUrl(q), isolated);
       } else {
-        navigate(searchUrl(q));
+        navigate(searchUrl(q), isolated);
       }
       return;
     }
 
     const item = filtered[sel];
     if (item.kind === 'tab') {
+      if (isolated) {
+        navigate(item.url, true);
+        return;
+      }
       window.ipc.postMessage(JSON.stringify({ type: 'switch_tab', tab_id: item.tab_id }));
       return;
     }
 
     if (item.kind === 'search') {
-      navigate(searchUrl(item.query));
+      navigate(searchUrl(item.query), isolated);
       return;
     }
 
@@ -546,7 +550,7 @@ pub fn html() -> String {
       return;
     }
 
-    navigate(item.url);
+    navigate(item.url, isolated);
   }
 
   function forceNavigate() {
@@ -565,8 +569,8 @@ pub fn html() -> String {
     window.ipc.postMessage(JSON.stringify({ type: 'ask_ai', text: q }));
   }
 
-  function navigate(url) {
-    window.ipc.postMessage(JSON.stringify({ type: 'navigate', url }));
+  function navigate(url, isolated) {
+    window.ipc.postMessage(JSON.stringify({ type: 'navigate', url, isolated: !!isolated }));
   }
 
   function searchUrl(q) {
@@ -754,11 +758,11 @@ pub fn html() -> String {
   function renderItem(item, idx) {
     const hostname = cleanHost(item.url || '');
     const rawTitle = (item.title && item.title !== item.url) ? item.title : hostname;
-    const kindLabel = esc(item.pill || kindLabelFor(item));
+    const kindLabel = esc(item.pill || (item.incognito ? 'Private' : kindLabelFor(item)));
     const selected = idx === sel ? ' selected' : '';
     const isJumpable = item.kind === 'tab' || item.kind === 'history';
     const shortcutNum = isJumpable ? (idx >= 1 && idx <= 9 ? String(idx) : idx === 10 ? '0' : '') : '';
-    const actionShortcut = item.kind === 'ask' ? '⌘⇧↵' : (item.kind === 'search' || item.kind === 'url') ? '⌘↵' : '';
+    const actionShortcut = (item.kind === 'search' || item.kind === 'url') ? '⌘↵' : '';
     const shortcutHtml = shortcutNum ? '<span class="shortcut-badge">⌘' + shortcutNum + '</span>'
                        : actionShortcut ? '<span class="shortcut-badge">' + actionShortcut + '</span>'
                        : '';

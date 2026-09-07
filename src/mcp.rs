@@ -2300,6 +2300,7 @@ mod tests {
             is_playing_audio: false,
             page_bytes: 0,
             page_time_ms: 0,
+            incognito: false,
             last_active_at: std::time::Instant::now(),
         }
     }

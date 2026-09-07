@@ -70,10 +70,10 @@ use workspace::{WorkspaceManager, DEFAULT_WORKSPACE_ID};
 enum AppEvent {
     ToggleOverlay,
     HideOverlay,
-    TitleChanged(usize, String),      // (tab_id, title)
-    BrowserUrlChanged(usize, String), // (tab_id, url)
-    FaviconFetched(String, String),   // (domain, data_uri)
-    NavigateTo(String),
+    TitleChanged(usize, String),           // (tab_id, title)
+    BrowserUrlChanged(usize, String),      // (tab_id, url)
+    FaviconFetched(usize, String, String), // (tab_id, domain, data_uri)
+    NavigateTo(String, bool),              // (url, isolated) — isolated opens an incognito tab
     PushAddressHistory, // address bar requested history snapshot for URL autocomplete
     UrlEditExpand(bool), // address bar entered/left edit mode — grow the bar webview so the
     // suggestion dropdown isn't clipped by the 32 px titlebar height.
@@ -104,7 +104,7 @@ enum AppEvent {
     AcpSessionRename(u64, String), // (session_id, title) — rename session
     SidebarReady,             // sidebar JS finished initializing — push restore
     SidebarReFocus,           // sidebar window became key — restore textarea focus
-    AskAI(String),            // overlay ⌘⇧Enter — open sidebar + send prompt
+    AskAI(String),            // overlay Ask AI row — open sidebar + send prompt
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
     // Open URL in a new tab. Second field = the tab that requested it (a page's
     // window.open / target=_blank), or None for UI surfaces (sidebar, A2UI, ACP
@@ -765,7 +765,11 @@ fn main() {
         // existed; every webview created afterward — in any workspace,
         // including brand new ones — silently reused that stale startup-time
         // value, defeating per-workspace cookie/localStorage isolation).
-        move |tab_id: usize, url: &str, data_store_id: Option<[u8; 16]>| -> WebView {
+        move |tab_id: usize,
+              url: &str,
+              data_store_id: Option<[u8; 16]>,
+              incognito: bool|
+              -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
             let p3 = proxy.clone();
@@ -816,6 +820,7 @@ fn main() {
                                 (v["domain"].as_str(), v["data"].as_str())
                                 {
                                     let _ = p3.send_event(AppEvent::FaviconFetched(
+                                        tab_id,
                                         domain.to_string(),
                                         data.to_string(),
                                     ));
@@ -1032,9 +1037,17 @@ fn main() {
             // Per-workspace cookie/localStorage/cache isolation. `None` (the
             // default workspace) omits the call entirely — WebKit falls back
             // to its default persistent data store.
-            let wv = match data_store_id {
-                Some(id) => wv.with_data_store_identifier(id),
-                None => wv,
+            // Isolated (incognito) tabs get their own non-persistent
+            // WKWebsiteDataStore — cookies/localStorage/cache live in memory
+            // only and die with the tab. Takes precedence over any workspace
+            // data-store id (wry ignores the identifier when incognito is set).
+            let wv = if incognito {
+                wv.with_incognito(true)
+            } else {
+                match data_store_id {
+                    Some(id) => wv.with_data_store_identifier(id),
+                    None => wv,
+                }
             };
             let wv = wv
                 .build_as_child(&*browser_win)
@@ -1229,7 +1242,8 @@ fn main() {
             if is_overall_active_ws && restored_active_id.is_none() && st.url == overall_active_url
             {
                 // Active tab — create WebView immediately
-                let wv = make_webview(tab_id, &st.url, ws.data_store_id);
+                // Isolated tabs are never written to the session file.
+                let wv = make_webview(tab_id, &st.url, ws.data_store_id, false);
                 if st.url == "about:blank" {
                     let html = newtab_html::html(&quickslots::to_json(&ws.quick_slots));
                     let _ = wv.load_html(&html);
@@ -1328,7 +1342,9 @@ fn main() {
                         Some("navigate") => {
                             dismiss();
                             if let Some(url) = v["url"].as_str() {
-                                let _ = p.send_event(AppEvent::NavigateTo(url.to_string()));
+                                let isolated = v["isolated"].as_bool().unwrap_or(false);
+                                let _ =
+                                    p.send_event(AppEvent::NavigateTo(url.to_string(), isolated));
                             }
                         }
                         Some("switch_tab") => {
@@ -1842,7 +1858,7 @@ fn main() {
                         Some("navigate") => {
                             // Submitted URL/query from the address bar edit field.
                             if let Some(url) = v["url"].as_str() {
-                                let _ = p.send_event(AppEvent::NavigateTo(url.to_string()));
+                                let _ = p.send_event(AppEvent::NavigateTo(url.to_string(), false));
                             }
                         }
                         _ => {}
@@ -2680,7 +2696,15 @@ fn main() {
         ($ws:expr, $tab_id:expr, $url:expr) => {{
             let ws_i = $ws;
             let id = $tab_id;
-            let wv = make_webview(id, $url, workspace_manager.at(ws_i).data_store_id);
+            // Isolation flag lives on the tab metadata — read it at spawn
+            // time so every path (palette, popup, wake) builds correctly.
+            let incognito = is_isolated_tab(&workspace_manager, id);
+            let wv = make_webview(
+                id,
+                $url,
+                workspace_manager.at(ws_i).data_store_id,
+                incognito,
+            );
             let _ = wv.set_visible(false);
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             let p = proxy.clone();
@@ -2725,7 +2749,8 @@ fn main() {
                 if let Some(url) = pending_tabs.remove(&target) {
                     let has_snapshot = tab_snapshots.contains_key(&target);
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
-                    let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id);
+                    let incognito = is_isolated_tab(&workspace_manager, target);
+                    let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id, incognito);
                     if !has_snapshot && url == "about:blank" {
                         let html =
                             newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots));
@@ -3509,7 +3534,7 @@ fn main() {
         // Checked every tick — macOS may deliver the URL after the run loop starts.
         for url in cold_open::take() {
             tracing::debug!(url = %url, "cold_open: draining URL");
-            let _ = proxy.send_event(AppEvent::NavigateTo(url));
+            let _ = proxy.send_event(AppEvent::NavigateTo(url, false));
         }
         let mut next_wake = if let Some(hide_at) = progress_hide_at {
             sys_stats_next_at.min(hide_at)
@@ -6354,7 +6379,7 @@ fn main() {
             }
 
             // ── Navigate: new tab with its own WebView ────────────────────
-            Event::UserEvent(AppEvent::NavigateTo(raw)) => {
+            Event::UserEvent(AppEvent::NavigateTo(raw, isolated)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
@@ -6364,7 +6389,11 @@ fn main() {
                     return;
                 }
                 let url = url::resolve_url(&raw, &search_engine);
-                let tab_id = workspace_manager.active().tabs.lock().unwrap().open(url.clone());
+                let tab_id = if isolated {
+                    workspace_manager.active().tabs.lock().unwrap().open_incognito(url.clone())
+                } else {
+                    workspace_manager.active().tabs.lock().unwrap().open(url.clone())
+                };
                 // Keep the currently *visible* tab on screen while new one loads.
                 // If a swap is already pending, the visible tab is the old one from that swap;
                 // the old new_id tab is now orphaned — clean it up.
@@ -6435,13 +6464,27 @@ fn main() {
                     let ws_idx = source
                         .and_then(|src| workspace_manager.index_of_tab(src))
                         .unwrap_or(workspace_manager.active_index());
-                    let new_id = workspace_manager.at(ws_idx).tabs.lock().unwrap().open_background(url.clone());
+                    // Popups from an isolated tab stay isolated — a persistent
+                    // cookie jar would leak the private session into history.
+                    let isolated = source.is_some_and(|src| is_isolated_tab(&workspace_manager, src));
+                    let new_id = if isolated {
+                        workspace_manager.at(ws_idx).tabs.lock().unwrap().open_incognito_background(url.clone())
+                    } else {
+                        workspace_manager.at(ws_idx).tabs.lock().unwrap().open_background(url.clone())
+                    };
                     spawn_tab_webview_at!(ws_idx, new_id, &url);
                     tracing::debug!(new_id, ?source, "OpenInNewTab kept in background (agent-driven source)");
                     return;
                 }
 
-                let tab_id = workspace_manager.active().tabs.lock().unwrap().open(url.clone());
+                // Popups from an isolated tab stay isolated — a persistent
+                // cookie jar would leak the private session into history.
+                let isolated = source.is_some_and(|src| is_isolated_tab(&workspace_manager, src));
+                let tab_id = if isolated {
+                    workspace_manager.active().tabs.lock().unwrap().open_incognito(url.clone())
+                } else {
+                    workspace_manager.active().tabs.lock().unwrap().open(url.clone())
+                };
                 // Keep the currently visible tab on screen while new one loads.
                 // Clean up orphaned tab if a swap was already pending.
                 let visible_id = if let Some((old, orphan)) = pending_swap.take() {
@@ -6554,12 +6597,14 @@ fn main() {
                         }
                     }
                     // Remember it for ⌘⇧T. Blank and new-tab pages are skipped:
-                    // reopening one restores nothing the user lost.
+                    // reopening one restores nothing the user lost. Private tabs
+                    // are skipped too — reopening would put the URL in a
+                    // persistent tab and in history.
                     let closed_url = {
                         let tm = workspace_manager.active().tabs.lock().unwrap();
                         tm.tabs()
                             .iter()
-                            .find(|t| t.id == id)
+                            .find(|t| t.id == id && !t.incognito)
                             .map(|t| t.url.clone())
                             .filter(|u| !u.is_empty() && u != "about:blank")
                     };
@@ -7418,7 +7463,7 @@ fn main() {
                 }
                 match action {
                     InternalPageAction::Navigate(url) => {
-                        let _ = proxy.send_event(AppEvent::NavigateTo(url));
+                        let _ = proxy.send_event(AppEvent::NavigateTo(url, false));
                     }
                     InternalPageAction::CopyText(text) => {
                         webview_utils::copy_text_to_pasteboard(&text);
@@ -7458,7 +7503,7 @@ fn main() {
                     if let Some(tab_id) = existing_tab {
                         let _ = proxy.send_event(AppEvent::SwitchTab(tab_id));
                     } else {
-                        let _ = proxy.send_event(AppEvent::NavigateTo(url));
+                        let _ = proxy.send_event(AppEvent::NavigateTo(url, false));
                     }
                 }
             }
@@ -7516,7 +7561,7 @@ fn main() {
                             "window.__slotSaved && window.__slotSaved()",
                         );
                     }
-                    let _ = proxy.send_event(AppEvent::NavigateTo(resolved));
+                    let _ = proxy.send_event(AppEvent::NavigateTo(resolved, false));
                 }
             }
 
@@ -7934,7 +7979,11 @@ fn main() {
             // ── Favicon fetched from page — store in cache ────────────────
             // Only update + save when we get a new/changed entry (avoids redundant writes).
             // FIFO eviction at FAVICON_CAP keeps memory bounded.
-            Event::UserEvent(AppEvent::FaviconFetched(domain, data_uri)) => {
+            Event::UserEvent(AppEvent::FaviconFetched(tab_id, domain, data_uri)) => {
+                // Isolated tabs leave no trace in the on-disk favicon cache.
+                if is_isolated_tab(&workspace_manager, tab_id) {
+                    return;
+                }
                 // The count cap alone let a handful of sites dominate the cache:
                 // one 6.4 MB "favicon" is bigger than the other 499 entries put
                 // together, and it gets shipped to the address bar as JS source
@@ -8099,6 +8148,28 @@ fn main() {
             }
 
             Event::UserEvent(AppEvent::NavigationError(tab_id, url, error)) => {
+                // nav_error_patch sends "" when the NSError carries no
+                // failing-URL key. The error page would then show an empty
+                // address and Retry would reload nothing — fall back to the
+                // URL the tab was asked to load.
+                let url = if url.is_empty() {
+                    workspace_manager
+                        .index_of_tab(tab_id)
+                        .and_then(|i| {
+                            workspace_manager
+                                .at(i)
+                                .tabs
+                                .lock()
+                                .unwrap()
+                                .tabs()
+                                .iter()
+                                .find(|t| t.id == tab_id)
+                                .map(|t| t.url.clone())
+                        })
+                        .unwrap_or_default()
+                } else {
+                    url
+                };
                 // External scheme that slipped through → try opening with macOS
                 if url::is_external_scheme(&url) {
                     macos::open_external_url(&url);
@@ -8492,7 +8563,7 @@ fn main() {
 
             // ── New tab (⌘N) ───────────────────────────────────────────────
             Event::UserEvent(AppEvent::NewTab) => {
-                let _ = proxy.send_event(AppEvent::NavigateTo(cfg.home_page.clone()));
+                let _ = proxy.send_event(AppEvent::NavigateTo(cfg.home_page.clone(), false));
             }
 
             // ── Reopen closed tab (⌘⇧T) ────────────────────────────────────
@@ -8612,7 +8683,7 @@ fn main() {
                 for url in urls {
                     let raw = url.to_string();
                     tracing::debug!(url = %raw, "OS opened URL");
-                    let _ = proxy.send_event(AppEvent::NavigateTo(raw));
+                    let _ = proxy.send_event(AppEvent::NavigateTo(raw, false));
                 }
                 // Bring window to front when opened externally
                 browser_win.set_focus();
@@ -9802,6 +9873,22 @@ fn build_browser_context(
     Some(out)
 }
 
+/// Whether `tab_id` belongs to an isolated (incognito) tab. WebViews are
+/// created separately from tab metadata, so every creation path re-derives
+/// this at build time (spawn, hibernation wake, favicon guard).
+fn is_isolated_tab(workspace_manager: &WorkspaceManager, tab_id: usize) -> bool {
+    workspace_manager.index_of_tab(tab_id).is_some_and(|i| {
+        workspace_manager
+            .at(i)
+            .tabs
+            .lock()
+            .unwrap()
+            .tabs()
+            .iter()
+            .any(|t| t.id == tab_id && t.incognito)
+    })
+}
+
 /// Snapshot every workspace's open tabs for session.json.
 fn session_snapshot(workspace_manager: &WorkspaceManager) -> Vec<config::WorkspaceSession> {
     workspace_manager
@@ -9809,9 +9896,12 @@ fn session_snapshot(workspace_manager: &WorkspaceManager) -> Vec<config::Workspa
         .iter()
         .map(|ws| {
             let mut tm = ws.tabs.lock().unwrap();
+            // Isolated tabs are never persisted — restoring them would
+            // recreate them on a persistent data store.
             let session_tabs: Vec<config::SessionTab> = tm
                 .tabs()
                 .iter()
+                .filter(|t| !t.incognito)
                 .map(|t| config::SessionTab {
                     url: t.url.clone(),
                     title: t.title.clone(),
@@ -9819,6 +9909,7 @@ fn session_snapshot(workspace_manager: &WorkspaceManager) -> Vec<config::Workspa
                 .collect();
             let active_tab_url = tm
                 .active_tab()
+                .filter(|t| !t.incognito)
                 .map(|t| t.url.as_str())
                 .unwrap_or("")
                 .to_string();

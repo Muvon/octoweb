@@ -753,6 +753,7 @@ pub fn build_items_json(
             "visit_count": visits,
             "visited_at": 0u64,  // tabs are live — recency handled in JS as "now"
             "hibernated": hibernated.contains(&tab.id),
+            "incognito": tab.incognito,
         }));
     }
 
