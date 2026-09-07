@@ -1,0 +1,79 @@
+# Title: Summarize Thread — Key Points, Disagreements, Verified Quotes
+#
+# Input: a URL — an HN / Reddit / forum thread or a long article. Opens it in
+# a background tab, reads all of it (browser_get_page_content paged by
+# offset, "more comments" expanded a few times), and digests it into key
+# points, top disagreements, and notable quotes with attribution. A verify
+# loop then checks every quote exists verbatim on the page and deletes any
+# that does not — a quote that cannot be found is not a quote.
+
+name        = "summarize-thread"
+description = "Open a thread or long article in a background tab, read all of it (paging browser_get_page_content), summarize key points, top disagreements, and notable quotes with attribution, then verify every quote exists verbatim on the page."
+
+# ── 1. Digest — read everything, keep the tab for verification ──────────────
+[[steps]]
+name    = "digest"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 900
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab.
+
+URL:
+{{input}}
+
+1. `browser_navigate` with the URL only (background tab); note tab_id and the landed URL. A consent banner shows → `browser_dismiss_overlay` (it rejects).
+2. `browser_get_page_content` on that tab_id. Its footer reports the total: keep calling with `offset` until everything is read (stop at 300000 characters and say so). On threads, `browser_snapshot` with `find` "more comments" / "load more" / "continue this thread" — a control is there → `browser_click` it (at most 3 times), `browser_wait`, read the new text.
+3. Leave the tab open — the next step verifies against it.
+
+Output exactly:
+TAB_ID: <id>
+URL: <landed URL>
+TITLE: <page title>
+READ: <characters read> of <total>
+KEY POINTS:
+- <5–8 bullets, each one claim or fact from the text>
+DISAGREEMENTS:
+- <2–4 items: "<position A>" (<who>) vs "<position B>" (<who>) — one line on the crux>
+QUOTES:
+- "<verbatim sentence, 8–40 words>" — <author or handle as shown on the page>
+(3–6 quotes. Copy exactly, punctuation included; no paraphrase, no ellipsis inside a quote.)
+
+The page did not load or holds no thread/article → output only:
+LOAD FAILED: <URL> — <what you saw>
+"""
+
+# ── 2. Verify — each quote must exist verbatim on the page ──────────────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
+
+  [[steps.run]]
+  name    = "check"
+  role    = "octoweb:assistant"
+  skills  = ["browser-tasks"]
+  timeout = 300
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab.
+
+Digest:
+{{digest}}
+
+LOAD FAILED → output "RESULT: VERIFIED", then the LOAD FAILED line, nothing else.
+
+Otherwise, for each QUOTES entry run `browser_execute_js` on TAB_ID with
+  document.body.innerText.includes(<the quote as a JS string literal>)
+true → keep. false → `browser_get_page_content` with `offset` around where you expect it; still absent → delete the quote (never reword it into existence). The attributed author's name is not in the page text → append "— attribution unverified". Then `browser_close_tab` TAB_ID.
+
+RESULT is NOT VERIFIED only when the tab is gone or the page no longer loads — say so.
+
+Output exactly:
+RESULT: VERIFIED | NOT VERIFIED
+TITLE: <title>
+URL: <URL>
+KEY POINTS, DISAGREEMENTS, and the surviving QUOTES, verbatim from the digest
+QUOTES CHECKED: <n> kept, <m> removed
+"""

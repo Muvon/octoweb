@@ -26,6 +26,7 @@ mod nav_error_patch;
 mod newtab_html;
 mod notification_html;
 mod overlay_html;
+mod page_index;
 mod progress_bar_html;
 mod prompt_history_js;
 mod quickslots;
@@ -105,6 +106,10 @@ enum AppEvent {
     SidebarReady,             // sidebar JS finished initializing — push restore
     SidebarReFocus,           // sidebar window became key — restore textarea focus
     AskAI(String),            // overlay Ask AI row — open sidebar + send prompt
+    AskSelectionRequest,      // ⌘⇧K — capture the page selection for the sidebar
+    AskSelection(usize, String), // (tab_id, selected text) — build the sidebar prompt
+    PageText(usize, String),  // (tab_id, visible text) — feed the full-text history index
+    ContentSearch(String),    // palette `/query` — search page text, push results back
     ToggleDevTools,           // Cmd+Shift+I — open devtools for active tab
     // Open URL in a new tab. Second field = the tab that requested it (a page's
     // window.open / target=_blank), or None for UI surfaces (sidebar, A2UI, ACP
@@ -281,6 +286,7 @@ fn keybind_to_event(
         A::SidebarFullscreen if !overlay && !inline => AppEvent::ToggleSidebarFullscreen,
         A::Fullscreen if !overlay && !inline && !find => AppEvent::ToggleFullscreen,
         A::InlineEdit if !overlay => AppEvent::InlineEditRequest,
+        A::AskSelection if !overlay && !inline => AppEvent::AskSelectionRequest,
         A::UrlEdit if !overlay && !inline && !find && !sidebar => AppEvent::UrlEditRequest,
         A::NewSession if sidebar && !overlay => AppEvent::AcpSessionCreatePanel,
         A::CloseTab if !overlay => {
@@ -490,6 +496,14 @@ fn terminate_octomind_pids(pids: &[u32]) {
         }
     }
 }
+
+/// Posts the page's visible text back to Rust for the full-text history
+/// index. Delayed so SPA frameworks have painted; internal documents
+/// (about:, error pages) are filtered by protocol.
+const PAGE_TEXT_JS: &str = "setTimeout(function(){try{if(!/^https?:$/.test(location.protocol))return;var t=(document.body&&document.body.innerText)||'';window.ipc.postMessage(JSON.stringify({type:'page_text',text:t.slice(0,6000)}))}catch(e){}},1500)";
+
+/// Posts the current selection back to Rust for "ask AI about selection".
+const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.ipc.postMessage(JSON.stringify({type:'selection_text',text:s.trim().slice(0,4000)}))})()";
 
 fn main() {
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
@@ -960,6 +974,15 @@ fn main() {
                                     ));
                                 }
                             }
+                            Some("selection_text") => {
+                                let text = v["text"].as_str().unwrap_or("").to_string();
+                                let _ = p3.send_event(AppEvent::AskSelection(tab_id, text));
+                            }
+                            Some("page_text") => {
+                                if let Some(text) = v["text"].as_str() {
+                                    let _ = p3.send_event(AppEvent::PageText(tab_id, text.to_string()));
+                                }
+                            }
                             Some("open_new_tab") => {
                                 if let Some(url) = v["url"].as_str() {
                                     let _ = p3.send_event(AppEvent::OpenInNewTab(url.to_string(), Some(tab_id)));
@@ -1166,6 +1189,9 @@ fn main() {
     // URL may still be the failed external URL, so URL alone cannot authorize
     // the error page's retry/copy IPC.
     let mut error_page_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Full-text memory of visited pages (palette `/query`, MCP search tool).
+    let mut page_index = page_index::PageIndex::load();
+    let mut page_index_save_at: Option<std::time::Instant> = None;
     // Consecutive WebContent crashes per tab, cleared once a load completes.
     // Bounds the reload-on-crash loop; see AppEvent::WebContentTerminated.
     let mut webcontent_crashes: std::collections::HashMap<usize, u8> =
@@ -1338,6 +1364,11 @@ fn main() {
                         Some("overlay_close") | Some("close") => {
                             dismiss();
                             let _ = p.send_event(AppEvent::HideOverlay);
+                        }
+                        Some("content_search") => {
+                            if let Some(q) = v["q"].as_str() {
+                                let _ = p.send_event(AppEvent::ContentSearch(q.to_string()));
+                            }
                         }
                         Some("navigate") => {
                             dismiss();
@@ -3058,11 +3089,13 @@ fn main() {
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> =
                         pending_tabs.keys().copied().collect();
+                    let rss = tab_rss_by_id(&workspace_manager.active().webviews);
                     webview_utils::build_items_json(
                         tm.tabs(),
                         tm.history(),
                         &favicon_cache.lock().unwrap(),
                         &hib,
+                        &rss,
                     )
                 };
                 let _ = overlay_wv.evaluate_script(&format!(
@@ -3423,6 +3456,7 @@ fn main() {
                         "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
                     ));
                 }
+                probe_workflows_and_routines(Some(s));
                 if let Some(ref json) = s.account_json {
                     let escaped = webview_utils::escape_js_template(json);
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -3542,6 +3576,9 @@ fn main() {
             sys_stats_next_at
         };
         if let Some(save_at) = history_save_at {
+            next_wake = next_wake.min(save_at);
+        }
+        if let Some(save_at) = page_index_save_at {
             next_wake = next_wake.min(save_at);
         }
         if let Some(save_at) = favicon_save_at {
@@ -3687,6 +3724,14 @@ fn main() {
                 pressure: pressure_str,
                 active_url: &active_url,
             });
+        }
+
+        // ── Debounced page-index save ───────────────────────────────────
+        if let Some(save_at) = page_index_save_at {
+            if now >= save_at {
+                page_index_save_at = None;
+                page_index.save();
+            }
         }
 
         // ── Debounced history save ──────────────────────────────────────
@@ -4098,6 +4143,7 @@ fn main() {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setAvailableCommands && window.__setAvailableCommands({sid},`{escaped}`)"
                         ));
+                        probe_workflows_and_routines(workspace_manager.at(ws_idx).acp_sessions.iter().find(|s| s.id == sid));
                     }
                     acp::AgentEvent::Done | acp::AgentEvent::Cancelled => {
                         let mut should_persist = false;
@@ -4220,6 +4266,18 @@ fn main() {
                         if should_persist {
                             persist_acp_history(&workspace_manager.at(ws_idx).id, &workspace_manager.at(ws_idx).acp_sessions, workspace_manager.at(ws_idx).acp_active_session_id, cfg.max_acp_session_messages);
                         }
+                    }
+                    acp::AgentEvent::Workflows(json) => {
+                        let escaped = webview_utils::escape_js_template(&json);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setWorkflows && window.__setWorkflows({sid},`{escaped}`)"
+                        ));
+                    }
+                    acp::AgentEvent::Schedules(text) => {
+                        let escaped = webview_utils::escape_js_template(&text);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setRoutines && window.__setRoutines({sid},`{escaped}`)"
+                        ));
                     }
                     acp::AgentEvent::Account { signed_in, account, over_quota, summary } => {
                         let json = serde_json::json!({
@@ -5021,6 +5079,9 @@ fn main() {
                         }).collect();
                         let _ = response.send(Ok(entries));
                     }
+                    McpCommand::SearchPageText { query, limit, response } => {
+                        let _ = response.send(Ok(page_index.search(&query, limit.unwrap_or(10))));
+                    }
                     McpCommand::GetPlayingTabs { response } => {
                         let tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
                         let active = tm.active_id();
@@ -5729,11 +5790,13 @@ fn main() {
                     let mut tm = workspace_manager.active().tabs.lock().unwrap();
                     tm.ensure_contiguous();
                     let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
+                    let rss = tab_rss_by_id(&workspace_manager.active().webviews);
                     webview_utils::build_items_json(
                         tm.tabs(),
                         tm.history(),
                         &favicon_cache.lock().unwrap(),
                         &hib,
+                        &rss,
                     )
                 };
                 let _ = address_bar_wv.evaluate_script(&format!(
@@ -6325,11 +6388,13 @@ fn main() {
                         let mut tm = workspace_manager.active().tabs.lock().unwrap();
                         tm.ensure_contiguous();
                         let hib: std::collections::HashSet<usize> = pending_tabs.keys().copied().collect();
+                        let rss = tab_rss_by_id(&workspace_manager.active().webviews);
                         webview_utils::build_items_json(
                             tm.tabs(),
                             tm.history(),
                             &favicon_cache.lock().unwrap(),
                             &hib,
+                            &rss,
                         )
                     };
                     let se = webview_utils::escape_js_template(&search_engine);
@@ -7421,6 +7486,49 @@ fn main() {
             }
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────
+            // ── Ask AI about the selection (⌘⇧K) ────────────────────────
+            Event::UserEvent(AppEvent::AskSelectionRequest) => {
+                match workspace_manager.active().webviews.get(&active_wv_id) {
+                    Some(wv) => {
+                        let _ = wv.evaluate_script(SELECTION_TEXT_JS);
+                    }
+                    // Hibernated or blank tab — nothing to select, ask about the page.
+                    None => {
+                        let _ = proxy.send_event(AppEvent::AskSelection(active_wv_id, String::new()));
+                    }
+                }
+            }
+            Event::UserEvent(AppEvent::AskSelection(tab_id, text)) => {
+                let (title, url) = tab_title_url(&workspace_manager, tab_id);
+                let url = sanitize::sanitize_url(&url);
+                let prompt = if text.is_empty() {
+                    format!("Explain this page: {title} — {url}")
+                } else {
+                    format!("Explain this, from {title} ({url}):\n\n{text}")
+                };
+                let _ = proxy.send_event(AppEvent::AskAI(prompt));
+            }
+
+            // ── Full-text history index ──────────────────────────────────
+            Event::UserEvent(AppEvent::PageText(tab_id, text)) => {
+                if error_page_tabs.contains(&tab_id) || is_isolated_tab(&workspace_manager, tab_id) {
+                    return;
+                }
+                let (title, url) = tab_title_url(&workspace_manager, tab_id);
+                if !url.starts_with("http") {
+                    return;
+                }
+                page_index.index(&url, &title, &text);
+                page_index_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            }
+            Event::UserEvent(AppEvent::ContentSearch(q)) => {
+                let hits = page_index.search(&q, 12);
+                let json = serde_json::to_string(&hits).unwrap_or_else(|_| "[]".into());
+                let _ = overlay_wv.evaluate_script(&format!(
+                    "window.__setContentResults && window.__setContentResults({json})"
+                ));
+            }
+
             Event::UserEvent(AppEvent::AskAI(text)) => {
                 // Open sidebar if not already visible
                 if !sidebar_visible {
@@ -8101,6 +8209,13 @@ fn main() {
                     }
                     // Don't hide progress bar yet — the real page load will fire its own events.
                     return;
+                }
+                // Full-text history: ask the page for its visible text. Private
+                // tabs and error pages leave no trace.
+                if !error_page_tabs.contains(&tab_id) && !is_isolated_tab(&workspace_manager, tab_id) {
+                    if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
+                        let _ = wv.evaluate_script(PAGE_TEXT_JS);
+                    }
                 }
                 if tab_id == active_wv_id && progress_visible {
                     let _ = progress_wv.evaluate_script(
@@ -9887,6 +10002,46 @@ fn is_isolated_tab(workspace_manager: &WorkspaceManager, tab_id: usize) -> bool 
             .iter()
             .any(|t| t.id == tab_id && t.incognito)
     })
+}
+
+/// Title and URL of a tab in any workspace; empty strings when unknown.
+fn tab_title_url(workspace_manager: &WorkspaceManager, tab_id: usize) -> (String, String) {
+    workspace_manager
+        .index_of_tab(tab_id)
+        .and_then(|i| {
+            workspace_manager
+                .at(i)
+                .tabs
+                .lock()
+                .unwrap()
+                .tabs()
+                .iter()
+                .find(|t| t.id == tab_id)
+                .map(|t| (t.title.clone(), t.url.clone()))
+        })
+        .unwrap_or_default()
+}
+
+/// Resident memory of every live tab WebView, for the palette's memory badge.
+/// Hibernated tabs have no process and simply get no badge.
+fn tab_rss_by_id(webviews: &HashMap<usize, WebView>) -> HashMap<usize, u64> {
+    webviews
+        .iter()
+        .filter_map(|(id, wv)| {
+            let ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
+            let (rss, _) = tab_stats::sample_pid(tab_stats::webview_pid(ptr)?)?;
+            Some((*id, rss / (1024 * 1024)))
+        })
+        .collect()
+}
+
+/// Background ext-call probes behind the sidebar's `/workflow` autocomplete
+/// and routines chip. Results arrive as `AgentEvent::Workflows` / `Schedules`.
+fn probe_workflows_and_routines(session: Option<&AcpSession>) {
+    if let Some(h) = session.and_then(|s| s.handle.as_ref()) {
+        let _ = h.send_command("/workflow".to_string());
+        let _ = h.send_command("/schedule list".to_string());
+    }
 }
 
 /// Snapshot every workspace's open tabs for session.json.

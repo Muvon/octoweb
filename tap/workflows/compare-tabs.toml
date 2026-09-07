@@ -1,0 +1,95 @@
+# Title: Compare Tabs — One Question, One Table, Every Row Cited
+#
+# Input: a question, then the tabs to compare (URLs and/or titles — the
+# assistant passes its browser state). Reads each tab's content, builds one
+# comparison table with a row per tab and a Source column holding the URL,
+# then re-checks every cell against its page before reporting. Never touches
+# what the user is looking at: listed tabs are read in place, missing ones
+# are opened in the background and closed again.
+
+name        = "compare-tabs"
+description = "Answer a question across open tabs: read each listed tab's content, build one comparison table with a row per tab cited by URL, then verify every cell against its page."
+
+# ── 1. Read — facts per tab, verbatim ───────────────────────────────────────
+[[steps]]
+name    = "read"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 600
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab.
+
+Request (a question, then the tabs to compare as URLs and/or titles):
+{{input}}
+
+1. `browser_get_tabs`. Match each listed tab by URL, else by title. A listed tab that is not open → `browser_navigate` its URL (background tab), read it, `browser_close_tab` it afterwards.
+2. For each tab, `browser_get_page_content` with its tab_id. Page with `offset` only while the part relevant to the question is still missing (stop at 100000 characters per tab).
+3. Keep only what the question needs. Quote numbers, names, prices, dates verbatim.
+
+Output, one block per tab:
+TAB: <title>
+URL: <URL as reported by browser_get_tabs, not as typed in the request>
+FACTS:
+- <criterion>: "<verbatim snippet>"
+- <criterion>: not on page
+
+A tab that failed to load:
+TAB: <title>
+URL: <URL>
+FACTS: LOAD FAILED — <what you saw>
+"""
+
+# ── 2. Table — one row per tab, Source column = URL ─────────────────────────
+[[steps]]
+name    = "table"
+role    = "octoweb:assistant"
+timeout = 180
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, no browser tools.
+
+Question and tabs:
+{{input}}
+
+Extracted facts:
+{{read}}
+
+Build one Markdown table: a row per tab, a column per criterion the question implies, and a last column "Source" holding that row's URL. A value missing from FACTS is "not on page" — never fill it from your own knowledge. Then answer the question in 1–3 sentences, citing rows by URL.
+
+Output exactly:
+TABLE:
+<markdown table>
+ANSWER:
+<answer>
+"""
+
+# ── 3. Verify — every cell traces to its page ───────────────────────────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
+
+  [[steps.run]]
+  name    = "check"
+  role    = "octoweb:assistant"
+  skills  = ["browser-tasks"]
+  timeout = 600
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab.
+
+Draft:
+{{table}}
+
+For every cell that is not "not on page": find its tab via `browser_get_tabs` (a closed URL → `browser_navigate` it in the background and `browser_close_tab` after) and confirm the value is in that page's text — `browser_execute_js` with `document.body.innerText.includes("<value>")` settles exact strings; `browser_get_page_content` for anything looser. A value you cannot find → set the cell to "not on page" and drop any ANSWER claim that relied on it. A tab that fails to load → keep its row, mark each cell "unverified (load failed)".
+
+RESULT is VERIFIED once every remaining cell traces to its page. Use NOT VERIFIED only when a tab failed to load — name the URL.
+
+Output exactly:
+RESULT: VERIFIED | NOT VERIFIED
+TABLE:
+<corrected table>
+ANSWER:
+<corrected answer>
+CHECKED: <n> cells, <m> corrected
+"""

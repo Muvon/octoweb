@@ -36,13 +36,15 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 
 2. **AI assistant built in** — Not an extension, not a tab. A sidebar overlay powered by a local [octomind](https://github.com/muvon/octomind) agent via [ACP](https://github.com/muvon/agent-client-protocol). Ask questions about the current page, get code explanations, summarize content — all without leaving the browser.
 
-3. **MCP server inside the browser** — Your AI tools can actually *drive* the browser. Octoweb runs an MCP server on `localhost:3434/mcp` that exposes 29 tools for navigation, tab management, page interaction, and content extraction. Point Claude Desktop or any MCP client at it and watch it browse.
+3. **MCP server inside the browser** — Your AI tools can actually *drive* the browser. Octoweb runs an MCP server on `localhost:3434/mcp` that exposes 30 tools for navigation, tab management, page interaction, and content extraction. Point Claude Desktop or any MCP client at it and watch it browse.
 
 ---
 
 ## Features
 
 - **Command palette** (`⌘⇧P`) — Fuzzy search across tabs and history. Type a URL, search query, or page fragment.
+- **Page memory** (`/` in the palette) — Search the text of pages you have visited, not just titles. "Where did I see that pricing table" is one keystroke away; the agent gets the same search as an MCP tool. Private tabs are never indexed.
+- **Ask about selection** (`⌘⇧K`) — Select text on any page and ask the sidebar to explain it, with the page as context. No selection asks about the page.
 - **Private tabs** (`⌘⇧↵` in the palette) — Open any result in an isolated tab with in-memory cookies and storage. Nothing is written to history, the session file, or the favicon cache; closing the tab discards everything.
 - **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access, one set per workspace. Footer bar shows all slots.
 - **Tab pinning** (`⌘⇧N`) — Pin the current tab to the fast-access bar with one keystroke.
@@ -51,7 +53,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
 - **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. **Off by default** — it reads your tabs, history and page text, so you turn it on deliberately in Settings (`⌘,`).
-- **MCP server** — 29 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
+- **MCP server** — 30 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content.
 - **Find-in-page** (`⌘F`) — Full-text search with highlighting.
 - **Page zoom** — `+`/`-` to zoom, `⌘0` to reset.
 - **Screenshots** — `⌘S` for viewport, `⌘⇧S` for full page. Copied to clipboard.
@@ -188,6 +190,7 @@ Claude Desktop / octomind / any MCP client
 | `browser_handle_dialog` | Arm auto-answers for upcoming `alert`/`confirm`/`prompt` dialogs |
 | `browser_upload_file` | Arm the next file chooser with local file paths |
 | `browser_get_history` | Get browsing history entries |
+| `browser_search_history_content` | Full-text search over the text of visited pages — title, URL, visit time, matching snippet |
 | `browser_get_playing_tabs` | List tabs currently playing audio/video |
 | `render_ui` | Draw an interactive A2UI surface (forms, approval cards, live views) in the AI sidebar and block until the user clicks |
 
@@ -237,6 +240,7 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘Q` | Quit |
 | `⌘⇧A` | Toggle AI sidebar |
 | `⌘⇧E` | AI edit selection |
+| `⌘⇧K` | Ask AI about the selection (or the page) |
 | `⌘⇧I` | Toggle DevTools |
 | `⌘↵` | Fullscreen window |
 | `⌘⇧↵` | Fullscreen AI sidebar |
@@ -308,6 +312,7 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 | `↵` | Confirm selection (open / switch / search) |
 | `⌘↵` | Force navigate: open as URL if it looks like one, otherwise search |
 | `⌘⇧↵` | Open selection in an isolated (incognito) tab — own cookies/storage, no history |
+| `/words` | Search the text of visited pages; results show a matching snippet |
 | `⌘W` | Close selected tab / remove selected history entry |
 | `⌘1` – `⌘9`, `⌘0` | Jump directly to result 1–10 (tabs and history only) |
 | `Esc` | Close palette |
@@ -318,6 +323,8 @@ When a query is entered, three action rows appear at the bottom: **Search Google
 | `⌘V` | Paste from clipboard |
 
 `⌘⇧↵` opens whatever is selected — an open tab, a history entry, a typed URL, or a search — in a **private tab**. It gets its own in-memory WebKit data store, so cookies, localStorage, and cache are separate from the workspace and vanish when the tab closes. Private tabs never write to history, the session file, the favicon cache, or the `⌘⇧T` reopen list, and popups they open stay private. They show a `Private` pill in the palette and are not restored on restart.
+
+Start the query with `/` to search page text instead of titles and URLs: every word must match as a prefix, results are most recent first, and each shows the passage that matched. The index keeps the first few kilobytes of text of the last 2000 pages in `page_index.json`. Open tabs also show their WebContent memory in megabytes next to the pill, so the tab eating your RAM is one glance away.
 
 ### AI sidebar (`⌘⇧A`)
 
@@ -341,6 +348,8 @@ The sidebar overlays the page on the right — the page content underneath is no
 - `Ctrl+U` — Clear input to cursor start
 
 History persists across sessions (`ai_prompt_history.json`).
+
+**Repeatable tasks.** The bundled tap ships browser workflows — watch a page for changes, compare open tabs, cancel a subscription, fill a form from memory, summarize a thread. Type `/workflow ` and pick one from the dropdown, then give it its input. The assistant can launch them itself through the `tap` tool, so a recurring job is `/schedule add when=... every=... message="<workflow and input in plain words>"`: when the message fires, the assistant runs the workflow in the background and relays its result. Pending routines show as a ⏱ chip in the header (click it to list them). Routines fire only while Octoweb is running, since the assistant session is the scheduler.
 
 ### Inline AI edit (`⌘⇧E`)
 

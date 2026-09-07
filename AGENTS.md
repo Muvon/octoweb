@@ -10,7 +10,7 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── browser.rs            ← TabManager (tabs, history, active state, visit counts)
    ├── config.rs             ← Config, session persistence, favicon cache, prompt history
    ├── acp.rs                ← ACP integration (sidebar AI + background learning agent)
-   ├── mcp.rs                ← MCP server — 20 browser control tools over HTTP JSON-RPC
+   ├── mcp.rs                ← MCP server — 30 browser control tools over HTTP JSON-RPC
    │
    ├── url.rs                ← URL resolution (user input → navigable URL)
    ├── webview_utils.rs      ← Injected JS scripts, favicon cache lookup, overlay data
@@ -24,7 +24,8 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── quickslots.rs         ← Fast-access slot logic (⌘⇧1–0 save, ⌘1–0 open)
    ├── prompt_history_js.rs  ← Shared JS module: prompt history nav, Ctrl+R search, ghost text
    │
-   ├── overlay_html.rs       ← Command palette (⌘⇧P) — fuzzy search tabs/history
+   ├── page_index.rs         ← Full-text index of visited page text (palette `/query`, MCP search tool)
+   ├── overlay_html.rs       ← Command palette (⌘⇧P) — fuzzy search tabs/history, `/` searches page text
    ├── sidebar_html.rs       ← AI assistant sidebar (⌘⇧A) — chat UI
    ├── address_bar_html.rs   ← Address bar with URL display + AI button
    ├── inline_edit_html.rs   ← Inline AI edit modal (⌘⇧E) — text transformation
@@ -60,7 +61,7 @@ Two ACP connections run independently:
 
 ### MCP — Browser Control Server (`mcp.rs`)
 
-HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 25 tools:
+HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 30 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -70,7 +71,7 @@ HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CO
 | Interaction | `browser_click`, `browser_hover`, `browser_type`, `browser_scroll`, `browser_press_key`, `browser_select_option` |
 | Dialogs & uploads | `browser_handle_dialog`, `browser_upload_file` (arm before the triggering click) |
 | Diagnostics | `browser_console_messages`, `browser_network_requests` |
-| History & media | `browser_get_history`, `browser_get_playing_tabs` |
+| History & media | `browser_get_history`, `browser_search_history_content`, `browser_get_playing_tabs` |
 
 Interactions run through an actionability harness (`dom_actions.rs`): resolve with retry, bounding-box stability, occlusion detection, pointer+mouse event sequences. Async scripts evaluate via `callAsyncJavaScript` (`async_eval.rs`) so Promises are actually awaited. End-to-end suite: `test_mcp.py` + `tests/fixtures/` (28 tests against a live instance).
 

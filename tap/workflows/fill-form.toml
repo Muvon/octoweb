@@ -1,0 +1,67 @@
+# Title: Fill Form — From Memory, Never Submit
+#
+# Input: optional hints ("use my work email", "shipping address, not
+# billing"). Snapshots the form on the tab the user is looking at, fills it
+# from memory (name, email, phone, address, handles) with one
+# browser_fill_form call and no submit, then re-snapshots to prove every
+# field holds its value. Submitting is the human's click, always.
+
+name        = "fill-form"
+description = "Snapshot the form on the user's current tab, fill it from memory (name, email, address, handles) with browser_fill_form and no submit, and return the filled fields for review — verified against a fresh snapshot. Never submits."
+
+# ── 1. Fill — map fields to memory, one fill call, no submit ────────────────
+[[steps]]
+name    = "fill"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 300
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui. Never submit: no `submit` argument, no Enter, no clicking buttons.
+
+Hints (may be empty):
+{{input}}
+
+1. `browser_get_current_tab` → the form the user is looking at. Do not navigate anywhere.
+2. `browser_snapshot` that tab_id (`within` the form if the page is dense). List every input, textarea and select with its label / placeholder / autocomplete hint.
+3. `remember`, in parallel: "user name", "email address", "phone number", "postal address", "company", "usernames handles", plus any hint terms. Prefer user_confirmed memories; apply the hints when choosing between values ("work email", "shipping address").
+4. Map each field to one remembered value. No value → leave the field alone. Never fill passwords, card numbers, CVV, bank or government ID numbers, even if remembered. Never fill a field whose purpose you cannot name.
+5. One `browser_fill_form` call with `tab_id` and `fields` (@ref + value). Do not pass `submit`. Selects → `browser_select_option` by label.
+
+Output exactly:
+URL: <tab URL>
+FILLED:
+| field | value | source memory |
+SKIPPED:
+- <field> — <no memory | sensitive | purpose unclear>
+NOT SUBMITTED
+"""
+
+# ── 2. Verify — every filled field shows its value, URL unchanged ───────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
+
+  [[steps.run]]
+  name    = "check"
+  role    = "octoweb:assistant"
+  skills  = ["browser-tasks"]
+  timeout = 180
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui. Never submit, never press Enter, never click.
+
+Fill report:
+{{fill}}
+
+1. `browser_get_current_tab`. Its URL differs from the report's URL → RESULT: NOT VERIFIED, reason "page changed"; touch nothing.
+2. `browser_snapshot` the tab with `find` = each field's label — snapshot lines carry the current value. Every FILLED row must show its value. A field that is empty or holds another value → `browser_type` it once with the reported value and re-snapshot that field.
+3. All rows match → RESULT: VERIFIED.
+
+Output exactly:
+RESULT: VERIFIED | NOT VERIFIED
+<the fill report, with any corrected rows>
+EVIDENCE: <one snapshot line per FILLED field, verbatim>
+NOT SUBMITTED — review the fields and press submit yourself.
+"""

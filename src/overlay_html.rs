@@ -607,9 +607,32 @@ pub fn html() -> String {
     updateBadge();
   }
 
+  window.__setContentResults = function(hits) {
+    // Stale reply after the user left `/` mode — ignore it.
+    if (userQuery.trim().charAt(0) !== '/') return;
+    filtered = (hits || []).map(function(h) {
+      return { kind: 'history', title: h.title || h.url, url: h.url, snippet: h.snippet, pill: 'Text', visited_at: h.visited_at };
+    });
+    sel = 0;
+    renderItems();
+    updateBadge();
+  };
+
   function render(rawQuery) {
     const raw = rawQuery.trim();
     const q = raw.toLowerCase();
+
+    // `/words` searches the text of visited pages — results come back
+    // asynchronously through __setContentResults.
+    if (raw.charAt(0) === '/') {
+      const cq = raw.slice(1).trim();
+      if (cq) {
+        window.ipc.postMessage(JSON.stringify({ type: 'content_search', q: cq }));
+      } else {
+        filtered = []; sel = 0; renderItems(); updateBadge();
+      }
+      return;
+    }
 
     if (!raw) {
       // Empty query: show tabs + recent history combined, sorted by recency then frequency.
@@ -778,10 +801,12 @@ pub fn html() -> String {
       iconHtml(item) +
       '<div class="item-text">' +
         '<div class="item-title">' + esc(rawTitle) + '</div>' +
-        (hostname ? '<div class="item-url">' + esc(hostname) + '</div>' : '') +
+        (item.snippet ? '<div class="item-url">' + esc(item.snippet) + '</div>'
+          : hostname ? '<div class="item-url">' + esc(hostname) + '</div>' : '') +
       '</div>' +
       '<div class="item-meta">' +
         shortcutHtml +
+        (item.rss_mb ? '<span class="shortcut-badge" title="WebContent memory">' + item.rss_mb + ' MB</span>' : '') +
         '<span class="kind-pill">' + kindLabel + '</span>' +
         closeHtml +
       '</div>' +

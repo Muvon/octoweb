@@ -1,0 +1,102 @@
+# Title: Watch Page — Detect Changes on a URL Between Runs
+#
+# Input: a URL, optionally followed by what to watch ("the price", "the
+# changelog section", "in-stock status"). Opens the page in a background tab,
+# extracts the watched text, diffs it against the snapshot memorized by the
+# previous run, reports CHANGED / UNCHANGED / FIRST RUN with the diff, and
+# memorizes the new snapshot. A final loop re-reads memory to prove the new
+# snapshot landed — run N is only comparable to run N-1 if it did.
+
+name        = "watch-page"
+description = "Open a URL in a background tab, extract the watched text, diff it against the snapshot memorized on the last run, report CHANGED/UNCHANGED with the diff, and memorize the new snapshot — verified by reading memory back."
+
+# ── 1. Extract — background tab, watched text only ──────────────────────────
+[[steps]]
+name    = "extract"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 300
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab. Output only the block below.
+
+Request (a URL, then optionally what to watch):
+{{input}}
+
+1. `browser_navigate` with the URL only (opens a background tab). Note the returned tab_id and the URL it landed on.
+2. A consent banner covers the page → `browser_dismiss_overlay` (it rejects; never accept).
+3. `browser_get_page_content` on that tab_id. The watched part is not in the first chunk → page with `offset` until you find it (stop at 200000 characters).
+4. Extract the watched text verbatim. Nothing specified → the main readable content, first 3000 characters. Drop relative timestamps ("3 minutes ago") and view counters that change on every load.
+5. `browser_close_tab` the tab.
+
+Output exactly:
+URL: <landed URL>
+WATCH: <what is watched, or "main content">
+SNAPSHOT:
+<extracted text>
+
+The page did not load (error page, empty text, login wall) → output only:
+LOAD FAILED: <URL> — <what you saw>
+"""
+
+# ── 2. Compare — diff against the memorized snapshot, store the new one ─────
+[[steps]]
+name    = "compare"
+role    = "octoweb:assistant"
+timeout = 180
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, no browser tools.
+
+Current extraction:
+{{extract}}
+
+It starts with LOAD FAILED → output that line verbatim and stop; touch nothing in memory.
+
+Otherwise:
+1. `remember` with query "watch-page snapshot <URL>" (the exact URL). Use the newest memory whose text starts with "watch-page snapshot <URL>"; ignore other URLs.
+2. Compare its stored text with SNAPSHOT line by line.
+3. `memorize` the new snapshot as one memory, importance 0.4, source agent_inferred, content exactly:
+   "watch-page snapshot <URL> ({{DATE}}) WATCH: <what>
+   <SNAPSHOT text>"
+   This workflow's snapshot is the one exception to the rule against storing page content.
+
+Output exactly:
+STATUS: CHANGED | UNCHANGED | FIRST RUN
+URL: <URL>
+WATCH: <what>
+DIFF:
+- <line only in the previous snapshot>
++ <line only in the current snapshot>
+(UNCHANGED → "DIFF: none". FIRST RUN → "DIFF: no previous snapshot".)
+"""
+
+# ── 3. Verify — read the stored snapshot back before reporting ──────────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "confirm", matches = '(?m)^RESULT: VERIFIED' }
+
+  [[steps.run]]
+  name    = "confirm"
+  role    = "octoweb:assistant"
+  timeout = 120
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, no browser tools.
+
+Extraction:
+{{extract}}
+
+Report:
+{{compare}}
+
+The report is a LOAD FAILED line → output "RESULT: VERIFIED", then the LOAD FAILED line, nothing else.
+
+Otherwise prove the new snapshot is stored: `remember` "watch-page snapshot <URL>" and check that the newest matching memory holds the same SNAPSHOT text (same first line, same last line). It does not → `memorize` it again exactly as the compare step specified, then read it back once more.
+
+Output exactly:
+RESULT: VERIFIED | NOT VERIFIED
+<the report, verbatim>
+EVIDENCE: <first 120 characters of the memory you read back, or what remember returned instead>
+"""

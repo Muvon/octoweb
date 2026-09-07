@@ -61,6 +61,11 @@ pub enum AgentEvent {
     Error(String),
     /// Agent sent updated list of available slash commands.
     AvailableCommands(Vec<CommandInfo>),
+    /// Tap workflows the agent can run, as the JSON array from a `/workflow`
+    /// ext call. Feeds the sidebar's `/workflow <name>` autocomplete.
+    Workflows(String),
+    /// Pending `/schedule list` text. Drives the sidebar's routines chip.
+    Schedules(String),
     /// Octomind account status, parsed from a `/usage` ext call. Drives the
     /// sidebar's login chip and signed-out / over-quota banner.
     Account {
@@ -380,6 +385,22 @@ async fn run_ext_command(
                 summary: tightest.map(|(_, t)| t),
             });
             wake();
+        }
+        Some("workflow") => {
+            if let Some(list) = out.get("data").and_then(|d| d.get("workflows")) {
+                let _ = tx.send(AgentEvent::Workflows(list.to_string()));
+                wake();
+            }
+        }
+        Some("schedule") => {
+            if let Some(msg) = out
+                .get("data")
+                .and_then(|d| d.get("message"))
+                .and_then(|v| v.as_str())
+            {
+                let _ = tx.send(AgentEvent::Schedules(msg.to_string()));
+                wake();
+            }
         }
         Some("login") => {
             let already_signed_in = out

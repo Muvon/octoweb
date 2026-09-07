@@ -13,7 +13,7 @@
 //! Tabs:
 //! - `browser_navigate` (always background: new tab, or in-place via tab_id; never moves focus)
 //! - `browser_get_tabs` / `browser_get_current_tab` / `browser_switch_tab` / `browser_close_tab`
-//! - `browser_get_history` / `browser_get_playing_tabs`
+//! - `browser_get_history` / `browser_search_history_content` / `browser_get_playing_tabs`
 //! - `browser_go_back` / `browser_go_forward` / `browser_reload`
 //!
 //! Interaction (selector accepts a CSS selector or a `@N` ref from snapshot;
@@ -143,6 +143,12 @@ pub enum McpCommand {
     GetHistory {
         limit: Option<usize>,
         response: oneshot::Sender<Result<Vec<HistoryInfo>, String>>,
+    },
+    /// Full-text search over the text of visited pages
+    SearchPageText {
+        query: String,
+        limit: Option<usize>,
+        response: oneshot::Sender<Result<Vec<crate::page_index::Hit>, String>>,
     },
     /// Get tabs currently playing audio
     GetPlayingTabs {
@@ -482,6 +488,7 @@ impl McpCommand {
             Self::GoBack { .. } => "GoBack",
             Self::GoForward { .. } => "GoForward",
             Self::GetHistory { .. } => "GetHistory",
+            Self::SearchPageText { .. } => "SearchPageText",
             Self::GetPlayingTabs { .. } => "GetPlayingTabs",
             Self::Reload { .. } => "Reload",
             Self::GetPageContent { .. } => "GetPageContent",
@@ -810,6 +817,16 @@ pub struct ScreenshotRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetHistoryRequest {
     #[schemars(description = "Max entries, most recent first. Default 50.")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchHistoryContentRequest {
+    #[schemars(
+        description = "Words to find in the text of pages the user has visited. Every word must match (as a prefix)."
+    )]
+    pub query: String,
+    #[schemars(description = "Max hits, most recent first. Default 10.")]
     pub limit: Option<usize>,
 }
 
@@ -1675,6 +1692,27 @@ impl McpServer {
             .await?
         );
         let json = serde_json::to_string(&entries)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "Search the text of pages the user has visited (not just titles/URLs). Answers \"where did I see X\" — returns title, URL, visit time, and a matching snippet. Private tabs are never indexed.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_search_history_content(
+        &self,
+        Parameters(req): Parameters<SearchHistoryContentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let hits = browser_try!(
+            self.send_command(|tx| McpCommand::SearchPageText {
+                query: req.query,
+                limit: req.limit,
+                response: tx,
+            })
+            .await?
+        );
+        let json = serde_json::to_string(&hits)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }

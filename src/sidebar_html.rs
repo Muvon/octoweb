@@ -467,7 +467,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   .session-tab .session-close:active { background: var(--fill-press); }
 
   /* Header controls */
-  #session-add-btn, #fullscreen-btn, #close-btn {
+  #session-add-btn, #routines-btn, #fullscreen-btn, #close-btn {
     width: 24px; height: 24px;
     border-radius: var(--r-ctl);
     border: none;
@@ -483,8 +483,10 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     width: 14px;
     height: 14px;
   }
+  #routines-btn { width: auto; padding: 0 6px; gap: 3px; font-size: 11px; }
+  #routines-btn.hidden { display: none; }
   #session-add-btn:hover:not(:disabled),
-  #fullscreen-btn:hover, #close-btn:hover {
+  #routines-btn:hover, #fullscreen-btn:hover, #close-btn:hover {
     background: var(--fill-hover);
     color: var(--label-2);
   }
@@ -2725,6 +2727,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
     </button>
+    <button id="routines-btn" class="hidden" type="button" title="Scheduled routines — click to list" aria-label="Scheduled routines">⏱<span id="routines-count"></span></button>
     <button id="fullscreen-btn" type="button" title="Toggle fullscreen" aria-label="Toggle assistant fullscreen">
       <svg class="ic-enter" width="10" height="10" viewBox="0 0 10 10" fill="none">
         <path d="M1 4V1h3M9 4V1H6M1 6v3h3M9 6v3H6"
@@ -3176,6 +3179,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       activityTimer: null,
       // commands
       availableCommands: [],
+      workflows: [],
+      routines: 0,
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
       drainingQueue: false,
@@ -3356,6 +3361,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     }
     activeSid = sid;
     active = s;
+    renderRoutinesChip();
     messagesHost.appendChild(s.container);
     refreshTabActiveStates();
     // Restore new session's input state (history is global — no swap needed)
@@ -3757,6 +3763,43 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     if (!s) return;
     try { s.availableCommands = JSON.parse(json); } catch(e) { s.availableCommands = []; }
   };
+
+  // Tap workflows (from a `/workflow` probe) and pending routines (from
+  // `/schedule list`) — both pushed by Rust per session.
+  window.__setWorkflows = function(sid, json) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    try { s.workflows = JSON.parse(json) || []; } catch(e) { s.workflows = []; }
+  };
+  window.__setRoutines = function(sid, text) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.routines = routinesFromMessage(text);
+    if (s === active) renderRoutinesChip();
+  };
+  function routinesFromMessage(text) {
+    var m = /^(\d+) scheduled entr/.exec(String(text || '').trim());
+    return m ? parseInt(m[1], 10) : 0;
+  }
+  function renderRoutinesChip() {
+    var btn = document.getElementById('routines-btn');
+    var n = active ? (active.routines || 0) : 0;
+    btn.classList.toggle('hidden', n === 0);
+    document.getElementById('routines-count').textContent = n ? String(n) : '';
+  }
+
+  function showWorkflowDropdown(filter) {
+    if (!active) return;
+    var lower = filter.trim().toLowerCase();
+    cmdFiltered = active.workflows.filter(function(w) {
+      return String(w.name || '').toLowerCase().indexOf(lower) === 0;
+    }).map(function(w) { return { name: 'workflow ' + w.name, description: w.description || '' }; });
+    if (cmdFiltered.length === 0) { hideCmdDropdown(); return; }
+    cmdActiveIdx = 0;
+    renderCmdDropdown();
+    cmdDropdown.classList.add('visible');
+    cmdVisible = true;
+  }
 
   function showCmdDropdown(filter) {
     if (!active) return;
@@ -4347,9 +4390,29 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     rename: function(o) {
       return toast(o.title ? 'Renamed to ' + o.title : 'Session title cleared');
     },
+    workflow: function(o) {
+      var d = o.data || {};
+      if (d.subcommand === 'error') return toast(String(d.message || 'Workflow failed'), true);
+      if (d.subcommand === 'run') {
+        var head = '<div class="cmd-section-title">' + escapeHtml(String(d.name || 'workflow')) + '</div>';
+        return head + renderMd(String(d.output || ''));
+      }
+      var list = Array.isArray(d.workflows) ? d.workflows : [];
+      if (!list.length) return emptyState('No tap workflows installed');
+      var html = '<div class="cmd-section-title">' + list.length + ' workflows — /workflow &lt;name&gt; &lt;input&gt;</div>';
+      for (var i = 0; i < list.length; i++) {
+        html += '<div class="cmd-toast"><span class="cmd-toast-icon" style="color:var(--accent)">▶</span><span><b>' +
+          escapeHtml(String(list[i].name || '')) + '</b> ' + escapeHtml(String(list[i].description || '')) + '</span></div>';
+      }
+      return html;
+    },
     schedule: function(o) {
       var d = o.data || {};
       var msg = String(d.message || '');
+      if (active && d.subcommand !== 'error' && d.subcommand !== 'help') {
+        active.routines = routinesFromMessage(msg);
+        renderRoutinesChip();
+      }
       if (d.is_error || d.subcommand === 'error') return toast(msg || 'Schedule command failed', true);
       if (!msg && d.subcommand === 'help') {
         return messageBlock('/schedule [list|add|remove|edit] [id] [when=...] [message=...]', false);
@@ -6148,6 +6211,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
       var spaceIdx = val.indexOf(' ');
       if (spaceIdx === -1) {
         showCmdDropdown(val.substring(1));
+      } else if (val.indexOf('/workflow ') === 0 && val.indexOf(' ', 10) === -1) {
+        showWorkflowDropdown(val.substring(10));
       } else {
         hideCmdDropdown();
       }
@@ -6169,6 +6234,9 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // ── Close sidebar ──────────────────────────────────────────────────────
   document.getElementById('close-btn').addEventListener('click', () => {
     window.ipc.postMessage(JSON.stringify({ type: 'sidebar_close' }));
+  });
+  document.getElementById('routines-btn').addEventListener('click', () => {
+    window.__injectPrompt('/schedule list');
   });
 
   // ── Toggle assistant fullscreen ───────────────────────────────────────

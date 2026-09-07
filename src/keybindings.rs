@@ -66,6 +66,7 @@ pub enum Action {
     Forward,
     NewTab,
     StopLoad,
+    AskSelection,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -232,6 +233,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "AI edit selection",
         "AI & Panels",
         "cmd+shift+e",
+    ),
+    (
+        Action::AskSelection,
+        "ask_selection",
+        "Ask AI about selection",
+        "AI & Panels",
+        "cmd+shift+k",
     ),
     // App
     (

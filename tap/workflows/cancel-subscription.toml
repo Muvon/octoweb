@@ -1,0 +1,96 @@
+# Title: Cancel Subscription — Through the Dark Patterns, Stop Before the Last Click
+#
+# Input: a service name ("Netflix", "Notion"). Run 1 (STAGE) walks Account →
+# Billing → Cancel in a background tab, always taking the cancel/reject option
+# and never an upsell, then STOPS at the final irreversible control and reports
+# the exact button and page so the human can decide. It leaves the tab open
+# and memorizes where it stopped. Run 2 with input "confirm <service>"
+# (CONFIRM) clicks that exact button and verifies the confirmation text.
+# Nothing irreversible happens without that second, explicit run.
+
+name        = "cancel-subscription"
+description = "Walk a service's cancel path through dark patterns (always the cancel/reject option, never an upsell), STOP before the final irreversible confirmation and report the exact button for the human; a second run with input 'confirm <service>' clicks it and verifies the confirmation text."
+
+# ── 1. Act — STAGE (find the last button, don't click) or CONFIRM (click it) ─
+[[steps]]
+name    = "act"
+role    = "octoweb:assistant"
+skills  = ["browser-tasks"]
+timeout = 600
+retries = 1
+prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab. All navigation in background tabs; never navigate a tab the user is looking at.
+
+Input:
+{{input}}
+
+MODE: the input starts with "confirm" → CONFIRM. Anything else → the input is the service name → STAGE.
+
+STAGE — find the cancel path and stop before the last click:
+1. `remember` "<service> account" and "<service> billing". `browser_get_tabs` for an open tab on the service. Start URL = that tab's URL, else the remembered URL, else the service's homepage. Open it with `browser_navigate` (url only, new background tab).
+2. Click through Account → Billing / Subscription / Plan → Cancel using `browser_snapshot` refs (`find` "cancel", "subscription", "billing" narrows the map). Never type a URL you were not shown.
+3. Dark patterns: on every screen take the option that moves toward cancelling — "Cancel", "Cancel subscription", "Continue to cancel", "Cancel anyway", "No thanks", "Decline offer", "Reject". Never click "Pause", "Keep", "Stay", "Switch plan", "Claim discount", "Accept offer", or anything that changes the plan. Exit survey → pick any reason and continue.
+4. STOP at the last irreversible control — the button whose click ends the subscription. Do NOT click it. Leave the tab open.
+5. `memorize` importance 0.7, source agent_inferred: "cancel-subscription pending: service=<name> tab_id=<id> url=<URL> button=<exact label> staged {{DATE}}".
+
+CONFIRM — the human approved:
+1. `remember` "cancel-subscription pending"; take the newest record (matching the service if the input names one).
+2. `browser_get_tabs`; find the tab by tab_id, else by URL. Not open → `browser_navigate` the URL (background) and re-walk to the same screen with snapshots.
+3. `browser_snapshot` with `find` = the recorded button label. Exactly that label present → `browser_click` it. Absent → click nothing else; report BLOCKED.
+4. `browser_wait` event "ready", then `browser_get_page_content` and `browser_screenshot` on the tab. Leave the tab open.
+
+Login wall, CAPTCHA, no cancel path, or button not found → BLOCKED.
+
+Output exactly one of:
+
+PHASE: STAGED
+SERVICE: <name>
+TAB_ID: <id>
+URL: <current URL>
+BUTTON: <exact label of the final confirmation control>
+PAGE SAYS: <verbatim sentences around the button, including any end date or refund note>
+PATH: <labels you clicked, in order>
+
+PHASE: CLICKED
+SERVICE: <name>
+TAB_ID: <id>
+URL: <URL after the click>
+CLICKED: <label>
+PAGE SAYS: <first 1500 characters of the page text>
+
+PHASE: BLOCKED
+SERVICE: <name>
+URL: <URL>
+REASON: <login wall | CAPTCHA | no cancel path found | button "<label>" not found>
+"""
+
+# ── 2. Verify — evidence for STAGED or CLICKED before reporting ─────────────
+[[steps]]
+name           = "verify"
+loop           = true
+max_iterations = 2
+exit_when      = { output = "check", matches = '(?m)^RESULT: (VERIFIED|BLOCKED)' }
+
+  [[steps.run]]
+  name    = "check"
+  role    = "octoweb:assistant"
+  skills  = ["browser-tasks"]
+  timeout = 300
+  prompt  = """
+Unattended workflow step: no greeting, no questions, no render_ui, never browser_switch_tab. Never click anything in this step.
+
+Outcome of the previous step:
+{{act}}
+
+PHASE BLOCKED → RESULT: BLOCKED.
+
+PHASE STAGED → `browser_snapshot` TAB_ID with `find` = BUTTON. The tab is open at URL and a control with exactly that label is present → RESULT: VERIFIED. Otherwise RESULT: NOT VERIFIED with what the snapshot showed.
+
+PHASE CLICKED → `browser_get_page_content` TAB_ID and look for confirmation evidence: "cancelled"/"canceled", "subscription ended", "ends on <date>", a confirmation number, an email-sent notice. Found → `memorize` importance 0.8, source agent_inferred: "<service> subscription cancelled {{DATE}}: <evidence sentence>"; `browser_close_tab` TAB_ID; RESULT: VERIFIED. Not found → `browser_wait` 5000 ms and read once more; still nothing → RESULT: NOT VERIFIED with the page text you saw.
+
+Output exactly:
+RESULT: VERIFIED | NOT VERIFIED | BLOCKED
+<the previous step's block, verbatim>
+EVIDENCE: <the verbatim confirmation sentence, or the snapshot line showing BUTTON, or what you saw instead>
+NEXT: <STAGED → "Approve and re-run with input `confirm <service>` to click BUTTON." | CLICKED → "Nothing further." | BLOCKED → what the human must do first>
+"""

@@ -164,6 +164,7 @@ pub fn html() -> String {
           <div class="row"><span class="row-label">Confirm</span><span class="keys"><kbd class="kbd">↵</kbd></span></div>
           <div class="row"><span class="row-label">Open as URL</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">↵</kbd></span></div>
           <div class="row"><span class="row-label">Private tab</span><span class="keys"><kbd class="kbd">⌘</kbd><kbd class="kbd">⇧</kbd><kbd class="kbd">↵</kbd></span></div>
+          <div class="row"><span class="row-label">Search page text</span><span class="keys"><kbd class="kbd">/</kbd>words</span></div>
           <div class="row"><span class="row-label">Close</span><span class="keys"><kbd class="kbd">Esc</kbd></span></div>
           <div class="row"><span class="row-label">Start / end</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">A</kbd>/<kbd class="kbd">E</kbd></span></div>
           <div class="row"><span class="row-label">Delete line</span><span class="keys"><kbd class="kbd">⌃</kbd><kbd class="kbd">K</kbd>/<kbd class="kbd">U</kbd></span></div>
