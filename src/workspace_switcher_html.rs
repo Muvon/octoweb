@@ -312,6 +312,12 @@ pub fn html() -> String {
       // Bare N is the New-workspace shortcut; Ctrl+N above still moves down.
       var create = rows.find(function(row) { return row.dataset.kind === 'create'; });
       if (create) { e.preventDefault(); activateRow(create); }
+    } else if ((e.key === 'e' || e.key === 'E' || e.key === 'd' || e.key === 'D') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // Bare E / D act on the highlighted workspace via its own hover buttons,
+      // so rename, delete confirm and the last-workspace guard stay in one place.
+      var row = rows[current];
+      var btn = row && row.querySelector(e.key === 'e' || e.key === 'E' ? '.ws-rename' : '.ws-delete');
+      if (btn && !btn.disabled) { e.preventDefault(); btn.click(); }
     }
   });
 

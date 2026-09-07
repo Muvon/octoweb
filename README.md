@@ -275,6 +275,8 @@ The switcher popover lists every workspace with its tab count; the one you are i
 | `⌃N` / `⌃P` | Move selection down / up |
 | `↵` | Switch to the selected workspace |
 | `N` | New workspace |
+| `E` | Rename the selected workspace |
+| `D` | Delete the selected workspace (asks to confirm; the last one cannot be deleted) |
 | `⌘1` – `⌘9`, `⌘0` | Switch to workspace 1–10 |
 | `Esc` | Close |
 
