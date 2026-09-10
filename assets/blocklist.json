@@ -86,7 +86,6 @@
   {"trigger":{"url-filter":"cdn\\.bizible\\.com"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"munchkin\\.marketo\\.net"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"js\\.hsleadflows\\.net"},"action":{"type":"block"}},
-  {"trigger":{"url-filter":"js\\.hsforms\\.net\\/forms\\/"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"cdn\\.cookielaw\\.org"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"cdn\\.onetrust\\.com"},"action":{"type":"block"}},
   {"trigger":{"url-filter":"cdn\\.branch\\.io"},"action":{"type":"block"}},
