@@ -347,7 +347,8 @@ EXPECTED_TOOLS = {
     "browser_fill_form", "browser_dismiss_overlay", "browser_hover", "browser_scroll",
     "browser_press_key", "browser_select_option", "browser_screenshot",
     "browser_console_messages", "browser_network_requests", "browser_handle_dialog",
-    "browser_upload_file", "browser_get_history", "browser_get_playing_tabs", "render_ui",
+    "browser_upload_file", "browser_get_history", "browser_search_history_content",
+    "browser_get_later", "browser_get_playing_tabs", "render_ui",
 }
 
 # Tools a host must be able to auto-approve. If any of these loses
@@ -356,6 +357,7 @@ EXPECTED_TOOLS = {
 READ_ONLY_TOOLS = {
     "browser_snapshot", "browser_get_page_content", "browser_get_page_info",
     "browser_get_tabs", "browser_get_current_tab", "browser_get_history",
+    "browser_search_history_content", "browser_get_later",
     "browser_get_playing_tabs", "browser_screenshot", "browser_console_messages",
     "browser_network_requests", "browser_wait",
 }

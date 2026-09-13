@@ -7638,7 +7638,7 @@ fn main() {
                             (format!("{text}\n\n{url}"), "Selection copied with address")
                         };
                         webview_utils::copy_text_to_pasteboard(&out);
-                        toast!(what.to_string(), "\u{1F4CB}", "Copied");
+                        toast!(what, "\u{1F4CB}", "Copied");
                     }
                     // ⌥⌘C: markdown for Slack, docs, notes, and prompts.
                     "copy_md" => {

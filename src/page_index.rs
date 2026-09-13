@@ -137,7 +137,7 @@ impl PageIndex {
             .into_iter()
             .filter_map(|id| live.get(&id).copied())
             .collect();
-        docs.sort_by(|a, b| b.visited_at.cmp(&a.visited_at));
+        docs.sort_by_key(|a| std::cmp::Reverse(a.visited_at));
         docs.into_iter()
             .take(limit)
             .map(|d| Hit {
