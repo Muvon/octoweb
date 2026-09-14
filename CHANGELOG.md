@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.15.0] - 2026-09-14
+
+### 📋 Release Summary
+
+This release adds saved-page queues and copying, page search workflows, workspace and tab management improvements, private tab isolation, link hints, tab restoration, and more robust browser controls (767be466, bb971707, 122ab30a, 97ade335, d47c3641, 170c1bd4, 5b5dfc8a). Existing behavior is improved across navigation, workspace switching, form interactions, notifications, layout scaling, resource usage, scrolling, and command handling (73bc1ac6, b4a39193, f7052cb2, 6bbee569, f5667a40, 763af52a, fce0c0e8, aeac9290, 2dcd73bd, 3bbe0fd5, 0e39eb42). Documentation and application behavior are also streamlined, including clearer workspace guidance and improved copy and history handling (022ea7a3, 7fae2c50, 439d97a9).
+
+
+### ✨ New Features & Enhancements
+
+- **browser**: add saved-page queue and copying `767be466`
+- **browser**: add page search and task workflows `bb971707`
+- **workspace**: add rename and delete shortcuts `122ab30a`
+- **tabs**: support private tab isolation `97ade335`
+- **navigation**: add link hints and tab restore `d47c3641`
+- **workspaces**: move tabs across workspaces `170c1bd4`
+- **mcp**: harden browser controls and state `5b5dfc8a`
+
+### 🔧 Improvements & Optimizations
+
+- **app**: streamline copy and history sorting `022ea7a3`
+- **input**: remove tao keyboard event handling `7fae2c50`
+
+### 🐛 Bug Fixes & Stability
+
+- **content-rules**: stop blocking HubSpot forms `73bc1ac6`
+- **notification**: prevent toast shadow clipping `b4a39193`
+- **actions/tools**: stabilize typing probes `f7052cb2`
+- **platform**: preserve interaction context `6bbee569`
+- **agent**: preserve indented slash commands `f5667a40`
+- **runtime**: limit UI and session resource use `763af52a`
+- **workspaces**: improve switcher navigation `fce0c0e8`
+- **browser**: verify form effects and page state `aeac9290`
+- **layout**: rescale chrome across displays `2dcd73bd`
+- **scroll**: route jumps to focused pane `3bbe0fd5`
+- **overlay**: populate URL when editing selection `0e39eb42`
+
+### 📚 Documentation & Examples
+
+- **readme**: clarify workspace-scoped slots and agents `439d97a9`
+
 ## [0.14.0] - 2026-09-05
 
 ### 📋 Release Summary
