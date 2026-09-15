@@ -38,6 +38,7 @@ mod sanitize;
 mod settings_html;
 mod shortcuts_html;
 mod sidebar_html;
+mod site_proxy;
 mod snapshot_js;
 mod tab_nav;
 mod tab_stats;
@@ -573,6 +574,7 @@ fn main() {
     crash_report::log_startup();
 
     let mut cfg = Config::load();
+    site_proxy::set_rules(&cfg.proxies);
     // Loaded once, early, so every persisted workspace's identity —
     // id/name/color/data_store_id — is known before any WebView is built.
     // The tab URLs themselves are consumed later, at the point the original
@@ -809,7 +811,8 @@ fn main() {
         move |tab_id: usize,
               url: &str,
               data_store_id: Option<[u8; 16]>,
-              incognito: bool|
+              incognito: bool,
+              proxy_rule: Option<config::ProxyRule>|
               -> WebView {
             let p1 = proxy.clone();
             let p2 = proxy.clone();
@@ -817,6 +820,7 @@ fn main() {
             let p4 = proxy.clone();
             let p5 = proxy.clone();
             let p6 = proxy.clone();
+            let p7 = proxy.clone();
             let sz = browser_win.inner_size();
             let scale = browser_win.scale_factor();
             let bar_h = (ADDRESS_BAR_H_LOGICAL * scale) as u32;
@@ -1109,13 +1113,23 @@ fn main() {
             // WKWebsiteDataStore — cookies/localStorage/cache live in memory
             // only and die with the tab. Takes precedence over any workspace
             // data-store id (wry ignores the identifier when incognito is set).
+            // WebKit applies a proxy to the whole store, so a proxied tab runs
+            // on a store of its own (see `site_proxy`).
+            let store_id = match &proxy_rule {
+                Some(rule) => Some(site_proxy::store_id(data_store_id, rule)),
+                None => data_store_id,
+            };
             let wv = if incognito {
                 wv.with_incognito(true)
             } else {
-                match data_store_id {
+                match store_id {
                     Some(id) => wv.with_data_store_identifier(id),
                     None => wv,
                 }
+            };
+            let wv = match &proxy_rule {
+                Some(rule) => wv.with_proxy_config(site_proxy::wry_config(rule)),
+                None => wv,
             };
             let wv = wv
                 .build_as_child(&*browser_win)
@@ -1125,6 +1139,10 @@ fn main() {
             // applied when the completion block fires.
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             content_rules::apply_to_webview(wv_ptr);
+            site_proxy::inject_from_webview(wv_ptr);
+            site_proxy::register(wv_ptr, proxy_rule.map(|rule| rule.id), move |url| {
+                let _ = p7.send_event(AppEvent::OpenInNewTab(url, Some(tab_id)));
+            });
 
             // Tune WKPreferences via the live shared reference inside configuration.
             // - Disable Google Safe Browsing: saves ~50-100ms per navigation.
@@ -1317,7 +1335,13 @@ fn main() {
             {
                 // Active tab — create WebView immediately
                 // Isolated tabs are never written to the session file.
-                let wv = make_webview(tab_id, &st.url, ws.data_store_id, false);
+                let wv = make_webview(
+                    tab_id,
+                    &st.url,
+                    ws.data_store_id,
+                    false,
+                    site_proxy::rule_for(&st.url),
+                );
                 if st.url == "about:blank" {
                     let html = newtab_html::html(
                         &quickslots::to_json(&ws.quick_slots),
@@ -2793,11 +2817,13 @@ fn main() {
             // Isolation flag lives on the tab metadata — read it at spawn
             // time so every path (palette, popup, wake) builds correctly.
             let incognito = is_isolated_tab(&workspace_manager, id);
+            let load_url: &str = $url;
             let wv = make_webview(
                 id,
-                $url,
+                load_url,
                 workspace_manager.at(ws_i).data_store_id,
                 incognito,
+                site_proxy::rule_for(load_url),
             );
             let _ = wv.set_visible(false);
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
@@ -2844,7 +2870,7 @@ fn main() {
                     let has_snapshot = tab_snapshots.contains_key(&target);
                     let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
                     let incognito = is_isolated_tab(&workspace_manager, target);
-                    let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id, incognito);
+                    let wv = make_webview(target, load_url, workspace_manager.at(ws_i).data_store_id, incognito, site_proxy::rule_for(&url));
                     if !has_snapshot && url == "about:blank" {
                         let html =
                             newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots), &later::to_json(&workspace_manager.at(ws_i).later));
@@ -3932,6 +3958,7 @@ fn main() {
                     if let Some(wv) = workspace_manager.active().webviews.get(&victim_id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
+                        site_proxy::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }
@@ -3999,6 +4026,7 @@ fn main() {
                 if let Some(wv) = workspace_manager.active().webviews.get(&victim_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
+                    site_proxy::unregister(wv_ptr);
                     nav_error_patch::unregister_termination(wv_ptr);
                     dialog_patch::unregister(wv_ptr);
                 }
@@ -6295,6 +6323,7 @@ fn main() {
                 if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
+                    site_proxy::unregister(wv_ptr);
                     nav_error_patch::unregister_termination(wv_ptr);
                     dialog_patch::unregister(wv_ptr);
                 }
@@ -6439,6 +6468,13 @@ fn main() {
                             "Proactive hibernation config updated"
                         );
                     }
+                    "proxies" => match serde_json::from_str::<Vec<config::ProxyRule>>(&val) {
+                        Ok(rules) => {
+                            site_proxy::set_rules(&rules);
+                            cfg.proxies = rules;
+                        }
+                        Err(e) => tracing::warn!(error = %e, "ignoring malformed proxies from settings"),
+                    },
                     _ => {}
                 }
                 cfg.save();
@@ -6598,6 +6634,7 @@ fn main() {
                         if let Some(wv) = workspace_manager.active().webviews.get(&orphan) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             nav_error_patch::unregister(wv_ptr);
+                            site_proxy::unregister(wv_ptr);
                             nav_error_patch::unregister_termination(wv_ptr);
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
@@ -6687,6 +6724,7 @@ fn main() {
                         if let Some(wv) = workspace_manager.active().webviews.get(&orphan) {
                             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                             nav_error_patch::unregister(wv_ptr);
+                            site_proxy::unregister(wv_ptr);
                             nav_error_patch::unregister_termination(wv_ptr);
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
@@ -6810,6 +6848,7 @@ fn main() {
                     if let Some(wv) = workspace_manager.active().webviews.get(&id) {
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
+                        site_proxy::unregister(wv_ptr);
                         nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }

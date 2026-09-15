@@ -451,6 +451,31 @@ pub struct Config {
     /// Whether the first-run welcome toast has been shown. Internal flag.
     #[serde(default)]
     pub first_run_completed: bool,
+    /// Per-site proxies (Settings → Proxies). Kept last: TOML emits it as
+    /// `[[proxies]]` tables, which must follow every plain value.
+    #[serde(default)]
+    pub proxies: Vec<ProxyRule>,
+}
+
+/// One proxy and the sites whose tabs go through it. See `site_proxy`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProxyRule {
+    /// Random, assigned once by the settings UI. Seeds this proxy's
+    /// WKWebsiteDataStore id, so changing it drops the proxy's cookies.
+    pub id: [u8; 16],
+    pub enabled: bool,
+    pub kind: ProxyKind,
+    pub host: String,
+    pub port: u16,
+    /// Domains or pasted URLs; each also covers its subdomains.
+    pub sites: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyKind {
+    Socks5,
+    Http,
 }
 
 fn default_max_prompt_history() -> usize {
@@ -500,6 +525,7 @@ impl Default for Config {
             max_tabs: 500,
             later_days: 14,
             first_run_completed: false,
+            proxies: Vec::new(),
         }
     }
 }

@@ -337,6 +337,28 @@ pub fn html() -> String {
   }
   .kb-reset-all:hover { filter: brightness(1.08); }
   .kb-reset-all:active { filter: brightness(0.92); transform: scale(0.96); }
+
+  /* Proxies */
+  .row textarea {
+    flex: 1 1 100%;
+    min-height: 56px;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--label);
+    background: var(--fill);
+    border: none;
+    border-radius: var(--r-ctl);
+    box-shadow: 0 0 0 0.5px var(--hairline);
+    outline: none;
+    resize: vertical;
+  }
+  .row textarea:focus {
+    background: var(--fill-hover);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .proxy-empty { padding: 4px 2px; }
+  #proxy-add { flex-shrink: 0; margin-left: 12px; }
 </style>
 </head>
 <body>
@@ -356,6 +378,7 @@ pub fn html() -> String {
     <div class="tabs">
       <button class="tab active" data-pane="tab-general">General</button>
       <button class="tab" data-pane="tab-keybindings">Keyboard shortcuts</button>
+      <button class="tab" data-pane="tab-proxies">Proxies</button>
     </div>
 
     <div id="tab-general" class="tab-pane active">
@@ -483,6 +506,14 @@ pub fn html() -> String {
         <button class="kb-reset-all" id="kb-reset-all">Reset all</button>
       </div>
     </div>
+
+    <div id="tab-proxies" class="tab-pane">
+      <div id="proxy-list"></div>
+      <div class="kb-footer">
+        <span class="kb-note">A tab opened on a listed site sends all its traffic through the proxy and keeps its own cookies.</span>
+        <button class="kb-reset-all" id="proxy-add">Add proxy</button>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -503,7 +534,7 @@ pub fn html() -> String {
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     if (e.key === 'Tab') {
-      var focusable = Array.prototype.slice.call(document.querySelectorAll('#panel button:not([disabled]), #panel input:not([disabled]), #panel select:not([disabled])'))
+      var focusable = Array.prototype.slice.call(document.querySelectorAll('#panel button:not([disabled]), #panel input:not([disabled]), #panel select:not([disabled]), #panel textarea:not([disabled])'))
         .filter(function(el) { return el.offsetParent !== null; });
       if (!focusable.length) return;
       var first = focusable[0], last = focusable[focusable.length - 1];
@@ -593,6 +624,8 @@ pub fn html() -> String {
         showRowError(el, '');
       }
     }
+    proxies = cfg.proxies;
+    renderProxies();
     syncSearchEngine();
     requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
@@ -623,6 +656,123 @@ pub fn html() -> String {
     lastValidValues.search_engine = seSelect.value;
     showRowError(seInput, '');
     ipc({ type: 'settings_update', key: 'search_engine', value: seSelect.value });
+  });
+
+  // ── Proxies ───────────────────────────────────────────────────────────
+  // The list round-trips as one JSON value. Ids are made here once and never
+  // change: Rust derives each proxy's cookie store from them.
+  var proxies = [];
+  var proxyList = document.getElementById('proxy-list');
+
+  // Mirrors site_proxy::valid_endpoint in Rust.
+  function hostError(host) {
+    return /^[A-Za-z0-9.\-_:]+$/.test(host) ? '' : 'Enter a host name or IP address.';
+  }
+
+  function saveProxies() {
+    ipc({ type: 'settings_update', key: 'proxies', value: JSON.stringify(proxies) });
+  }
+
+  function proxyCard(p, i) {
+    var id = 'proxy-' + i;
+    var name = 'Proxy ' + (i + 1);
+    return '<div class="section" data-proxy="' + i + '">' +
+      '<div class="row">' +
+        '<span class="row-label" id="' + id + '-label">' + name + '</span>' +
+        '<span class="kb-right">' +
+          '<button class="kb-reset" data-remove title="Remove" aria-label="Remove ' + name + '">✕</button>' +
+          '<button class="toggle' + (p.enabled ? ' on' : '') + '" role="switch" aria-checked="' + p.enabled + '" aria-labelledby="' + id + '-label"></button>' +
+        '</span>' +
+      '</div>' +
+      '<div class="row">' +
+        '<label class="row-label" for="' + id + '-kind">Type</label>' +
+        '<select id="' + id + '-kind" data-field="kind">' +
+          '<option value="socks5"' + (p.kind === 'socks5' ? ' selected' : '') + '>SOCKS5</option>' +
+          '<option value="http"' + (p.kind === 'http' ? ' selected' : '') + '>HTTP</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="row">' +
+        '<label class="row-label" for="' + id + '-host">Host</label>' +
+        '<input type="text" id="' + id + '-host" data-field="host" placeholder="127.0.0.1" value="' + esc(p.host) + '">' +
+      '</div>' +
+      '<div class="row">' +
+        '<label class="row-label" for="' + id + '-port">Port</label>' +
+        '<input type="number" id="' + id + '-port" data-field="port" min="1" max="65535" step="1" value="' + p.port + '">' +
+      '</div>' +
+      '<div class="row with-hint">' +
+        '<div class="row-label-stack">' +
+          '<label class="row-label" for="' + id + '-sites">Sites</label>' +
+          '<span class="row-hint">One per line, a domain or a full URL. Subdomains match too.</span>' +
+        '</div>' +
+        '<textarea id="' + id + '-sites" data-field="sites" rows="3" placeholder="example.com">' + esc(p.sites.join('\n')) + '</textarea>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderProxies() {
+    proxyList.innerHTML = proxies.length
+      ? proxies.map(proxyCard).join('')
+      : '<div class="kb-note proxy-empty">No proxies. Every site connects directly.</div>';
+  }
+
+  proxyList.addEventListener('click', function(e) {
+    var card = e.target.closest('[data-proxy]');
+    if (!card) return;
+    var i = Number(card.dataset.proxy);
+    if (e.target.closest('[data-remove]')) {
+      proxies.splice(i, 1);
+      renderProxies();
+      saveProxies();
+      return;
+    }
+    var toggle = e.target.closest('.toggle');
+    if (!toggle) return;
+    var p = proxies[i];
+    if (!p.enabled) {
+      var hostEl = card.querySelector('[data-field="host"]');
+      var error = hostError(p.host);
+      showRowError(hostEl, error);
+      if (error) { hostEl.focus(); return; }
+    }
+    p.enabled = !p.enabled;
+    toggle.classList.toggle('on', p.enabled);
+    toggle.setAttribute('aria-checked', p.enabled ? 'true' : 'false');
+    saveProxies();
+  });
+
+  proxyList.addEventListener('change', function(e) {
+    var el = e.target;
+    var card = el.closest('[data-proxy]');
+    if (!card || !el.dataset.field) return;
+    var p = proxies[Number(card.dataset.proxy)];
+    var error = '';
+    if (el.dataset.field === 'kind') {
+      p.kind = el.value;
+    } else if (el.dataset.field === 'host') {
+      error = hostError(el.value.trim());
+      if (!error) p.host = el.value.trim();
+    } else if (el.dataset.field === 'port') {
+      error = validationError(el);
+      if (!error) p.port = Number(el.value);
+    } else if (el.dataset.field === 'sites') {
+      p.sites = el.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    }
+    showRowError(el, error);
+    if (!error) saveProxies();
+  });
+
+  document.getElementById('proxy-add').addEventListener('click', function() {
+    proxies.push({
+      id: Array.from(crypto.getRandomValues(new Uint8Array(16))),
+      enabled: false,
+      kind: 'socks5',
+      host: '',
+      port: 1080,
+      sites: []
+    });
+    renderProxies();
+    saveProxies();
+    proxyList.querySelector('[data-proxy="' + (proxies.length - 1) + '"] [data-field="host"]').focus();
   });
 
   // ── Tabs ──────────────────────────────────────────────────────────────
