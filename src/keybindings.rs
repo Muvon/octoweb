@@ -70,6 +70,7 @@ pub enum Action {
     CopyLink,
     CopyLinkMarkdown,
     SaveLater,
+    Terminal,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -309,6 +310,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Follow link on page",
         "Tools",
         "cmd+shift+f",
+    ),
+    (
+        Action::Terminal,
+        "terminal",
+        "Toggle terminal",
+        "Tools",
+        "cmd+backquote",
     ),
 ];
 
