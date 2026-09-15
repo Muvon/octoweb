@@ -495,6 +495,9 @@ pub const MAX_SESSIONS: usize = 10;
 /// `user/repo`, and capability references reach this one as `muvon/<name>`.
 const OCTOMIND_TAP_NAME: &str = "muvon/octoweb";
 
+/// Octomind account usage and billing, opened from the sidebar's account card.
+const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
+
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
 
@@ -1754,7 +1757,10 @@ fn main() {
     const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
     let notif_margin = (NOTIF_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
     let sidebar_wv = WebViewBuilder::new()
-        .with_html(sidebar_html::html(cfg.max_ai_prompt_history))
+        .with_html(sidebar_html::html(
+            cfg.max_ai_prompt_history,
+            cfg.account_expanded,
+        ))
         .with_transparent(true)
         .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
             let path = request.uri().path().trim_start_matches('/');
@@ -1841,6 +1847,24 @@ fn main() {
                         Some("acp_signin") => {
                             let sid = v["session_id"].as_u64().unwrap_or(0);
                             let _ = p.send_event(AppEvent::AcpSignIn(sid));
+                        }
+                        Some("acp_refresh_account") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpRefreshAccount(sid));
+                        }
+                        Some("account_dashboard") => {
+                            let _ = p.send_event(AppEvent::OpenInNewTab(
+                                OCTOMIND_USAGE_URL.to_string(),
+                                None,
+                            ));
+                        }
+                        Some("account_expanded") => {
+                            if let Some(expanded) = v["expanded"].as_bool() {
+                                let _ = p.send_event(AppEvent::UpdateConfig(
+                                    "account_expanded".into(),
+                                    expanded.to_string(),
+                                ));
+                            }
                         }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
@@ -4597,14 +4621,8 @@ fn main() {
                             "window.__setRoutines && window.__setRoutines({sid},`{escaped}`)"
                         ));
                     }
-                    acp::AgentEvent::Account { signed_in, account, over_quota, summary } => {
-                        let json = serde_json::json!({
-                            "signed_in": signed_in,
-                            "account": account,
-                            "over_quota": over_quota,
-                            "summary": summary,
-                        });
-                        let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
+                    acp::AgentEvent::Account { signed_in, usage } => {
+                        let json_str = usage.to_string();
                         if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.account_json = Some(json_str.clone());
                         }
@@ -6575,6 +6593,7 @@ fn main() {
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
+                    "account_expanded" => cfg.account_expanded = val == "true",
                     "appearance" => {
                         if let Ok(appearance) = serde_json::from_value(serde_json::Value::String(val)) {
                             set_appearance(appearance);
@@ -11576,7 +11595,7 @@ mod chrome_js_syntax_tests {
             ("quickslots", crate::quickslots_html::html()),
             ("settings", crate::settings_html::html()),
             ("shortcuts", crate::shortcuts_html::html()),
-            ("sidebar", crate::sidebar_html::html(50)),
+            ("sidebar", crate::sidebar_html::html(50, false)),
             ("terminal", crate::terminal_html::html("null")),
             ("workspace_switcher", crate::workspace_switcher_html::html()),
         ]
