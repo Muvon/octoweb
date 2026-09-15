@@ -11,6 +11,7 @@
 ///   window.__stats(sizeBytes, timeMs)                         — update stats only
 ///   window.__setFavicon(dataUri)                              — update favicon
 ///   window.__setBadge(show)                                   — show/hide unread badge on 🐙
+///   window.__setSidebarOpen(open)                             — 🐙 takes the brand color while open
 ///   window.__sysStats(cpuPct, memMb)                          — update CPU%/RSS (null = hide)
 ///   window.__setShortcuts(data)                               — update live shortcut titles
 ///
@@ -447,10 +448,15 @@ pub fn html() -> String {
     border-radius: 50%;
     border: none;
   }
-  #ai-btn:hover  { background: var(--fill-hover); color: var(--label); }
+  #ai-btn:hover  { background: var(--fill-hover); color: var(--brand); }
   #ai-btn:active { background: var(--fill-press); transform: scale(0.92); }
-  .ai-icon { display: inline-flex; width: 16px; height: 16px; line-height: 0; }
+  #ai-btn.active { color: var(--brand); }
+  /* The octopus is pixel art on a 20-cell grid: at 20px every cell lands on
+     whole device pixels, so it stays crisp. Grey with see-through eyes at
+     rest; brand purple with its own eyes on hover and while the sidebar is open. */
+  .ai-icon { display: inline-flex; width: 20px; height: 20px; line-height: 0; }
   .ai-icon svg { width: 100%; height: 100%; }
+  #ai-btn:not(:hover):not(.active) .ai-icon path + path { fill: transparent; }
 
   /* ── Unread badge dot ────────────────────────────────────────────── */
   .badge {
@@ -532,8 +538,8 @@ pub fn html() -> String {
       <line x1="10.5" y1="1.5" x2="1.5" y2="10.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
     </svg>
   </button>
-  <button id="ai-btn" class="bar-btn" type="button" title="AI sidebar">
-    <span class="ai-icon">@@ICON_SPARKLES@@</span>
+  <button id="ai-btn" class="bar-btn" type="button" title="AI sidebar" aria-pressed="false">
+    <span class="ai-icon">@@ICON_OCTOPUS_BRAND@@</span>
     <span id="badge" class="badge"></span>
   </button>
 </div>
@@ -1185,6 +1191,12 @@ pub fn html() -> String {
   });
 
   // Badge API
+  window.__setSidebarOpen = function(open) {
+    const button = document.getElementById('ai-btn');
+    button.classList.toggle('active', !!open);
+    button.setAttribute('aria-pressed', String(!!open));
+  };
+
   window.__setBadge = function(show) {
     document.getElementById('badge').classList.toggle('show', !!show);
   };
@@ -1212,7 +1224,7 @@ pub fn html() -> String {
         .replace("@@ICON_CLOCK@@", crate::icons::CLOCK)
         .replace("@@ICON_ACTIVITY@@", crate::icons::ACTIVITY)
         .replace("@@ICON_CPU@@", crate::icons::CPU)
-        .replace("@@ICON_SPARKLES@@", crate::icons::SPARKLES)
+        .replace("@@ICON_OCTOPUS_BRAND@@", crate::icons::OCTOPUS_BRAND)
         .replace("@@ICON_LOCK@@", crate::icons::LOCK)
         .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
         .replace("@@ICON_LAYERS@@", crate::icons::LAYERS)

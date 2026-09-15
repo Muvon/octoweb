@@ -7205,6 +7205,8 @@ fn main() {
                     sidebar_visible = false;
                     sidebar_fullscreen = false; // reset on hide so next open is normal-width
                     layout_terminal!();
+                    let _ = address_bar_wv
+                        .evaluate_script("window.__setSidebarOpen && window.__setSidebarOpen(false)");
                     sidebar_hotkey_visible.store(false, Ordering::Relaxed);
                     sidebar_owns_key.store(false, Ordering::Relaxed);
                     // Return key window status to browser_win so the page
@@ -7229,6 +7231,8 @@ fn main() {
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
                     layout_terminal!();
+                    let _ = address_bar_wv
+                        .evaluate_script("window.__setSidebarOpen && window.__setSidebarOpen(true)");
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSidebarFullscreen && window.__setSidebarFullscreen({})",
                         sidebar_fullscreen
