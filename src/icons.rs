@@ -125,43 +125,6 @@ pub const LAYERS: &str = concat!(
     "</svg>"
 );
 
-/// `sun-moon` — appearance switcher: follow macOS.
-pub const SUN_MOON: &str = concat!(
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
-    r#"<path d="M12 8a2.83 2.83 0 0 0 4 4 4 4 0 1 1-4-4"/>"#,
-    r#"<path d="M12 2v2"/>"#,
-    r#"<path d="M12 20v2"/>"#,
-    r#"<path d="m4.9 4.9 1.4 1.4"/>"#,
-    r#"<path d="m17.7 17.7 1.4 1.4"/>"#,
-    r#"<path d="M2 12h2"/>"#,
-    r#"<path d="M20 12h2"/>"#,
-    r#"<path d="m6.3 17.7-1.4 1.4"/>"#,
-    r#"<path d="m19.1 4.9-1.4 1.4"/>"#,
-    "</svg>"
-);
-
-/// `sun` — appearance switcher: light.
-pub const SUN: &str = concat!(
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
-    r#"<circle cx="12" cy="12" r="4"/>"#,
-    r#"<path d="M12 2v2"/>"#,
-    r#"<path d="M12 20v2"/>"#,
-    r#"<path d="m4.93 4.93 1.41 1.41"/>"#,
-    r#"<path d="m17.66 17.66 1.41 1.41"/>"#,
-    r#"<path d="M2 12h2"/>"#,
-    r#"<path d="M20 12h2"/>"#,
-    r#"<path d="m6.34 17.66-1.41 1.41"/>"#,
-    r#"<path d="m19.07 4.93-1.41 1.41"/>"#,
-    "</svg>"
-);
-
-/// `moon` — appearance switcher: dark.
-pub const MOON: &str = concat!(
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
-    r#"<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>"#,
-    "</svg>"
-);
-
 /// `trash-2` — delete-workspace affordance in the workspace switcher.
 pub const TRASH: &str = concat!(
     r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
