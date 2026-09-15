@@ -213,6 +213,8 @@ enum AppEvent {
     TerminalScript(&'static str),  // keymap action run in the terminal page (new/close/cycle tab)
     Terminal(terminal::Request),   // message from the terminal panel page
     TerminalOutput(u32),           // (terminal_id) — shell output or exit: answer the panel's read
+    /// Address bar switcher: force light or dark, or follow macOS.
+    SetAppearance(config::Appearance),
     Quit,
 }
 
@@ -670,6 +672,8 @@ fn main() {
 
     cold_open::install_early(); // capture kAEGetURL before tao drops it
     let mut event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
+    // Before any window exists, so nothing paints in the wrong scheme first.
+    set_appearance(cfg.appearance);
     // Background/agent mode: octoweb runs as an MCP-driven worker that must never
     // pull focus from whatever the user is doing. Accessory policy (no Dock icon,
     // no menu bar) + not activating on launch = windows still render and the agent
@@ -1954,7 +1958,7 @@ fn main() {
     // Child of browser_win so macOS traffic lights render ON TOP natively.
     // Window corner rounding and titlebar glass effect handled by macOS.
     let address_bar_wv = WebViewBuilder::new()
-        .with_html(address_bar_html::html())
+        .with_html(address_bar_html::html(cfg.appearance))
         .with_transparent(true)
         .with_bounds(wry::Rect {
             position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
@@ -2007,6 +2011,12 @@ fn main() {
                         }
                         Some("toggle_shortcuts") => {
                             let _ = p.send_event(AppEvent::ToggleShortcuts);
+                        }
+                        Some("set_appearance") => {
+                            if let Ok(appearance) = serde_json::from_value(v["appearance"].clone())
+                            {
+                                let _ = p.send_event(AppEvent::SetAppearance(appearance));
+                            }
                         }
                         Some("url_edit_open") => {
                             // Address bar opened edit mode — push history snapshot for autocomplete.
@@ -6152,6 +6162,12 @@ fn main() {
                     settings_win.set_focus();
                     settings_visible = true;
                 }
+            }
+            // ── Appearance (address bar switcher) ───────────────────────────
+            Event::UserEvent(AppEvent::SetAppearance(appearance)) => {
+                set_appearance(appearance);
+                cfg.appearance = appearance;
+                cfg.save();
             }
             Event::UserEvent(AppEvent::HideSettings) => {
                 settings_win.set_visible(false);
@@ -10532,6 +10548,31 @@ fn key_focus_in(view: usize) -> bool {
     }
 }
 
+/// Force every window light or dark, or follow macOS for `Auto`. WebKit
+/// derives `prefers-color-scheme` from a view's effective appearance, so the
+/// chrome and every web page switch with it.
+fn set_appearance(appearance: config::Appearance) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    let name = match appearance {
+        config::Appearance::Auto => None,
+        config::Appearance::Light => Some("NSAppearanceNameAqua"),
+        config::Appearance::Dark => Some("NSAppearanceNameDarkAqua"),
+    };
+    unsafe {
+        let ns_appearance: *mut AnyObject = match name {
+            Some(name) => {
+                let name = objc2_foundation::NSString::from_str(name);
+                msg_send![class!(NSAppearance), appearanceNamed: &*name]
+            }
+            // nil makes the app inherit the system appearance again.
+            None => std::ptr::null_mut(),
+        };
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setAppearance: ns_appearance];
+    }
+}
+
 /// Current (sanitized) URL of a tab, for navigation-aware messages built off
 /// the main thread (watchdogs) or inside eval callbacks.
 /// Compact "where the user is" block prepended to every sidebar prompt.
@@ -11521,7 +11562,10 @@ mod chrome_js_syntax_tests {
     /// checks the script's grammar, not its content.
     fn chrome_surfaces() -> Vec<(&'static str, String)> {
         vec![
-            ("address_bar", crate::address_bar_html::html()),
+            (
+                "address_bar",
+                crate::address_bar_html::html(crate::config::Appearance::Auto),
+            ),
             (
                 "error_page",
                 crate::error_page_html::html("https://e.example", "-1009"),
@@ -11536,6 +11580,7 @@ mod chrome_js_syntax_tests {
             ("settings", crate::settings_html::html()),
             ("shortcuts", crate::shortcuts_html::html()),
             ("sidebar", crate::sidebar_html::html(50)),
+            ("terminal", crate::terminal_html::html("null")),
             ("workspace_switcher", crate::workspace_switcher_html::html()),
         ]
     }
