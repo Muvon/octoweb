@@ -55,7 +55,7 @@ pub fn html(slots_json: &str, later_json: &str) -> String {
   let saveSlot = null;
 
   function ipc(message) {{
-    window.ipc.postMessage(JSON.stringify(message));
+    window.webkit.messageHandlers.ipc.postMessage(JSON.stringify(message));
   }}
 
   function focusAddressForSlot(slot) {{

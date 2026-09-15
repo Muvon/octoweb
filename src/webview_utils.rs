@@ -31,11 +31,65 @@ pub fn reveal_file_in_finder(path: &str) {
     NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
 }
 
+/// Source prefix of the `window.ipc` user script wry adds to every WebView
+/// (wry `src/wkwebview/mod.rs`, first `w.init` after construction).
+const WRY_IPC_SCRIPT_PREFIX: &[u8] = b"Object.defineProperty(window, 'ipc'";
+
+/// Remove wry's `window.ipc` from a tab WebView's pages.
+///
+/// wry defines it with `Object.defineProperty` defaults — non-configurable and
+/// non-writable — in the page's global scope. A page script declaring its own
+/// top-level `ipc` (Google Sheets' minified bundle does) then throws "Can't
+/// declare global function 'ipc'" and the whole bundle dies. Pages must not see
+/// our plumbing: tab-page code posts straight to `webkit.messageHandlers.ipc`,
+/// the handler that wrapper called anyway. Must run right after the WebView is
+/// built, before its first document exists.
+pub fn remove_ipc_global(wv_ptr: usize) {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use std::ffi::{c_char, CStr};
+
+    unsafe {
+        let wv = wv_ptr as *mut AnyObject;
+        let config: *mut AnyObject = msg_send![wv, configuration];
+        let ucc: *mut AnyObject = msg_send![config, userContentController];
+        let scripts: *mut AnyObject = msg_send![ucc, userScripts];
+        let count: usize = msg_send![scripts, count];
+        let mut kept: Vec<Retained<AnyObject>> = Vec::with_capacity(count);
+        for i in 0..count {
+            let script: *mut AnyObject = msg_send![scripts, objectAtIndex: i];
+            let source: *mut AnyObject = msg_send![script, source];
+            let utf8: *const c_char = msg_send![source, UTF8String];
+            if CStr::from_ptr(utf8)
+                .to_bytes()
+                .starts_with(WRY_IPC_SCRIPT_PREFIX)
+            {
+                continue;
+            }
+            kept.push(Retained::retain(script).expect("WKUserScript is non-null"));
+        }
+        if kept.len() == count {
+            tracing::error!(
+                "wry's window.ipc user script not found — pages declaring a global `ipc` \
+                 will break; update WRY_IPC_SCRIPT_PREFIX to wry's current source"
+            );
+            return;
+        }
+        // Order and injection settings are preserved: the same WKUserScript
+        // objects go back in their original sequence.
+        let _: () = msg_send![ucc, removeAllUserScripts];
+        for script in &kept {
+            let _: () = msg_send![ucc, addUserScript: &**script];
+        }
+    }
+}
+
 /// Single JS script injected into every tab page at document-start.
 ///
 /// Merges all five former scripts into one IIFE so JavaScriptCore compiles
 /// and injects once per page instead of five times. Shared `_ipc` helper
-/// deduplicates the `window.ipc.postMessage` call site. The `load` event
+/// deduplicates the native IPC call site. The `load` event
 /// listener for page-stats and favicon is merged into a single handler.
 ///
 /// Covers:
@@ -48,8 +102,11 @@ pub const COMBINED_SCRIPT: &str = r#"
 (function () {
   'use strict';
 
-  // Shared IPC helper — one call site instead of five.
-  function _ipc(obj) { window.ipc.postMessage(JSON.stringify(obj)); }
+  // Shared IPC helper — one call site instead of five. The handler is captured
+  // before any page script runs; tab pages get no `window.ipc` global (see
+  // remove_ipc_global).
+  var _ipcHandler = window.webkit.messageHandlers.ipc;
+  function _ipc(obj) { _ipcHandler.postMessage(JSON.stringify(obj)); }
 
   // ── Native-function masking ───────────────────────────────────────────────
   // The instrumentation below replaces natives (fetch, XHR, console,

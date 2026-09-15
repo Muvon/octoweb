@@ -188,7 +188,7 @@ pub const SCRIPT: &str = r#"(function () {
     // COMBINED_SCRIPT uses — one new-tab path, not two.
     var href = el.tagName === 'A' ? el.href : null;
     if (newTab && href && !href.startsWith('javascript:')) {
-      window.ipc.postMessage(JSON.stringify({ type: 'open_new_tab', url: href }));
+      window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({ type: 'open_new_tab', url: href }));
       return;
     }
     try { el.focus({ preventScroll: true }); } catch (e) { /* not focusable */ }

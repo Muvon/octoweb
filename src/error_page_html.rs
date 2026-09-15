@@ -77,10 +77,10 @@ pub fn html(url: &str, error_code: &str) -> String {
 </main>
 <script>
 document.getElementById('retryBtn').addEventListener('click', function() {{
-  window.ipc.postMessage(JSON.stringify({{ type: 'error_retry', url: {json_url} }}));
+  window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({{ type: 'error_retry', url: {json_url} }}));
 }});
 document.getElementById('copyBtn').addEventListener('click', function() {{
-  window.ipc.postMessage(JSON.stringify({{ type: 'copy_text', text: {json_url} }}));
+  window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({{ type: 'copy_text', text: {json_url} }}));
 }});
 var backBtn = document.getElementById('backBtn');
 if (backBtn) backBtn.addEventListener('click', function() {{ history.back(); }});

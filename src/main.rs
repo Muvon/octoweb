@@ -518,10 +518,10 @@ fn terminate_octomind_pids(pids: &[u32]) {
 /// Posts the page's visible text back to Rust for the full-text history
 /// index. Delayed so SPA frameworks have painted; internal documents
 /// (about:, error pages) are filtered by protocol.
-const PAGE_TEXT_JS: &str = "setTimeout(function(){try{if(!/^https?:$/.test(location.protocol))return;var t=(document.body&&document.body.innerText)||'';window.ipc.postMessage(JSON.stringify({type:'page_text',text:t.slice(0,6000)}))}catch(e){}},1500)";
+const PAGE_TEXT_JS: &str = "setTimeout(function(){try{if(!/^https?:$/.test(location.protocol))return;var t=(document.body&&document.body.innerText)||'';window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({type:'page_text',text:t.slice(0,6000)}))}catch(e){}},1500)";
 
 /// Posts the current selection back to Rust for "ask AI about selection".
-const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.ipc.postMessage(JSON.stringify({type:'selection_text',purpose:'ask',text:s.trim().slice(0,4000)}))})()";
+const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({type:'selection_text',purpose:'ask',text:s.trim().slice(0,4000)}))})()";
 
 /// Posts what ⌘⇧C should copy: the selection, or for the markdown variant
 /// with no selection, the whole page rendered by `markdown_js`.
@@ -531,7 +531,7 @@ fn copy_js(markdown: bool) -> String {
         "(function(){{var s='';try{{s=String(window.getSelection()||'').trim()}}catch(e){{}}\
          var md={md};var page=false;var text=s;\
          if(md&&!s&&window.__octowebMarkdown){{text=window.__octowebMarkdown();page=true;}}\
-         window.ipc.postMessage(JSON.stringify({{type:'selection_text',purpose:md?'copy_md':'copy',page:page,text:text.slice(0,400000)}}))}})()"
+         window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({{type:'selection_text',purpose:md?'copy_md':'copy',page:page,text:text.slice(0,400000)}}))}})()"
     )
 }
 
@@ -1152,6 +1152,7 @@ fn main() {
             // applied when the completion block fires.
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             content_rules::apply_to_webview(wv_ptr);
+            webview_utils::remove_ipc_global(wv_ptr);
             site_proxy::inject_from_webview(wv_ptr);
             site_proxy::register(wv_ptr, proxy_rule.map(|rule| rule.id), move |url| {
                 let _ = p7.send_event(AppEvent::OpenInNewTab(url, Some(tab_id)));
