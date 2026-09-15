@@ -213,8 +213,6 @@ enum AppEvent {
     TerminalScript(&'static str),  // keymap action run in the terminal page (new/close/cycle tab)
     Terminal(terminal::Request),   // message from the terminal panel page
     TerminalOutput(u32),           // (terminal_id) — shell output or exit: answer the panel's read
-    /// Address bar switcher: force light or dark, or follow macOS.
-    SetAppearance(config::Appearance),
     Quit,
 }
 
@@ -1958,7 +1956,7 @@ fn main() {
     // Child of browser_win so macOS traffic lights render ON TOP natively.
     // Window corner rounding and titlebar glass effect handled by macOS.
     let address_bar_wv = WebViewBuilder::new()
-        .with_html(address_bar_html::html(cfg.appearance))
+        .with_html(address_bar_html::html())
         .with_transparent(true)
         .with_bounds(wry::Rect {
             position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
@@ -2011,12 +2009,6 @@ fn main() {
                         }
                         Some("toggle_shortcuts") => {
                             let _ = p.send_event(AppEvent::ToggleShortcuts);
-                        }
-                        Some("set_appearance") => {
-                            if let Ok(appearance) = serde_json::from_value(v["appearance"].clone())
-                            {
-                                let _ = p.send_event(AppEvent::SetAppearance(appearance));
-                            }
                         }
                         Some("url_edit_open") => {
                             // Address bar opened edit mode — push history snapshot for autocomplete.
@@ -2616,6 +2608,10 @@ fn main() {
             &keymap.read().unwrap().ui_json().to_string(),
         ))
         .with_transparent(true)
+        // chrome_win is rarely key while you work in a page; without this the
+        // first press on the panel only makes it key, so a drag of its top
+        // edge (or a click on a tab) did nothing.
+        .with_accept_first_mouse(true)
         .with_asynchronous_custom_protocol("octoweb-term".into(), terminals.output_protocol())
         .with_ipc_handler({
             let p = proxy.clone();
@@ -6163,12 +6159,6 @@ fn main() {
                     settings_visible = true;
                 }
             }
-            // ── Appearance (address bar switcher) ───────────────────────────
-            Event::UserEvent(AppEvent::SetAppearance(appearance)) => {
-                set_appearance(appearance);
-                cfg.appearance = appearance;
-                cfg.save();
-            }
             Event::UserEvent(AppEvent::HideSettings) => {
                 settings_win.set_visible(false);
                 settings_visible = false;
@@ -6585,6 +6575,12 @@ fn main() {
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
+                    "appearance" => {
+                        if let Ok(appearance) = serde_json::from_value(serde_json::Value::String(val)) {
+                            set_appearance(appearance);
+                            cfg.appearance = appearance;
+                        }
+                    }
                     "search_engine" => {
                         search_engine = val.clone();
                         cfg.search_engine = val;
@@ -11562,10 +11558,7 @@ mod chrome_js_syntax_tests {
     /// checks the script's grammar, not its content.
     fn chrome_surfaces() -> Vec<(&'static str, String)> {
         vec![
-            (
-                "address_bar",
-                crate::address_bar_html::html(crate::config::Appearance::Auto),
-            ),
+            ("address_bar", crate::address_bar_html::html()),
             (
                 "error_page",
                 crate::error_page_html::html("https://e.example", "-1009"),
