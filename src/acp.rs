@@ -66,16 +66,13 @@ pub enum AgentEvent {
     Workflows(String),
     /// Pending `/schedule list` text. Drives the sidebar's routines chip.
     Schedules(String),
-    /// Octomind account status, parsed from a `/usage` ext call. Drives the
-    /// sidebar's login chip and signed-out / over-quota banner.
+    /// Octomind account status from a `/usage` ext call. Drives the sidebar's
+    /// account card; `signed_in` also ends a pending login flow.
     Account {
         signed_in: bool,
-        /// "email (plan)" when known.
-        account: Option<String>,
-        /// A spend window is committed at or over its cap.
-        over_quota: bool,
-        /// Short human summary for the banner, e.g. "$3.40 / $5.00 (week)".
-        summary: Option<String>,
+        /// octomind's `/usage` output as sent: account ("email (plan)"), spend
+        /// windows, balance, storage and network.
+        usage: serde_json::Value,
     },
     /// A device-login flow started (from `/login`). The client opens `url` in a
     /// browser tab, shows `code`, and polls `/usage` until signed in.
@@ -352,37 +349,9 @@ async fn run_ext_command(
                 .get("signed_in")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let account = out
-                .get("account")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let mut over_quota = false;
-            let mut tightest: Option<(f64, String)> = None;
-            if let Some(windows) = out.get("windows").and_then(|v| v.as_array()) {
-                for w in windows {
-                    let f = |k: &str| w.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let cap = f("cap_usd");
-                    if cap <= 0.0 {
-                        continue;
-                    }
-                    // Reserved is future burn already committed by cloud machines —
-                    // count it against the cap so headroom reads honestly.
-                    let committed = f("spent_usd") + f("reserved_usd");
-                    if committed >= cap {
-                        over_quota = true;
-                    }
-                    let label = w.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                    let frac = committed / cap;
-                    if tightest.as_ref().is_none_or(|(best, _)| frac > *best) {
-                        tightest = Some((frac, format!("${committed:.2} / ${cap:.2} ({label})")));
-                    }
-                }
-            }
             let _ = tx.send(AgentEvent::Account {
                 signed_in,
-                account,
-                over_quota,
-                summary: tightest.map(|(_, t)| t),
+                usage: out.clone(),
             });
             wake();
         }

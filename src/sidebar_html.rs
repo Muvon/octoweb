@@ -24,6 +24,8 @@
 ///   window.__setShortcuts(data)                   — update live control titles
 ///   window.__a2uiUpdate(sid, fileId, payload, live, ts) — render / update an A2UI surface
 ///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
+///   window.__setAccount(sid, json)                — account card from octomind's /usage output
+///   window.__loginPending(sid, code)              — sign-in started; show the device code
 ///
 /// IPC messages sent to Rust (all session-scoped messages include `session_id`):
 ///   { type: "acp_prompt",    session_id, text, images }
@@ -41,7 +43,11 @@
 ///   { type: "a2ui_resolve",  file_id, sid, action }     — A2UI v1.0 action event → unblocks the waiting render_ui call
 ///   { type: "a2ui_fn_response", file_id, sid, response } — result of an agent-issued callRendererFunction
 ///   { type: "a2ui_open_url", url }                       — A2UI openUrl → open in a browser tab
-pub fn html(max_ai_prompt_history: usize) -> String {
+///   { type: "acp_signin", session_id }                   — start Octomind sign-in
+///   { type: "acp_refresh_account", session_id }          — re-read /usage for the account card
+///   { type: "account_dashboard" }                        — open the Octomind usage page
+///   { type: "account_expanded", expanded }               — remember the account card state
+pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     let prompt_history_js = crate::prompt_history_js::prompt_history_js();
     let keybindings_json = crate::keybindings::Keymap::load().ui_json().to_string();
     r#"<!DOCTYPE html>
@@ -273,41 +279,137 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   }
   #header-logo svg { width: 16px; height: 16px; display: block; }
 
-  /* ── Account bar — slim login / quota strip under the header ─────────────── */
-  #account-bar {
+  /* ── Account card — Octomind sign-in and usage under the header ─────────────── */
+  #account {
+    flex-shrink: 0;
+    background: var(--fill);
+    box-shadow: 0 0.5px 0 var(--hairline);
+  }
+  #account.hidden { display: none; }
+  #account [hidden] { display: none !important; }
+  #account.over-quota { background: color-mix(in srgb, var(--err) 10%, transparent); }
+  #account-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px 3px 4px;
+  }
+  #account-toggle {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
-    font-size: 13px;
-    line-height: 1.3;
+    height: 26px;
+    padding: 0 6px;
+    border: none;
+    border-radius: var(--r-ctl);
+    background: transparent;
     color: var(--label);
-    background: var(--fill);
-    box-shadow: 0 0.5px 0 var(--hairline);
-    flex-shrink: 0;
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease);
   }
-  #account-bar.hidden { display: none; }
-  #account-bar .account-dot {
+  #account-toggle:hover { background: var(--fill-hover); }
+  #account-toggle:active { background: var(--fill-press); }
+  #account.pending #account-toggle { cursor: default; background: transparent; }
+  .account-dot {
     width: 6px; height: 6px; border-radius: 50%;
     flex-shrink: 0;
     background: var(--label-2);
   }
-  #account-bar.signed-in  .account-dot { background: var(--ok); }
-  #account-bar.signed-out .account-dot,
-  #account-bar.over-quota .account-dot { background: var(--err); }
-  #account-bar.pending    .account-dot {
+  #account.signed-in  .account-dot { background: var(--ok); }
+  #account.signed-out .account-dot,
+  #account.over-quota .account-dot { background: var(--err); }
+  #account.pending    .account-dot {
     background: var(--accent);
     animation: acct-pulse 1.2s ease-in-out infinite;
   }
   @keyframes acct-pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
-  #account-bar.over-quota {
-    color: var(--label);
-    background: color-mix(in srgb, var(--err) 10%, transparent);
+  #account-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #account-plan {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: var(--r-capsule);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
   }
-  #account-text {
-    flex: 1; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  #account-plan:empty { display: none; }
+  .account-spacer { flex: 1; }
+  #account-meter {
+    flex: 0 0 44px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--divider);
   }
+  #account-meter-fill {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+  }
+  #account-meter-fill.warn { background: #ff9500; }
+  #account-meter-fill.err { background: #ff3b30; }
+  #account-pct {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--label-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .account-chev {
+    flex-shrink: 0;
+    color: var(--label-2);
+    transition: transform var(--t-fast) var(--ease);
+  }
+  #account.open .account-chev { transform: rotate(90deg); }
+  #account.signed-out .account-chev,
+  #account.pending .account-chev { display: none; }
+  /* Rows animate from 0fr to 1fr so the details slide open at their natural height. */
+  #account-details {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--t-pop) var(--ease);
+  }
+  #account.open #account-details { grid-template-rows: 1fr; }
+  #account-details-inner { min-height: 0; overflow: hidden; }
+  #account-body { padding: 4px 14px 0 18px; }
+  .account-line {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .account-foot {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 6px 8px 6px 18px;
+    font-size: 11px;
+    color: var(--label-2);
+  }
+  #account-updated { flex: 1; min-width: 0; }
+  .account-foot button {
+    height: 22px;
+    padding: 0 8px;
+    border: none;
+    border-radius: var(--r-ctl);
+    background: transparent;
+    color: var(--label-2);
+    font: inherit;
+    cursor: pointer;
+  }
+  .account-foot button:hover { background: var(--fill-hover); color: var(--label); }
+  .account-foot button:active { background: var(--fill-press); }
   #account-action {
     flex-shrink: 0;
     padding: 2px 10px;
@@ -2745,12 +2847,33 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     </button>
   </div>
 
-  <!-- Account bar — login / quota status (populated by __setAccount) -->
-  <div id="account-bar" class="hidden" role="status" aria-live="polite">
-    <span class="account-dot"></span>
-    <span id="account-text"></span>
-    <button id="account-action" type="button" style="display:none"></button>
-    <button id="account-dismiss" type="button" title="Dismiss" aria-label="Dismiss">×</button>
+  <!-- Account card — Octomind sign-in and usage (populated by __setAccount) -->
+  <div id="account" class="hidden" role="region" aria-label="Octomind account">
+    <div id="account-row">
+      <button id="account-toggle" type="button" aria-expanded="false" aria-controls="account-details">
+        <span class="account-dot" aria-hidden="true"></span>
+        <span id="account-name"></span>
+        <span id="account-plan"></span>
+        <span class="account-spacer"></span>
+        <span id="account-meter" aria-hidden="true" hidden><span id="account-meter-fill"></span></span>
+        <span id="account-pct" hidden></span>
+        <svg class="account-chev" width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="M3.5 2l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <button id="account-action" type="button" hidden></button>
+      <button id="account-dismiss" type="button" title="Dismiss" aria-label="Dismiss" hidden>×</button>
+    </div>
+    <div id="account-details" inert>
+      <div id="account-details-inner">
+        <div id="account-body" class="cmd-quotas"></div>
+        <div class="account-foot">
+          <span id="account-updated"></span>
+          <button id="account-refresh" type="button">Refresh</button>
+          <button id="account-dashboard" type="button">Usage page ↗</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Inline create-session panel (toggled by + button) -->
@@ -3425,62 +3548,162 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     applyStatus(s, st);
   };
 
-  // ── Account bar (login / quota) ───────────────────────────────────────────
-  const _acctBar = document.getElementById('account-bar');
-  const _acctText = document.getElementById('account-text');
+  // ── Account card (sign-in and usage)───────────────────────────────────────────
+  // One row while collapsed: who is signed in and how much of the tightest
+  // spend window is committed. The row opens the full usage; that choice is
+  // kept in config, except that running out of quota opens it regardless.
+  const _acct = document.getElementById('account');
+  const _acctToggle = document.getElementById('account-toggle');
+  const _acctName = document.getElementById('account-name');
+  const _acctPlan = document.getElementById('account-plan');
+  const _acctMeter = document.getElementById('account-meter');
+  const _acctMeterFill = document.getElementById('account-meter-fill');
+  const _acctPct = document.getElementById('account-pct');
   const _acctAction = document.getElementById('account-action');
   const _acctDismiss = document.getElementById('account-dismiss');
+  const _acctDetails = document.getElementById('account-details');
+  const _acctBody = document.getElementById('account-body');
+  const _acctUpdated = document.getElementById('account-updated');
+  const ACCT_TICK_MS = 30000;
+  // Opening the card re-reads usage when the last read is older than this.
+  const ACCT_STALE_MS = 15000;
+  let _acctKind = null;          // 'signed-in' | 'over-quota' | 'signed-out' | 'pending'
   let _acctDismissedKind = null; // stays hidden until the account state changes kind
+  let _acctOpen = /* ACCOUNT_EXPANDED */;
+  let _acctUpdatedAt = 0;
+  let _acctCode = '';
+  let _acctTicker = 0;
 
-  function _acctSet(kind, text, actionLabel) {
-    _acctBar.className = kind; // single state class; also clears 'hidden'
-    _acctText.textContent = text;
-    if (actionLabel) {
-      _acctAction.textContent = actionLabel;
-      _acctAction.style.display = '';
-    } else {
-      _acctAction.style.display = 'none';
-    }
-    // Always dismissible — a dismissed bar re-shows when the account state
-    // changes, so hiding one never traps the user (and background work like a
-    // pending sign-in still completes and updates the chip).
-    _acctDismiss.style.display = '';
+  function _acctExpandable() {
+    return _acctKind === 'signed-in' || _acctKind === 'over-quota';
+  }
+
+  function _acctShowUpdated() {
+    const minutes = Math.floor((Date.now() - _acctUpdatedAt) / 60000);
+    _acctUpdated.textContent = minutes < 1 ? 'Updated just now' : 'Updated ' + minutes + ' min ago';
+  }
+
+  function _acctRefresh() {
+    _acctUpdated.textContent = 'Refreshing…';
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_refresh_account', session_id: activeSid || 0 }));
+  }
+
+  function _acctApplyOpen() {
+    const open = _acctOpen && _acctExpandable();
+    _acct.classList.toggle('open', open);
+    _acctToggle.setAttribute('aria-expanded', String(open));
+    _acctDetails.inert = !open;
+    clearInterval(_acctTicker);
+    if (!open) return;
+    _acctShowUpdated();
+    _acctTicker = setInterval(_acctShowUpdated, ACCT_TICK_MS);
+    if (Date.now() - _acctUpdatedAt > ACCT_STALE_MS) _acctRefresh();
+  }
+
+  function _acctShow(kind, name, plan, action) {
+    _acctKind = kind;
+    _acct.className = kind; // single state class; also clears 'hidden'
+    _acctName.textContent = name;
+    _acctPlan.textContent = plan;
+    _acctAction.textContent = action || '';
+    _acctAction.hidden = !action;
+    // Being signed out is a normal state — octomind works with your own
+    // provider keys — so that one can be put away until the state changes.
+    _acctDismiss.hidden = kind !== 'signed-out';
+    _acctMeter.hidden = true;
+    _acctPct.hidden = true;
+    _acctApplyOpen();
+  }
+
+  function _acctResets(value) {
+    const ms = Date.parse(value) - Date.now();
+    if (!(ms > 0)) return '';
+    const days = Math.round(ms / 86400000);
+    if (days >= 2) return 'resets in ' + days + ' days';
+    const hours = Math.max(1, Math.round(ms / 3600000));
+    return 'resets in ' + hours + (hours === 1 ? ' hour' : ' hours');
   }
 
   function renderAccount(a) {
     if (!a || typeof a !== 'object') return;
-    let kind, text, action = null;
-    if (a.signed_in) {
-      if (a.over_quota) {
-        kind = 'over-quota';
-        text = 'Out of Octomind quota' + (a.summary ? ' · ' + a.summary : '');
-      } else {
-        kind = 'signed-in';
-        text = a.account || 'Signed in to Octomind';
-      }
-    } else {
-      kind = 'signed-out';
-      text = 'Not signed in to Octomind';
-      action = 'Sign in';
+    _acctUpdatedAt = Date.now();
+    // Reserved is future burn cloud machines already committed — it counts
+    // against the allowance so headroom reads honestly.
+    let peak = -1;
+    let body = '';
+    if (Number(a.balance_usd) > 0) {
+      body += '<div class="account-line"><span>Balance</span><span>$' +
+        Number(a.balance_usd).toFixed(2) + '</span></div>';
     }
-    // A change of state re-shows a previously dismissed bar.
+    (Array.isArray(a.windows) ? a.windows : []).forEach(function(w) {
+      const committed = (Number(w.spent_usd) || 0) + (Number(w.reserved_usd) || 0);
+      const allowance = Number(w.allowance_usd) || 0;
+      if (allowance > 0) peak = Math.max(peak, committed / allowance);
+      const resets = _acctResets(w.resets_at);
+      body += quotaRow((w.label || 'Spend') + (resets ? ' · ' + resets : ''), committed, allowance, 'USD');
+    });
+    if (Number(a.storage_quota_gb) > 0) body += quotaRow('Storage', a.storage_gb, a.storage_quota_gb, 'GB');
+    if (Number(a.network_included_gb) > 0) body += quotaRow('Network', a.network_used_gb, a.network_included_gb, 'GB');
+    _acctBody.innerHTML = body || '<div class="account-line">No usage limits on this plan</div>';
+
+    const kind = !a.signed_in ? 'signed-out' : (peak >= 1 ? 'over-quota' : 'signed-in');
     if (_acctDismissedKind && _acctDismissedKind !== kind) _acctDismissedKind = null;
-    if (_acctDismissedKind === kind) { _acctBar.className = 'hidden'; return; }
-    _acctSet(kind, text, action);
+    if (kind === 'over-quota' && _acctKind !== 'over-quota') _acctOpen = true;
+    if (_acctDismissedKind === kind) {
+      _acctKind = kind;
+      _acct.className = 'hidden';
+      return;
+    }
+    if (!a.signed_in) {
+      _acctShow('signed-out', 'Not signed in to Octomind', '', 'Sign in');
+      return;
+    }
+    // octomind sends the account as "email (plan)".
+    const who = /^(.*) \(([^()]+)\)$/.exec(a.account || '');
+    const email = who ? who[1] : (a.account || 'Signed in to Octomind');
+    _acctShow(kind, kind === 'over-quota' ? 'Out of Octomind quota' : email, who ? who[2] : '', null);
+    if (peak >= 0) {
+      const pct = Math.round(peak * 100);
+      _acctMeterFill.style.width = Math.min(100, pct) + '%';
+      _acctMeterFill.className = pct >= 100 ? 'err' : (pct >= 80 ? 'warn' : '');
+      _acctPct.textContent = pct + '%';
+      _acctMeter.hidden = false;
+      _acctPct.hidden = false;
+    }
   }
 
+  function _acctSignIn() {
+    _acctShow('pending', 'Starting sign-in…', '', null);
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_signin', session_id: activeSid || 0 }));
+  }
+
+  _acctToggle.addEventListener('click', () => {
+    if (_acctKind === 'signed-out') {
+      _acctSignIn();
+    } else if (_acctExpandable()) {
+      _acctOpen = !_acct.classList.contains('open');
+      _acctApplyOpen();
+      window.ipc.postMessage(JSON.stringify({ type: 'account_expanded', expanded: _acctOpen }));
+    }
+  });
   _acctAction.addEventListener('click', () => {
-    if (_acctBar.classList.contains('signed-out')) {
-      _acctSet('pending', 'Starting sign-in…', null);
-      window.ipc.postMessage(JSON.stringify({ type: 'acp_signin', session_id: activeSid || 0 }));
+    if (_acctKind === 'signed-out') {
+      _acctSignIn();
+    } else if (_acctKind === 'pending' && _acctCode) {
+      window.ipc.postMessage(JSON.stringify({ type: 'copy_text', text: _acctCode }));
+      _acctAction.textContent = 'Copied';
     }
   });
   _acctDismiss.addEventListener('click', () => {
-    _acctDismissedKind = _acctBar.className.split(' ')[0] || null;
-    _acctBar.className = 'hidden';
+    _acctDismissedKind = _acctKind;
+    _acct.className = 'hidden';
+  });
+  document.getElementById('account-refresh').addEventListener('click', _acctRefresh);
+  document.getElementById('account-dashboard').addEventListener('click', () => {
+    window.ipc.postMessage(JSON.stringify({ type: 'account_dashboard' }));
   });
 
-  // Callable from Rust — account/quota status parsed from `/usage`.
+  // Callable from Rust — octomind's `/usage` output.
   window.__setAccount = function(sid, json) {
     let a; try { a = JSON.parse(json); } catch (e) { return; }
     renderAccount(a);
@@ -3488,7 +3711,8 @@ pub fn html(max_ai_prompt_history: usize) -> String {
   // Callable from Rust — `/login` started; the verification tab is opening.
   window.__loginPending = function(sid, code) {
     _acctDismissedKind = null;
-    _acctSet('pending', code ? ('Waiting for browser… code ' + code) : 'Waiting for browser…', null);
+    _acctCode = code || '';
+    _acctShow('pending', 'Waiting for browser…', _acctCode, _acctCode ? 'Copy code' : null);
   };
 
   // ── Inline rename ───────────────────────────────────────────────────────
@@ -4220,7 +4444,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
     var cls = pct >= 100 ? ' err' : (pct >= 80 ? ' warn' : '');
     var value = suffix === 'GB'
       ? spent.toFixed(2) + ' / ' + limit.toFixed(2) + ' GB'
-      : fmtCost(spent) + ' / ' + fmtCost(limit);
+      : '$' + spent.toFixed(2) + ' / $' + limit.toFixed(2);
     return '<div class="cmd-quota"><div class="cmd-quota-head">' +
       '<span class="cmd-quota-name">' + escapeHtml(String(label)) + '</span>' +
       '<span class="cmd-quota-value">' + escapeHtml(value) + '</span></div>' +
@@ -4734,7 +4958,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
         for (var i = 0; i < windows.length; i++) {
           var w = windows[i] || {};
           var committed = Number(w.spent_usd || 0) + Number(w.reserved_usd || 0);
-          html += quotaRow(w.label || 'Window', committed, w.cap_usd, 'USD');
+          html += quotaRow(w.label || 'Window', committed, w.allowance_usd, 'USD');
         }
         html += '</div>';
       }
@@ -7482,6 +7706,7 @@ pub fn html(max_ai_prompt_history: usize) -> String {
             "/* MAX_PROMPT_HISTORY */",
             &max_ai_prompt_history.to_string(),
         )
+        .replace("/* ACCOUNT_EXPANDED */", &account_expanded.to_string())
         .replace("/* ICON_OCTOPUS_BRAND */", crate::icons::OCTOPUS_BRAND)
         .replace("/* ICON_CHECK */", crate::icons::CHECK)
         .replace("/* ICON_CHECK_CIRCLE */", crate::icons::CHECK_CIRCLE)
@@ -7495,7 +7720,7 @@ mod tests {
     /// with nothing in the build to warn you, so parse it here instead.
     #[test]
     fn the_inline_script_parses() {
-        let html = super::html(50);
+        let html = super::html(50, false);
         let open = html.find("<script>").expect("inline script");
         let start = open + "<script>".len();
         let end = start + html[start..].find("</script>").expect("script close");
@@ -7513,7 +7738,7 @@ mod tests {
     /// ship a sidebar with no renderer in it.
     #[test]
     fn the_a2ui_core_is_injected() {
-        let html = super::html(50);
+        let html = super::html(50, false);
         assert!(!html.contains("/* A2UI_CORE_JS */"), "marker not replaced");
         assert!(html.contains("function a2uiResolveValue"), "core missing");
     }

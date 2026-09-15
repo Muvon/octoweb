@@ -417,6 +417,9 @@ pub struct Config {
     /// Light, dark, or follow macOS — for the chrome and every page alike
     #[serde(default)]
     pub appearance: Appearance,
+    /// The sidebar's account card shows usage details, not just its row
+    #[serde(default)]
+    pub account_expanded: bool,
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
@@ -555,6 +558,7 @@ impl Default for Config {
             sidebar_width: default_sidebar_width(),
             terminal_height: default_terminal_height(),
             appearance: Appearance::Auto,
+            account_expanded: false,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,
