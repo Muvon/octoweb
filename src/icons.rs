@@ -59,15 +59,6 @@ pub const CPU: &str = concat!(
     "</svg>"
 );
 
-/// `sparkles` — AI toggle button (replaces the 🐙 emoji in the address bar).
-pub const SPARKLES: &str = concat!(
-    r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
-    r#"<path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5 10.1 7.6z"/>"#,
-    r#"<path d="M19 14l.8 1.9L21.7 16.7l-1.9.8L19 19.5l-.8-1.9L16.3 16.7l1.9-.8z"/>"#,
-    r#"<path d="M5 16l.6 1.4L7 18l-1.4.6L5 20l-.6-1.4L3 18l1.4-.6z"/>"#,
-    "</svg>"
-);
-
 /// `check-circle-2` — success toast icon.
 pub const CHECK_CIRCLE: &str = concat!(
     r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,

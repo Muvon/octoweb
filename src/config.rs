@@ -411,6 +411,15 @@ pub struct Config {
     /// AI sidebar width in logical pixels
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    /// Terminal panel height in logical pixels
+    #[serde(default = "default_terminal_height")]
+    pub terminal_height: u32,
+    /// Light, dark, or follow macOS — for the chrome and every page alike
+    #[serde(default)]
+    pub appearance: Appearance,
+    /// The sidebar's account card shows usage details, not just its row
+    #[serde(default)]
+    pub account_expanded: bool,
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
@@ -487,6 +496,16 @@ pub struct ProxyRule {
     pub sites: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Follow the macOS appearance.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyKind {
@@ -502,6 +521,10 @@ fn default_max_prompt_history() -> usize {
 
 fn default_sidebar_width() -> u32 {
     440
+}
+
+fn default_terminal_height() -> u32 {
+    320
 }
 
 fn default_max_ai_prompt_history() -> usize {
@@ -533,6 +556,9 @@ impl Default for Config {
             window_width: 1280,
             window_height: 800,
             sidebar_width: default_sidebar_width(),
+            terminal_height: default_terminal_height(),
+            appearance: Appearance::Auto,
+            account_expanded: false,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,

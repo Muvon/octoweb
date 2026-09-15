@@ -43,6 +43,8 @@ mod snapshot_js;
 mod ssh_tunnel;
 mod tab_nav;
 mod tab_stats;
+mod terminal;
+mod terminal_html;
 mod theme;
 mod url;
 mod webview_utils;
@@ -206,6 +208,11 @@ enum AppEvent {
     KeybindReset(String),          // (action_id) — restore one action to its default
     KeybindResetAll,               // restore every keybinding to default
     KeybindCapture(bool),          // settings panel started/stopped recording a chord
+    ToggleTerminal,                // ⌘` — show/hide the terminal panel
+    ToggleTerminalFullscreen,      // ⌘⇧Return in the terminal / header icon — fill the page area
+    TerminalScript(&'static str),  // keymap action run in the terminal page (new/close/cycle tab)
+    Terminal(terminal::Request),   // message from the terminal panel page
+    TerminalOutput(u32),           // (terminal_id) — shell output or exit: answer the panel's read
     Quit,
 }
 
@@ -225,6 +232,7 @@ enum InternalPageAction {
 enum PanelFocusTarget {
     AddressBar,
     Sidebar,
+    Terminal,
     ActiveTab,
 }
 
@@ -361,6 +369,31 @@ fn keybind_to_event(
             }
         }
         A::TogglePin if !overlay => AppEvent::TogglePin,
+        A::Terminal if !overlay => AppEvent::ToggleTerminal,
+        _ => return None,
+    })
+}
+
+/// Map a keybinding while the terminal panel has the keyboard. `None` hands
+/// the key to the terminal: any chord not listed means something to the shell
+/// or the panel there (⌃D, ⌃U, ⌃P, ⌘1…). Tab and fullscreen keys follow
+/// focus, as they do for the sidebar's sessions.
+fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
+    use keybindings::Action as A;
+    Some(match action {
+        A::Terminal => AppEvent::ToggleTerminal,
+        A::SidebarFullscreen => AppEvent::ToggleTerminalFullscreen,
+        A::NewSession => AppEvent::TerminalScript("window.__termNew()"),
+        A::CloseTab => AppEvent::TerminalScript("window.__termClose()"),
+        A::Back => AppEvent::TerminalScript("window.__termCycle(-1)"),
+        A::Forward => AppEvent::TerminalScript("window.__termCycle(1)"),
+        A::Quit => AppEvent::Quit,
+        A::CommandPalette => AppEvent::ToggleOverlay,
+        A::Settings => AppEvent::ToggleSettings,
+        A::Shortcuts => AppEvent::ToggleShortcuts,
+        A::Sidebar => AppEvent::ToggleSidebar,
+        A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
+        A::Fullscreen => AppEvent::ToggleFullscreen,
         _ => return None,
     })
 }
@@ -461,6 +494,9 @@ pub const MAX_SESSIONS: usize = 10;
 /// Name the bundled tap registers under. `octomind tap` addresses taps as
 /// `user/repo`, and capability references reach this one as `muvon/<name>`.
 const OCTOMIND_TAP_NAME: &str = "muvon/octoweb";
+
+/// Octomind account usage and billing, opened from the sidebar's account card.
+const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
 
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
@@ -637,6 +673,8 @@ fn main() {
 
     cold_open::install_early(); // capture kAEGetURL before tao drops it
     let mut event_loop: EventLoop<AppEvent> = EventLoopBuilder::with_user_event().build();
+    // Before any window exists, so nothing paints in the wrong scheme first.
+    set_appearance(cfg.appearance);
     // Background/agent mode: octoweb runs as an MCP-driven worker that must never
     // pull focus from whatever the user is doing. Accessory policy (no Dock icon,
     // no menu bar) + not activating on launch = windows still render and the agent
@@ -1719,7 +1757,10 @@ fn main() {
     const NOTIF_MARGIN_LOGICAL: f64 = 12.0;
     let notif_margin = (NOTIF_MARGIN_LOGICAL * browser_win.scale_factor()) as u32;
     let sidebar_wv = WebViewBuilder::new()
-        .with_html(sidebar_html::html(cfg.max_ai_prompt_history))
+        .with_html(sidebar_html::html(
+            cfg.max_ai_prompt_history,
+            cfg.account_expanded,
+        ))
         .with_transparent(true)
         .with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
             let path = request.uri().path().trim_start_matches('/');
@@ -1806,6 +1847,24 @@ fn main() {
                         Some("acp_signin") => {
                             let sid = v["session_id"].as_u64().unwrap_or(0);
                             let _ = p.send_event(AppEvent::AcpSignIn(sid));
+                        }
+                        Some("acp_refresh_account") => {
+                            let sid = v["session_id"].as_u64().unwrap_or(0);
+                            let _ = p.send_event(AppEvent::AcpRefreshAccount(sid));
+                        }
+                        Some("account_dashboard") => {
+                            let _ = p.send_event(AppEvent::OpenInNewTab(
+                                OCTOMIND_USAGE_URL.to_string(),
+                                None,
+                            ));
+                        }
+                        Some("account_expanded") => {
+                            if let Some(expanded) = v["expanded"].as_bool() {
+                                let _ = p.send_event(AppEvent::UpdateConfig(
+                                    "account_expanded".into(),
+                                    expanded.to_string(),
+                                ));
+                            }
                         }
                         Some("sidebar_close") => {
                             let _ = p.send_event(AppEvent::ToggleSidebar);
@@ -2551,6 +2610,50 @@ fn main() {
             k.ui_json()
         ));
     }
+    // ── Terminal panel (⌘`) — docked above the footer ────────────────────
+    // Built after the keymap so its controls start with live shortcut titles.
+    // Height is kept in logical points like the sidebar width, and the page
+    // keeps at least PAGE_MIN_H_LOGICAL above the panel.
+    const TERMINAL_H_LOGICAL: u32 = 320;
+    const TERMINAL_MIN_H_LOGICAL: u32 = 120;
+    const PAGE_MIN_H_LOGICAL: u32 = 80;
+    let clamp_terminal_height = |height: u32, page_height: u32, scale_factor: f64| {
+        let page_logical_height = (f64::from(page_height) / scale_factor) as u32;
+        let max_height = page_logical_height
+            .saturating_sub(PAGE_MIN_H_LOGICAL)
+            .max(TERMINAL_MIN_H_LOGICAL);
+        height.clamp(TERMINAL_MIN_H_LOGICAL, max_height)
+    };
+    let mut terminal_height_logical = cfg.terminal_height;
+    let mut terminal_fullscreen = false;
+    let mut terminals = terminal::Terminals::new(proxy.clone());
+    let terminal_wv = WebViewBuilder::new()
+        .with_html(terminal_html::html(
+            &keymap.read().unwrap().ui_json().to_string(),
+        ))
+        .with_transparent(true)
+        // chrome_win is rarely key while you work in a page; without this the
+        // first press on the panel only makes it key, so a drag of its top
+        // edge (or a click on a tab) did nothing.
+        .with_accept_first_mouse(true)
+        .with_asynchronous_custom_protocol("octoweb-term".into(), terminals.output_protocol())
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(request) = serde_json::from_str::<terminal::Request>(msg.body()) {
+                    let _ = p.send_event(AppEvent::Terminal(request));
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create terminal WebView");
+    let _ = terminal_wv.set_visible(false);
+    // The key window's first responder is inside this view while the terminal
+    // has the keyboard (see `key_focus_in`).
+    let terminal_view = objc2::rc::Retained::as_ptr(&terminal_wv.webview()) as usize;
+    let mut terminal_visible = false;
+    let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
+
     let _key_monitor: *mut objc2::runtime::AnyObject = {
         use block2::RcBlock;
         use objc2::runtime::AnyObject;
@@ -2620,6 +2723,15 @@ fn main() {
             // command palette is open) falls through so the key still reaches
             // the focused WebView — mirroring the previous hardcoded behavior.
             let action = km.read().ok().and_then(|k| k.lookup(mods, keycode));
+            if key_focus_in(terminal_view) {
+                return match action.and_then(terminal_keybind_to_event) {
+                    Some(ev) => {
+                        let _ = p.send_event(ev);
+                        consume
+                    }
+                    None => pass,
+                };
+            }
             if let Some(action) = action {
                 if let Some(ev) = keybind_to_event(
                     action,
@@ -2703,6 +2815,21 @@ fn main() {
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
 
+    /// Hand the keyboard to the terminal panel's active tab.
+    macro_rules! focus_terminal {
+        () => {{
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                let _: () = msg_send![ns_win, makeKeyWindow];
+            }
+            let _ = terminal_wv.focus();
+            let _ =
+                terminal_wv.evaluate_script(&format!("window.__termShow({})", terminal_fullscreen));
+        }};
+    }
+
     macro_rules! capture_panel_focus {
         () => {{
             let chrome_is_key = unsafe {
@@ -2712,7 +2839,9 @@ fn main() {
                 let is_key: bool = msg_send![ns_win, isKeyWindow];
                 is_key
             };
-            if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
+            if key_focus_in(terminal_view) {
+                PanelFocusTarget::Terminal
+            } else if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
                 PanelFocusTarget::Sidebar
             } else if address_bar_editing {
                 PanelFocusTarget::AddressBar
@@ -2752,6 +2881,7 @@ fn main() {
                         let _ = address_bar_wv
                             .evaluate_script("window.__urlEditFocus && window.__urlEditFocus()");
                     }
+                    PanelFocusTarget::Terminal if terminal_visible => focus_terminal!(),
                     _ => {
                         unsafe {
                             use objc2::msg_send;
@@ -2789,6 +2919,10 @@ fn main() {
                     json
                 ));
                 let _ = address_bar_wv.evaluate_script(&format!(
+                    "window.__setShortcuts && window.__setShortcuts({})",
+                    json
+                ));
+                let _ = terminal_wv.evaluate_script(&format!(
                     "window.__setShortcuts && window.__setShortcuts({})",
                     json
                 ));
@@ -3072,6 +3206,50 @@ fn main() {
     /// size every time — every show path must use it, because a tab shown with
     /// bounds computed at some earlier moment paints under the footer and the
     /// user cannot see or click what is behind it.
+    /// The terminal panel's frame: docked above the footer at its stored
+    /// height, or the whole page area in fullscreen. It stops at an open
+    /// sidebar rather than covering it.
+    macro_rules! terminal_bounds {
+        () => {{
+            let sz = browser_win.inner_size();
+            let scale = browser_win.scale_factor();
+            let page_h = sz.height.saturating_sub(address_bar_h + footer_h);
+            let h = if terminal_fullscreen {
+                page_h
+            } else {
+                let logical = clamp_terminal_height(terminal_height_logical, page_h, scale);
+                ((f64::from(logical) * scale) as u32).min(page_h)
+            };
+            let sidebar_w = if sidebar_visible && !sidebar_fullscreen {
+                sidebar_width_physical(sidebar_width_logical, scale)
+            } else {
+                0
+            };
+            wry::Rect {
+                position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h + page_h - h).into(),
+                size: tao::dpi::PhysicalSize::new(sz.width.saturating_sub(sidebar_w), h).into(),
+            }
+        }};
+    }
+
+    macro_rules! layout_terminal {
+        () => {{
+            if terminal_visible {
+                let _ = terminal_wv.set_bounds(terminal_bounds!());
+            }
+        }};
+    }
+
+    macro_rules! hide_terminal {
+        () => {{
+            let _ = terminal_wv.set_visible(false);
+            terminal_visible = false;
+            // Reset on hide so the next open is docked, as the sidebar does.
+            terminal_fullscreen = false;
+            restore_panel_focus!(terminal_focus_target);
+        }};
+    }
+
     macro_rules! tab_bounds {
         () => {{
             let sz = browser_win.inner_size();
@@ -4443,14 +4621,8 @@ fn main() {
                             "window.__setRoutines && window.__setRoutines({sid},`{escaped}`)"
                         ));
                     }
-                    acp::AgentEvent::Account { signed_in, account, over_quota, summary } => {
-                        let json = serde_json::json!({
-                            "signed_in": signed_in,
-                            "account": account,
-                            "over_quota": over_quota,
-                            "summary": summary,
-                        });
-                        let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
+                    acp::AgentEvent::Account { signed_in, usage } => {
+                        let json_str = usage.to_string();
                         if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.account_json = Some(json_str.clone());
                         }
@@ -6421,6 +6593,13 @@ fn main() {
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
+                    "account_expanded" => cfg.account_expanded = val == "true",
+                    "appearance" => {
+                        if let Ok(appearance) = serde_json::from_value(serde_json::Value::String(val)) {
+                            set_appearance(appearance);
+                            cfg.appearance = appearance;
+                        }
+                    }
                     "search_engine" => {
                         search_engine = val.clone();
                         cfg.search_engine = val;
@@ -7044,6 +7223,9 @@ fn main() {
                     let _ = sidebar_wv.set_visible(false);
                     sidebar_visible = false;
                     sidebar_fullscreen = false; // reset on hide so next open is normal-width
+                    layout_terminal!();
+                    let _ = address_bar_wv
+                        .evaluate_script("window.__setSidebarOpen && window.__setSidebarOpen(false)");
                     sidebar_hotkey_visible.store(false, Ordering::Relaxed);
                     sidebar_owns_key.store(false, Ordering::Relaxed);
                     // Return key window status to browser_win so the page
@@ -7067,6 +7249,9 @@ fn main() {
                     });
                     let _ = sidebar_wv.set_visible(true);
                     sidebar_visible = true;
+                    layout_terminal!();
+                    let _ = address_bar_wv
+                        .evaluate_script("window.__setSidebarOpen && window.__setSidebarOpen(true)");
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSidebarFullscreen && window.__setSidebarFullscreen({})",
                         sidebar_fullscreen
@@ -7170,6 +7355,7 @@ fn main() {
                         size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
                     });
                 }
+                layout_terminal!();
             }
 
             Event::UserEvent(AppEvent::SidebarResizeEnd(width)) => {
@@ -7193,6 +7379,7 @@ fn main() {
                         size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
                     });
                 }
+                layout_terminal!();
                 cfg.sidebar_width = sidebar_width_logical;
                 cfg.save();
             }
@@ -7218,6 +7405,7 @@ fn main() {
                         size: tao::dpi::PhysicalSize::new(sidebar_w, sz.height).into(),
                     });
                 }
+                layout_terminal!();
                 cfg.sidebar_width = SIDEBAR_W_LOGICAL;
                 cfg.save();
             }
@@ -7245,6 +7433,7 @@ fn main() {
                     sidebar_fullscreen = true;
                 } else {
                     sidebar_fullscreen = !sidebar_fullscreen;
+                    layout_terminal!();
                     let sz = browser_win.inner_size();
                     sidebar_width_logical = clamp_sidebar_width(
                         sidebar_width_logical,
@@ -7706,6 +7895,8 @@ fn main() {
                     && !settings_visible
                     && !shortcuts_visible
                     && !workspace_switcher_visible.load(Ordering::Relaxed)
+                    // chrome_win also turns key when the terminal takes focus.
+                    && !key_focus_in(terminal_view)
                     && is_app_active()
                     && unsafe { macos::window_is_key(chrome_win.ns_window()) } =>
             {
@@ -8245,6 +8436,82 @@ fn main() {
                     let _ = find_bar_wv.evaluate_script("window.__focus && window.__focus()");
                 }
             }
+
+            // ── Terminal panel (⌘`) ──────────────────────────────────────────
+            Event::UserEvent(AppEvent::ToggleTerminal) => {
+                if terminal_visible {
+                    hide_terminal!();
+                } else {
+                    terminal_focus_target = capture_panel_focus!();
+                    terminal_visible = true;
+                    layout_terminal!();
+                    let _ = terminal_wv.set_visible(true);
+                    focus_terminal!();
+                }
+            }
+            // ── Terminal fullscreen — the panel fills the page area (⌘⇧Return
+            //     while it has focus, or the icon in its header) ─────────────
+            Event::UserEvent(AppEvent::ToggleTerminalFullscreen) => {
+                if terminal_visible {
+                    terminal_fullscreen = !terminal_fullscreen;
+                    layout_terminal!();
+                    focus_terminal!();
+                } else {
+                    // Surface it first, already expanded.
+                    terminal_fullscreen = true;
+                    let _ = proxy.send_event(AppEvent::ToggleTerminal);
+                }
+            }
+            Event::UserEvent(AppEvent::TerminalScript(script)) if terminal_visible => {
+                let _ = terminal_wv.evaluate_script(script);
+            }
+            Event::UserEvent(AppEvent::Terminal(request)) => match request {
+                terminal::Request::Open { id, cols, rows } => {
+                    let error = terminals
+                        .open(id, cols, rows)
+                        .err()
+                        .map(|e| format!("Could not start the shell: {e}"));
+                    let error = serde_json::to_string(&error).unwrap();
+                    let _ = terminal_wv
+                        .evaluate_script(&format!("window.__termOpened({id}, {error})"));
+                }
+                terminal::Request::Input { id, data } => terminals.write(id, data.0.into_bytes()),
+                terminal::Request::Resize { id, cols, rows } => terminals.resize(id, cols, rows),
+                terminal::Request::Close { id } => terminals.close(id),
+                terminal::Request::OpenUrl { url } => {
+                    let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                }
+                terminal::Request::Hide => {
+                    if terminal_visible {
+                        hide_terminal!();
+                    }
+                }
+                terminal::Request::Fullscreen => {
+                    let _ = proxy.send_event(AppEvent::ToggleTerminalFullscreen);
+                }
+                terminal::Request::ResizePanel { height } => {
+                    terminal_height_logical = height;
+                    layout_terminal!();
+                }
+                terminal::Request::ResizePanelEnd { height } => {
+                    let page_h = browser_win
+                        .inner_size()
+                        .height
+                        .saturating_sub(address_bar_h + footer_h);
+                    terminal_height_logical =
+                        clamp_terminal_height(height, page_h, browser_win.scale_factor());
+                    layout_terminal!();
+                    cfg.terminal_height = terminal_height_logical;
+                    cfg.save();
+                }
+                terminal::Request::ResizePanelReset => {
+                    terminal_height_logical = TERMINAL_H_LOGICAL;
+                    layout_terminal!();
+                    cfg.terminal_height = TERMINAL_H_LOGICAL;
+                    cfg.save();
+                }
+            },
+            Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
 
             // ── Find bar: hide (Esc / close button) ─────────────────────────
             Event::UserEvent(AppEvent::HideFindBar) if find_bar_visible => {
@@ -9264,6 +9531,7 @@ fn main() {
                             size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
                         });
                     }
+                    layout_terminal!();
                     // Resize address bar to full width. While the user is in URL
                     // edit mode the bar is grown by ~340 px so the autocomplete
                     // dropdown stays visible below the 32 px titlebar strip.
@@ -10277,6 +10545,53 @@ fn is_app_active() -> bool {
     }
 }
 
+/// Whether the key window's first responder is `view` or a view inside it.
+fn key_focus_in(view: usize) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let window: *mut AnyObject = msg_send![app, keyWindow];
+        if window.is_null() {
+            return false;
+        }
+        let responder: *mut AnyObject = msg_send![window, firstResponder];
+        if responder.is_null() {
+            return false;
+        }
+        let is_view: bool = msg_send![responder, isKindOfClass: class!(NSView)];
+        if !is_view {
+            return false;
+        }
+        msg_send![responder, isDescendantOf: view as *mut AnyObject]
+    }
+}
+
+/// Force every window light or dark, or follow macOS for `Auto`. WebKit
+/// derives `prefers-color-scheme` from a view's effective appearance, so the
+/// chrome and every web page switch with it.
+fn set_appearance(appearance: config::Appearance) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    let name = match appearance {
+        config::Appearance::Auto => None,
+        config::Appearance::Light => Some("NSAppearanceNameAqua"),
+        config::Appearance::Dark => Some("NSAppearanceNameDarkAqua"),
+    };
+    unsafe {
+        let ns_appearance: *mut AnyObject = match name {
+            Some(name) => {
+                let name = objc2_foundation::NSString::from_str(name);
+                msg_send![class!(NSAppearance), appearanceNamed: &*name]
+            }
+            // nil makes the app inherit the system appearance again.
+            None => std::ptr::null_mut(),
+        };
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setAppearance: ns_appearance];
+    }
+}
+
 /// Current (sanitized) URL of a tab, for navigation-aware messages built off
 /// the main thread (watchdogs) or inside eval callbacks.
 /// Compact "where the user is" block prepended to every sidebar prompt.
@@ -10978,7 +11293,10 @@ mod persistence_and_paging_tests {
 
 #[cfg(test)]
 mod keybinding_dispatch_tests {
-    use super::{keybind_to_event, push_closed_tab, wants_browser_context, AppEvent};
+    use super::{
+        keybind_to_event, push_closed_tab, terminal_keybind_to_event, wants_browser_context,
+        AppEvent,
+    };
     use crate::keybindings::Action as A;
 
     /// No chrome surface owns the keyboard — the permissive context every
@@ -11087,6 +11405,40 @@ mod keybinding_dispatch_tests {
         let sidebar = keybind_to_event(A::CloseTab, false, false, false, true, false, false);
         assert!(matches!(sidebar, Some(AppEvent::AcpSessionCloseActive)));
         assert!(matches!(idle(A::CloseTab), Some(AppEvent::CloseTab(0))));
+    }
+
+    #[test]
+    fn a_focused_terminal_keeps_shell_keys_and_takes_its_tab_keys() {
+        // ⌃D ⌃U ⌃P ⌃N ⌃T ⌃B are shell keys: bound to browser actions, they
+        // must still reach the terminal.
+        for action in [
+            A::ScrollDown,
+            A::ScrollUp,
+            A::ScrollTop,
+            A::ScrollBottom,
+            A::PrevTab,
+            A::NextTab,
+        ] {
+            assert!(
+                terminal_keybind_to_event(action).is_none(),
+                "{} must reach the shell",
+                action.id()
+            );
+        }
+        for action in [A::NewSession, A::CloseTab, A::Back, A::Forward] {
+            assert!(matches!(
+                terminal_keybind_to_event(action),
+                Some(AppEvent::TerminalScript(_))
+            ));
+        }
+        assert!(matches!(
+            terminal_keybind_to_event(A::Terminal),
+            Some(AppEvent::ToggleTerminal)
+        ));
+        assert!(matches!(
+            terminal_keybind_to_event(A::SidebarFullscreen),
+            Some(AppEvent::ToggleTerminalFullscreen)
+        ));
     }
 
     #[test]
@@ -11243,7 +11595,8 @@ mod chrome_js_syntax_tests {
             ("quickslots", crate::quickslots_html::html()),
             ("settings", crate::settings_html::html()),
             ("shortcuts", crate::shortcuts_html::html()),
-            ("sidebar", crate::sidebar_html::html(50)),
+            ("sidebar", crate::sidebar_html::html(50, false)),
+            ("terminal", crate::terminal_html::html("null")),
             ("workspace_switcher", crate::workspace_switcher_html::html()),
         ]
     }

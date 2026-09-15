@@ -154,6 +154,7 @@ extern "C-unwind" fn window_frame(
 ///  - SPA URL tracking (pushState / replaceState / popstate)
 ///  - Audio/video playback state (WeakRef, no MutationObserver)
 ///  - Find-in-page (CSS Custom Highlight API, zero DOM mutation)
+///  - Safari's `window.safari`, which WKWebView pages lack
 pub const COMBINED_SCRIPT: &str = r#"
 (function () {
   'use strict';
@@ -189,6 +190,29 @@ pub const COMBINED_SCRIPT: &str = r#"
       _native.set(wrapper, orig);
     } catch (e) {}
     return wrapper;
+  }
+
+  // ── Safari parity: window.safari ──────────────────────────────────────────
+  // Safari pages have `window.safari`; WKWebView apps don't, even with Safari's
+  // user agent. Sites feature-test it to take their WebKit code path: µTorrent
+  // Web loads its GUI from http://127.0.0.1 directly instead of fetching it from
+  // its https page, which WebKit blocks as mixed content (Chrome and Firefox let
+  // loopback through). Octoweb has no website push, so that API answers
+  // "denied". Configurable, so a page's own `safari` global still declares
+  // (see remove_ipc_global for what a frozen global breaks).
+  if (!('safari' in window)) {
+    var _pushDenied = function () { return { permission: 'denied', deviceToken: null }; };
+    var _remoteNotification = Object.create({
+      permission: _pushDenied,
+      requestPermission: function (url, websitePushID, userInfo, callback) {
+        if (typeof callback === 'function') callback(_pushDenied());
+      }
+    }, { [Symbol.toStringTag]: { value: 'SafariRemoteNotification' } });
+    Object.defineProperty(window, 'safari', {
+      value: { pushNotification: _remoteNotification },
+      configurable: true,
+      writable: true
+    });
   }
 
   // ── Page stats + Favicon ── single load listener combining both tasks ──────

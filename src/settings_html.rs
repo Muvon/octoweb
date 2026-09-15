@@ -461,6 +461,17 @@ pub fn html() -> String {
       <div class="section-title">General</div>
       <div class="row with-hint">
         <div class="row-label-stack">
+          <span class="row-label" id="appearance-label">Appearance</span>
+          <span class="row-hint">Auto follows macOS. Websites follow your choice too.</span>
+        </div>
+        <span class="seg" id="appearance-seg" role="group" aria-labelledby="appearance-label">
+          <button type="button" data-appearance="auto" aria-pressed="true">Auto</button>
+          <button type="button" data-appearance="light" aria-pressed="false">Light</button>
+          <button type="button" data-appearance="dark" aria-pressed="false">Dark</button>
+        </span>
+      </div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
           <label class="row-label" for="home_page">Home page</label>
           <span class="row-hint">Loads on launch when there's no previous session to restore.</span>
         </div>
@@ -702,8 +713,25 @@ pub fn html() -> String {
     proxies = cfg.proxies;
     renderProxies();
     syncSearchEngine();
+    showAppearance(cfg.appearance);
     requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
+
+  // ── Appearance ────────────────────────────────────────────────────────
+  // Rust applies it app-wide: every window and page switches at once, this
+  // panel included.
+  function showAppearance(value) {
+    document.querySelectorAll('#appearance-seg button').forEach(function(b) {
+      b.setAttribute('aria-pressed', String(b.dataset.appearance === value));
+    });
+  }
+
+  document.querySelectorAll('#appearance-seg button').forEach(function(b) {
+    b.addEventListener('click', function() {
+      showAppearance(b.dataset.appearance);
+      ipc({ type: 'settings_update', key: 'appearance', value: b.dataset.appearance });
+    });
+  });
 
   // ── Search engine presets ─────────────────────────────────────────────
   // The select holds full URL templates; "custom" reveals the raw URL input.
