@@ -40,6 +40,7 @@ mod shortcuts_html;
 mod sidebar_html;
 mod site_proxy;
 mod snapshot_js;
+mod ssh_tunnel;
 mod tab_nav;
 mod tab_stats;
 mod theme;
@@ -152,6 +153,7 @@ enum AppEvent {
     ToggleSettings,                                  // ⌘, — toggle settings modal
     HideSettings,                                    // JS Esc / backdrop click in settings modal
     UpdateConfig(String, String), // (key, value) — config field changed in settings UI
+    ProxyStatus([u8; 16], ssh_tunnel::Status), // SSH tunnel proxy changed state
     ToggleWorkspaces,             // ⌘⇧O — toggle workspace switcher popover
     HideWorkspaces,               // JS Esc / backdrop click in workspace switcher
     SwitchWorkspace(String),      // (workspace_id) — switch active workspace
@@ -534,6 +536,10 @@ fn copy_js(markdown: bool) -> String {
 }
 
 fn main() {
+    // ssh runs this binary as SSH_ASKPASS for password-authenticated tunnel proxies.
+    if let Ok(id) = std::env::var(ssh_tunnel::ASKPASS_ENV) {
+        ssh_tunnel::askpass(&id);
+    }
     // Initialize tracing: RUST_LOG env controls verbosity (e.g. RUST_LOG=debug).
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -645,6 +651,13 @@ fn main() {
     }
     cold_open::install(); // hook application:openURLs: for warm launch
     let proxy = event_loop.create_proxy();
+    let mut tunnels = ssh_tunnel::Tunnels::new(proxy.clone());
+    tunnels.sync(&cfg.proxies);
+    // Last reported state per SSH tunnel, shown in Settings → Proxies.
+    let mut proxy_status: HashMap<[u8; 16], ssh_tunnel::Status> = HashMap::new();
+    // Tabs whose load failed while their SSH tunnel was down → URL to reload
+    // once it connects.
+    let mut tunnel_retry: HashMap<usize, String> = HashMap::new();
     let overlay_hotkey_visible = Arc::new(AtomicBool::new(false));
     let find_bar_hotkey_visible = Arc::new(AtomicBool::new(false));
     // Address bar in URL edit mode: Ctrl+N/P navigate suggestions, not tabs.
@@ -5977,6 +5990,7 @@ fn main() {
                     let _ = settings_wv.evaluate_script(&format!(
                         "window.__setConfig && window.__setConfig({})", config_json
                     ));
+                    let _ = settings_wv.evaluate_script(&proxy_status_script(&proxy_status));
                     // Inject current keybindings into the Keybindings tab
                     if let Ok(k) = keymap.read() {
                         let _ = settings_wv.evaluate_script(&format!(
@@ -6469,8 +6483,29 @@ fn main() {
                         );
                     }
                     "proxies" => match serde_json::from_str::<Vec<config::ProxyRule>>(&val) {
-                        Ok(rules) => {
+                        Ok(mut rules) => {
+                            for rule in &mut rules {
+                                let Some(password) = rule.password.take() else {
+                                    continue;
+                                };
+                                if password.is_empty() {
+                                    ssh_tunnel::forget_password(&rule.id);
+                                } else if let Err(e) = ssh_tunnel::save_password(&rule.id, &password) {
+                                    tracing::warn!(error = %e, "failed to store SSH proxy password in Keychain");
+                                }
+                                rule.has_password = !password.is_empty();
+                                // ssh reads the password only when it connects.
+                                tunnels.stop(&rule.id);
+                            }
+                            for old in &cfg.proxies {
+                                if old.has_password && !rules.iter().any(|r| r.id == old.id) {
+                                    ssh_tunnel::forget_password(&old.id);
+                                }
+                            }
                             site_proxy::set_rules(&rules);
+                            let started = tunnels.sync(&rules);
+                            proxy_status.retain(|id, _| tunnels.is_running(id) && !started.contains(id));
+                            let _ = settings_wv.evaluate_script(&proxy_status_script(&proxy_status));
                             cfg.proxies = rules;
                         }
                         Err(e) => tracing::warn!(error = %e, "ignoring malformed proxies from settings"),
@@ -6478,6 +6513,34 @@ fn main() {
                     _ => {}
                 }
                 cfg.save();
+            }
+
+            Event::UserEvent(AppEvent::ProxyStatus(id, status)) => {
+                // Reports queued before a tunnel was stopped still arrive.
+                if !tunnels.is_running(&id) {
+                    return;
+                }
+                if matches!(status, ssh_tunnel::Status::Connected) {
+                    tunnel_retry.retain(|&tab_id, url| {
+                        if !error_page_tabs.contains(&tab_id) {
+                            return false;
+                        }
+                        if site_proxy::rule_for(url).is_none_or(|rule| rule.id != id) {
+                            return true;
+                        }
+                        if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
+                            let _ = wv.load_url(url);
+                        }
+                        false
+                    });
+                }
+                // While ssh retries, keep showing why it failed.
+                let retrying = matches!(status, ssh_tunnel::Status::Connecting)
+                    && matches!(proxy_status.get(&id), Some(ssh_tunnel::Status::Failed(_)));
+                if !retrying {
+                    proxy_status.insert(id, status);
+                    let _ = settings_wv.evaluate_script(&proxy_status_script(&proxy_status));
+                }
             }
 
             Event::UserEvent(AppEvent::KeybindRecord(action, chord)) => {
@@ -8290,6 +8353,7 @@ fn main() {
             // ── Quit ──────────────────────────────────────────────────────
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
+                tunnels.stop_all();
                 save_and_exit(
                     &workspace_manager,
                     &favicon_cache,
@@ -8587,6 +8651,11 @@ fn main() {
                     let _ = progress_wv.set_visible(false);
                     progress_visible = false;
                     progress_hide_at = None;
+                }
+                // Tabs can load before their SSH tunnel is up (launch, reconnect);
+                // they are reloaded once it connects.
+                if site_proxy::rule_for(&url).is_some_and(|rule| rule.kind == config::ProxyKind::Ssh) {
+                    tunnel_retry.insert(tab_id, url.clone());
                 }
                 // Load error page directly into the failing browser WebView
                 if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
@@ -9077,6 +9146,7 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
+                        tunnels.stop_all();
                         save_and_exit(
                             &workspace_manager,
                             &favicon_cache,
@@ -10250,6 +10320,18 @@ fn build_browser_context(
     }
     out.push_str("</untrusted>");
     Some(out)
+}
+
+/// Script pushing `{hex id: {state, message}}` into Settings → Proxies.
+fn proxy_status_script(status: &HashMap<[u8; 16], ssh_tunnel::Status>) -> String {
+    let json: serde_json::Map<String, serde_json::Value> = status
+        .iter()
+        .map(|(id, s)| (ssh_tunnel::hex(id), s.to_json()))
+        .collect();
+    format!(
+        "window.__setProxyStatus && window.__setProxyStatus({})",
+        serde_json::Value::Object(json)
+    )
 }
 
 /// Whether `tab_id` belongs to an isolated (incognito) tab. WebViews are

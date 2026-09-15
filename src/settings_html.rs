@@ -151,6 +151,7 @@ pub fn html() -> String {
   }
 
   .row input[type="text"],
+  .row input[type="password"],
   .row input[type="number"] {
     flex: 1;
     min-width: 0;
@@ -168,8 +169,10 @@ pub fn html() -> String {
     transition: background var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
   }
   .row input[type="text"]:hover,
+  .row input[type="password"]:hover,
   .row input[type="number"]:hover { background: var(--fill-hover); }
   .row input[type="text"]:focus,
+  .row input[type="password"]:focus,
   .row input[type="number"]:focus {
     background: var(--fill-hover);
     box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
@@ -339,6 +342,77 @@ pub fn html() -> String {
   .kb-reset-all:active { filter: brightness(0.92); transform: scale(0.96); }
 
   /* Proxies */
+  .proxy-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; }
+  .proxy-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .proxy-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .proxy-name,
+  .proxy-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .proxy-name { font-size: 13px; color: var(--label); }
+  .proxy-sub { font-size: 11px; color: var(--label-2); }
+  .proxy-chev { font-size: 15px; color: var(--label-2); transition: transform var(--t-fast) var(--ease); }
+  .proxy.open .proxy-chev { transform: rotate(90deg); }
+  .proxy-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--fill-press); }
+  .proxy-dot.on { background: var(--accent); }
+  .proxy-dot.connecting { background: var(--warn); }
+  .proxy-dot.connected { background: var(--ok); }
+  .proxy-dot.failed { background: var(--err); }
+  .proxy-body { box-shadow: 0 0.5px 0 var(--hairline) inset; }
+  .proxy-inline { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
+  .seg {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    background: var(--fill);
+    border-radius: var(--r-capsule);
+    box-shadow: inset 0 0 0 0.5px var(--hairline);
+  }
+  .seg button {
+    padding: 3px 10px;
+    border: none;
+    border-radius: var(--r-capsule);
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    color: var(--label-2);
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  }
+  .seg button:hover { color: var(--label); }
+  .seg button[aria-pressed="true"] {
+    background: var(--glass-thin);
+    color: var(--label);
+    box-shadow: 0 0 0 0.5px var(--hairline), var(--glass-shine);
+  }
+  .proxy-status { min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--label-2); }
+  .proxy-status-text { overflow-wrap: anywhere; }
+  .proxy-link,
+  .proxy-remove {
+    flex-shrink: 0;
+    padding: 3px 8px;
+    border: none;
+    border-radius: var(--r-ctl);
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .proxy-link { color: var(--accent); }
+  .proxy-link:hover { background: var(--fill-hover); }
+  .proxy-remove { color: var(--err); }
+  .proxy-remove:hover { background: color-mix(in srgb, var(--err) 12%, transparent); }
   .row textarea {
     flex: 1 1 100%;
     min-height: 56px;
@@ -357,7 +431,8 @@ pub fn html() -> String {
     background: var(--fill-hover);
     box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
-  .proxy-empty { padding: 4px 2px; }
+  .proxy-empty { padding: 20px 12px; text-align: center; }
+  .proxy-empty .kb-note { display: block; margin-top: 4px; }
   #proxy-add { flex-shrink: 0; margin-left: 12px; }
 </style>
 </head>
@@ -510,7 +585,7 @@ pub fn html() -> String {
     <div id="tab-proxies" class="tab-pane">
       <div id="proxy-list"></div>
       <div class="kb-footer">
-        <span class="kb-note">A tab opened on a listed site sends all its traffic through the proxy and keeps its own cookies.</span>
+        <span class="kb-note">Tabs opened on a proxy's sites send everything through it and keep their own cookies.</span>
         <button class="kb-reset-all" id="proxy-add">Add proxy</button>
       </div>
     </div>
@@ -660,119 +735,285 @@ pub fn html() -> String {
 
   // ── Proxies ───────────────────────────────────────────────────────────
   // The list round-trips as one JSON value. Ids are made here once and never
-  // change: Rust derives each proxy's cookie store from them.
+  // change: Rust derives each proxy's cookie store and Keychain entry from
+  // them. A typed password rides along once as `password`; Rust moves it to
+  // the Keychain and only `has_password` stays.
   var proxies = [];
+  var proxyStatus = {};
+  var openProxy = -1;
+  var removeArmed = null;
   var proxyList = document.getElementById('proxy-list');
+  var KIND_LABELS = { ssh: 'SSH tunnel', socks5: 'SOCKS5', http: 'HTTP' };
 
-  // Mirrors site_proxy::valid_endpoint in Rust.
+  // Both mirror site_proxy::valid_endpoint in Rust.
   function hostError(host) {
     return /^[A-Za-z0-9.\-_:]+$/.test(host) ? '' : 'Enter a host name or IP address.';
+  }
+  function serverError(server) {
+    return server && server[0] !== '-' && !/[\s\x00-\x1f\x7f-\x9f]/.test(server)
+      ? '' : 'Enter user@server or a host from ~/.ssh/config.';
+  }
+  function endpointError(p) {
+    return p.kind === 'ssh' ? serverError(p.ssh) : hostError(p.host);
   }
 
   function saveProxies() {
     ipc({ type: 'settings_update', key: 'proxies', value: JSON.stringify(proxies) });
+    proxies.forEach(function(p) { delete p.password; });
+  }
+
+  function proxyState(p) {
+    if (!p.enabled) return { state: 'off', text: 'Off' };
+    if (p.kind !== 'ssh') return { state: 'on', text: 'On' };
+    var hex = p.id.map(function(b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+    var s = proxyStatus[hex];
+    if (s && s.state === 'connected') return { state: 'connected', text: 'Connected · SOCKS5 on 127.0.0.1:' + p.port };
+    if (s && s.state === 'failed') return { state: 'failed', text: s.message };
+    return { state: 'connecting', text: 'Connecting…' };
+  }
+
+  function proxyTitle(p, i) {
+    return p.name || (p.kind === 'ssh' ? p.ssh : p.host) || 'Proxy ' + (i + 1);
+  }
+
+  function proxySummary(p) {
+    var target = p.kind === 'ssh'
+      ? (p.ssh || 'No server')
+      : (p.host ? p.host + ':' + p.port : 'No server');
+    var sites = p.sites.length === 1 ? '1 site' : p.sites.length + ' sites';
+    return KIND_LABELS[p.kind] + ' · ' + target + ' · ' + sites;
+  }
+
+  function proxyRow(label, id, control, hint) {
+    var labelHtml = '<label class="row-label" for="' + id + '">' + label + '</label>';
+    return hint
+      ? '<div class="row with-hint"><div class="row-label-stack">' + labelHtml +
+          '<span class="row-hint">' + hint + '</span></div>' + control + '</div>'
+      : '<div class="row">' + labelHtml + control + '</div>';
+  }
+
+  function proxyBody(p, i) {
+    var id = 'proxy-' + i;
+    var st = proxyState(p);
+    var kinds = ['ssh', 'socks5', 'http'].map(function(k) {
+      return '<button data-kind="' + k + '" aria-pressed="' + (p.kind === k) + '">' + KIND_LABELS[k] + '</button>';
+    }).join('');
+    var html = proxyRow('Name', id + '-name',
+        '<input type="text" id="' + id + '-name" data-field="name" placeholder="Optional" value="' + esc(p.name) + '">') +
+      '<div class="row"><span class="row-label" id="' + id + '-kind">Type</span>' +
+        '<span class="seg" role="group" aria-labelledby="' + id + '-kind">' + kinds + '</span></div>';
+    if (p.kind === 'ssh') {
+      html += proxyRow('Server', id + '-ssh',
+          '<input type="text" id="' + id + '-ssh" data-field="ssh" placeholder="user@server" value="' + esc(p.ssh) + '">',
+          'What you would pass to <code>ssh</code>. Hosts from ~/.ssh/config work too.') +
+        proxyRow('Password', id + '-password',
+          '<span class="proxy-inline">' +
+            '<input type="password" id="' + id + '-password" data-field="password" autocomplete="off" placeholder="' +
+              (p.has_password ? 'Saved in Keychain' : 'Optional') + '">' +
+            (p.has_password ? '<button class="proxy-link" data-forget>Forget</button>' : '') +
+          '</span>',
+          'Keys and ssh-agent are tried first.') +
+        proxyRow('Local port', id + '-port',
+          '<input type="number" id="' + id + '-port" data-field="port" min="1024" max="65535" step="1" value="' + p.port + '">',
+          'Tabs reach the tunnel at 127.0.0.1 on this port. macOS reserves ports below 1024.');
+    } else {
+      html += proxyRow('Server', id + '-host',
+        '<span class="proxy-inline">' +
+          '<input type="text" id="' + id + '-host" data-field="host" placeholder="127.0.0.1" value="' + esc(p.host) + '">' +
+          '<input type="number" id="' + id + '-port" data-field="port" min="1" max="65535" step="1" value="' + p.port + '" aria-label="Port">' +
+        '</span>');
+    }
+    html += proxyRow('Sites', id + '-sites',
+        '<textarea id="' + id + '-sites" data-field="sites" rows="3" placeholder="example.com">' + esc(p.sites.join('\n')) + '</textarea>',
+        'One per line, a domain or a full URL. Subdomains match too.') +
+      '<div class="row">' +
+        '<span class="proxy-status"><span class="proxy-dot ' + st.state + '"></span>' +
+          '<span class="proxy-status-text">' + esc(st.text) + '</span></span>' +
+        '<button class="proxy-remove" data-remove>Remove</button>' +
+      '</div>';
+    return '<div class="proxy-body" id="' + id + '-body">' + html + '</div>';
   }
 
   function proxyCard(p, i) {
-    var id = 'proxy-' + i;
-    var name = 'Proxy ' + (i + 1);
-    return '<div class="section" data-proxy="' + i + '">' +
-      '<div class="row">' +
-        '<span class="row-label" id="' + id + '-label">' + name + '</span>' +
-        '<span class="kb-right">' +
-          '<button class="kb-reset" data-remove title="Remove" aria-label="Remove ' + name + '">✕</button>' +
-          '<button class="toggle' + (p.enabled ? ' on' : '') + '" role="switch" aria-checked="' + p.enabled + '" aria-labelledby="' + id + '-label"></button>' +
-        '</span>' +
+    var st = proxyState(p);
+    var open = i === openProxy;
+    var title = proxyTitle(p, i);
+    return '<div class="section proxy' + (open ? ' open' : '') + '" data-proxy="' + i + '">' +
+      '<div class="proxy-head">' +
+        '<button class="proxy-open" aria-expanded="' + open + '" aria-controls="proxy-' + i + '-body">' +
+          '<span class="proxy-dot ' + st.state + '" title="' + esc(st.text) + '"></span>' +
+          '<span class="proxy-text">' +
+            '<span class="proxy-name">' + esc(title) + '</span>' +
+            '<span class="proxy-sub">' + esc(proxySummary(p)) + '</span>' +
+          '</span>' +
+          '<span class="proxy-chev" aria-hidden="true">›</span>' +
+        '</button>' +
+        '<button class="toggle' + (p.enabled ? ' on' : '') + '" role="switch" aria-checked="' + p.enabled + '" aria-label="Use ' + esc(title) + '"></button>' +
       '</div>' +
-      '<div class="row">' +
-        '<label class="row-label" for="' + id + '-kind">Type</label>' +
-        '<select id="' + id + '-kind" data-field="kind">' +
-          '<option value="socks5"' + (p.kind === 'socks5' ? ' selected' : '') + '>SOCKS5</option>' +
-          '<option value="http"' + (p.kind === 'http' ? ' selected' : '') + '>HTTP</option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="row">' +
-        '<label class="row-label" for="' + id + '-host">Host</label>' +
-        '<input type="text" id="' + id + '-host" data-field="host" placeholder="127.0.0.1" value="' + esc(p.host) + '">' +
-      '</div>' +
-      '<div class="row">' +
-        '<label class="row-label" for="' + id + '-port">Port</label>' +
-        '<input type="number" id="' + id + '-port" data-field="port" min="1" max="65535" step="1" value="' + p.port + '">' +
-      '</div>' +
-      '<div class="row with-hint">' +
-        '<div class="row-label-stack">' +
-          '<label class="row-label" for="' + id + '-sites">Sites</label>' +
-          '<span class="row-hint">One per line, a domain or a full URL. Subdomains match too.</span>' +
-        '</div>' +
-        '<textarea id="' + id + '-sites" data-field="sites" rows="3" placeholder="example.com">' + esc(p.sites.join('\n')) + '</textarea>' +
-      '</div>' +
+      (open ? proxyBody(p, i) : '') +
     '</div>';
   }
 
-  function renderProxies() {
+  function renderProxies(focusSelector) {
+    removeArmed = null;
     proxyList.innerHTML = proxies.length
       ? proxies.map(proxyCard).join('')
-      : '<div class="kb-note proxy-empty">No proxies. Every site connects directly.</div>';
+      : '<div class="section proxy-empty"><div class="row-label">No proxies yet</div>' +
+        '<span class="kb-note">Add an SSH tunnel or a SOCKS5/HTTP proxy, then list the sites that should use it.</span></div>';
+    var el = focusSelector && proxyList.querySelector(focusSelector);
+    if (el) el.focus();
   }
+
+  // Updates a card's header and status line in place, so an open editor
+  // keeps focus while you type.
+  function refreshProxy(i) {
+    var card = proxyList.querySelector('[data-proxy="' + i + '"]');
+    if (!card) return;
+    var p = proxies[i];
+    var st = proxyState(p);
+    var title = proxyTitle(p, i);
+    card.querySelectorAll('.proxy-dot').forEach(function(dot) { dot.className = 'proxy-dot ' + st.state; });
+    card.querySelector('.proxy-dot').title = st.text;
+    card.querySelector('.proxy-name').textContent = title;
+    card.querySelector('.proxy-sub').textContent = proxySummary(p);
+    var text = card.querySelector('.proxy-status-text');
+    if (text) text.textContent = st.text;
+    var toggle = card.querySelector('.toggle');
+    toggle.classList.toggle('on', p.enabled);
+    toggle.setAttribute('aria-checked', p.enabled ? 'true' : 'false');
+    toggle.setAttribute('aria-label', 'Use ' + title);
+  }
+
+  // Rust pushes {hex id: {state, message}} for SSH tunnels on open and on change.
+  window.__setProxyStatus = function(status) {
+    proxyStatus = status;
+    proxies.forEach(function(_, i) { refreshProxy(i); });
+  };
 
   proxyList.addEventListener('click', function(e) {
     var card = e.target.closest('[data-proxy]');
     if (!card) return;
     var i = Number(card.dataset.proxy);
-    if (e.target.closest('[data-remove]')) {
+    var p = proxies[i];
+    var remove = e.target.closest('[data-remove]');
+    if (removeArmed && remove !== removeArmed) {
+      removeArmed.textContent = 'Remove';
+      removeArmed = null;
+    }
+    if (remove) {
+      // Two clicks, so a stray one can't drop a proxy.
+      if (!removeArmed) {
+        removeArmed = remove;
+        remove.textContent = 'Click again to remove';
+        return;
+      }
       proxies.splice(i, 1);
+      openProxy = -1;
       renderProxies();
       saveProxies();
       return;
     }
-    var toggle = e.target.closest('.toggle');
-    if (!toggle) return;
-    var p = proxies[i];
-    if (!p.enabled) {
-      var hostEl = card.querySelector('[data-field="host"]');
-      var error = hostError(p.host);
-      showRowError(hostEl, error);
-      if (error) { hostEl.focus(); return; }
+    if (e.target.closest('.proxy-open')) {
+      openProxy = openProxy === i ? -1 : i;
+      renderProxies('[data-proxy="' + i + '"] .proxy-open');
+      return;
     }
-    p.enabled = !p.enabled;
-    toggle.classList.toggle('on', p.enabled);
-    toggle.setAttribute('aria-checked', p.enabled ? 'true' : 'false');
-    saveProxies();
+    var kind = e.target.closest('[data-kind]');
+    if (kind) {
+      if (p.kind === kind.dataset.kind) return;
+      p.kind = kind.dataset.kind;
+      // Don't leave a proxy on that can't connect with its new type.
+      if (endpointError(p)) p.enabled = false;
+      renderProxies('[data-proxy="' + i + '"] [data-kind="' + p.kind + '"]');
+      saveProxies();
+      return;
+    }
+    if (e.target.closest('[data-forget]')) {
+      p.password = '';
+      p.has_password = false;
+      saveProxies();
+      renderProxies('[data-proxy="' + i + '"] [data-field="password"]');
+      return;
+    }
+    if (e.target.closest('.toggle')) {
+      var error = p.enabled ? '' : endpointError(p);
+      if (error) {
+        openProxy = i;
+        renderProxies();
+        var input = proxyList.querySelector('[data-proxy="' + i + '"] [data-field="' + (p.kind === 'ssh' ? 'ssh' : 'host') + '"]');
+        showRowError(input, error);
+        input.focus();
+        return;
+      }
+      p.enabled = !p.enabled;
+      refreshProxy(i);
+      saveProxies();
+    }
   });
 
   proxyList.addEventListener('change', function(e) {
     var el = e.target;
     var card = el.closest('[data-proxy]');
     if (!card || !el.dataset.field) return;
-    var p = proxies[Number(card.dataset.proxy)];
+    var i = Number(card.dataset.proxy);
+    var p = proxies[i];
+    var value = el.value.trim();
     var error = '';
-    if (el.dataset.field === 'kind') {
-      p.kind = el.value;
-    } else if (el.dataset.field === 'host') {
-      error = hostError(el.value.trim());
-      if (!error) p.host = el.value.trim();
-    } else if (el.dataset.field === 'port') {
-      error = validationError(el);
-      if (!error) p.port = Number(el.value);
-    } else if (el.dataset.field === 'sites') {
-      p.sites = el.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    switch (el.dataset.field) {
+      case 'name':
+        p.name = value;
+        break;
+      case 'host':
+        error = hostError(value);
+        if (!error) p.host = value;
+        break;
+      case 'ssh':
+        error = serverError(value);
+        if (!error) p.ssh = value;
+        break;
+      case 'port':
+        error = validationError(el);
+        if (!error) p.port = Number(value);
+        break;
+      case 'password':
+        if (!el.value) return;
+        p.password = el.value;
+        p.has_password = true;
+        break;
+      case 'sites':
+        p.sites = el.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+        break;
     }
     showRowError(el, error);
-    if (!error) saveProxies();
+    if (error) return;
+    saveProxies();
+    if (el.dataset.field === 'password') {
+      el.value = '';
+      el.placeholder = 'Saved in Keychain';
+      if (!card.querySelector('[data-forget]')) {
+        el.insertAdjacentHTML('afterend', '<button class="proxy-link" data-forget>Forget</button>');
+      }
+    }
+    refreshProxy(i);
   });
 
   document.getElementById('proxy-add').addEventListener('click', function() {
+    var port = 1080;
+    while (proxies.some(function(p) { return p.port === port; })) port++;
     proxies.push({
       id: Array.from(crypto.getRandomValues(new Uint8Array(16))),
+      name: '',
       enabled: false,
-      kind: 'socks5',
+      kind: 'ssh',
       host: '',
-      port: 1080,
+      port: port,
+      ssh: '',
+      has_password: false,
       sites: []
     });
-    renderProxies();
+    openProxy = proxies.length - 1;
+    renderProxies('[data-proxy="' + openProxy + '"] [data-field="ssh"]');
     saveProxies();
-    proxyList.querySelector('[data-proxy="' + (proxies.length - 1) + '"] [data-field="host"]').focus();
   });
 
   // ── Tabs ──────────────────────────────────────────────────────────────

@@ -82,12 +82,17 @@ pub fn store_id(workspace_store: Option<[u8; 16]>, rule: &ProxyRule) -> [u8; 16]
 }
 
 pub fn wry_config(rule: &ProxyRule) -> wry::ProxyConfig {
+    let host = match rule.kind {
+        ProxyKind::Ssh => "127.0.0.1".to_string(),
+        ProxyKind::Socks5 | ProxyKind::Http => rule.host.clone(),
+    };
     let endpoint = wry::ProxyEndpoint {
-        host: rule.host.clone(),
+        host,
         port: rule.port.to_string(),
     };
     match rule.kind {
-        ProxyKind::Socks5 => wry::ProxyConfig::Socks5(endpoint),
+        // `ssh -D` serves SOCKS5 on its local port.
+        ProxyKind::Socks5 | ProxyKind::Ssh => wry::ProxyConfig::Socks5(endpoint),
         ProxyKind::Http => wry::ProxyConfig::Http(endpoint),
     }
 }
@@ -249,15 +254,28 @@ fn site_matches(host: &str, site: &str) -> bool {
                 .is_some_and(|sub| sub.ends_with('.')))
 }
 
-/// Host name or IP literal — mirrors the settings UI check. wry unwraps the
-/// endpoint it builds from these, so nothing else may reach it.
-fn valid_endpoint(rule: &ProxyRule) -> bool {
+/// Mirrors the settings UI checks. wry unwraps the endpoint it builds from
+/// host/port, and an SSH server is handed to ssh as an argument.
+pub fn valid_endpoint(rule: &ProxyRule) -> bool {
     rule.port != 0
-        && !rule.host.is_empty()
-        && rule
-            .host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+        && match rule.kind {
+            // A leading '-' would make ssh read the server as an option.
+            ProxyKind::Ssh => {
+                !rule.ssh.is_empty()
+                    && !rule.ssh.starts_with('-')
+                    && !rule
+                        .ssh
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control())
+            }
+            ProxyKind::Socks5 | ProxyKind::Http => {
+                !rule.host.is_empty()
+                    && rule
+                        .host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+            }
+        }
 }
 
 #[cfg(test)]
@@ -267,10 +285,14 @@ mod tests {
     fn rule(id: u8, host: &str, sites: &[&str]) -> ProxyRule {
         ProxyRule {
             id: [id; 16],
+            name: String::new(),
             enabled: true,
             kind: ProxyKind::Socks5,
             host: host.to_string(),
             port: 1080,
+            ssh: String::new(),
+            has_password: false,
+            password: None,
             sites: sites.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -303,5 +325,16 @@ mod tests {
         let mut zero_port = rule(1, "127.0.0.1", &[]);
         zero_port.port = 0;
         assert!(!valid_endpoint(&zero_port));
+
+        let ssh = |server: &str| ProxyRule {
+            kind: ProxyKind::Ssh,
+            ssh: server.to_string(),
+            ..rule(1, "", &[])
+        };
+        assert!(valid_endpoint(&ssh("me@server")));
+        assert!(valid_endpoint(&ssh("ssh://me@server:2222")));
+        assert!(!valid_endpoint(&ssh("")));
+        assert!(!valid_endpoint(&ssh("-oProxyCommand=touch /tmp/x")));
+        assert!(!valid_endpoint(&ssh("me@server -v")));
     }
 }

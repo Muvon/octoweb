@@ -461,21 +461,39 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProxyRule {
     /// Random, assigned once by the settings UI. Seeds this proxy's
-    /// WKWebsiteDataStore id, so changing it drops the proxy's cookies.
+    /// WKWebsiteDataStore id and Keychain entry, so it never changes.
     pub id: [u8; 16],
+    /// Label in Settings; empty shows the server instead.
+    #[serde(default)]
+    pub name: String,
     pub enabled: bool,
     pub kind: ProxyKind,
+    /// SOCKS5/HTTP proxy host. Unused for SSH — the tunnel listens on 127.0.0.1.
     pub host: String,
+    /// SOCKS5/HTTP proxy port; for SSH, the tunnel's local port.
     pub port: u16,
+    /// SSH destination as given to `ssh`: `user@server`,
+    /// `ssh://user@server:2222` or a `~/.ssh/config` host.
+    #[serde(default)]
+    pub ssh: String,
+    /// An SSH password is stored in the Keychain (see `ssh_tunnel`).
+    #[serde(default)]
+    pub has_password: bool,
+    /// Password typed in Settings, moved to the Keychain on arrival;
+    /// `Some("")` forgets it. Never persisted.
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
     /// Domains or pasted URLs; each also covers its subdomains.
     pub sites: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyKind {
     Socks5,
     Http,
+    /// `ssh -D` tunnel run by octoweb, used as a local SOCKS5 proxy.
+    Ssh,
 }
 
 fn default_max_prompt_history() -> usize {
