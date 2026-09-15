@@ -85,6 +85,62 @@ pub fn remove_ipc_global(wv_ptr: usize) {
     }
 }
 
+/// Give pages the real window frame behind `outerWidth`, `outerHeight`,
+/// `screenX` and `screenY`.
+///
+/// WebKit asks the UI delegate's private
+/// `_webView:getWindowFrameWithCompletionHandler:` and uses a zero frame when
+/// the delegate lacks it, as wry's does. Google Sheets divides `outerWidth` by
+/// `innerWidth` to detect browser zoom, so a 0 made it draw its grid canvas at
+/// a quarter of the display's resolution.
+pub fn expose_window_frame(wv_ptr: usize) {
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::{msg_send, sel};
+
+    unsafe {
+        let wv = wv_ptr as *mut AnyObject;
+        let delegate: *mut AnyObject = msg_send![wv, UIDelegate];
+        let class: *const AnyClass = msg_send![delegate, class];
+        let added = objc2::ffi::class_addMethod(
+            class as *mut _,
+            sel!(_webView:getWindowFrameWithCompletionHandler:),
+            std::mem::transmute::<
+                extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
+                unsafe extern "C-unwind" fn(),
+            >(window_frame),
+            c"v@:@@".as_ptr(),
+        );
+        // WebKit records which methods a delegate has when it is set, and wry
+        // set this WebView's before the class gained the method.
+        if added.as_bool() {
+            let _: () = msg_send![wv, setUIDelegate: delegate];
+        }
+    }
+}
+
+extern "C-unwind" fn window_frame(
+    _delegate: *mut objc2::runtime::AnyObject,
+    _sel: objc2::runtime::Sel,
+    webview: *mut objc2::runtime::AnyObject,
+    completion_handler: *mut objc2::runtime::AnyObject,
+) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::CGRect;
+
+    unsafe {
+        let window: *mut AnyObject = msg_send![webview, window];
+        // A WebView outside any window (mid-teardown) keeps WebKit's zero frame.
+        let frame = if window.is_null() {
+            CGRect::ZERO
+        } else {
+            msg_send![window, frame]
+        };
+        let block = completion_handler as *const block2::Block<dyn Fn(CGRect)>;
+        (*block).call((frame,));
+    }
+}
+
 /// Single JS script injected into every tab page at document-start.
 ///
 /// Merges all five former scripts into one IIFE so JavaScriptCore compiles

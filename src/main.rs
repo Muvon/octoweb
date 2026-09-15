@@ -1153,6 +1153,7 @@ fn main() {
             let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
             content_rules::apply_to_webview(wv_ptr);
             webview_utils::remove_ipc_global(wv_ptr);
+            webview_utils::expose_window_frame(wv_ptr);
             site_proxy::inject_from_webview(wv_ptr);
             site_proxy::register(wv_ptr, proxy_rule.map(|rule| rule.id), move |url| {
                 let _ = p7.send_event(AppEvent::OpenInNewTab(url, Some(tab_id)));
