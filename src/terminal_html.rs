@@ -1,17 +1,23 @@
 //! Terminal panel (⌘`): tabs of xterm.js terminals, each attached to a login
-//! shell in `terminal.rs`.
+//! shell in `terminal.rs`. Docked above the footer; Rust owns its bounds.
 //!
-//! IPC out: open, input, resize, close, open_url, hide. Output comes back by
+//! IPC out: open, input, resize, close, open_url, hide, fullscreen,
+//! resize_panel, resize_panel_end, resize_panel_reset. Output comes back by
 //! long poll on `octoweb-term://localhost/<id>` (200 output, 410 shell gone).
-//! Rust calls `window.__termShow()` when the panel takes focus and
-//! `window.__termOpened(id, error)` once a shell has started or failed.
+//!
+//! Called from Rust:
+//!   window.__termShow(fullscreen)     — panel took focus
+//!   window.__termOpened(id, error)    — a shell started, or failed to
+//!   window.__termNew() / __termClose() / __termCycle(step) — keymap actions
+//!   window.__setShortcuts(data)       — update control titles
 
 const XTERM_JS: &str = include_str!("../assets/lib/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../assets/lib/xterm.css");
 const FIT_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-fit.min.js");
 const WEB_LINKS_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-web-links.min.js");
 
-pub fn html() -> String {
+/// `keybindings_json` is `Keymap::ui_json`, for the controls' shortcut titles.
+pub fn html(keybindings_json: &str) -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
@@ -25,35 +31,60 @@ pub fn html() -> String {
   html, body {
     width: 100%; height: 100%;
     margin: 0;
-    background: transparent;
     overflow: hidden;
+    background: var(--term-bg);
     -webkit-font-smoothing: antialiased;
   }
 
   #panel {
     position: fixed;
-    inset: 0 0 12px 0;
+    inset: 0;
     display: flex;
     flex-direction: column;
-    background: var(--term-bg);
-    border-radius: 0 0 var(--r-card) var(--r-card);
-    box-shadow: var(--shadow-float);
-    overflow: hidden;
+    box-shadow: inset 0 0.5px 0 var(--hairline);
   }
+
+  #resize-handle {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 6px;
+    z-index: 30;
+    cursor: row-resize;
+    touch-action: none;
+  }
+  #resize-handle::after {
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--accent);
+    opacity: 0;
+  }
+  #resize-handle:hover::after,
+  #resize-handle.active::after { opacity: 1; }
+  #panel.fullscreen #resize-handle { display: none; }
+  body.resizing, body.resizing * { cursor: row-resize !important; }
 
   #bar {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 2px;
-    height: 30px;
-    padding: 0 6px;
-    border-bottom: 0.5px solid var(--hairline);
+    gap: 4px;
+    height: 32px;
+    padding: 0 10px;
+    box-shadow: 0 0.5px 0 var(--hairline);
     font-family: var(--font-text);
     font-size: var(--fs-caption);
     -webkit-user-select: none; user-select: none;
   }
-  #tabs { display: flex; gap: 2px; min-width: 0; overflow: hidden; }
+  #tabs {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    overflow: hidden;
+  }
 
   .tab {
     display: flex;
@@ -61,8 +92,8 @@ pub fn html() -> String {
     gap: 4px;
     min-width: 0;
     max-width: 200px;
-    height: 22px;
-    padding: 0 2px 0 10px;
+    height: 24px;
+    padding: 0 3px 0 10px;
     border-radius: var(--r-ctl);
     color: var(--label-2);
     cursor: default;
@@ -70,37 +101,77 @@ pub fn html() -> String {
   .tab:hover { background: var(--fill-hover); }
   .tab.active { background: var(--fill-press); color: var(--label); }
   .tab .title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-
-  button {
-    flex: 0 0 auto;
+  .tab .close {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 18px; height: 18px;
+    width: 16px; height: 16px;
     padding: 0;
     border: none;
     border-radius: var(--r-capsule);
     background: transparent;
     color: var(--label-2);
-    font: inherit;
-    font-size: 14px;
-    line-height: 1;
     cursor: pointer;
+    opacity: 0;
+    transition: background var(--t-fast), opacity var(--t-fast);
   }
-  button:hover { background: var(--fill-hover); color: var(--label); }
-  #new { width: 22px; height: 22px; font-size: 16px; }
+  .tab:hover .close, .tab.active .close { opacity: 1; }
+  .tab .close:hover { background: var(--fill-hover); }
+
+  #new-btn, #fullscreen-btn, #close-btn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px; height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: var(--r-ctl);
+    background: transparent;
+    color: var(--label-2);
+    cursor: pointer;
+    transition: background var(--t-fast), color var(--t-fast);
+  }
+  #new-btn svg, #fullscreen-btn svg, #close-btn svg { width: 14px; height: 14px; }
+  #new-btn:hover, #fullscreen-btn:hover, #close-btn:hover { background: var(--fill-hover); }
+  #new-btn:active, #fullscreen-btn:active, #close-btn:active { background: var(--fill-press); }
+  #fullscreen-btn.active {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
 
   #terms { position: relative; flex: 1 1 auto; min-height: 0; }
   /* visibility, not display: hidden tabs keep a size, so they re-fit with the panel. */
-  .term { position: absolute; inset: 6px 4px 4px 10px; visibility: hidden; }
+  .term { position: absolute; inset: 8px 10px 6px 10px; visibility: hidden; }
   .term.active { visibility: visible; }
 </style>
 </head>
 <body>
 <div id="panel">
+  <div id="resize-handle" role="separator" aria-label="Resize terminal" aria-orientation="horizontal" tabindex="0"></div>
   <div id="bar">
-    <div id="tabs"></div>
-    <button id="new" title="New terminal (⌘T)" aria-label="New terminal">+</button>
+    <div id="tabs" role="tablist" aria-label="Terminals"></div>
+    <button id="new-btn" type="button" title="New terminal" aria-label="New terminal">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="fullscreen-btn" type="button" title="Toggle fullscreen" aria-label="Toggle terminal fullscreen">
+      <svg class="ic-enter" width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <path d="M1 4V1h3M9 4V1H6M1 6v3h3M9 6v3H6"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <svg class="ic-exit" width="10" height="10" viewBox="0 0 10 10" fill="none" style="display:none">
+        <path d="M4 1v3H1M6 1v3h3M4 9V6H1M6 9V6h3"
+              stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <button id="close-btn" type="button" title="Hide terminal" aria-label="Hide terminal">
+      <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+        <path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </button>
   </div>
   <div id="terms"></div>
 </div>
@@ -109,8 +180,13 @@ pub fn html() -> String {
 <script>/*@@WEB_LINKS_ADDON_JS@@*/</script>
 <script>
 (function() {
+  const panel = document.getElementById('panel');
   const tabsEl = document.getElementById('tabs');
   const termsEl = document.getElementById('terms');
+  const handle = document.getElementById('resize-handle');
+  const newBtn = document.getElementById('new-btn');
+  const fullscreenBtn = document.getElementById('fullscreen-btn');
+  const closeBtn = document.getElementById('close-btn');
   const dark = matchMedia('(prefers-color-scheme: dark)');
   const THEMES = {
     light: {
@@ -133,6 +209,8 @@ pub fn html() -> String {
   const terminals = new Map(); // id -> { id, term, fit, el, tab }
   let nextId = 1;
   let activeId = 0;
+  let closeTabTitle = 'Close terminal';
+  let fullscreenChord = '';
 
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
@@ -149,8 +227,13 @@ pub fn html() -> String {
     termsEl.appendChild(el);
     const tab = document.createElement('div');
     tab.className = 'tab';
+    tab.setAttribute('role', 'tab');
     tab.innerHTML = '<span class="title">Terminal</span>' +
-      '<button class="close" title="Close (⌘W)" aria-label="Close terminal">×</button>';
+      '<button class="close" type="button" aria-label="Close terminal">' +
+      '<svg width="8" height="8" viewBox="0 0 8 8" fill="none">' +
+      '<path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+      '</svg></button>';
+    tab.querySelector('.close').title = closeTabTitle;
     tabsEl.appendChild(tab);
 
     const term = new Terminal({
@@ -179,7 +262,7 @@ pub fn html() -> String {
     term.onTitleChange(function(title) {
       tab.querySelector('.title').textContent = title || 'Terminal';
     });
-    term.attachCustomKeyEventHandler(function(e) { return shortcut(e, t); });
+    term.attachCustomKeyEventHandler(shortcut);
 
     // Fit first, so the shell starts at the real size.
     activate(id);
@@ -195,6 +278,7 @@ pub fn html() -> String {
     terminals.forEach(function(t) {
       t.el.classList.toggle('active', t.id === id);
       t.tab.classList.toggle('active', t.id === id);
+      t.tab.setAttribute('aria-selected', String(t.id === id));
     });
     const t = terminals.get(id);
     t.fit.fit();
@@ -235,26 +319,100 @@ pub fn html() -> String {
     close(t.id);
   }
 
-  // ⌘ shortcuts of the panel itself. Everything else, ⌘C and ⌘V included,
-  // takes xterm's normal path.
-  function shortcut(e, t) {
-    if (e.type !== 'keydown' || !e.metaKey || e.ctrlKey || e.altKey) return true;
-    const ids = Array.from(terminals.keys());
-    const at = ids.indexOf(t.id);
-    const digit = /^Digit[1-9]$/.test(e.code) ? ids[Number(e.code.slice(5)) - 1] : undefined;
-    let handled = true;
-    if (e.code === 'KeyT' && !e.shiftKey) open();
-    else if (e.code === 'KeyW' && !e.shiftKey) close(t.id);
-    else if (e.code === 'KeyK' && !e.shiftKey) t.term.clear();
-    else if (e.code === 'BracketLeft' && e.shiftKey) activate(ids[(at + ids.length - 1) % ids.length]);
-    else if (e.code === 'BracketRight' && e.shiftKey) activate(ids[(at + 1) % ids.length]);
-    else if (digit && !e.shiftKey) activate(digit);
-    else handled = false;
-    if (handled) e.preventDefault();
-    return !handled;
+  // Positional keys the keymap doesn't hold: ⌘1–⌘9 pick a tab (like the
+  // quickslots) and ⌘K clears. New, close and cycling come from Rust's keymap.
+  function shortcut(e) {
+    if (e.type !== 'keydown' || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return true;
+    if (/^Digit[1-9]$/.test(e.code)) {
+      const id = Array.from(terminals.keys())[Number(e.code.slice(5)) - 1];
+      if (id) activate(id);
+    } else if (e.code === 'KeyK') {
+      terminals.get(activeId).term.clear();
+    } else {
+      return true;
+    }
+    e.preventDefault();
+    return false;
   }
 
-  document.getElementById('new').addEventListener('click', open);
+  function setFullscreen(on) {
+    panel.classList.toggle('fullscreen', on);
+    fullscreenBtn.classList.toggle('active', on);
+    fullscreenBtn.querySelector('.ic-enter').style.display = on ? 'none' : '';
+    fullscreenBtn.querySelector('.ic-exit').style.display = on ? '' : 'none';
+    const label = on ? 'Exit fullscreen' : 'Toggle fullscreen';
+    fullscreenBtn.title = label + (fullscreenChord ? ' (' + fullscreenChord + ')' : '');
+  }
+
+  newBtn.addEventListener('click', open);
+  fullscreenBtn.addEventListener('click', function() { ipc({ type: 'fullscreen' }); });
+  closeBtn.addEventListener('click', function() { ipc({ type: 'hide' }); });
+
+  // The panel's top edge moves while it's dragged, so screenY is the stable
+  // coordinate. Live resizes go out at most once per frame; Rust persists the
+  // final height.
+  let dragPointer = null;
+  let dragStartY = 0;
+  let dragStartHeight = 0;
+  let dragHeight = 0;
+  let dragFrame = 0;
+
+  function queueResize(height) {
+    dragHeight = Math.max(0, Math.round(height));
+    if (dragFrame) return;
+    dragFrame = requestAnimationFrame(function() {
+      dragFrame = 0;
+      ipc({ type: 'resize_panel', height: dragHeight });
+    });
+  }
+
+  handle.addEventListener('pointerdown', function(e) {
+    if (!e.isPrimary || e.button !== 0) return;
+    e.preventDefault();
+    dragPointer = e.pointerId;
+    dragStartY = e.screenY;
+    dragStartHeight = Math.round(window.innerHeight);
+    dragHeight = dragStartHeight;
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('active');
+    document.body.classList.add('resizing');
+  });
+
+  handle.addEventListener('pointermove', function(e) {
+    if (e.pointerId !== dragPointer) return;
+    e.preventDefault();
+    queueResize(dragStartHeight + dragStartY - e.screenY);
+  });
+
+  function finishResize(e) {
+    if (e.pointerId !== dragPointer) return;
+    e.preventDefault();
+    if (e.type !== 'pointercancel') {
+      dragHeight = Math.max(0, Math.round(dragStartHeight + dragStartY - e.screenY));
+    }
+    if (dragFrame) {
+      cancelAnimationFrame(dragFrame);
+      dragFrame = 0;
+    }
+    if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+    dragPointer = null;
+    handle.classList.remove('active');
+    document.body.classList.remove('resizing');
+    ipc({ type: 'resize_panel_end', height: dragHeight });
+  }
+
+  handle.addEventListener('pointerup', finishResize);
+  handle.addEventListener('pointercancel', finishResize);
+  handle.addEventListener('dblclick', function(e) {
+    e.preventDefault();
+    ipc({ type: 'resize_panel_reset' });
+  });
+  handle.addEventListener('keydown', function(e) {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    const step = (e.shiftKey ? 64 : 16) * (e.key === 'ArrowUp' ? 1 : -1);
+    ipc({ type: 'resize_panel_end', height: Math.round(window.innerHeight) + step });
+  });
 
   window.addEventListener('resize', function() {
     terminals.forEach(function(t) { t.fit.fit(); });
@@ -264,7 +422,8 @@ pub fn html() -> String {
     terminals.forEach(function(t) { t.term.options.theme = theme(); });
   });
 
-  window.__termShow = function() {
+  window.__termShow = function(fullscreen) {
+    setFullscreen(!!fullscreen);
     if (terminals.size) activate(activeId);
     else open();
   };
@@ -275,11 +434,46 @@ pub fn html() -> String {
     if (error) t.term.write('\x1b[31m' + error + '\x1b[0m\r\n');
     else pump(t);
   };
+
+  window.__termNew = open;
+
+  window.__termClose = function() {
+    if (activeId) close(activeId);
+  };
+
+  window.__termCycle = function(step) {
+    const ids = Array.from(terminals.keys());
+    if (ids.length < 2) return;
+    activate(ids[(ids.indexOf(activeId) + step + ids.length) % ids.length]);
+  };
+
+  // Control titles follow the effective keymap rather than compiled defaults.
+  window.__setShortcuts = function(data) {
+    const actions = data && Array.isArray(data.actions) ? data.actions : [];
+    const chordFor = function(id) {
+      const action = actions.find(function(item) { return item.id === id; });
+      return action && Array.isArray(action.keys) ? action.keys.join('') : '';
+    };
+    const titled = function(label, id) {
+      const chord = chordFor(id);
+      return chord ? label + ' (' + chord + ')' : label;
+    };
+    newBtn.title = titled('New terminal', 'new_session');
+    closeBtn.title = titled('Hide terminal', 'terminal');
+    closeTabTitle = titled('Close terminal', 'close_tab');
+    document.querySelectorAll('.tab .close').forEach(function(button) {
+      button.title = closeTabTitle;
+    });
+    fullscreenChord = chordFor('sidebar_fullscreen');
+    setFullscreen(panel.classList.contains('fullscreen'));
+  };
+  window.__setShortcuts(/*@@KEYBINDINGS_JSON@@*/);
 })();
 </script>
 </body>
 </html>"#
         .replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/*@@KEYBINDINGS_JSON@@*/", keybindings_json)
         .replace("/*@@XTERM_CSS@@*/", XTERM_CSS)
         .replace("/*@@XTERM_JS@@*/", XTERM_JS)
         .replace("/*@@FIT_ADDON_JS@@*/", FIT_ADDON_JS)

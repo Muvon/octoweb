@@ -411,6 +411,9 @@ pub struct Config {
     /// AI sidebar width in logical pixels
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    /// Terminal panel height in logical pixels
+    #[serde(default = "default_terminal_height")]
+    pub terminal_height: u32,
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
@@ -504,6 +507,10 @@ fn default_sidebar_width() -> u32 {
     440
 }
 
+fn default_terminal_height() -> u32 {
+    320
+}
+
 fn default_max_ai_prompt_history() -> usize {
     50
 }
@@ -533,6 +540,7 @@ impl Default for Config {
             window_width: 1280,
             window_height: 800,
             sidebar_width: default_sidebar_width(),
+            terminal_height: default_terminal_height(),
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,

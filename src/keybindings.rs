@@ -80,14 +80,14 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     (
         Action::CloseTab,
         "close_tab",
-        "Close tab / session",
+        "Close tab / session / terminal",
         "Tabs & Navigation",
         "cmd+w",
     ),
     (
         Action::NewSession,
         "new_session",
-        "New AI session",
+        "New AI session / terminal",
         "Tabs & Navigation",
         "cmd+t",
     ),
@@ -115,14 +115,14 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     (
         Action::Back,
         "back",
-        "Back",
+        "Back / previous terminal",
         "Tabs & Navigation",
         "cmd+bracketleft",
     ),
     (
         Action::Forward,
         "forward",
-        "Forward",
+        "Forward / next terminal",
         "Tabs & Navigation",
         "cmd+bracketright",
     ),
@@ -248,7 +248,7 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     (
         Action::SidebarFullscreen,
         "sidebar_fullscreen",
-        "Fullscreen AI sidebar",
+        "Fullscreen AI sidebar / terminal",
         "AI & Panels",
         "cmd+shift+return",
     ),

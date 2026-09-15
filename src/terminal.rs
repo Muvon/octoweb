@@ -36,12 +36,37 @@ const READ_CHUNK: usize = 64 << 10;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    Open { id: u32, cols: u16, rows: u16 },
-    Input { id: u32, data: Keys },
-    Resize { id: u32, cols: u16, rows: u16 },
-    Close { id: u32 },
-    OpenUrl { url: String },
+    Open {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Input {
+        id: u32,
+        data: Keys,
+    },
+    Resize {
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Close {
+        id: u32,
+    },
+    OpenUrl {
+        url: String,
+    },
     Hide,
+    Fullscreen,
+    /// Live panel height while its top edge is dragged, in logical points.
+    ResizePanel {
+        height: u32,
+    },
+    /// Final panel height, to persist.
+    ResizePanelEnd {
+        height: u32,
+    },
+    ResizePanelReset,
 }
 
 /// Terminal input. Its Debug output is redacted: it carries whatever is
