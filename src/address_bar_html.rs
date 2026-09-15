@@ -17,7 +17,8 @@
 /// IPC messages sent to Rust:
 ///   { type: "toggle_sidebar" }       — 🐙 button clicked
 ///   { type: "copy_text", text: "…" } — copy title or URL to clipboard
-pub fn html() -> String {
+///   { type: "set_appearance", appearance } — switcher picked auto | light | dark
+pub fn html(appearance: crate::config::Appearance) -> String {
     let template = r#"<!DOCTYPE html>
 <html>
 <head>
@@ -452,6 +453,66 @@ pub fn html() -> String {
   .ai-icon { display: inline-flex; width: 16px; height: 16px; line-height: 0; }
   .ai-icon svg { width: 100%; height: 100%; }
 
+  /* ── Appearance switcher — the button shows the current scheme; open,
+        the three choices slide out to its left as a segmented pill ── */
+  #appearance {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .appearance-icon { display: none; width: 13px; height: 13px; line-height: 0; }
+  .appearance-icon svg { width: 100%; height: 100%; }
+  #appearance[data-current="auto"] .appearance-icon[data-appearance="auto"],
+  #appearance[data-current="light"] .appearance-icon[data-appearance="light"],
+  #appearance[data-current="dark"] .appearance-icon[data-appearance="dark"] { display: inline-flex; }
+  #appearance.open #appearance-btn { background: var(--fill-press); color: var(--label); }
+
+  #appearance-menu {
+    position: absolute;
+    top: 50%;
+    right: calc(100% + 4px);
+    z-index: 5;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--r-capsule);
+    background: var(--glass-thick);
+    box-shadow: 0 0 0 0.5px var(--hairline), 0 1px 3px rgba(0, 0, 0, 0.12);
+    opacity: 0;
+    visibility: hidden;
+    transform: translate(8px, -50%) scale(0.92);
+    transform-origin: right center;
+    transition: opacity var(--t-fast) var(--ease), transform var(--t-pop) var(--spring),
+                visibility 0s linear var(--t-pop);
+  }
+  #appearance.open #appearance-menu {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(0, -50%) scale(1);
+    transition: opacity var(--t-fast) var(--ease), transform var(--t-pop) var(--spring);
+  }
+  .appearance-opt {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: var(--r-capsule);
+    background: transparent;
+    color: var(--label-2);
+    cursor: pointer;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+  }
+  .appearance-opt svg { width: 13px; height: 13px; }
+  .appearance-opt:hover { background: var(--fill-hover); color: var(--label); }
+  .appearance-opt[aria-checked="true"] {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+
   /* ── Unread badge dot ────────────────────────────────────────────── */
   .badge {
     position: absolute;
@@ -508,6 +569,18 @@ pub fn html() -> String {
     <span class="ws-icon">@@ICON_LAYERS@@</span>
     <span class="ws-dot" id="ws-dot"></span>
   </button>
+  <div id="appearance">
+    <div id="appearance-menu" role="radiogroup" aria-label="Appearance">
+      <button class="appearance-opt" type="button" role="radio" data-appearance="auto" title="Auto — follow macOS" aria-label="Auto">@@ICON_SUN_MOON@@</button>
+      <button class="appearance-opt" type="button" role="radio" data-appearance="light" title="Light" aria-label="Light">@@ICON_SUN@@</button>
+      <button class="appearance-opt" type="button" role="radio" data-appearance="dark" title="Dark" aria-label="Dark">@@ICON_MOON@@</button>
+    </div>
+    <button id="appearance-btn" class="bar-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="appearance-menu">
+      <span class="appearance-icon" data-appearance="auto">@@ICON_SUN_MOON@@</span>
+      <span class="appearance-icon" data-appearance="light">@@ICON_SUN@@</span>
+      <span class="appearance-icon" data-appearance="dark">@@ICON_MOON@@</span>
+    </button>
+  </div>
   <button id="settings-btn" class="bar-btn" type="button" title="Settings">
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
       <path d="M6.6 1.2h2.8l.4 1.9.5.2 1.7-.9 2 2-.9 1.7.2.5 1.9.4v2.8l-1.9.4-.2.5.9 1.7-2 2-1.7-.9-.5.2-.4 1.9H6.6l-.4-1.9-.5-.2-1.7.9-2-2 .9-1.7-.2-.5L.8 9.2V6.4l1.9-.4.2-.5-.9-1.7 2-2 1.7.9.5-.2.4-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
@@ -1169,6 +1242,62 @@ pub fn html() -> String {
     if (dot) dot.style.background = color;
   };
 
+  // Appearance. Rust applies the pick app-wide: every window and page follows
+  // it through prefers-color-scheme, this bar included.
+  const appearanceEl   = document.getElementById('appearance');
+  const appearanceBtn  = document.getElementById('appearance-btn');
+  const appearanceOpts = Array.from(appearanceEl.querySelectorAll('.appearance-opt'));
+  const APPEARANCE_LABELS = { auto: 'Auto', light: 'Light', dark: 'Dark' };
+
+  function showAppearance(value) {
+    appearanceEl.dataset.current = value;
+    appearanceBtn.title = 'Appearance: ' + APPEARANCE_LABELS[value];
+    appearanceOpts.forEach(function(opt) {
+      opt.setAttribute('aria-checked', String(opt.dataset.appearance === value));
+    });
+  }
+
+  function setAppearanceOpen(open) {
+    appearanceEl.classList.toggle('open', open);
+    appearanceBtn.setAttribute('aria-expanded', String(open));
+    if (open) {
+      appearanceOpts.find(function(opt) {
+        return opt.dataset.appearance === appearanceEl.dataset.current;
+      }).focus();
+    }
+  }
+
+  appearanceBtn.addEventListener('click', function() {
+    setAppearanceOpen(!appearanceEl.classList.contains('open'));
+  });
+
+  appearanceOpts.forEach(function(opt, i) {
+    opt.addEventListener('click', function() {
+      showAppearance(opt.dataset.appearance);
+      setAppearanceOpen(false);
+      window.ipc.postMessage(JSON.stringify({ type: 'set_appearance', appearance: opt.dataset.appearance }));
+    });
+    opt.addEventListener('keydown', function(e) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const step = e.key === 'ArrowRight' ? 1 : -1;
+        appearanceOpts[(i + step + appearanceOpts.length) % appearanceOpts.length].focus();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        setAppearanceOpen(false);
+        appearanceBtn.focus();
+      }
+    });
+  });
+
+  // A press anywhere else, or the window losing focus, closes it.
+  document.addEventListener('mousedown', function(e) {
+    if (!e.target.closest('#appearance')) setAppearanceOpen(false);
+  });
+  window.addEventListener('blur', function() { setAppearanceOpen(false); });
+
+  showAppearance(@@APPEARANCE@@);
+
   // Settings
   document.getElementById('settings-btn').addEventListener('click', function() {
     window.ipc.postMessage(JSON.stringify({ type: 'toggle_settings' }));
@@ -1198,7 +1327,7 @@ pub fn html() -> String {
   // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
-    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest')) return;
+    if (e.target.closest('#ai-btn, .bar-btn, #appearance, #title-row, #url-row, #url-input, #url-suggest')) return;
     if (editing) return;
     window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });
@@ -1216,4 +1345,11 @@ pub fn html() -> String {
         .replace("@@ICON_LOCK@@", crate::icons::LOCK)
         .replace("@@ICON_SHIELD_ALERT@@", crate::icons::SHIELD_ALERT)
         .replace("@@ICON_LAYERS@@", crate::icons::LAYERS)
+        .replace("@@ICON_SUN_MOON@@", crate::icons::SUN_MOON)
+        .replace("@@ICON_SUN@@", crate::icons::SUN)
+        .replace("@@ICON_MOON@@", crate::icons::MOON)
+        .replace(
+            "@@APPEARANCE@@",
+            &serde_json::to_string(&appearance).expect("Appearance serializes"),
+        )
 }

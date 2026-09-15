@@ -414,6 +414,9 @@ pub struct Config {
     /// Terminal panel height in logical pixels
     #[serde(default = "default_terminal_height")]
     pub terminal_height: u32,
+    /// Light, dark, or follow macOS — for the chrome and every page alike
+    #[serde(default)]
+    pub appearance: Appearance,
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
@@ -490,6 +493,16 @@ pub struct ProxyRule {
     pub sites: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Follow the macOS appearance.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyKind {
@@ -541,6 +554,7 @@ impl Default for Config {
             window_height: 800,
             sidebar_width: default_sidebar_width(),
             terminal_height: default_terminal_height(),
+            appearance: Appearance::Auto,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,
