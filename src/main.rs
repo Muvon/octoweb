@@ -43,6 +43,8 @@ mod snapshot_js;
 mod ssh_tunnel;
 mod tab_nav;
 mod tab_stats;
+mod terminal;
+mod terminal_html;
 mod theme;
 mod url;
 mod webview_utils;
@@ -168,6 +170,9 @@ enum AppEvent {
     HideShortcuts,    // JS Esc / backdrop click in shortcuts overlay
     ToggleFindBar,    // ⌘F — toggle find-in-page bar
     HideFindBar,      // Esc / close button in find bar
+    ToggleTerminal,   // ⌘` — show/hide the terminal panel
+    Terminal(terminal::Request), // message from the terminal panel page
+    TerminalOutput(u32), // (terminal_id) — a shell has output or exited: answer the panel's read
     SidebarFind,      // ⌘F while the sidebar has key — search the chats
     FindInPage(String), // search query from find bar input
     FindNext,         // next match (Enter in find bar)
@@ -225,6 +230,7 @@ enum InternalPageAction {
 enum PanelFocusTarget {
     AddressBar,
     Sidebar,
+    Terminal,
     ActiveTab,
 }
 
@@ -361,8 +367,27 @@ fn keybind_to_event(
             }
         }
         A::TogglePin if !overlay => AppEvent::TogglePin,
+        A::Terminal if !overlay => AppEvent::ToggleTerminal,
         _ => return None,
     })
+}
+
+/// Shortcuts that still fire while the terminal panel has the keyboard: the
+/// app-wide panels. Every other chord is a key the shell or the panel uses
+/// there (⌃D, ⌃U, ⌘W, ⌘1…).
+fn fires_over_terminal(action: keybindings::Action) -> bool {
+    use keybindings::Action as A;
+    matches!(
+        action,
+        A::Terminal
+            | A::Quit
+            | A::CommandPalette
+            | A::Settings
+            | A::Shortcuts
+            | A::Sidebar
+            | A::ToggleWorkspaces
+            | A::Fullscreen
+    )
 }
 
 /// A `render_ui` call parked until the user clicks one of its buttons. The
@@ -2116,6 +2141,30 @@ fn main() {
     let _ = find_bar_wv.set_visible(false);
     let mut find_bar_visible = false;
 
+    // ── Terminal panel (⌘`) — drops down over the page ──────────────────
+    const TERMINAL_HEIGHT_RATIO: f64 = 0.6;
+    let mut terminals = terminal::Terminals::new(proxy.clone());
+    let terminal_wv = WebViewBuilder::new()
+        .with_html(terminal_html::html())
+        .with_transparent(true)
+        .with_asynchronous_custom_protocol("octoweb-term".into(), terminals.output_protocol())
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(request) = serde_json::from_str::<terminal::Request>(msg.body()) {
+                    let _ = p.send_event(AppEvent::Terminal(request));
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create terminal WebView");
+    let _ = terminal_wv.set_visible(false);
+    // The key window's first responder is inside this view while the terminal
+    // has the keyboard (see `key_focus_in`).
+    let terminal_view = objc2::rc::Retained::as_ptr(&terminal_wv.webview()) as usize;
+    let mut terminal_visible = false;
+    let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
+
     // ── Inline AI edit modal (⌘⇧E) ──────────────────────────────────────
     const INLINE_EDIT_W_LOGICAL: f64 = 350.0;
     const INLINE_EDIT_H_LOGICAL: f64 = 36.0;
@@ -2620,6 +2669,9 @@ fn main() {
             // command palette is open) falls through so the key still reaches
             // the focused WebView — mirroring the previous hardcoded behavior.
             let action = km.read().ok().and_then(|k| k.lookup(mods, keycode));
+            if key_focus_in(terminal_view) && !action.is_some_and(fires_over_terminal) {
+                return pass;
+            }
             if let Some(action) = action {
                 if let Some(ev) = keybind_to_event(
                     action,
@@ -2703,6 +2755,20 @@ fn main() {
 
     // ── Helper macros (expand in-place, access event-loop locals) ─────────
 
+    /// Hand the keyboard to the terminal panel's active tab.
+    macro_rules! focus_terminal {
+        () => {{
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                let _: () = msg_send![ns_win, makeKeyWindow];
+            }
+            let _ = terminal_wv.focus();
+            let _ = terminal_wv.evaluate_script("window.__termShow()");
+        }};
+    }
+
     macro_rules! capture_panel_focus {
         () => {{
             let chrome_is_key = unsafe {
@@ -2712,7 +2778,9 @@ fn main() {
                 let is_key: bool = msg_send![ns_win, isKeyWindow];
                 is_key
             };
-            if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
+            if key_focus_in(terminal_view) {
+                PanelFocusTarget::Terminal
+            } else if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
                 PanelFocusTarget::Sidebar
             } else if address_bar_editing {
                 PanelFocusTarget::AddressBar
@@ -2752,6 +2820,7 @@ fn main() {
                         let _ = address_bar_wv
                             .evaluate_script("window.__urlEditFocus && window.__urlEditFocus()");
                     }
+                    PanelFocusTarget::Terminal if terminal_visible => focus_terminal!(),
                     _ => {
                         unsafe {
                             use objc2::msg_send;
@@ -3072,6 +3141,30 @@ fn main() {
     /// size every time — every show path must use it, because a tab shown with
     /// bounds computed at some earlier moment paints under the footer and the
     /// user cannot see or click what is behind it.
+    /// The terminal panel: the top `TERMINAL_HEIGHT_RATIO` of the page area.
+    macro_rules! terminal_bounds {
+        () => {{
+            let sz = browser_win.inner_size();
+            let page_h = sz.height.saturating_sub(address_bar_h + footer_h);
+            wry::Rect {
+                position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h).into(),
+                size: tao::dpi::PhysicalSize::new(
+                    sz.width,
+                    (f64::from(page_h) * TERMINAL_HEIGHT_RATIO) as u32,
+                )
+                .into(),
+            }
+        }};
+    }
+
+    macro_rules! hide_terminal {
+        () => {{
+            let _ = terminal_wv.set_visible(false);
+            terminal_visible = false;
+            restore_panel_focus!(terminal_focus_target);
+        }};
+    }
+
     macro_rules! tab_bounds {
         () => {{
             let sz = browser_win.inner_size();
@@ -7706,6 +7799,8 @@ fn main() {
                     && !settings_visible
                     && !shortcuts_visible
                     && !workspace_switcher_visible.load(Ordering::Relaxed)
+                    // chrome_win also turns key when the terminal takes focus.
+                    && !key_focus_in(terminal_view)
                     && is_app_active()
                     && unsafe { macos::window_is_key(chrome_win.ns_window()) } =>
             {
@@ -8245,6 +8340,42 @@ fn main() {
                     let _ = find_bar_wv.evaluate_script("window.__focus && window.__focus()");
                 }
             }
+
+            // ── Terminal panel (⌘`) ──────────────────────────────────────────
+            Event::UserEvent(AppEvent::ToggleTerminal) => {
+                if terminal_visible {
+                    hide_terminal!();
+                } else {
+                    terminal_focus_target = capture_panel_focus!();
+                    let _ = terminal_wv.set_bounds(terminal_bounds!());
+                    let _ = terminal_wv.set_visible(true);
+                    terminal_visible = true;
+                    focus_terminal!();
+                }
+            }
+            Event::UserEvent(AppEvent::Terminal(request)) => match request {
+                terminal::Request::Open { id, cols, rows } => {
+                    let error = terminals
+                        .open(id, cols, rows)
+                        .err()
+                        .map(|e| format!("Could not start the shell: {e}"));
+                    let error = serde_json::to_string(&error).unwrap();
+                    let _ = terminal_wv
+                        .evaluate_script(&format!("window.__termOpened({id}, {error})"));
+                }
+                terminal::Request::Input { id, data } => terminals.write(id, data.0.into_bytes()),
+                terminal::Request::Resize { id, cols, rows } => terminals.resize(id, cols, rows),
+                terminal::Request::Close { id } => terminals.close(id),
+                terminal::Request::OpenUrl { url } => {
+                    let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                }
+                terminal::Request::Hide => {
+                    if terminal_visible {
+                        hide_terminal!();
+                    }
+                }
+            },
+            Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
 
             // ── Find bar: hide (Esc / close button) ─────────────────────────
             Event::UserEvent(AppEvent::HideFindBar) if find_bar_visible => {
@@ -9264,6 +9395,9 @@ fn main() {
                             size: tao::dpi::PhysicalSize::new(find_bar_w, find_bar_h).into(),
                         });
                     }
+                    if terminal_visible {
+                        let _ = terminal_wv.set_bounds(terminal_bounds!());
+                    }
                     // Resize address bar to full width. While the user is in URL
                     // edit mode the bar is grown by ~340 px so the autocomplete
                     // dropdown stays visible below the 32 px titlebar strip.
@@ -10274,6 +10408,28 @@ fn is_app_active() -> bool {
         }
         let front_pid: i32 = msg_send![frontmost, processIdentifier];
         front_pid == std::process::id() as i32
+    }
+}
+
+/// Whether the key window's first responder is `view` or a view inside it.
+fn key_focus_in(view: usize) -> bool {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let window: *mut AnyObject = msg_send![app, keyWindow];
+        if window.is_null() {
+            return false;
+        }
+        let responder: *mut AnyObject = msg_send![window, firstResponder];
+        if responder.is_null() {
+            return false;
+        }
+        let is_view: bool = msg_send![responder, isKindOfClass: class!(NSView)];
+        if !is_view {
+            return false;
+        }
+        msg_send![responder, isDescendantOf: view as *mut AnyObject]
     }
 }
 
