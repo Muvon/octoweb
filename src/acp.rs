@@ -397,6 +397,48 @@ async fn run_ext_command(
     }
 }
 
+/// One install at a time: every session connects on its own thread and they
+/// would otherwise race brew for the same formula lock.
+static INSTALL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Install octomind through Homebrew when it is not on PATH. A DMG install
+/// skips the cask, so nothing resolved the dependency for the user. Runs
+/// before the spawn: the sidebar just stays in "connecting" while brew works.
+/// Best-effort — on failure the spawn below reports the usual "isn't
+/// installed" error and the main thread retries as for any disconnect.
+fn ensure_octomind(program: &str) {
+    if program != "octomind" {
+        return;
+    }
+    let missing = || {
+        matches!(
+            std::process::Command::new(program).arg("--version").output(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+    };
+    let _guard = INSTALL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Re-check under the lock: another session may have just installed it.
+    if !missing() {
+        return;
+    }
+    tracing::info!("octomind not on PATH — installing via Homebrew");
+    let status = std::process::Command::new("brew")
+        .args(["install", "muvon/tap/octomind"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            tracing::info!("octomind installed via Homebrew");
+            // Startup registration ran before octomind existed and only warned.
+            crate::macos::register_octomind_tap(crate::OCTOMIND_TAP_NAME);
+        }
+        Ok(s) => tracing::warn!(code = ?s.code(), "brew install octomind failed"),
+        Err(e) => tracing::warn!(error = %e, "brew not on PATH — cannot install octomind"),
+    }
+}
+
 /// Receiving ends of the `AcpHandle` channels, owned by the ACP thread.
 struct SessionInbox {
     prompt_rx: tokio::sync::mpsc::UnboundedReceiver<PromptMessage>,
@@ -422,6 +464,8 @@ async fn init_session(
     // all of the agent's filesystem writes to this dir.
     let workspace = crate::agent_workspace::workspace_dir();
     let _ = std::fs::create_dir_all(&workspace);
+
+    ensure_octomind(&program);
 
     let mut child = tokio::process::Command::new(&program);
     // The agent's capability manifest forwards this as the
