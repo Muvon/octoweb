@@ -15,6 +15,8 @@ const XTERM_JS: &str = include_str!("../assets/lib/xterm.min.js");
 const XTERM_CSS: &str = include_str!("../assets/lib/xterm.css");
 const FIT_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-fit.min.js");
 const WEB_LINKS_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-web-links.min.js");
+const WEBGL_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-webgl.min.js");
+const UNICODE11_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-unicode11.min.js");
 
 /// `keybindings_json` is `Keymap::ui_json`, for the controls' shortcut titles.
 pub fn html(keybindings_json: &str) -> String {
@@ -178,6 +180,8 @@ pub fn html(keybindings_json: &str) -> String {
 <script>/*@@XTERM_JS@@*/</script>
 <script>/*@@FIT_ADDON_JS@@*/</script>
 <script>/*@@WEB_LINKS_ADDON_JS@@*/</script>
+<script>/*@@WEBGL_ADDON_JS@@*/</script>
+<script>/*@@UNICODE11_ADDON_JS@@*/</script>
 <script>
 (function() {
   const panel = document.getElementById('panel');
@@ -242,6 +246,8 @@ pub fn html(keybindings_json: &str) -> String {
       cursorBlink: true,
       scrollback: 10000,
       macOptionClickForcesSelection: true,
+      // `term.unicode` (Unicode 11 widths) is gated behind this flag.
+      allowProposedApi: true,
       theme: theme(),
     });
     const fit = new FitAddon.FitAddon();
@@ -250,6 +256,16 @@ pub fn html(keybindings_json: &str) -> String {
       ipc({ type: 'open_url', url: url });
     }));
     term.open(el);
+    // The DOM renderer draws block/box glyphs from the font, which leaves seams
+    // between cells. WebGL synthesizes them (customGlyphs) so pixel art tiles.
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(function() { webgl.dispose(); });
+      term.loadAddon(webgl);
+    } catch (_e) {}
+    // Default width tables are Unicode 6: emoji count as one cell and overflow.
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = '11';
     const t = { id: id, term: term, fit: fit, el: el, tab: tab };
     terminals.set(id, t);
 
@@ -478,4 +494,6 @@ pub fn html(keybindings_json: &str) -> String {
         .replace("/*@@XTERM_JS@@*/", XTERM_JS)
         .replace("/*@@FIT_ADDON_JS@@*/", FIT_ADDON_JS)
         .replace("/*@@WEB_LINKS_ADDON_JS@@*/", WEB_LINKS_ADDON_JS)
+        .replace("/*@@WEBGL_ADDON_JS@@*/", WEBGL_ADDON_JS)
+        .replace("/*@@UNICODE11_ADDON_JS@@*/", UNICODE11_ADDON_JS)
 }
