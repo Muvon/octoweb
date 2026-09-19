@@ -1,5 +1,6 @@
-//! Terminal panel (⌘`): tabs of xterm.js terminals, each attached to a login
-//! shell in `terminal.rs`. Docked above the footer; Rust owns its bounds.
+//! Terminal panel (⌘`): tabs of xterm.js terminals, each tab split into panes
+//! (⌘D beside, ⌘⇧D below) and each pane attached to a login shell in
+//! `terminal.rs`. Docked above the footer; Rust owns its bounds.
 //!
 //! IPC out: open, input, resize, close, open_url, hide, fullscreen,
 //! resize_panel, resize_panel_end, resize_panel_reset. Output comes back by
@@ -95,7 +96,7 @@ pub fn html(keybindings_json: &str) -> String {
     min-width: 0;
     max-width: 200px;
     height: 24px;
-    padding: 0 3px 0 10px;
+    padding: 0 3px 0 4px;
     border-radius: var(--r-ctl);
     color: var(--label-2);
     cursor: default;
@@ -103,6 +104,13 @@ pub fn html(keybindings_json: &str) -> String {
   .tab:hover { background: var(--fill-hover); }
   .tab.active { background: var(--fill-press); color: var(--label); }
   .tab .title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* The ⌘1–⌘9 digit, numbered by position so closing a tab renumbers the rest. */
+  #tabs { counter-reset: tab; }
+  .tab { counter-increment: tab; }
+  .tab .kbd { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .tab .kbd::before { content: counter(tab); }
+  .tab:nth-child(n+10) .kbd { display: none; }
+  .tab:nth-child(n+10) { padding-left: 10px; }
   .tab .close {
     flex-shrink: 0;
     display: flex;
@@ -145,8 +153,14 @@ pub fn html(keybindings_json: &str) -> String {
 
   #terms { position: relative; flex: 1 1 auto; min-height: 0; }
   /* visibility, not display: hidden tabs keep a size, so they re-fit with the panel. */
-  .term { position: absolute; inset: 8px 10px 6px 10px; visibility: hidden; }
-  .term.active { visibility: visible; }
+  .panes { position: absolute; inset: 0; display: flex; visibility: hidden; }
+  .panes.active { visibility: visible; }
+  /* The split's background shows through the gap as the divider. */
+  .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: 1px; background: var(--hairline); }
+  .split.column { flex-direction: column; }
+  .pane { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; background: var(--term-bg); }
+  .split .pane:not(.focused) .term { opacity: 0.6; }
+  .term { position: absolute; inset: 8px 10px 6px 10px; }
 </style>
 </head>
 <body>
@@ -210,9 +224,10 @@ pub fn html(keybindings_json: &str) -> String {
       brightBlue: '#3b8eea', brightMagenta: '#d670d6', brightCyan: '#29b8db', brightWhite: '#e5e5e5',
     },
   };
-  const terminals = new Map(); // id -> { id, term, fit, el, tab }
+  const panes = new Map(); // shell id -> { id, term, fit, el, tab, title }
+  const tabs = [];         // { el, tabEl, focused }, in strip order
   let nextId = 1;
-  let activeId = 0;
+  let active = null;       // the tab on screen; null only when there are none
   let closeTabTitle = 'Close terminal';
   let fullscreenChord = '';
 
@@ -224,21 +239,42 @@ pub fn html(keybindings_json: &str) -> String {
     return dark.matches ? THEMES.dark : THEMES.light;
   }
 
-  function open() {
-    const id = nextId++;
+  function openTab() {
     const el = document.createElement('div');
-    el.className = 'term';
+    el.className = 'panes';
     termsEl.appendChild(el);
-    const tab = document.createElement('div');
-    tab.className = 'tab';
-    tab.setAttribute('role', 'tab');
-    tab.innerHTML = '<span class="title">Terminal</span>' +
+    const tabEl = document.createElement('div');
+    tabEl.className = 'tab';
+    tabEl.setAttribute('role', 'tab');
+    tabEl.innerHTML = '<span class="kbd" aria-hidden="true"></span><span class="title">Terminal</span>' +
       '<button class="close" type="button" aria-label="Close terminal">' +
       '<svg width="8" height="8" viewBox="0 0 8 8" fill="none">' +
       '<path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
       '</svg></button>';
-    tab.querySelector('.close').title = closeTabTitle;
-    tabsEl.appendChild(tab);
+    tabEl.querySelector('.close').title = closeTabTitle;
+    tabsEl.appendChild(tabEl);
+    const tab = { el: el, tabEl: tabEl, focused: null };
+    tabs.push(tab);
+
+    tabEl.addEventListener('mousedown', function(e) {
+      if (e.target.closest('.close')) return;
+      e.preventDefault();
+      showTab(tab);
+    });
+    tabEl.querySelector('.close').addEventListener('click', function() { closeTab(tab); });
+    focusPane(newPane(tab, el, null));
+    showTab(tab);
+  }
+
+  // A pane with a new shell, inserted into `parent` before `before`.
+  function newPane(tab, parent, before) {
+    const id = nextId++;
+    const el = document.createElement('div');
+    el.className = 'pane';
+    const host = document.createElement('div');
+    host.className = 'term';
+    el.appendChild(host);
+    parent.insertBefore(el, before);
 
     const term = new Terminal({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
@@ -255,7 +291,7 @@ pub fn html(keybindings_json: &str) -> String {
     term.loadAddon(new WebLinksAddon.WebLinksAddon(function(_event, url) {
       ipc({ type: 'open_url', url: url });
     }));
-    term.open(el);
+    term.open(host);
     // The DOM renderer draws block/box glyphs from the font, which leaves seams
     // between cells. WebGL synthesizes them (customGlyphs) so pixel art tiles.
     try {
@@ -266,55 +302,110 @@ pub fn html(keybindings_json: &str) -> String {
     // Default width tables are Unicode 6: emoji count as one cell and overflow.
     term.loadAddon(new Unicode11Addon.Unicode11Addon());
     term.unicode.activeVersion = '11';
-    const t = { id: id, term: term, fit: fit, el: el, tab: tab };
-    terminals.set(id, t);
+    const p = { id: id, term: term, fit: fit, el: el, tab: tab, title: 'Terminal' };
+    panes.set(id, p);
 
-    tab.addEventListener('mousedown', function(e) {
-      if (e.target.closest('.close')) return;
-      e.preventDefault();
-      activate(id);
-    });
-    tab.querySelector('.close').addEventListener('click', function() { close(id); });
+    el.addEventListener('focusin', function() { focusPane(p); });
     term.onTitleChange(function(title) {
-      tab.querySelector('.title').textContent = title || 'Terminal';
+      p.title = title || 'Terminal';
+      if (tab.focused === p) tab.tabEl.querySelector('.title').textContent = p.title;
     });
     term.attachCustomKeyEventHandler(shortcut);
 
     // Fit first, so the shell starts at the real size.
-    activate(id);
+    fit.fit();
     ipc({ type: 'open', id: id, cols: term.cols, rows: term.rows });
     term.onData(function(data) { ipc({ type: 'input', id: id, data: data }); });
     term.onResize(function(size) {
       ipc({ type: 'resize', id: id, cols: size.cols, rows: size.rows });
     });
+    return p;
   }
 
-  function activate(id) {
-    activeId = id;
-    terminals.forEach(function(t) {
-      t.el.classList.toggle('active', t.id === id);
-      t.tab.classList.toggle('active', t.id === id);
-      t.tab.setAttribute('aria-selected', String(t.id === id));
+  // The pane keys go to in its tab; the tab shows its title.
+  function focusPane(p) {
+    const tab = p.tab;
+    if (tab.focused) tab.focused.el.classList.remove('focused');
+    tab.focused = p;
+    p.el.classList.add('focused');
+    tab.tabEl.querySelector('.title').textContent = p.title;
+  }
+
+  function showTab(tab) {
+    active = tab;
+    tabs.forEach(function(t) {
+      t.el.classList.toggle('active', t === tab);
+      t.tabEl.classList.toggle('active', t === tab);
+      t.tabEl.setAttribute('aria-selected', String(t === tab));
     });
-    const t = terminals.get(id);
-    t.fit.fit();
-    t.term.focus();
+    refit(tab);
+    tab.focused.term.focus();
   }
 
-  function close(id) {
-    const t = terminals.get(id);
-    if (!t) return;
-    terminals.delete(id);
-    ipc({ type: 'close', id: id });
-    t.term.dispose();
-    t.el.remove();
-    t.tab.remove();
-    if (activeId !== id) return;
-    const last = Array.from(terminals.keys()).pop();
+  function refit(tab) {
+    panes.forEach(function(p) { if (p.tab === tab) p.fit.fit(); });
+  }
+
+  // A new pane beside ('row') or below ('column') the focused one. A split in
+  // the other direction nests.
+  function split(dir) {
+    const target = active.focused;
+    let parent = target.el.parentElement;
+    if (!parent.classList.contains(dir)) {
+      // WebKit drops a moved element's focus without a blur event, which
+      // would leave xterm blinking this cursor.
+      target.term.blur();
+      parent = document.createElement('div');
+      parent.className = 'split ' + dir;
+      target.el.replaceWith(parent);
+      parent.appendChild(target.el);
+    }
+    const p = newPane(active, parent, target.el.nextSibling);
+    refit(active);
+    focusPane(p);
+    p.term.focus();
+  }
+
+  function disposePane(p) {
+    panes.delete(p.id);
+    ipc({ type: 'close', id: p.id });
+    p.term.dispose();
+  }
+
+  // A closed pane's space goes to its neighbour; the last pane takes its tab.
+  function closePane(p) {
+    if (!panes.has(p.id)) return;
+    const tab = p.tab;
+    const parent = p.el.parentElement;
+    if (parent === tab.el) {
+      closeTab(tab);
+      return;
+    }
+    const neighbor = p.el.previousElementSibling || p.el.nextElementSibling;
+    disposePane(p);
+    p.el.remove();
+    // A split down to one child gives way to it.
+    if (parent.children.length === 1) parent.replaceWith(neighbor);
+    if (tab.focused === p) {
+      const el = neighbor.matches('.pane') ? neighbor : neighbor.querySelector('.pane');
+      panes.forEach(function(q) { if (q.el === el) focusPane(q); });
+    }
+    refit(tab);
+    // Moving the neighbour out of its split drops its focus.
+    if (tab === active) tab.focused.term.focus();
+  }
+
+  function closeTab(tab) {
+    panes.forEach(function(p) { if (p.tab === tab) disposePane(p); });
+    tab.el.remove();
+    tab.tabEl.remove();
+    tabs.splice(tabs.indexOf(tab), 1);
+    if (active !== tab) return;
+    const last = tabs[tabs.length - 1];
     if (last) {
-      activate(last);
+      showTab(last);
     } else {
-      activeId = 0;
+      active = null;
       ipc({ type: 'hide' });
     }
   }
@@ -332,18 +423,23 @@ pub fn html(keybindings_json: &str) -> String {
       // Read again only once xterm has parsed this: a flood backs up into the shell.
       await new Promise(function(resolve) { t.term.write(bytes, resolve); });
     }
-    close(t.id);
+    closePane(t);
   }
 
   // Positional keys the keymap doesn't hold: ⌘1–⌘9 pick a tab (like the
-  // quickslots) and ⌘K clears. New, close and cycling come from Rust's keymap.
+  // quickslots), ⌘D / ⌘⇧D split the focused pane beside / below, and ⌘K
+  // clears. New, close and cycling come from Rust's keymap.
   function shortcut(e) {
-    if (e.type !== 'keydown' || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return true;
-    if (/^Digit[1-9]$/.test(e.code)) {
-      const id = Array.from(terminals.keys())[Number(e.code.slice(5)) - 1];
-      if (id) activate(id);
+    if (e.type !== 'keydown' || !e.metaKey || e.ctrlKey || e.altKey) return true;
+    if (e.code === 'KeyD') {
+      split(e.shiftKey ? 'column' : 'row');
+    } else if (e.shiftKey) {
+      return true;
+    } else if (/^Digit[1-9]$/.test(e.code)) {
+      const tab = tabs[Number(e.code.slice(5)) - 1];
+      if (tab) showTab(tab);
     } else if (e.code === 'KeyK') {
-      terminals.get(activeId).term.clear();
+      active.focused.term.clear();
     } else {
       return true;
     }
@@ -360,7 +456,7 @@ pub fn html(keybindings_json: &str) -> String {
     fullscreenBtn.title = label + (fullscreenChord ? ' (' + fullscreenChord + ')' : '');
   }
 
-  newBtn.addEventListener('click', open);
+  newBtn.addEventListener('click', openTab);
   fullscreenBtn.addEventListener('click', function() { ipc({ type: 'fullscreen' }); });
   closeBtn.addEventListener('click', function() { ipc({ type: 'hide' }); });
 
@@ -431,36 +527,35 @@ pub fn html(keybindings_json: &str) -> String {
   });
 
   window.addEventListener('resize', function() {
-    terminals.forEach(function(t) { t.fit.fit(); });
+    panes.forEach(function(p) { p.fit.fit(); });
   });
 
   dark.addEventListener('change', function() {
-    terminals.forEach(function(t) { t.term.options.theme = theme(); });
+    panes.forEach(function(p) { p.term.options.theme = theme(); });
   });
 
   window.__termShow = function(fullscreen) {
     setFullscreen(!!fullscreen);
-    if (terminals.size) activate(activeId);
-    else open();
+    if (active) showTab(active);
+    else openTab();
   };
 
   window.__termOpened = function(id, error) {
-    const t = terminals.get(id);
-    if (!t) return;
-    if (error) t.term.write('\x1b[31m' + error + '\x1b[0m\r\n');
-    else pump(t);
+    const p = panes.get(id);
+    if (!p) return;
+    if (error) p.term.write('\x1b[31m' + error + '\x1b[0m\r\n');
+    else pump(p);
   };
 
-  window.__termNew = open;
+  window.__termNew = openTab;
 
   window.__termClose = function() {
-    if (activeId) close(activeId);
+    if (active) closePane(active.focused);
   };
 
   window.__termCycle = function(step) {
-    const ids = Array.from(terminals.keys());
-    if (ids.length < 2) return;
-    activate(ids[(ids.indexOf(activeId) + step + ids.length) % ids.length]);
+    if (tabs.length < 2) return;
+    showTab(tabs[(tabs.indexOf(active) + step + tabs.length) % tabs.length]);
   };
 
   // Control titles follow the effective keymap rather than compiled defaults.

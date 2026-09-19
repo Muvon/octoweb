@@ -1,4 +1,4 @@
-//! Shells behind the terminal panel (⌘`): one login shell per terminal tab,
+//! Shells behind the terminal panel (⌘`): one login shell per terminal pane,
 //! each on its own pseudo-terminal.
 //!
 //! Output reaches the panel by long poll on `octoweb-term://localhost/<id>`
