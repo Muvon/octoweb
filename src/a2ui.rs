@@ -75,6 +75,36 @@ fn kinds_of(msg: &serde_json::Map<String, Value>) -> Vec<&'static str> {
 /// message and give a surface the basic catalog when it names none. Both are
 /// required by the schema but neither changes what gets drawn, so we fill them
 /// in rather than rejecting an envelope over them.
+/// Fill a missing `surfaceId` on follow-up messages from the one `createSurface`
+/// in the same envelope. Models routinely open a surface and update it in one
+/// call, naming the surface only once; the intent is unambiguous when exactly
+/// one surface is created, and bouncing the envelope taught them to give up on
+/// surfaces altogether. Runs before `validate`.
+pub fn fill_surface_ids(messages: &mut [Value]) {
+    let created: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| m.get("createSurface")?.get("surfaceId")?.as_str())
+        .collect();
+    let [id] = created.as_slice() else {
+        return;
+    };
+    let id = Value::String((*id).to_owned());
+    for msg in messages.iter_mut() {
+        for kind in ["updateComponents", "updateDataModel", "deleteSurface"] {
+            let Some(body) = msg.get_mut(kind).and_then(|b| b.as_object_mut()) else {
+                continue;
+            };
+            let missing = !body
+                .get("surfaceId")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if missing {
+                body.insert("surfaceId".into(), id.clone());
+            }
+        }
+    }
+}
+
 pub fn normalize(messages: &mut [Value]) {
     for msg in messages.iter_mut() {
         let Some(obj) = msg.as_object_mut() else {
@@ -385,6 +415,29 @@ mod tests {
     #[test]
     fn a_complete_surface_has_no_problems() {
         assert_eq!(validate(&good()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn fill_surface_ids_inherits_from_the_single_create_surface() {
+        let mut messages = vec![
+            json!({"createSurface": {"surfaceId": "s1"}}),
+            json!({"updateComponents": {"components": []}}),
+            json!({"updateDataModel": {"surfaceId": "", "path": "/a", "value": 1}}),
+            json!({"updateDataModel": {"surfaceId": "other", "path": "/b", "value": 2}}),
+        ];
+        fill_surface_ids(&mut messages);
+        assert_eq!(messages[1]["updateComponents"]["surfaceId"], "s1");
+        assert_eq!(messages[2]["updateDataModel"]["surfaceId"], "s1");
+        assert_eq!(messages[3]["updateDataModel"]["surfaceId"], "other");
+
+        // Two surfaces created — ambiguous, leave the envelope alone.
+        let mut two = vec![
+            json!({"createSurface": {"surfaceId": "a"}}),
+            json!({"createSurface": {"surfaceId": "b"}}),
+            json!({"updateComponents": {"components": []}}),
+        ];
+        fill_surface_ids(&mut two);
+        assert!(two[2]["updateComponents"].get("surfaceId").is_none());
     }
 
     #[test]

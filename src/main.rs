@@ -10636,6 +10636,12 @@ fn build_browser_context(
         }
     }
     out.push_str("</untrusted>");
+    // Per-turn reminder, next to the user's words where it lands harder than
+    // the system prompt: fixed-answer questions belong in a surface.
+    out.push_str(
+        "\nAsk through render_ui, not prose, whenever the answer is a choice, a yes/no, \
+         an approval, or a form.",
+    );
     Some(out)
 }
 

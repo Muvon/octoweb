@@ -669,11 +669,29 @@ pub struct RenderUiRequest {
     #[schemars(
         description = "A2UI v1.0 envelope messages, applied in order. Each item carries \"version\":\"v1.0\" plus exactly one of: {\"createSurface\":{\"surfaceId\",\"catalogId\"?,\"components\"?,\"dataModel\"?,\"sendDataModel\"?}} | {\"updateComponents\":{\"surfaceId\",\"components\":[{\"id\",\"component\",...props}]}} | {\"updateDataModel\":{\"surfaceId\",\"path\"?,\"value\"}} | {\"deleteSurface\":{\"surfaceId\"}} | {\"callRendererFunction\":{\"functionCallId\",\"callFunction\":{\"call\",\"args\"}}}. Reuse a surfaceId to update a surface in place instead of stacking new ones."
     )]
+    #[serde(deserialize_with = "messages_from_array_or_string")]
     pub messages: Vec<serde_json::Value>,
     #[schemars(
         description = "Event names that complete this call. Each must match a Button's action.event.name. Omit or leave empty for a fire-and-forget update, which returns immediately."
     )]
     pub await_events: Option<Vec<String>>,
+}
+
+/// Models sometimes hand the envelope over as one JSON string instead of an
+/// array. The content is the same; parse it rather than bounce the surface.
+fn messages_from_array_or_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<serde_json::Value>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Array(Vec<serde_json::Value>),
+        Text(String),
+    }
+    match Raw::deserialize(d)? {
+        Raw::Array(v) => Ok(v),
+        Raw::Text(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1065,8 +1083,9 @@ impl McpServer {
             // The surface stays on screen after the timeout, so tell the model
             // the truth: nothing was answered, but the user may still be there.
             Err(_) => Ok(Err(format!(
-                "No response after {} minutes — the surface is still on screen. \
-                 Ask the user in chat, or call render_ui again with the same surfaceId.",
+                "No response after {} minutes — the surface is still on screen and still live; \
+                 a late click arrives as a new user message. Tell the user in one line that the \
+                 card is waiting for them, then end your turn. Do not restate its options in prose.",
                 RENDER_UI_AWAIT_TIMEOUT.as_secs() / 60
             ))),
             Ok(Err(_)) => Ok(Err(
@@ -1907,7 +1926,7 @@ impl McpServer {
         \n\
         ENVELOPE: every message carries \"version\":\"v1.0\" and exactly one of createSurface | updateComponents | updateDataModel | deleteSurface | callRendererFunction. createSurface can carry the whole UI at once through its own \"components\" and \"dataModel\". A malformed envelope is rejected with the exact problem — read the error and resend, don't fall back to prose.\n\
         \n\
-        COMMON MISTAKES that render nothing: (1) the key is \"component\", NOT \"type\". (2) Components are a FLAT adjacency list — every component has a string \"id\" and parents reference children BY ID, never inline. (3) Exactly one component must have id \"root\". (4) Only catalog components render.\n\
+        COMMON MISTAKES that render nothing: (1) the key is \"component\", NOT \"type\". (2) Components are a FLAT adjacency list — every component has a string \"id\" and parents reference children BY ID, never inline. (3) Exactly one component must have id \"root\". (4) Only catalog components render. (5) createSurface carries the whole UI — components and dataModel — in one message; add updateComponents/updateDataModel only to change a surface that already exists, and name the surfaceId on every message.\n\
         \n\
         Catalog (values for \"component\"):\n\
         Card{child}, Column{children,align?,justify?,gap?}, Row{children,align?,justify?,gap?},\n\
@@ -1952,14 +1971,15 @@ impl McpServer {
         // The renderer paints whatever it can understand, which turns a typo
         // into a blank card and leaves the agent guessing. Reject here instead,
         // naming every problem at once so one resend fixes all of them.
-        let problems = crate::a2ui::validate(&req.messages);
+        let mut messages = req.messages;
+        crate::a2ui::fill_surface_ids(&mut messages);
+        let problems = crate::a2ui::validate(&messages);
         if !problems.is_empty() {
             return Ok(err_result(format!(
                 "This A2UI envelope will not render:\n- {}",
                 problems.join("\n- ")
             )));
         }
-        let mut messages = req.messages;
         crate::a2ui::normalize(&mut messages);
         let await_events = req.await_events.unwrap_or_default();
         let blocking = !await_events.is_empty();
