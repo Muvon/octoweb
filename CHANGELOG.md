@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.16.0] - 2026-09-26
+
+### 📋 Release Summary
+
+Workspaces and quick slots support hold-to-reorder; terminals now support xterm rendering, addons, split panes, and resizable panels. Added SSH tunnel and per-site proxies, appearance selection and modes, Safari push notifications, Brew installation of missing octomind, and a reworked usage card; WebView, UI input, IPC messaging, and address-bar AI button behavior were updated.
+
+### ✨ New Features & Enhancements
+
+- **ui**: enable hold-to-reorder workspaces and quick slots `1aac5275`
+- **terminal**: support split terminal panes `52979832`
+- **terminal**: enable xterm rendering addons `3fc6423c`
+- **acp**: install missing octomind via brew `b8bbecc5`
+- **webview**: expose Safari push notification API `5aae7d67`
+- **account**: rework usage status card `1aaa7e2d`
+- **appearance**: support appearance selection `cf9e7ad3`
+- **appearance**: support appearance modes `c9b9337c`
+- **terminal**: support resizable terminal panels `42ff79a6`
+- **terminal**: add xterm terminal support `06d776aa`
+- **proxy**: add SSH tunnel proxies `a9ac7ba4`
+- **proxy**: add per-site proxy routing `b79c108d`
+
+### 🔧 Improvements & Optimizations
+
+- **address-bar**: update AI button state `2a1e0f03`
+
+### 🐛 Bug Fixes & Stability
+
+- **webview**: preserve WebRTC streams during autoplay blocking `1ee84533`
+- **ui**: normalize render_ui messages and require UI input `e4dfab29`
+- **webview**: expose window frame to web pages `9e4f709c`
+- **ipc**: route WebView messages natively `ac1cd8a8`
+
 ## [0.15.0] - 2026-09-14
 
 ### 📋 Release Summary
