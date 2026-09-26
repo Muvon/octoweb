@@ -15,6 +15,7 @@ mod download_patch;
 mod error_page_html;
 mod find_bar_html;
 mod hibernation;
+mod hold_reorder_js;
 mod icons;
 mod inline_edit_html;
 mod keybindings;
@@ -142,6 +143,7 @@ enum AppEvent {
     QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
     QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
     QuickSlotSaveUrl(usize, usize, String), // origin tab, slot, raw URL from new-tab card
+    QuickSlotReorder(String, usize, usize), // workspace, source, destination
     QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
     InternalPageIpc(usize, InternalPageAction), // restricted IPC from new-tab/error pages
     TogglePin,                 // ⌘⇧N — pin/unpin current tab to quickslots
@@ -163,6 +165,7 @@ enum AppEvent {
     JumpToTab(usize), // switcher "live" row — activate a tab in whichever workspace owns it
     CreateWorkspace,  // "+ New Workspace" row
     RenameWorkspace(String, String), // (workspace_id, name)
+    ReorderWorkspace(String, String, bool), // source id, target id, insert after
     DeleteWorkspace(String), // (workspace_id)
     MoveTabPicker,    // ⌘⇧M — open the switcher in "move current tab" mode
     MoveTabToWorkspace(String), // (workspace_id) — move the active tab there and reload it
@@ -1715,6 +1718,17 @@ fn main() {
                                 ));
                             }
                         }
+                        Some("workspace_reorder") => {
+                            if let (Some(id), Some(target), Some(after)) =
+                                (v["id"].as_str(), v["target"].as_str(), v["after"].as_bool())
+                            {
+                                let _ = p.send_event(AppEvent::ReorderWorkspace(
+                                    id.to_string(),
+                                    target.to_string(),
+                                    after,
+                                ));
+                            }
+                        }
                         Some("workspace_delete") => {
                             if let Some(id) = v["id"].as_str() {
                                 let _ = p.send_event(AppEvent::DeleteWorkspace(id.to_string()));
@@ -2346,6 +2360,21 @@ fn main() {
             move |msg| {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(msg.body()) {
                     match v["type"].as_str() {
+                        Some("quickslot_reorder") => {
+                            if let (Some(workspace), Some(from), Some(to)) = (
+                                v["workspace"].as_str(),
+                                v["from"].as_u64(),
+                                v["to"].as_u64(),
+                            ) {
+                                if from < 10 && to < 10 {
+                                    let _ = p.send_event(AppEvent::QuickSlotReorder(
+                                        workspace.to_string(),
+                                        from as usize,
+                                        to as usize,
+                                    ));
+                                }
+                            }
+                        }
                         Some("quickslot_open") => {
                             if let Some(slot) = v["slot"].as_u64() {
                                 let _ = p.send_event(AppEvent::QuickSlotOpen(slot as usize));
@@ -2382,7 +2411,8 @@ fn main() {
         let active_url_json =
             serde_json::to_string(&active_url).unwrap_or_else(|_| "\"\"".to_string());
         let _ = footer_wv.evaluate_script(&format!(
-            "window.__updateSlots && window.__updateSlots({json}, {active_url_json})"
+            "window.__updateSlots && window.__updateSlots({json}, {active_url_json}, {})",
+            serde_json::to_string(&workspace_manager.active().id).unwrap_or_default()
         ));
     }
 
@@ -3819,7 +3849,8 @@ fn main() {
             let active_url_json =
                 serde_json::to_string(&active_url).unwrap_or_else(|_| "\"\"".to_string());
             let _ = footer_wv.evaluate_script(&format!(
-                "window.__updateSlots && window.__updateSlots({json}, {active_url_json})"
+                "window.__updateSlots && window.__updateSlots({json}, {active_url_json}, {})",
+                serde_json::to_string(&workspace_manager.active().id).unwrap_or_default()
             ));
             for (&tid, wv) in workspace_manager.active().webviews.iter() {
                 let tab_url = workspace_manager
@@ -6371,6 +6402,14 @@ fn main() {
                 workspace_switcher_visible.store(false, Ordering::Relaxed);
                 focus_active_webview!();
             }
+            Event::UserEvent(AppEvent::ReorderWorkspace(id, target, after)) => {
+                if workspace_manager.reorder(&id, &target, after) {
+                    history_save_at = Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(500),
+                    );
+                }
+                refresh_workspace_switcher!();
+            }
             Event::UserEvent(AppEvent::RenameWorkspace(id, name)) => {
                 let is_active = id == workspace_manager.active().id;
                 workspace_manager.rename(&id, name);
@@ -8189,6 +8228,15 @@ fn main() {
                     }
                     let _ = proxy.send_event(AppEvent::NavigateTo(resolved, false));
                 }
+            }
+
+            Event::UserEvent(AppEvent::QuickSlotReorder(workspace, from, to)) => {
+                if workspace == workspace_manager.active().id
+                    && quickslots::reorder(&mut workspace_manager.active_mut().quick_slots, from, to)
+                {
+                    save_quickslots!();
+                }
+                sync_quickslots_ui!();
             }
 
             // ── Quick-slot: remove slot ───────────────────────────────────

@@ -19,6 +19,19 @@ pub type QuickSlots = [Option<QuickSlot>; 10];
 /// workspace they were saved in, like tabs and cookies.
 pub type AllQuickSlots = HashMap<String, QuickSlots>;
 
+/// Move a pin to its new shortcut position, shifting intervening slots.
+pub fn reorder(slots: &mut QuickSlots, from: usize, to: usize) -> bool {
+    if from >= slots.len() || to >= slots.len() || from == to || slots[from].is_none() {
+        return false;
+    }
+    if from < to {
+        slots[from..=to].rotate_left(1);
+    } else {
+        slots[to..=from].rotate_right(1);
+    }
+    true
+}
+
 pub fn save_all(all: &AllQuickSlots) {
     let path = slots_path();
     if let Some(parent) = path.parent() {
@@ -60,4 +73,39 @@ fn slots_path() -> PathBuf {
     crate::config::base_dir()
         .join("octoweb")
         .join("quickslots.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reorder_preserves_pins_and_updates_shortcut_positions() {
+        let mut slots: QuickSlots = Default::default();
+        for (index, name) in [(0, "A"), (1, "B"), (2, "C")] {
+            slots[index] = Some(QuickSlot {
+                url: name.into(),
+                title: name.into(),
+                favicon: Some(name.into()),
+            });
+        }
+        assert!(reorder(&mut slots, 0, 2));
+        assert_eq!(slots[0].as_ref().unwrap().url, "B");
+        assert_eq!(slots[1].as_ref().unwrap().url, "C");
+        assert_eq!(slots[2].as_ref().unwrap().favicon.as_deref(), Some("A"));
+        assert!(reorder(&mut slots, 2, 9));
+        assert!(slots[2].is_none());
+        assert_eq!(slots[9].as_ref().unwrap().url, "A");
+        assert!(reorder(&mut slots, 9, 0));
+        assert_eq!(slots[0].as_ref().unwrap().url, "A");
+        assert_eq!(slots.iter().flatten().count(), 3);
+        let saved = to_json(&slots);
+        assert!(!reorder(&mut slots, 3, 0));
+        assert!(!reorder(&mut slots, 0, 10));
+        assert!(!reorder(&mut slots, usize::MAX, 0));
+        assert!(!reorder(&mut slots, 0, 0));
+        assert_eq!(to_json(&slots), saved);
+        let restored: QuickSlots = serde_json::from_str(&saved).unwrap();
+        assert_eq!(to_json(&restored), saved);
+    }
 }

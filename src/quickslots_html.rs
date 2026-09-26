@@ -235,10 +235,26 @@ pub fn html() -> String {
 <body>
 <div id="bar"></div>
 <script>
+/*@@HOLD_REORDER@@*/
 (function() {
   const bar = document.getElementById('bar');
   let slots = [];
   let activeUrl = '';
+  let workspaceId = '';
+  const reorder = createHoldReorder(bar, {
+    selector: '.slot', horizontal: true,
+    canDrag: (row, target) => !row.classList.contains('empty') && !target.closest('.close'),
+    onDrop: function(row, target, after) {
+      const from = Number(row.dataset.slot);
+      const targetIndex = Number(target.dataset.slot);
+      // Empty slots are destinations themselves; occupied slots use insertion.
+      const to = target.classList.contains('empty') ? targetIndex
+        : targetIndex + (after ? 1 : 0) - (from < targetIndex ? 1 : 0);
+      if (from !== to) window.ipc.postMessage(JSON.stringify({
+        type: 'quickslot_reorder', workspace: workspaceId, from, to
+      }));
+    }
+  });
 
   function appendBadge(target, index) {
     const badge = document.createElement('span');
@@ -248,6 +264,7 @@ pub fn html() -> String {
   }
 
   function render() {
+    reorder.cancel();
     bar.replaceChildren();
     let foundEmpty = false;
     for (let i = 0; i < 10; i++) {
@@ -255,6 +272,7 @@ pub fn html() -> String {
 
       if (s) {
         const el = document.createElement('div');
+        el.dataset.slot = i;
         el.className = 'slot' + (activeUrl && s.url === activeUrl ? ' current' : '');
 
         const open = document.createElement('button');
@@ -299,6 +317,7 @@ pub fn html() -> String {
       } else {
         const el = document.createElement('button');
         el.type = 'button';
+        el.dataset.slot = i;
         el.className = 'slot empty' + (foundEmpty ? ' extra-empty' : '');
         foundEmpty = true;
         appendBadge(el, i);
@@ -323,7 +342,8 @@ pub fn html() -> String {
     }
   }
 
-  window.__updateSlots = function(data, currentUrl) {
+  window.__updateSlots = function(data, currentUrl, currentWorkspace) {
+    workspaceId = currentWorkspace || '';
     slots = Array.isArray(data) ? data : [];
     activeUrl = typeof currentUrl === 'string' ? currentUrl : '';
     render();
@@ -331,7 +351,10 @@ pub fn html() -> String {
 
   window.__setActiveUrl = function(currentUrl) {
     activeUrl = typeof currentUrl === 'string' ? currentUrl : '';
-    render();
+    bar.querySelectorAll('.slot').forEach(function(row) {
+      const slot = slots[Number(row.dataset.slot)];
+      row.classList.toggle('current', Boolean(slot && activeUrl && slot.url === activeUrl));
+    });
   };
 
   // Initial empty render
@@ -342,5 +365,6 @@ pub fn html() -> String {
 </html>"#;
     template
         .replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/*@@HOLD_REORDER@@*/", crate::hold_reorder_js::JS)
         .replace("@@ICON_PLUS@@", crate::icons::PLUS)
 }

@@ -22,7 +22,7 @@ use wry::WebView;
 
 const DEFAULT_COLOR: &str = "#7C5CFF";
 
-/// Id of the always-present first workspace. Also what an MCP caller that
+/// Id of the original default workspace. Also what an MCP caller that
 /// sends no workspace token is routed to.
 pub const DEFAULT_WORKSPACE_ID: &str = "default";
 
@@ -237,6 +237,28 @@ impl WorkspaceManager {
         }
     }
 
+    /// Reorder shortcut positions without changing the active workspace or
+    /// moving any of its tabs, WebViews, cookies, or agent sessions elsewhere.
+    pub fn reorder(&mut self, id: &str, target: &str, after: bool) -> bool {
+        let (Some(from), Some(target)) = (self.index_of(id), self.index_of(target)) else {
+            return false;
+        };
+        if from == target {
+            return false;
+        }
+        let to = target + usize::from(after) - usize::from(from < target);
+        if from == to {
+            return false;
+        }
+        let active_id = self.active().id.clone();
+        let workspace = self.workspaces.remove(from);
+        self.workspaces.insert(to, workspace);
+        self.active_index = self
+            .index_of(&active_id)
+            .expect("active workspace preserved");
+        true
+    }
+
     /// Drops the workspace. Refuses to remove the last remaining one.
     ///
     /// Stage 1 MVP: does not clean up the on-disk `WKWebsiteDataStore` for
@@ -289,4 +311,45 @@ fn new_id() -> String {
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reorder_preserves_active_workspace_and_owned_state() {
+        let workspaces = ["a", "b", "c"].map(|id| {
+            let mut ws = Workspace::new(id.into(), id.into(), DEFAULT_COLOR.into(), None, 10);
+            ws.closed_tabs.push(format!("https://{id}.test"));
+            ws
+        });
+        let mut manager =
+            WorkspaceManager::from_workspaces(workspaces.into(), "b", 10, String::new());
+        let active_tabs = Arc::clone(&manager.active().tabs);
+        assert!(manager.reorder("a", "c", true));
+        assert_eq!(
+            manager
+                .list()
+                .iter()
+                .map(|ws| ws.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c", "a"]
+        );
+        assert_eq!(manager.active().id, "b");
+        assert!(Arc::ptr_eq(&active_tabs, &manager.active().tabs));
+        assert!(manager.reorder("b", "a", true));
+        assert_eq!(manager.active_index(), 2);
+        assert_eq!(manager.active().closed_tabs, ["https://b.test"]);
+        assert!(manager.reorder("b", "c", false));
+        assert_eq!(manager.active_index(), 0);
+        assert!(!manager.reorder("missing", "b", false));
+        assert!(!manager.reorder("b", "missing", false));
+        assert!(!manager.reorder("b", "b", true));
+        assert!(!manager.reorder("b", "c", false));
+        assert_eq!(manager.list().len(), 3);
+        for ws in manager.list() {
+            assert_eq!(ws.closed_tabs, [format!("https://{}.test", ws.id)]);
+        }
+    }
 }

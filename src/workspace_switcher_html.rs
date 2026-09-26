@@ -63,6 +63,8 @@ pub fn html() -> String {
   }
 
   .ws-row {
+    user-select: none;
+    -webkit-user-select: none;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -241,6 +243,7 @@ pub fn html() -> String {
   </div>
 </div>
 <script>
+/*@@HOLD_REORDER@@*/
 (function() {
   function ipc(msg) {
     window.ipc.postMessage(JSON.stringify(msg));
@@ -254,6 +257,17 @@ pub fn html() -> String {
     if (e.target === this) close();
   });
   var lastData = [];
+  var reorder = createHoldReorder(document.getElementById('ws-list'), {
+    selector: '.ws-row', scroller: document.getElementById('panel'),
+    canDrag: function(row, target) {
+      return viewMode === 'switch' && !target.closest('button, input') && !row.querySelector('input');
+    },
+    onDrop: function(row, target, after) {
+      pendingFocusKey = row.dataset.rowKey;
+      ipc({ type: 'workspace_reorder', id: row.dataset.workspaceId,
+        target: target.dataset.workspaceId, after: after });
+    }
+  });
   var selectedKey = null;
   var pendingFocusKey = null;
   // 'switch' (Cmd+Shift+O) or 'move' (Cmd+Shift+M — pick where the current tab
@@ -503,6 +517,7 @@ pub fn html() -> String {
   }
 
   function render(data, requestedFocusKey) {
+    reorder.cancel();
     lastData = data;
     var moving = viewMode === 'move';
     document.getElementById('title').textContent = moving ? 'Move tab to workspace' : 'Workspaces';
@@ -550,6 +565,7 @@ pub fn html() -> String {
   // only hidden, never torn down, so both the module cursor and the DOM focus
   // survive a close and would otherwise reopen on a stale row.
   window.__resetSelection = function() {
+    reorder.cancel();
     selectedKey = null;
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   };
@@ -568,6 +584,7 @@ pub fn html() -> String {
 </body>
 </html>"#
         .replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/*@@HOLD_REORDER@@*/", crate::hold_reorder_js::JS)
         .replace("@@ICON_PLUS@@", crate::icons::PLUS)
         .replace("@@ICON_CHECK@@", crate::icons::CHECK)
         .replace("@@ICON_PENCIL@@", crate::icons::PENCIL)
