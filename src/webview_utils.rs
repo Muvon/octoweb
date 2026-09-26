@@ -455,23 +455,30 @@ pub const COMBINED_SCRIPT: &str = r#"
   // autoplay). Removing it and setting preload="none" prevents the browser from
   // fetching media bytes until the user interacts — saving network, CPU, and
   // GPU memory on news/media-heavy pages (typically 3-5 autoplay videos/page).
+  // Live call streams (WebRTC `srcObject`) are exempt: calls like Telemost start
+  // remote screen/camera/audio via `autoplay`, and blocking it leaves a gray
+  // tile. srcObject is usually assigned after insertion, so a source-less
+  // element is judged at `loadstart`, when its source is finally known.
   (function () {
+    function strip(el) {
+      el.removeAttribute('autoplay');
+      el.setAttribute('preload', 'none');
+      if (!el.paused) el.pause();
+    }
     function block(el) {
       if (!el || el.nodeType !== 1) return;
-      if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') {
-        if (el.hasAttribute('autoplay')) {
-          el.removeAttribute('autoplay');
-          el.setAttribute('preload', 'none');
-          if (!el.paused) el.pause();
-        }
-      } else {
-        var kids = el.querySelectorAll('video[autoplay],audio[autoplay]');
-        for (var i = 0; i < kids.length; i++) {
-          kids[i].removeAttribute('autoplay');
-          kids[i].setAttribute('preload', 'none');
-        }
+      var els = (el.tagName === 'VIDEO' || el.tagName === 'AUDIO')
+        ? [el] : el.querySelectorAll('video[autoplay],audio[autoplay]');
+      for (var i = 0; i < els.length; i++) {
+        var m = els[i];
+        if (m.hasAttribute('autoplay') && (m.hasAttribute('src') || m.querySelector('source'))) strip(m);
       }
     }
+    document.addEventListener('loadstart', function (e) {
+      var el = e.target;
+      if ((el.tagName === 'VIDEO' || el.tagName === 'AUDIO') && el.hasAttribute('autoplay')
+          && !(el.srcObject instanceof MediaStream)) strip(el);
+    }, true);
     new MutationObserver(function (muts) {
       for (var i = 0; i < muts.length; i++) {
         var ns = muts[i].addedNodes;
