@@ -161,6 +161,8 @@ pub enum McpCommand {
     /// Reload a tab
     Reload {
         tab_id: Option<usize>,
+        /// Bypass the HTTP cache (`reloadFromOrigin`).
+        hard: bool,
         response: oneshot::Sender<Result<(), String>>,
     },
     /// Get readable text content of a page
@@ -838,6 +840,16 @@ pub struct ScreenshotRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReloadRequest {
+    #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
+    pub tab_id: Option<usize>,
+    #[schemars(
+        description = "Bypass the HTTP cache and refetch every resource from the server (use after rebuilding the page's JS/CSS). Default false."
+    )]
+    pub hard: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetHistoryRequest {
     #[schemars(description = "Max entries, most recent first. Default 50.")]
     pub limit: Option<usize>,
@@ -1212,14 +1224,17 @@ impl McpServer {
         )]))
     }
 
-    #[tool(description = "Reload the tab. Defaults to the visible tab.")]
+    #[tool(
+        description = "Reload the tab. hard=true bypasses the HTTP cache so updated JS/CSS is refetched. Defaults to the visible tab."
+    )]
     async fn browser_reload(
         &self,
-        Parameters(req): Parameters<TabIdRequest>,
+        Parameters(req): Parameters<ReloadRequest>,
     ) -> Result<CallToolResult, McpError> {
         browser_try!(
             self.send_command(|tx| McpCommand::Reload {
                 tab_id: req.tab_id,
+                hard: req.hard.unwrap_or(false),
                 response: tx,
             })
             .await?

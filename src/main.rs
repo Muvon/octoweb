@@ -130,7 +130,7 @@ enum AppEvent {
     PageLoadStarted(usize),                     // (tab_id) — show progress bar
     PageLoadFinished(usize),                    // (tab_id) — hide progress bar
     NavigationError(usize, String, String),     // (tab_id, url, error) — show error page
-    Reload,                                     // Cmd+R — reload current page
+    Reload(bool),                               // (hard) ⌘R / ⌘⇧R — hard skips the HTTP cache
     Back,                                       // ⌘[ — history back in the focused tab
     Forward,                                    // ⌘] — history forward in the focused tab
     NewTab,                                     // ⌘N — open the home page in a new foreground tab
@@ -348,7 +348,8 @@ fn keybind_to_event(
         A::ScrollUp if !overlay && !inline => AppEvent::ScrollUp,
         A::ScrollTop if !overlay && !inline => AppEvent::ScrollTop,
         A::ScrollBottom if !overlay && !inline => AppEvent::ScrollBottom,
-        A::Reload if !overlay => AppEvent::Reload,
+        A::Reload if !overlay => AppEvent::Reload(false),
+        A::HardReload if !overlay => AppEvent::Reload(true),
         // The four keys every browser has. Suppressed in the sidebar and in
         // text-entry contexts, where they belong to the field, not the page.
         A::Back if !overlay && !inline && !sidebar && !address_edit => AppEvent::Back,
@@ -5471,11 +5472,15 @@ fn main() {
                             .collect();
                         let _ = response.send(Ok(playing));
                     }
-                    McpCommand::Reload { tab_id, response } => {
+                    McpCommand::Reload { tab_id, hard, response } => {
                         let target_id = tab_id.unwrap_or(mcp_default_tab);
                         let _ = mcp_ensure_tab!(ws_idx, target_id);
                         if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
-                            let _ = wv.reload();
+                            if hard {
+                                reload_from_origin(wv);
+                            } else {
+                                let _ = wv.reload();
+                            }
                             let _ = response.send(Ok(()));
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
@@ -9326,12 +9331,14 @@ fn main() {
             }
 
             // ── Reload current page ───────────────────────────────────────────
-            Event::UserEvent(AppEvent::Reload) => {
+            Event::UserEvent(AppEvent::Reload(hard)) => {
                 if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
                     // If mid-snapshot-restore, skip the snapshot and load the real URL directly.
                     if let Some(url) = deferred_nav.remove(&active_wv_id) {
                         restoring_tabs.remove(&active_wv_id);
                         let _ = wv.load_url(&url);
+                    } else if hard {
+                        reload_from_origin(wv);
                     } else {
                         let _ = wv.reload();
                     }
@@ -9801,6 +9808,15 @@ unsafe fn copy_png_to_clipboard(png_data: *mut objc2::runtime::AnyObject) {
     let _: bool = objc2::msg_send![&*pb, setData: &*png_data, forType: &*png_type];
 }
 
+/// Hard reload: WKWebView `reloadFromOrigin` revalidates every resource end to
+/// end, so rebuilt JS/CSS is refetched. wry only exposes the plain `reload`,
+/// which serves `Cache-Control: immutable` subresources from cache.
+fn reload_from_origin(wv: &WebView) {
+    let wv_obj = objc2::rc::Retained::as_ptr(&wv.webview()) as *mut objc2::runtime::AnyObject;
+    unsafe {
+        let _: *mut objc2::runtime::AnyObject = objc2::msg_send![&*wv_obj, reloadFromOrigin];
+    }
+}
 /// Viewport screenshot: takeSnapshot → PNG → clipboard.
 /// `ns_win_ptr` is the NSWindow pointer to restore key-window focus after the
 /// async snapshot completes — takeSnapshot can temporarily steal key-window

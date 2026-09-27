@@ -50,6 +50,7 @@ pub enum Action {
     ScrollTop,
     ScrollBottom,
     Reload,
+    HardReload,
     Screenshot,
     ScreenshotFull,
     ZoomIn,
@@ -111,6 +112,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Reload page",
         "Tabs & Navigation",
         "cmd+r",
+    ),
+    (
+        Action::HardReload,
+        "hard_reload",
+        "Hard reload (bypass cache)",
+        "Tabs & Navigation",
+        "cmd+shift+r",
     ),
     (
         Action::Back,
