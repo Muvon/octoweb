@@ -1,7 +1,8 @@
 //! URL resolution: turn user input into a navigable URL.
 //!
 //! - Already has a scheme → pass through
-//! - Looks like localhost / IP / domain → prepend `https://`
+//! - Looks like localhost → prepend `http://` (local dev servers rarely speak TLS)
+//! - Looks like an IP / domain → prepend `https://`
 //! - Otherwise → search using the configured engine
 
 /// Turn user input into a navigable URL.
@@ -17,24 +18,37 @@ pub fn resolve_url(input: &str, search_engine: &str) -> String {
         return s.to_string();
     }
 
-    if !s.chars().any(char::is_whitespace)
-        && (looks_like_localhost(s) || looks_like_ipv4(s) || looks_like_domain(s))
-    {
-        return format!("https://{s}");
+    if !s.chars().any(char::is_whitespace) {
+        if looks_like_localhost(s) {
+            return format!("http://{s}");
+        }
+        if looks_like_ipv4(s) || looks_like_domain(s) {
+            return format!("https://{s}");
+        }
     }
 
     search_engine.replace("{}", &encode_uri(s))
 }
 
 fn has_url_scheme(s: &str) -> bool {
-    let Some(idx) = s.find(':') else {
+    let Some((scheme, rest)) = s.split_once(':') else {
         return false;
     };
-    let scheme = &s[..idx];
     !scheme.is_empty()
         && scheme
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+        && !is_host_port(scheme, rest)
+}
+
+/// `localhost:5173/app` and `example.com:8080` parse as a scheme by the URL
+/// grammar, but a host followed by a port is what was typed. A dot or
+/// `localhost` tells it apart from `tel:5551234`.
+fn is_host_port(host: &str, rest: &str) -> bool {
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0
+        && matches!(rest.as_bytes().get(digits), None | Some(b'/' | b'?' | b'#'))
+        && (host == "localhost" || host.contains('.'))
 }
 
 fn host_part(input: &str) -> &str {
@@ -177,5 +191,54 @@ mod tests {
         // A bare search term is not a URL, even when it reads like a scheme.
         assert!(!is_agent_forbidden_scheme("javascript"));
         assert!(!is_agent_forbidden_scheme("data"));
+    }
+
+    const SEARCH: &str = "https://search.test/?q={}";
+
+    #[test]
+    fn a_host_with_a_port_is_not_a_scheme() {
+        assert_eq!(
+            resolve_url("localhost:5180/blog", SEARCH),
+            "http://localhost:5180/blog"
+        );
+        assert_eq!(
+            resolve_url("example.com:8080/x?y#z", SEARCH),
+            "https://example.com:8080/x?y#z"
+        );
+        assert_eq!(
+            resolve_url("192.168.1.1:8080", SEARCH),
+            "https://192.168.1.1:8080"
+        );
+    }
+
+    #[test]
+    fn localhost_gets_plain_http() {
+        assert_eq!(resolve_url("localhost", SEARCH), "http://localhost");
+        assert_eq!(
+            resolve_url("localhost:3000", SEARCH),
+            "http://localhost:3000"
+        );
+        assert_eq!(resolve_url("example.com", SEARCH), "https://example.com");
+    }
+
+    #[test]
+    fn real_schemes_pass_through() {
+        for url in [
+            "https://example.com",
+            "about:blank",
+            "mailto:a@b.c",
+            "tel:5551234",
+            "com.example.app:/oauth",
+        ] {
+            assert_eq!(resolve_url(url, SEARCH), url);
+        }
+    }
+
+    #[test]
+    fn anything_else_is_a_search() {
+        assert_eq!(
+            resolve_url("rust ownership", SEARCH),
+            "https://search.test/?q=rust%20ownership"
+        );
     }
 }

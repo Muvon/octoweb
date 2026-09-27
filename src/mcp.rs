@@ -1972,8 +1972,10 @@ impl McpServer {
         // into a blank card and leaves the agent guessing. Reject here instead,
         // naming every problem at once so one resend fixes all of them.
         let mut messages = req.messages;
+        let await_events = req.await_events.unwrap_or_default();
         crate::a2ui::fill_surface_ids(&mut messages);
-        let problems = crate::a2ui::validate(&messages);
+        let mut problems = crate::a2ui::validate(&messages);
+        problems.extend(crate::a2ui::unanswerable_wait(&messages, &await_events));
         if !problems.is_empty() {
             return Ok(err_result(format!(
                 "This A2UI envelope will not render:\n- {}",
@@ -1981,7 +1983,6 @@ impl McpServer {
             )));
         }
         crate::a2ui::normalize(&mut messages);
-        let await_events = req.await_events.unwrap_or_default();
         let blocking = !await_events.is_empty();
         let session_id = self.state.session_id;
         tracing::debug!(?session_id, blocking, "MCP render_ui");

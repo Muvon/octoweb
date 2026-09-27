@@ -62,6 +62,66 @@ fn is_known_component(name: &str) -> bool {
     CATALOG_COMPONENTS.contains(&name) || LEGACY_COMPONENTS.contains(&name)
 }
 
+/// Mirrors the sidebar renderer's Button: a click needs an event, an `openUrl`
+/// or a `functionCall` to go anywhere, and without one the renderer draws a
+/// broken control. `actions` is a spelling agents emit that it also accepts.
+fn button_action(button: &serde_json::Map<String, Value>) -> Option<&Value> {
+    button.get("action").or_else(|| button.get("actions"))
+}
+
+fn has_button_action(button: &serde_json::Map<String, Value>) -> bool {
+    let Some(action) = button_action(button) else {
+        return false;
+    };
+    action
+        .pointer("/event/name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.is_empty())
+        || action
+            .pointer("/functionCall/call")
+            .is_some_and(Value::is_string)
+        || action
+            .get("openUrl")
+            .is_some_and(|url| url.is_string() || url.pointer("/url").is_some_and(Value::is_string))
+}
+
+/// Why a blocking `render_ui` on a new surface could never be answered: it
+/// waits on `await_events`, but no Button in the envelope sends an event. Any
+/// event click completes the call, so only a surface with none is stuck until
+/// the timeout. Incremental envelopes may be answered by Buttons an earlier
+/// call drew, and a `callRendererFunction` answers the call itself.
+pub fn unanswerable_wait(messages: &[Value], await_events: &[String]) -> Option<String> {
+    let creates_surface = messages.iter().any(|m| m.get("createSurface").is_some());
+    let calls_renderer = messages
+        .iter()
+        .any(|m| m.get("callRendererFunction").is_some());
+    if await_events.is_empty() || !creates_surface || calls_renderer {
+        return None;
+    }
+    let sends_event = messages
+        .iter()
+        .filter_map(|m| m.get("createSurface").or_else(|| m.get("updateComponents")))
+        .filter_map(|body| body.get("components")?.as_array())
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|c| c.get("component").and_then(Value::as_str) == Some("Button"))
+        .filter_map(button_action)
+        .any(|action| {
+            action
+                .pointer("/event/name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| !n.is_empty())
+        });
+    (!sends_event).then(|| {
+        format!(
+            "await_events is {await_events:?}, but no Button on this surface has an \
+             \"action\": {{\"event\": {{\"name\"}}}}, so nothing can answer and the call would \
+             wait until it times out. Give a Button one of those event names, or drop \
+             await_events for a fire-and-forget update."
+        )
+    })
+}
+
 /// The message kind of `msg`, ignoring the `version` envelope field.
 fn kinds_of(msg: &serde_json::Map<String, Value>) -> Vec<&'static str> {
     MESSAGE_KINDS
@@ -127,6 +187,8 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
     // they make — checked together at the end, once every message is seen.
     let mut declared: Vec<String> = Vec::new();
     let mut referenced: Vec<(String, String)> = Vec::new();
+    // Buttons with nowhere for a click to go, as (path, id).
+    let mut actionless: Vec<(String, String)> = Vec::new();
     let mut has_create_surface = false;
 
     for (i, msg) in messages.iter().enumerate() {
@@ -188,6 +250,7 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
                         &mut problems,
                         &mut declared,
                         &mut referenced,
+                        &mut actionless,
                     );
                 }
                 if body.get("dataModel").is_some_and(|d| !d.is_object()) {
@@ -201,6 +264,7 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
                     &mut problems,
                     &mut declared,
                     &mut referenced,
+                    &mut actionless,
                 ),
                 None => problems.push(format!(
                     "{at}.updateComponents needs a \"components\" array."
@@ -279,6 +343,19 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
                 ));
             }
         }
+        // A Modal's trigger is the one Button that needs no action: opening
+        // the Modal is its click.
+        for (at, id) in &actionless {
+            let is_trigger = referenced
+                .iter()
+                .any(|(from, target)| target == id && from.ends_with(".trigger"));
+            if !is_trigger {
+                problems.push(format!(
+                    "{at} is a Button with no action, so a click on it goes nowhere. Give it \
+                     \"action\": {{\"event\": {{\"name\": \"…\"}}}} (or openUrl / functionCall)."
+                ));
+            }
+        }
     }
 
     problems
@@ -290,6 +367,7 @@ fn check_components(
     problems: &mut Vec<String>,
     declared: &mut Vec<String>,
     referenced: &mut Vec<(String, String)>,
+    actionless: &mut Vec<(String, String)>,
 ) {
     let Some(list) = components.as_array() else {
         problems.push(format!("{at} must be an array."));
@@ -333,6 +411,11 @@ fn check_components(
                 "{at} uses unknown component \"{name}\". The catalog is: {}.",
                 CATALOG_COMPONENTS.join(", ")
             ));
+        }
+        if name == "Button" && !has_button_action(obj) {
+            if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+                actionless.push((at.clone(), id.to_string()));
+            }
         }
 
         for prop in CHILD_PROPS {
@@ -738,5 +821,65 @@ mod tests {
         ]}})];
         let problems = validate(&messages);
         assert!(problems.len() >= 4, "{problems:?}");
+    }
+
+    #[test]
+    fn a_button_without_an_action_is_rejected_on_a_new_surface() {
+        // What an agent actually sent: the only Button has no action, so the
+        // renderer drew a broken control and the blocked call could never end.
+        let messages = vec![
+            json!({"createSurface": {"surfaceId": "pick", "components": [
+                {"id": "root", "component": "Card", "child": "go"},
+                {"id": "go", "component": "Button", "child": "label", "variant": "primary"},
+                {"id": "label", "component": "Text", "text": "Open it"}
+            ]}}),
+        ];
+        let problems = validate(&messages);
+        assert!(
+            problems.iter().any(|p| p.contains("Button with no action")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn every_button_action_the_renderer_accepts_validates() {
+        let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+            {"id": "root", "component": "Row", "children": ["a", "b", "c", "d"]},
+            {"id": "a", "component": "Button", "child": "t", "action": {"event": {"name": "ok"}}},
+            {"id": "b", "component": "Button", "child": "t",
+             "action": {"functionCall": {"call": "openUrl", "args": {"url": "https://x.test"}}}},
+            {"id": "c", "component": "Button", "child": "t", "action": {"openUrl": {"url": "https://x.test"}}},
+            {"id": "d", "component": "Button", "child": "t", "actions": {"event": {"name": "no"}}},
+            {"id": "t", "component": "Text", "text": "Go"}
+        ]}})];
+        assert_eq!(validate(&messages), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_modal_trigger_needs_no_action() {
+        let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+            {"id": "root", "component": "Modal", "trigger": "open", "content": "body"},
+            {"id": "open", "component": "Button", "child": "label"},
+            {"id": "label", "component": "Text", "text": "Details"},
+            {"id": "body", "component": "Text", "text": "More"}
+        ]}})];
+        assert_eq!(validate(&messages), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_blocking_surface_needs_a_button_that_sends_an_event() {
+        let awaited = vec!["pick".to_string()];
+        let no_event = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+            {"id": "root", "component": "ChoicePicker", "options": []}
+        ]}})];
+        let reason = unanswerable_wait(&no_event, &awaited);
+        assert!(reason.is_some_and(|r| r.contains("pick")));
+
+        assert_eq!(unanswerable_wait(&good(), &awaited), None);
+        assert_eq!(unanswerable_wait(&no_event, &[]), None);
+        // Updating an existing surface: its Buttons may come from an earlier call.
+        let update =
+            vec![json!({"updateDataModel": {"surfaceId": "s1", "path": "/a", "value": 1}})];
+        assert_eq!(unanswerable_wait(&update, &awaited), None);
     }
 }

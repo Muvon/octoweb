@@ -6620,6 +6620,19 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   }
 
   function a2uiFailureControl(block, detail) {
+    // A render_ui call blocked on this surface can't be answered through a
+    // broken control. Rust fails it with the reason so the agent repairs the
+    // surface now instead of waiting out the timeout; it ignores surfaces
+    // nothing waits on. Once per problem, since every re-render lands here.
+    block.failuresReported = block.failuresReported || new Set();
+    if (!block.resolved && !block.failuresReported.has(detail)) {
+      block.failuresReported.add(detail);
+      window.ipc.postMessage(JSON.stringify({
+        type: 'a2ui_failed',
+        file_id: block.pollFileId || block.fileId,
+        detail: detail,
+      }));
+    }
     const wrap = document.createElement('div');
     wrap.className = 'a2ui-unknown';
     const text = document.createElement('span');

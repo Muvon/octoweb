@@ -207,6 +207,9 @@ enum AppEvent {
     /// `callRendererFunction`: (call_id, `rendererFunctionResponse` envelope).
     /// Completes the `render_ui` call blocked on that surface, if any.
     A2uiFunctionResponse(String, serde_json::Value),
+    /// A control on an A2UI surface failed to render: (call_id, reason).
+    /// Fails the `render_ui` call blocked on that surface, if any.
+    A2uiFailed(String, String),
     KeybindRecord(String, String), // (action_id, chord) — remap a global shortcut
     KeybindReset(String),          // (action_id) — restore one action to its default
     KeybindResetAll,               // restore every keybinding to default
@@ -1961,6 +1964,13 @@ fn main() {
                                     call_id,
                                     v["response"].clone(),
                                 ));
+                            }
+                        }
+                        Some("a2ui_failed") => {
+                            let call_id = v["file_id"].as_str().unwrap_or("").to_string();
+                            let detail = v["detail"].as_str().unwrap_or("").to_string();
+                            if !call_id.is_empty() {
+                                let _ = p.send_event(AppEvent::A2uiFailed(call_id, detail));
                             }
                         }
                         Some("a2ui_open_url") => {
@@ -8370,6 +8380,21 @@ fn main() {
                         %call_id,
                         "callRendererFunction result with no waiting render_ui call — dropping"
                     ),
+                }
+            }
+            // ── A2UI control that failed to render ──────────────────────────
+            // Nobody can answer a surface through a broken control, so a
+            // `render_ui` call blocked on it would sit until its 30-minute cap
+            // while the user's "fix it" request queues behind the stuck turn.
+            // Fail the call now, with the renderer's reason, so the agent
+            // sends a working surface.
+            Event::UserEvent(AppEvent::A2uiFailed(call_id, detail)) => {
+                if let Some(pending) = pending_a2ui.remove(&call_id) {
+                    let _ = pending.response.send(Err(format!(
+                        "The surface rendered, but a control on it failed and the user cannot \
+                         answer it: {detail} Fix the envelope and call render_ui again with the \
+                         same surfaceId."
+                    )));
                 }
             }
 
