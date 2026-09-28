@@ -97,6 +97,8 @@ enum AppEvent {
     OpenNotifiedSession,     // user clicked the notification toast
     ToggleFullscreen,        // ⌘Return — toggle native macOS fullscreen on the chrome window
     ToggleSidebarFullscreen, // ⌘⇧Return / icon — sidebar expands to full window width inside chrome
+    /// (session title) — the sidebar took the keyboard; `None` when it lost it.
+    SidebarFocus(Option<String>),
     /// (session_id, text, images, display) — a prompt for the agent. `display`
     /// overrides what the chat shows for it; A2UI clicks send the agent a full
     /// instruction block but show the user a one-liner.
@@ -1939,6 +1941,13 @@ fn main() {
                             let title = v["title"].as_str().unwrap_or("").to_string();
                             let _ = p.send_event(AppEvent::AcpSessionRename(sid, title));
                         }
+                        Some("panel_focus") => {
+                            let title = v["title"].as_str().unwrap_or("").to_string();
+                            let _ = p.send_event(AppEvent::SidebarFocus(Some(title)));
+                        }
+                        Some("panel_blur") => {
+                            let _ = p.send_event(AppEvent::SidebarFocus(None));
+                        }
                         Some("sidebar_ready") => {
                             let _ = p.send_event(AppEvent::SidebarReady);
                         }
@@ -2694,6 +2703,8 @@ fn main() {
     let terminal_view = objc2::rc::Retained::as_ptr(&terminal_wv.webview()) as usize;
     let mut terminal_visible = false;
     let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
+    // The panel that last titled chrome_win (see `panel_focus!`).
+    let mut chrome_title_panel: Option<&'static str> = None;
 
     let _key_monitor: *mut objc2::runtime::AnyObject = {
         use block2::RcBlock;
@@ -3288,6 +3299,32 @@ fn main() {
             // Reset on hide so the next open is docked, as the sidebar does.
             terminal_fullscreen = false;
             restore_panel_focus!(terminal_focus_target);
+        }};
+    }
+
+    /// Title chrome_win after the panel holding the keyboard: window trackers
+    /// (Timex) read the focused window's title, and the page's is browser_win's.
+    /// A blur (`None`) clears only the title its own panel set, since the
+    /// focus of the next panel can arrive first.
+    macro_rules! panel_focus {
+        ($panel:expr, $title:expr) => {{
+            let panel: &'static str = $panel;
+            let title: Option<String> = $title;
+            match title {
+                Some(title) => {
+                    chrome_title_panel = Some(panel);
+                    if title.is_empty() {
+                        chrome_win.set_title(panel);
+                    } else {
+                        chrome_win.set_title(&format!("{panel} — {title}"));
+                    }
+                }
+                None if chrome_title_panel == Some(panel) => {
+                    chrome_title_panel = None;
+                    chrome_win.set_title("");
+                }
+                None => {}
+            }
         }};
     }
 
@@ -7962,6 +7999,7 @@ fn main() {
                      if(document.activeElement===el)return;setTimeout(f,30)})()})()"
                 );
             }
+            Event::UserEvent(AppEvent::SidebarFocus(title)) => panel_focus!("Assistant", title),
 
             // ── Ask AI: open sidebar + inject prompt ──────────────────────
             // ── Ask AI about the selection (⌘⇧K) ────────────────────────
@@ -8588,6 +8626,8 @@ fn main() {
                     cfg.terminal_height = TERMINAL_H_LOGICAL;
                     cfg.save();
                 }
+                terminal::Request::Focus { title } => panel_focus!("Terminal", Some(title)),
+                terminal::Request::Blur => panel_focus!("Terminal", None),
             },
             Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
 

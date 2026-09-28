@@ -67,6 +67,12 @@ pub enum Request {
         height: u32,
     },
     ResizePanelReset,
+    /// The panel took the keyboard; `title` is the focused pane's shell title.
+    Focus {
+        title: String,
+    },
+    /// The panel lost the keyboard.
+    Blur,
 }
 
 /// Terminal input. Its Debug output is redacted: it carries whatever is

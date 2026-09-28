@@ -3,8 +3,9 @@
 //! `terminal.rs`. Docked above the footer; Rust owns its bounds.
 //!
 //! IPC out: open, input, resize, close, open_url, hide, fullscreen,
-//! resize_panel, resize_panel_end, resize_panel_reset. Output comes back by
-//! long poll on `octoweb-term://localhost/<id>` (200 output, 410 shell gone).
+//! resize_panel, resize_panel_end, resize_panel_reset, focus, blur. Output
+//! comes back by long poll on `octoweb-term://localhost/<id>` (200 output,
+//! 410 shell gone).
 //!
 //! Called from Rust:
 //!   window.__termShow(fullscreen)     — panel took focus
@@ -302,13 +303,17 @@ pub fn html(keybindings_json: &str) -> String {
     // Default width tables are Unicode 6: emoji count as one cell and overflow.
     term.loadAddon(new Unicode11Addon.Unicode11Addon());
     term.unicode.activeVersion = '11';
-    const p = { id: id, term: term, fit: fit, el: el, tab: tab, title: 'Terminal' };
+    const p = { id: id, term: term, fit: fit, el: el, tab: tab, title: 'Terminal', shellTitle: '' };
     panes.set(id, p);
 
     el.addEventListener('focusin', function() { focusPane(p); });
     term.onTitleChange(function(title) {
+      p.shellTitle = title;
       p.title = title || 'Terminal';
-      if (tab.focused === p) tab.tabEl.querySelector('.title').textContent = p.title;
+      if (tab.focused === p) {
+        tab.tabEl.querySelector('.title').textContent = p.title;
+        reportFocus();
+      }
     });
     term.attachCustomKeyEventHandler(shortcut);
 
@@ -329,6 +334,13 @@ pub fn html(keybindings_json: &str) -> String {
     tab.focused = p;
     p.el.classList.add('focused');
     tab.tabEl.querySelector('.title').textContent = p.title;
+    reportFocus();
+  }
+
+  // Rust titles chrome_win after the pane with the keyboard: window trackers
+  // (Timex) read the focused window's title, and the page's is browser_win's.
+  function reportFocus() {
+    if (active && document.hasFocus()) ipc({ type: 'focus', title: active.focused.shellTitle });
   }
 
   function showTab(tab) {
@@ -529,6 +541,9 @@ pub fn html(keybindings_json: &str) -> String {
   window.addEventListener('resize', function() {
     panes.forEach(function(p) { p.fit.fit(); });
   });
+
+  window.addEventListener('focus', reportFocus);
+  window.addEventListener('blur', function() { ipc({ type: 'blur' }); });
 
   dark.addEventListener('change', function() {
     panes.forEach(function(p) { p.term.options.theme = theme(); });

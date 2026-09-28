@@ -3511,7 +3511,18 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       input.selectionStart = s.inputSelectionStart ?? input.value.length;
       input.selectionEnd   = s.inputSelectionEnd   ?? input.value.length;
     } catch (_) {}
+    reportFocus();
   }
+
+  // Rust titles chrome_win after the session with the keyboard: window trackers
+  // (Timex) read the focused window's title, and the page's is browser_win's.
+  function reportFocus() {
+    if (active && document.hasFocus()) {
+      window.ipc.postMessage(JSON.stringify({ type: 'panel_focus', title: active.title }));
+    }
+  }
+  window.addEventListener('focus', reportFocus);
+  window.addEventListener('blur', () => window.ipc.postMessage(JSON.stringify({ type: 'panel_blur' })));
 
   // Rust-driven session lifecycle
   window.__addSession = function(sid, title, tag, status) {
@@ -3534,6 +3545,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (!s) return;
     s.title = title;
     s.tabTitle.textContent = title;
+    if (s === active) reportFocus();
   };
   window.__updateSessionTag = function(sid, tag) {
     const s = sessions.get(sid);
