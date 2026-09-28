@@ -2116,7 +2116,8 @@ fn main() {
         .build_as_child(&*browser_win)
         .expect("Failed to create address bar WebView");
     // Initialize address bar with the active tab's URL, title, and favicon from session.
-    {
+    // Yields the page part of the window title (see `sync_window_titles!`).
+    let mut window_page_title = {
         let tm = workspace_manager.active().tabs.lock().unwrap();
         let tab = tm.tabs().iter().find(|t| t.id == active_wv_id);
         let url = tab.map(|t| t.url.clone()).unwrap_or_default();
@@ -2135,17 +2136,18 @@ fn main() {
                 "window.__setFavicon && window.__setFavicon(`{escaped_fav}`)"
             ));
         }
-        // Set window title from restored session
-        if !title.is_empty() {
-            browser_win.set_title(&title);
-        }
         let ws = workspace_manager.active();
         let escaped_ws_name = webview_utils::escape_js_template(&ws.name);
         let _ = address_bar_wv.evaluate_script(&format!(
             "window.__setWorkspace && window.__setWorkspace(`{}`, `{escaped_ws_name}`)",
             ws.color
         ));
-    }
+        if title.is_empty() {
+            url
+        } else {
+            title
+        }
+    };
 
     // ── Progress bar WebView (thin bar at bottom edge of address bar) ─────
     // Child of browser_win (same as address bar) so it layers correctly.
@@ -2703,8 +2705,9 @@ fn main() {
     let terminal_view = objc2::rc::Retained::as_ptr(&terminal_wv.webview()) as usize;
     let mut terminal_visible = false;
     let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
-    // The panel that last titled chrome_win (see `panel_focus!`).
+    // The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
     let mut chrome_title_panel: Option<&'static str> = None;
+    let mut chrome_panel_title = String::new();
 
     let _key_monitor: *mut objc2::runtime::AnyObject = {
         use block2::RcBlock;
@@ -3302,10 +3305,28 @@ fn main() {
         }};
     }
 
-    /// Title chrome_win after the panel holding the keyboard: window trackers
-    /// (Timex) read the focused window's title, and the page's is browser_win's.
-    /// A blur (`None`) clears only the title its own panel set, since the
-    /// focus of the next panel can arrive first.
+    /// Window trackers (Timex) read the focused window's title, so both windows
+    /// carry the active workspace: browser_win the page, chrome_win the panel
+    /// holding the keyboard (untitled while none does).
+    macro_rules! sync_window_titles {
+        () => {{
+            let ws = &workspace_manager.active().name;
+            browser_win.set_title(&format!("[{ws}] {window_page_title}"));
+            match chrome_title_panel {
+                Some(panel) if chrome_panel_title.is_empty() => {
+                    chrome_win.set_title(&format!("[{ws}] {panel}"))
+                }
+                Some(panel) => {
+                    chrome_win.set_title(&format!("[{ws}] {panel} — {chrome_panel_title}"))
+                }
+                None => chrome_win.set_title(""),
+            }
+        }};
+    }
+
+    /// A chrome_win panel took the keyboard (`Some(title)`) or lost it (`None`).
+    /// A blur clears only its own panel, since the focus of the next panel can
+    /// arrive first.
     macro_rules! panel_focus {
         ($panel:expr, $title:expr) => {{
             let panel: &'static str = $panel;
@@ -3313,20 +3334,16 @@ fn main() {
             match title {
                 Some(title) => {
                     chrome_title_panel = Some(panel);
-                    if title.is_empty() {
-                        chrome_win.set_title(panel);
-                    } else {
-                        chrome_win.set_title(&format!("{panel} — {title}"));
-                    }
+                    chrome_panel_title = title;
                 }
-                None if chrome_title_panel == Some(panel) => {
-                    chrome_title_panel = None;
-                    chrome_win.set_title("");
-                }
+                None if chrome_title_panel == Some(panel) => chrome_title_panel = None,
                 None => {}
             }
+            sync_window_titles!();
         }};
     }
+
+    sync_window_titles!();
 
     macro_rules! tab_bounds {
         () => {{
@@ -3466,7 +3483,7 @@ fn main() {
         };
     }
 
-    /// Update address bar with the given URL, title, and cached page stats.
+    /// Update address bar and window title with the given URL, title, and cached page stats.
     macro_rules! update_address_bar_url {
         ($url:expr) => {{
             let u = &$url;
@@ -3478,6 +3495,8 @@ fn main() {
             let (pb, pt) = tab.map(|t| (t.page_bytes, t.page_time_ms)).unwrap_or((0, 0));
             drop(tm);
             let escaped_title = webview_utils::escape_js_template(&raw_title);
+            window_page_title = if raw_title.is_empty() { u.to_string() } else { raw_title };
+            sync_window_titles!();
             let _ = address_bar_wv.evaluate_script(&format!(
                 "window.__update && window.__update(`{escaped_url}`, {secure}, `{escaped_title}`, {pb}, {pt})"
             ));
@@ -6468,6 +6487,7 @@ fn main() {
                 refresh_workspace_switcher!();
                 if is_active {
                     push_workspace_dot!();
+                    sync_window_titles!();
                 }
             }
             Event::UserEvent(AppEvent::DeleteWorkspace(id)) => {
@@ -6989,7 +7009,6 @@ fn main() {
                 // WebView is loading behind the old visible page. Do not leave
                 // the previous tab's URL displayed until WebKit commits.
                 update_address_bar_url!(url);
-                browser_win.set_title(&url);
                 tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
                 macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
@@ -7076,7 +7095,6 @@ fn main() {
                 pending_swap = Some((visible_id, tab_id));
                 pending_swap_at = Some(std::time::Instant::now());
                 update_address_bar_url!(url);
-                browser_win.set_title(&url);
                 macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
             }
@@ -8763,7 +8781,11 @@ fn main() {
                     history_save_at.get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(60));
                 }
                 if tab_id == active_wv_id {
-                    browser_win.set_title(&title);
+                    // An untitled page keeps the URL its navigation set.
+                    if !title.is_empty() {
+                        window_page_title = title.clone();
+                        sync_window_titles!();
+                    }
                     let escaped = webview_utils::escape_js_template(&title);
                     let _ = address_bar_wv.evaluate_script(&format!(
                         "window.__setTitle && window.__setTitle(`{escaped}`)"
@@ -8794,8 +8816,6 @@ fn main() {
                 }
                 if tab_id == active_wv_id {
                     update_address_bar_url!(url);
-                    // Reset window title — TitleChanged will set the real one once the page loads.
-                    browser_win.set_title(&url);
                 }
             }
 
