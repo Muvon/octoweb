@@ -1,13 +1,17 @@
 //! Terminal panel (⌘`): tabs of xterm.js terminals, each tab split into panes
 //! (⌘D beside, ⌘⇧D below) and each pane attached to a login shell in
-//! `terminal.rs`. Docked above the footer; Rust owns its bounds.
+//! `terminal.rs`. Docked above the footer; Rust owns its bounds. Every
+//! workspace has its own tabs; Rust keeps their layout, so a reloaded page or
+//! the next launch rebuilds them.
 //!
-//! IPC out: open, input, resize, close, open_url, hide, fullscreen,
-//! resize_panel, resize_panel_end, resize_panel_reset, focus, blur. Output
-//! comes back by long poll on `octoweb-term://localhost/<id>` (200 output,
-//! 410 shell gone).
+//! IPC out: ready, layout, open, input, resize, close, open_url, hide,
+//! fullscreen, resize_panel, resize_panel_end, resize_panel_reset, focus, blur.
+//! Output comes back by long poll on `octoweb-term://localhost/<id>` (200
+//! output, 410 shell gone).
 //!
 //! Called from Rust:
+//!   window.__termSpace(ws, layout, floor) — put a workspace on screen
+//!   window.__termDrop(ws)             — a workspace was deleted
 //!   window.__termShow(fullscreen)     — panel took focus
 //!   window.__termOpened(id, error)    — a shell started, or failed to
 //!   window.__termNew() / __termClose() / __termCycle(step) — keymap actions
@@ -158,6 +162,11 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
   /* visibility, not display: hidden tabs keep a size, so they re-fit with the panel. */
   .panes { position: absolute; inset: 0; display: flex; visibility: hidden; }
   .panes.active { visibility: visible; }
+  /* One wrapper per workspace in the strip and in the pane area; only the
+     workspace on screen shows. */
+  #tabs > .space { display: contents; }
+  #terms > .space { position: absolute; inset: 0; }
+  #tabs > .space[hidden], #terms > .space[hidden] { display: none; }
   /* The split's background shows through the gap as the divider. */
   .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: 1px; background: var(--hairline); }
   .split.column { flex-direction: column; }
@@ -231,10 +240,13 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
       brightBlue: '#3b8eea', brightMagenta: '#d670d6', brightCyan: '#29b8db', brightWhite: '#e5e5e5',
     },
   };
-  const panes = new Map(); // shell id -> { id, term, fit, el, tab, title }
-  const tabs = [];         // { el, tabEl, focused }, in strip order
+  const panes = new Map(); // shell id -> { id, term, fit, el, tab, title }, every workspace's
+  // Workspace id -> { ws, tabsEl, termsEl, tabs, active, pending }. Only the
+  // workspace on screen shows; the shells of the others run on. `pending` is
+  // the layout Rust kept, built once the panel shows it.
+  const spaces = new Map();
+  let space = null;        // the workspace on screen
   let nextId = 1;
-  let active = null;       // the tab on screen; null only when there are none
   let closeTabTitle = 'Close terminal';
   let fullscreenChord = '';
 
@@ -256,9 +268,16 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
   applyTheme();
 
   function openTab() {
+    const tab = addTab(space);
+    focusPane(newPane(tab, tab.el, null));
+    showTab(tab);
+  }
+
+  // An empty tab at the end of workspace `s`'s strip.
+  function addTab(s) {
     const el = document.createElement('div');
     el.className = 'panes';
-    termsEl.appendChild(el);
+    s.termsEl.appendChild(el);
     const tabEl = document.createElement('div');
     tabEl.className = 'tab';
     tabEl.setAttribute('role', 'tab');
@@ -268,9 +287,9 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
       '<path d="M1 1L7 7M7 1L1 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
       '</svg></button>';
     tabEl.querySelector('.close').title = closeTabTitle;
-    tabsEl.appendChild(tabEl);
-    const tab = { el: el, tabEl: tabEl, focused: null };
-    tabs.push(tab);
+    s.tabsEl.appendChild(tabEl);
+    const tab = { space: s, el: el, tabEl: tabEl, focused: null };
+    s.tabs.push(tab);
 
     tabEl.addEventListener('mousedown', function(e) {
       if (e.target.closest('.close')) return;
@@ -278,15 +297,16 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
       showTab(tab);
     });
     tabEl.querySelector('.close').addEventListener('click', function() { closeTab(tab); });
-    focusPane(newPane(tab, el, null));
-    showTab(tab);
+    return tab;
   }
 
-  // A pane with a new shell, inserted into `parent` before `before`.
-  function newPane(tab, parent, before) {
-    const id = nextId++;
+  // A pane inserted into `parent` before `before`, on shell `id` when a kept
+  // layout is rebuilt, else on a new shell.
+  function newPane(tab, parent, before, id) {
+    if (id === undefined) id = nextId++;
     const el = document.createElement('div');
     el.className = 'pane';
+    el.dataset.pane = id;
     const host = document.createElement('div');
     host.className = 'term';
     el.appendChild(host);
@@ -350,23 +370,28 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
     p.el.classList.add('focused');
     tab.tabEl.querySelector('.title').textContent = p.title;
     reportFocus();
+    saveLayout(tab.space);
   }
 
   // Rust titles chrome_win after the pane with the keyboard: window trackers
   // (Timex) read the focused window's title, and the page's is browser_win's.
   function reportFocus() {
-    if (active && document.hasFocus()) ipc({ type: 'focus', title: active.focused.shellTitle });
+    if (space && space.active && document.hasFocus()) {
+      ipc({ type: 'focus', title: space.active.focused.shellTitle });
+    }
   }
 
   function showTab(tab) {
-    active = tab;
-    tabs.forEach(function(t) {
+    const s = tab.space;
+    s.active = tab;
+    s.tabs.forEach(function(t) {
       t.el.classList.toggle('active', t === tab);
       t.tabEl.classList.toggle('active', t === tab);
       t.tabEl.setAttribute('aria-selected', String(t === tab));
     });
     refit(tab);
     tab.focused.term.focus();
+    saveLayout(s);
   }
 
   function refit(tab) {
@@ -376,7 +401,8 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
   // A new pane beside ('row') or below ('column') the focused one. A split in
   // the other direction nests.
   function split(dir) {
-    const target = active.focused;
+    const tab = space.active;
+    const target = tab.focused;
     let parent = target.el.parentElement;
     if (!parent.classList.contains(dir)) {
       // WebKit drops a moved element's focus without a blur event, which
@@ -387,8 +413,8 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
       target.el.replaceWith(parent);
       parent.appendChild(target.el);
     }
-    const p = newPane(active, parent, target.el.nextSibling);
-    refit(active);
+    const p = newPane(tab, parent, target.el.nextSibling);
+    refit(tab);
     focusPane(p);
     p.term.focus();
   }
@@ -419,22 +445,74 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
     }
     refit(tab);
     // Moving the neighbour out of its split drops its focus.
-    if (tab === active) tab.focused.term.focus();
+    if (tab === tab.space.active) tab.focused.term.focus();
+    saveLayout(tab.space);
   }
 
   function closeTab(tab) {
+    const s = tab.space;
+    const wasActive = s.active === tab;
     panes.forEach(function(p) { if (p.tab === tab) disposePane(p); });
     tab.el.remove();
     tab.tabEl.remove();
-    tabs.splice(tabs.indexOf(tab), 1);
-    if (active !== tab) return;
-    const last = tabs[tabs.length - 1];
-    if (last) {
-      showTab(last);
-    } else {
-      active = null;
-      ipc({ type: 'hide' });
+    s.tabs.splice(s.tabs.indexOf(tab), 1);
+    if (wasActive) s.active = s.tabs[s.tabs.length - 1] || null;
+    saveLayout(s);
+    // A background workspace's tab goes when its shell exits; it shows its
+    // new active tab once it is on screen again.
+    if (!wasActive || s !== space) return;
+    if (s.active) showTab(s.active);
+    else ipc({ type: 'hide' });
+  }
+
+  // The tab and split tree Rust keeps for a workspace: { active, tabs:
+  // [{ focused, root }] }, each node a { pane: id } or a
+  // { split: 'row' | 'column', children: [...] }.
+  function layoutOf(s) {
+    function node(el) {
+      if (el.classList.contains('pane')) return { pane: Number(el.dataset.pane) };
+      return {
+        split: el.classList.contains('row') ? 'row' : 'column',
+        children: Array.prototype.map.call(el.children, node),
+      };
     }
+    return {
+      active: s.tabs.indexOf(s.active),
+      tabs: s.tabs.map(function(t) {
+        return { focused: t.focused.id, root: node(t.el.firstElementChild) };
+      }),
+    };
+  }
+
+  function saveLayout(s) {
+    // Not built yet, or mid-build: Rust's copy is the layout.
+    if (s.pending) return;
+    ipc({ type: 'layout', ws: s.ws, layout: layoutOf(s) });
+  }
+
+  // Rebuild a workspace's tabs and splits from the layout Rust kept. Each pane
+  // reattaches to its shell, or starts one where the saved one left off.
+  function build(s) {
+    const layout = s.pending;
+    if (!layout) return;
+    layout.tabs.forEach(function(saved) {
+      const tab = addTab(s);
+      buildNode(tab, tab.el, saved.root);
+      focusPane(panes.get(saved.focused));
+    });
+    s.active = s.tabs[layout.active] || null;
+    s.pending = null;
+  }
+
+  function buildNode(tab, parent, node) {
+    if (node.pane !== undefined) {
+      newPane(tab, parent, null, node.pane);
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'split ' + node.split;
+    parent.appendChild(el);
+    node.children.forEach(function(child) { buildNode(tab, el, child); });
   }
 
   async function pump(t) {
@@ -463,10 +541,10 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
     } else if (e.shiftKey) {
       return true;
     } else if (/^Digit[1-9]$/.test(e.code)) {
-      const tab = tabs[Number(e.code.slice(5)) - 1];
+      const tab = space.tabs[Number(e.code.slice(5)) - 1];
       if (tab) showTab(tab);
     } else if (e.code === 'KeyK') {
-      active.focused.term.clear();
+      space.active.focused.term.clear();
     } else {
       return true;
     }
@@ -562,9 +640,49 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
 
   dark.addEventListener('change', applyTheme);
 
+  // Put workspace `ws` on screen. `layout` is what Rust kept for it, used only
+  // the first time this page sees `ws` and built once the panel shows; `floor`
+  // is the lowest pane id free in every workspace.
+  window.__termSpace = function(ws, layout, floor) {
+    nextId = Math.max(nextId, floor);
+    if (space) space.tabsEl.hidden = space.termsEl.hidden = true;
+    space = spaces.get(ws);
+    if (!space) {
+      space = {
+        ws: ws,
+        tabsEl: document.createElement('div'),
+        termsEl: document.createElement('div'),
+        tabs: [],
+        active: null,
+        pending: layout,
+      };
+      space.tabsEl.className = space.termsEl.className = 'space';
+      tabsEl.appendChild(space.tabsEl);
+      termsEl.appendChild(space.termsEl);
+      spaces.set(ws, space);
+    }
+    space.tabsEl.hidden = space.termsEl.hidden = false;
+  };
+
+  // A deleted workspace; Rust has hung up its shells.
+  window.__termDrop = function(ws) {
+    const s = spaces.get(ws);
+    if (!s) return;
+    panes.forEach(function(p) {
+      if (p.tab.space !== s) return;
+      panes.delete(p.id);
+      p.term.dispose();
+    });
+    s.tabsEl.remove();
+    s.termsEl.remove();
+    spaces.delete(ws);
+    if (space === s) space = null;
+  };
+
   window.__termShow = function(fullscreen) {
     setFullscreen(!!fullscreen);
-    if (active) showTab(active);
+    build(space);
+    if (space.active) showTab(space.active);
     else openTab();
   };
 
@@ -578,12 +696,13 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
   window.__termNew = openTab;
 
   window.__termClose = function() {
-    if (active) closePane(active.focused);
+    if (space.active) closePane(space.active.focused);
   };
 
   window.__termCycle = function(step) {
+    const tabs = space.tabs;
     if (tabs.length < 2) return;
-    showTab(tabs[(tabs.indexOf(active) + step + tabs.length) % tabs.length]);
+    showTab(tabs[(tabs.indexOf(space.active) + step + tabs.length) % tabs.length]);
   };
 
   // Control titles follow the effective keymap rather than compiled defaults.
@@ -607,6 +726,8 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
     setFullscreen(panel.classList.contains('fullscreen'));
   };
   window.__setShortcuts(/*@@KEYBINDINGS_JSON@@*/);
+  // Rust answers with __termSpace: the workspace on screen and its layout.
+  ipc({ type: 'ready' });
 })();
 </script>
 </body>

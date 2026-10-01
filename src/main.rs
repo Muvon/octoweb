@@ -2292,6 +2292,9 @@ fn main() {
 
     // ── Debounced history persistence: save 60 s after first mutation ─────
     let mut history_save_at: Option<std::time::Instant> = None;
+    // Terminal layouts, directories and output: saved shortly after the
+    // layout changes, and on quit.
+    let mut terminal_save_at: Option<std::time::Instant> = None;
     let mut favicon_save_at: Option<std::time::Instant> = None;
 
     // ── Proactive hibernation: runs every 60 s independent of memory pressure ─
@@ -2678,7 +2681,21 @@ fn main() {
     };
     let mut terminal_height_logical = cfg.terminal_height;
     let mut terminal_fullscreen = false;
-    let mut terminals = terminal::Terminals::new(proxy.clone());
+    // Each workspace's terminal tabs from the last run, and every pane's shell,
+    // started again in its directory once the panel opens the pane.
+    let saved_terminals = config::load_terminals();
+    for ws in workspace_manager.list_mut() {
+        ws.terminal_layout = saved_terminals.layouts.get(&ws.id).cloned();
+    }
+    let terminal_next_id = workspace_manager
+        .list()
+        .iter()
+        .filter_map(|ws| ws.terminal_layout.as_ref())
+        .flat_map(terminal::layout_panes)
+        .max()
+        .map_or(1, |id| id + 1);
+    let mut terminals =
+        terminal::Terminals::new(proxy.clone(), saved_terminals.shells, terminal_next_id);
     let terminal_wv = WebViewBuilder::new()
         .with_html(terminal_html::html(
             &keymap.read().unwrap().ui_json().to_string(),
@@ -3307,6 +3324,43 @@ fn main() {
             // Reset on hide so the next open is docked, as the sidebar does.
             terminal_fullscreen = false;
             restore_panel_focus!(terminal_focus_target);
+        }};
+    }
+
+    /// Put the active workspace's terminal tabs in the panel, built at once
+    /// while it is on screen, else when it next shows.
+    macro_rules! mount_terminal_space {
+        () => {{
+            let ws = workspace_manager.active();
+            let layout = ws
+                .terminal_layout
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |layout| layout.to_string());
+            let mut script = format!(
+                "window.__termSpace({}, {layout}, {});",
+                serde_json::to_string(&ws.id).unwrap(),
+                terminals.next_id(),
+            );
+            if terminal_visible {
+                script += &format!("window.__termShow({terminal_fullscreen});");
+            }
+            let _ = terminal_wv.evaluate_script(&script);
+        }};
+    }
+
+    /// Every workspace's terminal layout, with each pane's directory and output.
+    macro_rules! terminal_snapshot {
+        () => {{
+            let layouts: HashMap<String, serde_json::Value> = workspace_manager
+                .list()
+                .iter()
+                .filter_map(|ws| Some((ws.id.clone(), ws.terminal_layout.clone()?)))
+                .collect();
+            let panes: Vec<u32> = layouts.values().flat_map(terminal::layout_panes).collect();
+            config::SavedTerminals {
+                shells: terminals.snapshot(&panes),
+                layouts,
+            }
         }};
     }
 
@@ -4021,6 +4075,9 @@ fn main() {
         if let Some(save_at) = history_save_at {
             next_wake = next_wake.min(save_at);
         }
+        if let Some(save_at) = terminal_save_at {
+            next_wake = next_wake.min(save_at);
+        }
         if let Some(save_at) = page_index_save_at {
             next_wake = next_wake.min(save_at);
         }
@@ -4204,6 +4261,13 @@ fn main() {
                     config::save_session(&session, &active_ws);
                 });
             }
+        }
+
+        // ── Debounced terminal save (output runs to megabytes: off this thread) ──
+        if terminal_save_at.is_some_and(|save_at| now >= save_at) {
+            terminal_save_at = None;
+            let saved = terminal_snapshot!();
+            std::thread::spawn(move || config::save_terminals(&saved));
         }
 
         // ── Debounced favicon save (same pattern as history — the full-cache
@@ -6407,6 +6471,7 @@ fn main() {
                 push_workspace_dot!();
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
+                mount_terminal_space!();
                 relive_pending_a2ui!();
                 sync_quickslots_ui!();
                 sync_later_ui!();
@@ -6471,6 +6536,7 @@ fn main() {
                 push_workspace_dot!();
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
+                mount_terminal_space!();
                 sync_quickslots_ui!();
                 sync_later_ui!();
                 refresh_workspace_switcher!();
@@ -6499,6 +6565,24 @@ fn main() {
                 if workspace_manager.list().len() <= 1 {
                     return; // refuse to remove the last workspace
                 }
+                // Hang up its terminals: dropping the workspace alone would leave
+                // the shells running.
+                if let Some(layout) = workspace_manager
+                    .list()
+                    .iter()
+                    .find(|ws| ws.id == id)
+                    .and_then(|ws| ws.terminal_layout.as_ref())
+                {
+                    for pane in terminal::layout_panes(layout) {
+                        terminals.close(pane);
+                    }
+                }
+                let _ = terminal_wv.evaluate_script(&format!(
+                    "window.__termDrop({})",
+                    serde_json::to_string(&id).unwrap()
+                ));
+                terminal_save_at
+                    .get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(10));
                 if let Some(ref handle) = mcp_handle {
                     handle.unregister_workspace(&id);
                 }
@@ -6555,6 +6639,7 @@ fn main() {
                     push_workspace_dot!();
                     reset_sys_stats!();
                     push_acp_sessions_to_sidebar!();
+                    mount_terminal_space!();
                     relive_pending_a2ui!();
                     save_quickslots!();
                     sync_quickslots_ui!();
@@ -8616,6 +8701,15 @@ fn main() {
                 let _ = terminal_wv.evaluate_script(script);
             }
             Event::UserEvent(AppEvent::Terminal(request)) => match request {
+                terminal::Request::Ready => mount_terminal_space!(),
+                terminal::Request::Layout { ws, layout } => {
+                    if let Some(i) = workspace_manager.index_of(&ws) {
+                        workspace_manager.at_mut(i).terminal_layout = Some(layout);
+                        terminal_save_at.get_or_insert(
+                            std::time::Instant::now() + std::time::Duration::from_secs(10),
+                        );
+                    }
+                }
                 terminal::Request::Open { id, cols, rows } => {
                     let error = terminals
                         .open(id, cols, rows)
@@ -8775,6 +8869,7 @@ fn main() {
             Event::UserEvent(AppEvent::Quit) => {
                 crash_report::log_exit_trigger("Quit");
                 tunnels.stop_all();
+                config::save_terminals(&terminal_snapshot!());
                 save_and_exit(
                     &workspace_manager,
                     &favicon_cache,
@@ -9572,6 +9667,7 @@ fn main() {
                     if window_id == browser_win_id {
                         crash_report::log_exit_trigger("CloseRequested");
                         tunnels.stop_all();
+                        config::save_terminals(&terminal_snapshot!());
                         save_and_exit(
                             &workspace_manager,
                             &favicon_cache,

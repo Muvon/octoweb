@@ -396,6 +396,133 @@ fn acp_history_path() -> PathBuf {
     base_dir().join("octoweb").join("acp_history.json")
 }
 
+// ── Terminal panel persistence ───────────────────────────────────────────────────────
+// Each workspace's terminal tabs and splits, as the panel reports them, plus
+// every pane's working directory and recent output, so the next launch starts
+// each pane's shell in its directory under its old output.
+// `terminals/state.json` holds layouts and directories, `terminals/<pane>.log`
+// each pane's output.
+
+/// One terminal pane's shell as last seen.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SavedShell {
+    pub cwd: Option<PathBuf>,
+    /// Raw terminal output, replayed into the pane.
+    pub history: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SavedTerminals {
+    /// Panel layout per `Workspace::id`.
+    pub layouts: std::collections::HashMap<String, serde_json::Value>,
+    /// Keyed by pane id.
+    pub shells: std::collections::HashMap<u32, SavedShell>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TerminalStateFile {
+    layouts: std::collections::HashMap<String, serde_json::Value>,
+    cwds: std::collections::HashMap<u32, PathBuf>,
+}
+
+pub fn save_terminals(saved: &SavedTerminals) {
+    write_terminals(&terminals_dir(), saved);
+}
+
+pub fn load_terminals() -> SavedTerminals {
+    read_terminals(&terminals_dir())
+}
+
+fn write_terminals(dir: &std::path::Path, saved: &SavedTerminals) {
+    if let Err(e) = fs::create_dir_all(dir) {
+        tracing::warn!(error = %e, "Failed to create the terminals dir");
+        return;
+    }
+    for (id, shell) in &saved.shells {
+        if let Err(e) = fs::write(dir.join(format!("{id}.log")), &shell.history) {
+            tracing::warn!(error = %e, id, "Failed to write terminal output");
+        }
+    }
+    // Output of panes closed since the last save.
+    for (id, path) in terminal_logs(dir) {
+        if !saved.shells.contains_key(&id) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let state = TerminalStateFile {
+        layouts: saved.layouts.clone(),
+        cwds: saved
+            .shells
+            .iter()
+            .filter_map(|(id, shell)| Some((*id, shell.cwd.clone()?)))
+            .collect(),
+    };
+    let path = dir.join("state.json");
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string(&state) {
+        Ok(s) => {
+            if let Err(e) = fs::write(&tmp, &s) {
+                tracing::warn!(error = %e, "Failed to write terminal state tmp");
+                return;
+            }
+            if let Err(e) = fs::rename(&tmp, &path) {
+                tracing::warn!(error = %e, "Failed to rename terminal state tmp");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "Failed to serialize terminal state"),
+    }
+}
+
+fn read_terminals(dir: &std::path::Path) -> SavedTerminals {
+    let Some(state) = fs::read_to_string(dir.join("state.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<TerminalStateFile>(&s).ok())
+    else {
+        return SavedTerminals::default();
+    };
+    let mut shells: std::collections::HashMap<u32, SavedShell> = state
+        .cwds
+        .into_iter()
+        .map(|(id, cwd)| {
+            let shell = SavedShell {
+                cwd: Some(cwd),
+                history: Vec::new(),
+            };
+            (id, shell)
+        })
+        .collect();
+    for (id, path) in terminal_logs(dir) {
+        match fs::read(&path) {
+            Ok(history) => shells.entry(id).or_default().history = history,
+            Err(e) => tracing::warn!(error = %e, id, "Failed to read terminal output"),
+        }
+    }
+    SavedTerminals {
+        layouts: state.layouts,
+        shells,
+    }
+}
+
+/// `<pane>.log` files in `dir`, by pane id.
+fn terminal_logs(dir: &std::path::Path) -> Vec<(u32, PathBuf)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+        .filter_map(|path| {
+            let id = path.file_stem()?.to_str()?.parse::<u32>().ok()?;
+            Some((id, path))
+        })
+        .collect()
+}
+
+fn terminals_dir() -> PathBuf {
+    base_dir().join("octoweb").join("terminals")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// URL to load on startup
@@ -649,4 +776,40 @@ impl Config {
 
 fn config_path() -> PathBuf {
     base_dir().join("octoweb").join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminals_round_trip_and_drop_closed_panes() {
+        let dir = std::env::temp_dir().join(format!("octoweb-terminals-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Output of a pane closed since the last save.
+        fs::write(dir.join("7.log"), b"gone").unwrap();
+        let saved = SavedTerminals {
+            layouts: [(
+                "ws".to_string(),
+                serde_json::json!({ "active": 0, "tabs": [] }),
+            )]
+            .into(),
+            shells: [
+                (
+                    1,
+                    SavedShell {
+                        cwd: Some(PathBuf::from("/tmp")),
+                        history: b"$ ls\r\n".to_vec(),
+                    },
+                ),
+                (2, SavedShell::default()),
+            ]
+            .into(),
+        };
+        write_terminals(&dir, &saved);
+        assert_eq!(read_terminals(&dir), saved);
+        assert!(!dir.join("7.log").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

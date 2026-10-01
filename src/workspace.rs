@@ -43,6 +43,9 @@ pub struct Workspace {
     pub acp_sessions: Vec<AcpSession>,
     /// Which of `acp_sessions` is foreground in the sidebar tab strip.
     pub acp_active_session_id: u64,
+    /// Terminal panel tabs and splits, as the panel last reported them (see
+    /// `__termSpace` in `terminal_html.rs`). `None` until a terminal opens here.
+    pub terminal_layout: Option<serde_json::Value>,
     /// Most-recently-used tab id order for this workspace, walked by
     /// Ctrl+P/Ctrl+N (`PrevTab`/`NextTab`). Per-workspace, not just
     /// per-workspace-unique-id-safe: unlike a keyed map, a shared list's
@@ -84,6 +87,7 @@ impl Workspace {
             webviews: HashMap::new(),
             acp_sessions: Vec::new(),
             acp_active_session_id: 0,
+            terminal_layout: None,
             mru: Vec::new(),
             quick_slots: Default::default(),
             later: Vec::new(),
