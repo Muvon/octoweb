@@ -21,7 +21,9 @@ const WEBGL_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-webgl.min.j
 const UNICODE11_ADDON_JS: &str = include_str!("../assets/lib/xterm-addon-unicode11.min.js");
 
 /// `keybindings_json` is `Keymap::ui_json`, for the controls' shortcut titles.
-pub fn html(keybindings_json: &str) -> String {
+/// `shell_theme_json` is `terminal::shell_theme`, or `null` to use only the
+/// built-in palettes.
+pub fn html(keybindings_json: &str, shell_theme_json: &str) -> String {
     r#"<!DOCTYPE html>
 <html>
 <head>
@@ -207,6 +209,10 @@ pub fn html(keybindings_json: &str) -> String {
   const fullscreenBtn = document.getElementById('fullscreen-btn');
   const closeBtn = document.getElementById('close-btn');
   const dark = matchMedia('(prefers-color-scheme: dark)');
+  // The user's own terminal colours ({dark, theme, options}, see
+  // `terminal::shell_theme`): `theme` replaces the THEMES entry of its own
+  // appearance. null keeps THEMES.
+  const SHELL = /*@@SHELL_THEME_JSON@@*/;
   const THEMES = {
     light: {
       background: '#f8f8fa', foreground: '#1d1d1f', cursor: '#1d1d1f', cursorAccent: '#f8f8fa',
@@ -237,8 +243,17 @@ pub fn html(keybindings_json: &str) -> String {
   }
 
   function theme() {
+    if (SHELL && SHELL.dark === dark.matches) return SHELL.theme;
     return dark.matches ? THEMES.dark : THEMES.light;
   }
+
+  // --term-bg paints the padding around each terminal in its background colour.
+  function applyTheme() {
+    const t = theme();
+    document.documentElement.style.setProperty('--term-bg', t.background);
+    panes.forEach(function(p) { p.term.options.theme = t; });
+  }
+  applyTheme();
 
   function openTab() {
     const el = document.createElement('div');
@@ -277,7 +292,7 @@ pub fn html(keybindings_json: &str) -> String {
     el.appendChild(host);
     parent.insertBefore(el, before);
 
-    const term = new Terminal({
+    const term = new Terminal(Object.assign({
       fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
       fontSize: 13,
       cursorBlink: true,
@@ -286,7 +301,7 @@ pub fn html(keybindings_json: &str) -> String {
       // `term.unicode` (Unicode 11 widths) is gated behind this flag.
       allowProposedApi: true,
       theme: theme(),
-    });
+    }, SHELL && SHELL.options));
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon.WebLinksAddon(function(_event, url) {
@@ -545,9 +560,7 @@ pub fn html(keybindings_json: &str) -> String {
   window.addEventListener('focus', reportFocus);
   window.addEventListener('blur', function() { ipc({ type: 'blur' }); });
 
-  dark.addEventListener('change', function() {
-    panes.forEach(function(p) { p.term.options.theme = theme(); });
-  });
+  dark.addEventListener('change', applyTheme);
 
   window.__termShow = function(fullscreen) {
     setFullscreen(!!fullscreen);
@@ -599,6 +612,7 @@ pub fn html(keybindings_json: &str) -> String {
 </body>
 </html>"#
         .replace("/*@@THEME@@*/", crate::theme::CSS)
+        .replace("/*@@SHELL_THEME_JSON@@*/", shell_theme_json)
         .replace("/*@@KEYBINDINGS_JSON@@*/", keybindings_json)
         .replace("/*@@XTERM_CSS@@*/", XTERM_CSS)
         .replace("/*@@XTERM_JS@@*/", XTERM_JS)

@@ -241,6 +241,42 @@ pub fn open_external_url(url: &str) -> bool {
     ok
 }
 
+/// Ghostty's command-line binary, located through Launch Services so an install
+/// outside /Applications is found too. `None` when Ghostty isn't installed.
+pub fn ghostty_cli() -> Option<std::path::PathBuf> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let bundle_id = NSString::from_str("com.mitchellh.ghostty");
+    let app = NSWorkspace::sharedWorkspace().URLForApplicationWithBundleIdentifier(&bundle_id)?;
+    let app = app.path()?;
+    Some(std::path::PathBuf::from(app.to_string()).join("Contents/MacOS/ghostty"))
+}
+
+/// Lock one view light (`Some(false)`) or dark (`Some(true)`) whatever the app
+/// appearance is, or `None` to inherit it again. WebKit derives
+/// `prefers-color-scheme` from the view's effective appearance.
+pub fn set_view_appearance(view: *mut objc2::runtime::AnyObject, dark: Option<bool>) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: `view` is a live NSView, messaged on the main thread.
+    unsafe {
+        let appearance: *mut AnyObject = match dark {
+            Some(dark) => {
+                let name = objc2_foundation::NSString::from_str(if dark {
+                    "NSAppearanceNameDarkAqua"
+                } else {
+                    "NSAppearanceNameAqua"
+                });
+                msg_send![class!(NSAppearance), appearanceNamed: &*name]
+            }
+            None => std::ptr::null_mut(),
+        };
+        let _: () = msg_send![view, setAppearance: appearance];
+    }
+}
+
 /// Set the macOS dock/app icon from the embedded PNG.
 pub fn set_app_icon() {
     use objc2_app_kit::{NSApplication, NSImage};

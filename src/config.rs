@@ -417,6 +417,9 @@ pub struct Config {
     /// Light, dark, or follow macOS — for the chrome and every page alike
     #[serde(default)]
     pub appearance: Appearance,
+    /// The terminal panel follows `appearance`, or stays light or dark
+    #[serde(default)]
+    pub terminal_appearance: TerminalAppearance,
     /// The sidebar's account card shows usage details, not just its row
     #[serde(default)]
     pub account_expanded: bool,
@@ -506,6 +509,27 @@ pub enum Appearance {
     Dark,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalAppearance {
+    /// Follow `Config::appearance`.
+    #[default]
+    General,
+    Light,
+    Dark,
+}
+
+impl TerminalAppearance {
+    /// `Some(dark)` when locked, `None` when it follows `Config::appearance`.
+    pub fn locked_dark(self) -> Option<bool> {
+        match self {
+            Self::General => None,
+            Self::Light => Some(false),
+            Self::Dark => Some(true),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyKind {
@@ -558,6 +582,7 @@ impl Default for Config {
             sidebar_width: default_sidebar_width(),
             terminal_height: default_terminal_height(),
             appearance: Appearance::Auto,
+            terminal_appearance: TerminalAppearance::General,
             account_expanded: false,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,

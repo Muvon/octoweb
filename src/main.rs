@@ -2682,6 +2682,7 @@ fn main() {
     let terminal_wv = WebViewBuilder::new()
         .with_html(terminal_html::html(
             &keymap.read().unwrap().ui_json().to_string(),
+            &terminal::shell_theme().map_or_else(|| "null".to_string(), |theme| theme.to_string()),
         ))
         .with_transparent(true)
         // chrome_win is rarely key while you work in a page; without this the
@@ -2703,6 +2704,10 @@ fn main() {
     // The key window's first responder is inside this view while the terminal
     // has the keyboard (see `key_focus_in`).
     let terminal_view = objc2::rc::Retained::as_ptr(&terminal_wv.webview()) as usize;
+    macos::set_view_appearance(
+        terminal_view as *mut objc2::runtime::AnyObject,
+        cfg.terminal_appearance.locked_dark(),
+    );
     let mut terminal_visible = false;
     let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
     // The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
@@ -6709,6 +6714,17 @@ fn main() {
                         if let Ok(appearance) = serde_json::from_value(serde_json::Value::String(val)) {
                             set_appearance(appearance);
                             cfg.appearance = appearance;
+                        }
+                    }
+                    "terminal_appearance" => {
+                        if let Ok(appearance) = serde_json::from_value::<config::TerminalAppearance>(
+                            serde_json::Value::String(val),
+                        ) {
+                            macos::set_view_appearance(
+                                terminal_view as *mut objc2::runtime::AnyObject,
+                                appearance.locked_dark(),
+                            );
+                            cfg.terminal_appearance = appearance;
                         }
                     }
                     "search_engine" => {
@@ -11751,7 +11767,7 @@ mod chrome_js_syntax_tests {
             ("settings", crate::settings_html::html()),
             ("shortcuts", crate::shortcuts_html::html()),
             ("sidebar", crate::sidebar_html::html(50, false)),
-            ("terminal", crate::terminal_html::html("null")),
+            ("terminal", crate::terminal_html::html("null", "null")),
             ("workspace_switcher", crate::workspace_switcher_html::html()),
         ]
     }

@@ -403,3 +403,194 @@ fn login_shell_command(slave: OwnedFd) -> io::Result<Command> {
     }
     Ok(cmd)
 }
+
+/// Ghostty config keys holding a single colour, with their xterm.js theme key.
+const GHOSTTY_COLOR_KEYS: [(&str, &str); 6] = [
+    ("background", "background"),
+    ("foreground", "foreground"),
+    ("cursor-color", "cursor"),
+    ("cursor-text", "cursorAccent"),
+    ("selection-background", "selectionBackground"),
+    ("selection-foreground", "selectionForeground"),
+];
+
+/// xterm.js theme keys for palette entries 0–15.
+const ANSI_THEME_KEYS: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "brightBlack",
+    "brightRed",
+    "brightGreen",
+    "brightYellow",
+    "brightBlue",
+    "brightMagenta",
+    "brightCyan",
+    "brightWhite",
+];
+
+/// The user's own terminal colours, from Ghostty's resolved config —
+/// `+show-config` has already applied `theme =` and the defaults. Shaped
+/// `{dark, theme, options}`: `theme` is an xterm.js theme, `dark` the panel
+/// appearance it stands in for, `options` Ghostty's bold brightening and
+/// minimum contrast. `None` without Ghostty; the panel then keeps its built-in
+/// light and dark palettes.
+pub fn shell_theme() -> Option<serde_json::Value> {
+    let cli = crate::macos::ghostty_cli()?;
+    let output = match Command::new(&cli)
+        .args(["+show-config", "--changes-only=false"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::warn!(
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "ghostty +show-config failed"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, cli = %cli.display(), "ghostty +show-config did not start");
+            return None;
+        }
+    };
+    let theme = parse_ghostty_config(&String::from_utf8_lossy(&output.stdout));
+    if theme.is_none() {
+        tracing::warn!("ghostty +show-config printed no background or foreground");
+    }
+    theme
+}
+
+fn parse_ghostty_config(config: &str) -> Option<serde_json::Value> {
+    let mut theme = serde_json::Map::new();
+    let mut bold_is_bright = false;
+    let mut minimum_contrast: f64 = 1.0;
+    for line in config.lines() {
+        let Some((key, value)) = line.split_once(" = ") else {
+            continue;
+        };
+        match key {
+            "palette" => {
+                let Some((index, color)) = value.split_once('=') else {
+                    continue;
+                };
+                let name = index
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| ANSI_THEME_KEYS.get(i));
+                if let (Some(name), Some(color)) = (name, hex_color(color)) {
+                    theme.insert((*name).into(), color.into());
+                }
+            }
+            "bold-color" => bold_is_bright = value == "bright",
+            "minimum-contrast" => {
+                if let Ok(ratio) = value.parse() {
+                    minimum_contrast = ratio;
+                }
+            }
+            _ => {
+                // Ghostty-only values such as `cell-foreground` have no xterm.js
+                // equivalent; leaving the key out lets xterm.js derive it.
+                if let (Some((_, name)), Some(color)) = (
+                    GHOSTTY_COLOR_KEYS
+                        .iter()
+                        .find(|(ghostty, _)| *ghostty == key),
+                    hex_color(value),
+                ) {
+                    theme.insert((*name).into(), color.into());
+                }
+            }
+        }
+    }
+    let background = theme.get("background")?.as_str()?;
+    if !theme.contains_key("foreground") {
+        return None;
+    }
+    // The same cut Ghostty makes to pick a light or dark window.
+    let dark = perceived_luminance(background) <= 0.5;
+    Some(serde_json::json!({
+        "dark": dark,
+        "theme": theme,
+        "options": {
+            "drawBoldTextInBrightColors": bold_is_bright,
+            "minimumContrastRatio": minimum_contrast,
+        },
+    }))
+}
+
+/// `value` when it is a `#rrggbb` colour.
+fn hex_color(value: &str) -> Option<&str> {
+    let digits = value.strip_prefix('#')?;
+    (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit())).then_some(value)
+}
+
+/// Perceived luminance (0–1) of a `#rrggbb` colour.
+fn perceived_luminance(hex: &str) -> f64 {
+    let channel = |i: usize| {
+        f64::from(u8::from_str_radix(&hex[i..i + 2], 16).expect("checked by hex_color")) / 255.0
+    };
+    0.299 * channel(1) + 0.587 * channel(3) + 0.114 * channel(5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ghostty_config_maps_to_xterm_options() {
+        let theme = parse_ghostty_config(
+            "font-size = 16\n\
+             background = #1e2326\n\
+             foreground = #f1f2f3\n\
+             cursor-color = #cdd4d9\n\
+             cursor-text = \n\
+             selection-background = #515e61\n\
+             selection-foreground = cell-foreground\n\
+             palette = 0=#000000\n\
+             palette = 12=#b9ddfc\n\
+             palette = 16=#000000\n\
+             bold-color = bright\n\
+             minimum-contrast = 1.1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            theme,
+            serde_json::json!({
+                "dark": true,
+                "theme": {
+                    "background": "#1e2326",
+                    "foreground": "#f1f2f3",
+                    "cursor": "#cdd4d9",
+                    "selectionBackground": "#515e61",
+                    "black": "#000000",
+                    "brightBlue": "#b9ddfc",
+                },
+                "options": {
+                    "drawBoldTextInBrightColors": true,
+                    "minimumContrastRatio": 1.1,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn light_background_and_plain_bold() {
+        let theme =
+            parse_ghostty_config("background = #f7f7f7\nforeground = #4a4543\nbold-color = \n")
+                .unwrap();
+        assert_eq!(theme["dark"], false);
+        assert_eq!(theme["options"]["drawBoldTextInBrightColors"], false);
+        assert_eq!(theme["options"]["minimumContrastRatio"], 1.0);
+    }
+
+    #[test]
+    fn config_without_background_is_rejected() {
+        assert!(parse_ghostty_config("foreground = #ffffff\n").is_none());
+    }
+}

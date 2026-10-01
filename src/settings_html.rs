@@ -472,6 +472,17 @@ pub fn html() -> String {
       </div>
       <div class="row with-hint">
         <div class="row-label-stack">
+          <span class="row-label" id="terminal-appearance-label">Terminal</span>
+          <span class="row-hint">General follows Appearance. Light or Dark keeps the terminal in that mode.</span>
+        </div>
+        <span class="seg" id="terminal-appearance-seg" role="group" aria-labelledby="terminal-appearance-label">
+          <button type="button" data-appearance="general" aria-pressed="true">General</button>
+          <button type="button" data-appearance="light" aria-pressed="false">Light</button>
+          <button type="button" data-appearance="dark" aria-pressed="false">Dark</button>
+        </span>
+      </div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
           <label class="row-label" for="home_page">Home page</label>
           <span class="row-hint">Loads on launch when there's no previous session to restore.</span>
         </div>
@@ -713,23 +724,31 @@ pub fn html() -> String {
     proxies = cfg.proxies;
     renderProxies();
     syncSearchEngine();
-    showAppearance(cfg.appearance);
+    showAppearance('appearance-seg', cfg.appearance);
+    showAppearance('terminal-appearance-seg', cfg.terminal_appearance);
     requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
 
   // ── Appearance ────────────────────────────────────────────────────────
   // Rust applies it app-wide: every window and page switches at once, this
-  // panel included.
-  function showAppearance(value) {
-    document.querySelectorAll('#appearance-seg button').forEach(function(b) {
+  // panel included. The terminal row follows it or locks the terminal panel.
+  var APPEARANCE_KEYS = {
+    'appearance-seg': 'appearance',
+    'terminal-appearance-seg': 'terminal_appearance'
+  };
+
+  function showAppearance(seg, value) {
+    document.querySelectorAll('#' + seg + ' button').forEach(function(b) {
       b.setAttribute('aria-pressed', String(b.dataset.appearance === value));
     });
   }
 
-  document.querySelectorAll('#appearance-seg button').forEach(function(b) {
-    b.addEventListener('click', function() {
-      showAppearance(b.dataset.appearance);
-      ipc({ type: 'settings_update', key: 'appearance', value: b.dataset.appearance });
+  Object.keys(APPEARANCE_KEYS).forEach(function(seg) {
+    document.querySelectorAll('#' + seg + ' button').forEach(function(b) {
+      b.addEventListener('click', function() {
+        showAppearance(seg, b.dataset.appearance);
+        ipc({ type: 'settings_update', key: APPEARANCE_KEYS[seg], value: b.dataset.appearance });
+      });
     });
   });
 
