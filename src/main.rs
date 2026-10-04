@@ -2,6 +2,7 @@ mod a2ui;
 mod a2ui_js;
 mod acp;
 mod address_bar_html;
+mod agent_tabs;
 mod agent_workspace;
 mod async_eval;
 mod browser;
@@ -129,13 +130,16 @@ enum AppEvent {
     // login). Foregrounded only when the source is the visible tab or None — so a
     // page the agent drives in a BACKGROUND tab can't yank the user's view/focus.
     OpenInNewTab(String, Option<usize>),
-    PageLoadStarted(usize),                     // (tab_id) — show progress bar
-    PageLoadFinished(usize),                    // (tab_id) — hide progress bar
-    NavigationError(usize, String, String),     // (tab_id, url, error) — show error page
-    Reload(bool),                               // (hard) ⌘R / ⌘⇧R — hard skips the HTTP cache
-    Back,                                       // ⌘[ — history back in the focused tab
-    Forward,                                    // ⌘] — history forward in the focused tab
-    NewTab,                                     // ⌘N — open the home page in a new foreground tab
+    PageLoadStarted(usize),                 // (tab_id) — show progress bar
+    PageLoadFinished(usize),                // (tab_id) — hide progress bar
+    NavigationError(usize, String, String), // (tab_id, url, error) — show error page
+    // An MCP action navigated tab `.0`: answer `.1` once the destination has
+    // settled, as `<.2 verb> → page navigated to …`.
+    McpSettleNav(usize, McpReply, String),
+    Reload(bool),              // (hard) ⌘R / ⌘⇧R — hard skips the HTTP cache
+    Back,                      // ⌘[ — history back in the focused tab
+    Forward,                   // ⌘] — history forward in the focused tab
+    NewTab,                    // ⌘N — open the home page in a new foreground tab
     ReopenTab,                 // ⌘⇧T — reopen the last tab closed in this workspace
     FollowLink,                // ⌘⇧F — toggle the keyboard link-hint overlay
     StopLoad,                  // ⌘. — stop the current load
@@ -1281,6 +1285,10 @@ fn main() {
     // swap is in flight.
     let mut visibility_reconcile_next_at = std::time::Instant::now();
     const PENDING_SWAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    // Background tabs an MCP agent is driving — kept rendering off-screen and
+    // out of hibernation's reach (see agent_tabs.rs).
+    let mut driven_tabs = agent_tabs::AgentTabs::default();
+    let mut driven_sweep_next_at = std::time::Instant::now();
 
     // Favicon cache: domain → base64 data-URI, persisted across sessions.
     // favicon_order tracks insertion order for FIFO eviction at 500 entries —
@@ -1331,6 +1339,10 @@ fn main() {
             tokio::sync::oneshot::Sender<Result<mcp::NavigateOutcome, String>>,
         ),
     > = HashMap::new();
+    // MCP actions whose navigation is still loading: tab_id → (queued_at, reply,
+    // verb). Answered by `settle_after_nav` on PageLoadFinished.
+    let mut mcp_settle_pending: HashMap<usize, Vec<(std::time::Instant, McpReply, String)>> =
+        HashMap::new();
     let mut all_quick_slots = quickslots::load_all();
     let mut all_later = later::load_all();
 
@@ -3213,13 +3225,14 @@ fn main() {
     /// short-circuits to "navigated". SPA pushState routes bump the soft
     /// counter but leave the JS context alive, so the action's own effect probe
     /// answers them — and can evaluate an `expect: url:#/route`. Used by the
-    /// trusted-input actions (click / hover / press_key).
+    /// trusted-input actions (click / hover / press_key); a navigation is
+    /// answered as `<$verb> → page navigated to …` once the new page settles.
     macro_rules! mcp_nav_watchdog_hard {
-        ($ws:expr, $arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $on_nav:expr, $timeout_msg:expr) => {{
+        ($arc:expr, $delay_ms:expr, $tab_id:expr, $hgen0:expr, $verb:expr, $timeout_msg:expr) => {{
             let arc_wd = $arc.clone();
-            let tabs_wd = workspace_manager.at($ws).tabs.clone();
+            let proxy_wd = proxy.clone();
             let (tab_wd, hgen_wd) = ($tab_id, $hgen0);
-            let on_nav = $on_nav;
+            let verb: String = $verb;
             let msg: String = $timeout_msg;
             let ceiling = std::time::Duration::from_millis($delay_ms);
             std::thread::spawn(move || {
@@ -3231,9 +3244,8 @@ fn main() {
                         return; // the effect probe already answered
                     }
                     if tab_nav::hard_get(tab_wd) != hgen_wd {
-                        if let Some(tx) = guard.take() {
-                            let _ = tx.send(on_nav(tab_url(&tabs_wd, tab_wd)));
-                        }
+                        drop(guard);
+                        let _ = proxy_wd.send_event(AppEvent::McpSettleNav(tab_wd, arc_wd, verb));
                         return;
                     }
                     if start.elapsed() >= ceiling {
@@ -3267,6 +3279,69 @@ fn main() {
                 ensure_webview_at!(ws_i, t);
             }
             known
+        }};
+    }
+
+    /// Answer a history step or reload as `<verb> → page navigated to …` once
+    /// the page settles. Gives the navigation 1.5 s to register, then hands
+    /// over to `McpSettleNav`, which also waits out a load still in flight.
+    macro_rules! mcp_await_nav {
+        ($response:expr, $tab_id:expr, $gen0:expr, $verb:expr) => {{
+            let reply: McpReply = Arc::new(Mutex::new(Some($response)));
+            let (tab_wd, gen0, verb): (usize, u64, String) = ($tab_id, $gen0, $verb);
+            let proxy_wd = proxy.clone();
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                while tab_nav::get(tab_wd) == gen0
+                    && start.elapsed() < std::time::Duration::from_millis(1500)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let _ = proxy_wd.send_event(AppEvent::McpSettleNav(tab_wd, reply, verb));
+            });
+        }};
+    }
+
+    /// browser_go_back / browser_go_forward. Refuses when there is nothing to
+    /// step to — `history.back()` on a fresh tab used to answer "Navigated
+    /// back" while nothing moved — and otherwise answers once the page settles.
+    macro_rules! mcp_history_step {
+        ($ws:expr, $tab_id:expr, $response:expr, $back:expr) => {{
+            let (ws_i, id, response, back) = ($ws, $tab_id, $response, $back);
+            let _ = mcp_ensure_tab!(ws_i, id);
+            match workspace_manager.at(ws_i).webviews.get(&id) {
+                None => {
+                    let _ = response.send(Err("Tab not found".to_string()));
+                }
+                Some(wv) => {
+                    let wk = wv.webview();
+                    let can: bool = unsafe {
+                        if back {
+                            objc2::msg_send![&*wk, canGoBack]
+                        } else {
+                            objc2::msg_send![&*wk, canGoForward]
+                        }
+                    };
+                    if !can {
+                        let _ = response.send(Err(format!(
+                            "Tab {id} has no {} page in its history — it stays at {}",
+                            if back { "earlier" } else { "later" },
+                            tab_url(&workspace_manager.at(ws_i).tabs, id)
+                        )));
+                    } else {
+                        let gen0 = tab_nav::get(id);
+                        let _: *mut objc2::runtime::AnyObject = unsafe {
+                            if back {
+                                objc2::msg_send![&*wk, goBack]
+                            } else {
+                                objc2::msg_send![&*wk, goForward]
+                            }
+                        };
+                        let verb = if back { "Went back" } else { "Went forward" };
+                        mcp_await_nav!(response, id, gen0, verb.to_string());
+                    }
+                }
+            }
         }};
     }
 
@@ -3418,11 +3493,32 @@ fn main() {
         }};
     }
 
+    /// Un-hide a background tab the agent is driving, parked off-screen at full
+    /// tab size: WebKit renders it like a visible page (rAF, unthrottled timers)
+    /// while the user keeps seeing the active tab.
+    macro_rules! park_tab {
+        ($wv:expr) => {{
+            let wv = $wv;
+            let mut bounds = tab_bounds!();
+            bounds.position =
+                tao::dpi::PhysicalPosition::new(agent_tabs::PARK_X, address_bar_h as i32).into();
+            let _ = wv.set_bounds(bounds);
+            let _ = wv.set_visible(true);
+            agent_tabs::keep_rendering(wv, true);
+        }};
+    }
+
     macro_rules! commit_tab_visibility {
         ($target:expr) => {{
             let target = $target;
+            let now = std::time::Instant::now();
             for (&tid, wv) in workspace_manager.active().webviews.iter() {
-                if tid != target {
+                if tid == target {
+                    continue;
+                }
+                if driven_tabs.is_awake(tid, now) {
+                    park_tab!(wv);
+                } else {
                     let _ = wv.set_visible(false);
                 }
             }
@@ -4137,7 +4233,41 @@ fn main() {
             {
                 visibility_reconcile_next_at = now + std::time::Duration::from_secs(1);
                 for (&tid, wv) in workspace_manager.active().webviews.iter() {
-                    let _ = wv.set_visible(tid == active_wv_id);
+                    if tid == active_wv_id {
+                        let _ = wv.set_visible(true);
+                    } else if driven_tabs.is_awake(tid, now) {
+                        park_tab!(wv);
+                    } else {
+                        let _ = wv.set_visible(false);
+                    }
+                }
+            }
+        }
+        // ── Driven tabs: keep the awake rendering, settle the ones the agent left ──
+        // The reconciler only walks the active workspace; an agent may be
+        // working in another one. The visible tab is never parked or hidden,
+        // but it too stops rendering while the window is covered unless awake.
+        {
+            let now = std::time::Instant::now();
+            if now >= driven_sweep_next_at {
+                driven_sweep_next_at = now + std::time::Duration::from_secs(1);
+                let (awake, asleep) = driven_tabs.sweep(now);
+                for tid in awake {
+                    if let Some(wv) = workspace_manager.webview_of_tab(tid) {
+                        if tid == active_wv_id {
+                            agent_tabs::keep_rendering(wv, true);
+                        } else {
+                            park_tab!(wv);
+                        }
+                    }
+                }
+                for tid in asleep {
+                    if let Some(wv) = workspace_manager.webview_of_tab(tid) {
+                        agent_tabs::keep_rendering(wv, false);
+                        if tid != active_wv_id {
+                            let _ = wv.set_visible(false);
+                        }
+                    }
                 }
             }
         }
@@ -4195,6 +4325,56 @@ fn main() {
                          still be loading — call browser_snapshot or browser_get_page_info on it \
                          rather than navigating again."
                     )));
+                }
+            }
+        }
+        // A navigation that never finishes as a load — a same-document back or
+        // forward, a page-cache restore — fires no PageLoadFinished; a briefly
+        // "loading" view left go_back on X waiting out the stale timer. Settle
+        // as soon as the view is no longer loading.
+        {
+            let idle: Vec<usize> = mcp_settle_pending
+                .keys()
+                .copied()
+                .filter(|&id| {
+                    workspace_manager.webview_of_tab(id).is_some_and(|wv| {
+                        let loading: bool = unsafe { objc2::msg_send![&*wv.webview(), isLoading] };
+                        !loading
+                    })
+                })
+                .collect();
+            for id in idle {
+                for (_, reply, verb) in mcp_settle_pending.remove(&id).unwrap_or_default() {
+                    if let (Some(wv), Some(i)) =
+                        (workspace_manager.webview_of_tab(id), workspace_manager.index_of_tab(id))
+                    {
+                        settle_after_nav(wv, id, workspace_manager.at(i).tabs.clone(), reply, verb);
+                    }
+                }
+            }
+        }
+        // Same for actions waiting on the page they navigated to — but the action
+        // itself happened, so it is answered as one that did, with where the tab
+        // is. Inside send_command's 30 s window even after a slow action.
+        {
+            const SETTLE_STALE: std::time::Duration = std::time::Duration::from_secs(15);
+            let stale: Vec<usize> = mcp_settle_pending
+                .iter()
+                .filter(|(_, waiting)| waiting.iter().any(|(t, _, _)| now.duration_since(*t) >= SETTLE_STALE))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in stale {
+                let url = workspace_manager
+                    .index_of_tab(id)
+                    .map(|i| tab_url(&workspace_manager.at(i).tabs, id))
+                    .unwrap_or_default();
+                for (_, reply, verb) in mcp_settle_pending.remove(&id).unwrap_or_default() {
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        let _ = tx.send(Ok(format!(
+                            "{verb} → page navigated to {url} (still loading after {} s — re-snapshot before acting)",
+                            SETTLE_STALE.as_secs()
+                        )));
+                    }
                 }
             }
         }
@@ -4300,6 +4480,7 @@ fn main() {
                         &workspace_manager.active().mru,
                         active_wv_id,
                         &media_playing_tabs,
+                        &driven_tabs.protected(now),
                         pressure,
                     )
                 };
@@ -4370,6 +4551,7 @@ fn main() {
                     pending_swap,
                     active_wv_id,
                     &media_playing_tabs,
+                    &driven_tabs.protected(now),
                     &proactive_config,
                 )
             };
@@ -4998,9 +5180,9 @@ fn main() {
                         .unwrap_or(active_wv_id)
                 };
 
-                // Touch the target tab so hibernation knows it's in use.
-                // Prevents background tabs used by AI from being offloaded.
-                let touch_id = match &cmd {
+                // The tab a page command acts on. `None` for tab-list, history and
+                // UI commands; a new background tab is handled where it is spawned.
+                let page_tab = match &cmd {
                     McpCommand::Navigate { tab_id, .. } => *tab_id,
                     McpCommand::GetPageInfo { tab_id, .. }
                     | McpCommand::ExecuteJs { tab_id, .. }
@@ -5011,16 +5193,33 @@ fn main() {
                     | McpCommand::GoBack { tab_id, .. }
                     | McpCommand::GoForward { tab_id, .. }
                     | McpCommand::Scroll { tab_id, .. }
-                    | McpCommand::Wait { tab_id, .. } => *tab_id,
-                    McpCommand::Click { tab_id, .. }
+                    | McpCommand::Wait { tab_id, .. }
+                    | McpCommand::Click { tab_id, .. }
                     | McpCommand::Hover { tab_id, .. }
                     | McpCommand::Type { tab_id, .. }
                     | McpCommand::PressKey { tab_id, .. }
-                    | McpCommand::SelectOption { tab_id, .. } => *tab_id,
+                    | McpCommand::SelectOption { tab_id, .. }
+                    | McpCommand::DismissOverlay { tab_id, .. } => {
+                        Some(tab_id.unwrap_or(mcp_default_tab))
+                    }
                     _ => None,
                 };
-                if let Some(id) = touch_id.or(Some(mcp_default_tab)) {
+                // Touch the target tab so hibernation knows it's in use.
+                // Prevents background tabs used by AI from being offloaded.
+                if let Some(id) = page_tab.or(Some(mcp_default_tab)) {
                     workspace_manager.at(ws_idx).tabs.lock().unwrap().touch(id);
+                }
+                // Wake it: a hidden or covered page runs no animation frames, so
+                // overlays the page animates away would otherwise never leave.
+                if let Some(id) = page_tab {
+                    driven_tabs.touch(id, std::time::Instant::now());
+                    if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
+                        if id == active_wv_id {
+                            agent_tabs::keep_rendering(wv, true);
+                        } else {
+                            park_tab!(wv);
+                        }
+                    }
                 }
 
                 match cmd {
@@ -5112,7 +5311,12 @@ fn main() {
                             None => {
                                 let new_id = workspace_manager.at(ws_idx).tabs.lock().unwrap().open_background(resolved.clone());
                                 spawn_tab_webview_at!(ws_idx, new_id, &resolved);
-
+                                // Load it awake, so the page renders the way it would
+                                // for a user and the readiness probe sees that.
+                                driven_tabs.touch(new_id, std::time::Instant::now());
+                                if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&new_id) {
+                                    park_tab!(wv);
+                                }
                                 if let Some((_, old)) = mcp_nav_pending.remove(&new_id) {
                                     let _ = old.send(Err("Superseded by new navigation".into()));
                                 }
@@ -5185,6 +5389,7 @@ fn main() {
                             // down the WebView (its close() re-run is a no-op).
                             workspace_manager.at(ws_idx).tabs.lock().unwrap().close(tab_id);
                             tab_nav::forget(tab_id);
+                            driven_tabs.forget(tab_id);
                             if ws_idx == workspace_manager.active_index() {
                                 let _ = proxy.send_event(AppEvent::CloseTab(tab_id));
                             } else {
@@ -5312,7 +5517,8 @@ fn main() {
                                     format!(
                                         "browser_execute_js did not finish within {timeout_ms} ms and the tab did NOT navigate. \
                                          The script is still running or awaiting (long fetch loops hit this): pass a larger \
-                                         timeout_ms (max 60000), run requests in parallel with Promise.all, or split the work."
+                                         timeout_ms (max {}), run requests in parallel with Promise.all, or split the work.",
+                                        mcp::MAX_WAIT_MS
                                     ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));
@@ -5340,7 +5546,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
+                                let proxy_cb = proxy.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -5359,8 +5565,8 @@ fn main() {
                                             &NativeActionCtx {
                                                 tab_id: id,
                                                 gen0,
-                                                tabs: tabs_cb.clone(),
                                                 response: response_cb.clone(),
+                                                proxy: proxy_cb.clone(),
                                             },
                                             format!("Clicked {} ({sel})", t.desc),
                                             expect.clone(),
@@ -5380,9 +5586,8 @@ fn main() {
                                         }
                                     }
                                 });
-                                let sel_wd = selector.clone();
-                                mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
-                                    move |url: String| Ok(format!("Clicked '{sel_wd}' → page navigated to {url}")),
+                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
+                                    format!("Clicked '{selector}'"),
                                     format!(
                                         "Click on '{selector}' got no answer from the page within {}s and the tab did \
                                          not navigate — its JS context is frozen or busy (heavy re-render, blocked main \
@@ -5412,7 +5617,7 @@ fn main() {
                                 let response_cb = response.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
+                                let proxy_cb = proxy.clone();
                                 let sel = selector.clone();
                                 let zoom = zoom_level;
                                 async_eval::eval_async_expr(wv, &script, move |res| {
@@ -5431,8 +5636,8 @@ fn main() {
                                             &NativeActionCtx {
                                                 tab_id: id,
                                                 gen0,
-                                                tabs: tabs_cb.clone(),
                                                 response: response_cb.clone(),
+                                                proxy: proxy_cb.clone(),
                                             },
                                             format!("Hovered {} ({sel})", t.desc),
                                             expect.clone(),
@@ -5450,9 +5655,8 @@ fn main() {
                                         }
                                     }
                                 });
-                                let sel_wd = selector.clone();
-                                mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
-                                    move |url: String| Ok(format!("Hovered '{sel_wd}' → page navigated to {url}")),
+                                mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, id, tab_nav::hard_get(id),
+                                    format!("Hovered '{selector}'"),
                                     format!(
                                         "Hover on '{selector}' got no answer from the page within {}s and the tab did \
                                          not navigate. browser_snapshot to refresh @refs, then retry.",
@@ -5480,7 +5684,7 @@ fn main() {
                                 let sel_for_err = selector.clone();
                                 let gen0 = tab_nav::get(id);
                                 let wk = wv.webview();
-                                let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
+                                let proxy_cb = proxy.clone();
                                 async_eval::eval_async_expr(wv, &script, move |res| {
                                     let val = match res {
                                         Ok(v) => v,
@@ -5502,8 +5706,8 @@ fn main() {
                                             &NativeActionCtx {
                                                 tab_id: id,
                                                 gen0,
-                                                tabs: tabs_cb.clone(),
                                                 response: response_cb.clone(),
+                                                proxy: proxy_cb.clone(),
                                             },
                                             format!("Typed into {sel_for_err} with native keystrokes"),
                                             expect.clone(),
@@ -5540,36 +5744,10 @@ fn main() {
                         let _ = response.send(result);
                     }
                     McpCommand::GoBack { tab_id, response } => {
-                        let target_id = tab_id.or(Some(mcp_default_tab));
-                        if let Some(id) = target_id {
-                            let _ = mcp_ensure_tab!(ws_idx, id);
-                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
-                                match wv.evaluate_script("history.back()") {
-                                    Ok(()) => { let _ = response.send(Ok(())); }
-                                    Err(e) => { let _ = response.send(Err(format!("GoBack failed: {e}"))); }
-                                }
-                            } else {
-                                let _ = response.send(Err("Tab not found".to_string()));
-                            }
-                        } else {
-                            let _ = response.send(Err("No active tab".to_string()));
-                        }
+                        mcp_history_step!(ws_idx, tab_id.unwrap_or(mcp_default_tab), response, true);
                     }
                     McpCommand::GoForward { tab_id, response } => {
-                        let target_id = tab_id.or(Some(mcp_default_tab));
-                        if let Some(id) = target_id {
-                            let _ = mcp_ensure_tab!(ws_idx, id);
-                            if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
-                                match wv.evaluate_script("history.forward()") {
-                                    Ok(()) => { let _ = response.send(Ok(())); }
-                                    Err(e) => { let _ = response.send(Err(format!("GoForward failed: {e}"))); }
-                                }
-                            } else {
-                                let _ = response.send(Err("Tab not found".to_string()));
-                            }
-                        } else {
-                            let _ = response.send(Err("No active tab".to_string()));
-                        }
+                        mcp_history_step!(ws_idx, tab_id.unwrap_or(mcp_default_tab), response, false);
                     }
                     McpCommand::GetHistory { limit, response } => {
                         let mut tm = workspace_manager.at(ws_idx).tabs.lock().unwrap();
@@ -5601,12 +5779,14 @@ fn main() {
                         let target_id = tab_id.unwrap_or(mcp_default_tab);
                         let _ = mcp_ensure_tab!(ws_idx, target_id);
                         if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&target_id) {
+                            let gen0 = tab_nav::get(target_id);
                             if hard {
                                 reload_from_origin(wv);
                             } else {
                                 let _ = wv.reload();
                             }
-                            let _ = response.send(Ok(()));
+                            let verb = if hard { "Hard-reloaded" } else { "Reloaded" };
+                            mcp_await_nav!(response, target_id, gen0, verb.to_string());
                         } else {
                             let _ = response.send(Err("Tab not found".to_string()));
                         }
@@ -5875,7 +6055,7 @@ fn main() {
                             let sel_for_msg = sel_for_err.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
+                            let proxy_cb = proxy.clone();
                             let key_label = if modifiers.is_empty() {
                                 key.clone()
                             } else {
@@ -5897,8 +6077,8 @@ fn main() {
                                         &NativeActionCtx {
                                             tab_id: target_id,
                                             gen0,
-                                            tabs: tabs_cb.clone(),
                                             response: response_cb.clone(),
+                                            proxy: proxy_cb.clone(),
                                         },
                                         format!("Pressed {key_label} on {}", t.desc),
                                         expect.clone(),
@@ -5916,9 +6096,8 @@ fn main() {
                                     }
                                 }
                             });
-                            let key_wd = key.clone();
-                            mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
-                                move |url: String| Ok(format!("Pressed {key_wd} → page navigated to {url}")),
+                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
+                                format!("Pressed {key}"),
                                 format!(
                                     "PressKey on '{sel_for_msg}' got no answer from the page within {}s and the tab \
                                      did not navigate. Re-snapshot and retry.",
@@ -5943,23 +6122,31 @@ fn main() {
                                 // Has its own 8 s internal cap; the `timeout_ms` argument
                                 // is intentionally ignored here.
                                 "ready" => readiness_js::READINESS_JS.to_string(),
+                                // Playwright's word for it, so agents reach for it: no
+                                // fetch/XHR in flight for 500 ms. Requests older than 3 s
+                                // are long-polls and streams that never finish.
+                                "networkidle" => format!(
+                                    "new Promise(r => {{ var w = window.__octoweb_inflight, t0 = performance.now(); (function poll() {{ var n = performance.now(), busy = false; if (w) {{ w.inflight.forEach(function (t) {{ if (n - t < 3000) busy = true; }}); if (n - w.lastDone < 500) busy = true; }} if (!busy) return r('ready'); if (n - t0 >= {timeout_ms}) return r('timeout'); setTimeout(poll, 100); }})(); }})"
+                                ),
                                 // Wait for visible text to appear / disappear — the outcome
                                 // an agent usually means by "wait" (parity with Playwright /
-                                // Chrome DevTools MCP wait_for(text)).
+                                // Chrome DevTools MCP wait_for(text)). Both waits poll: a
+                                // reveal that only flips an attribute (`hidden`, a class)
+                                // adds no node, and a node observer never saw it.
                                 other if other.starts_with("text:") || other.starts_with("text_gone:") => {
                                     let gone = other.starts_with("text_gone:");
                                     let needle = other.split_once(':').map(|x| x.1).unwrap_or("");
                                     let n_json = serde_json::to_string(needle).unwrap_or_default();
                                     let want = if gone { "=== -1" } else { "!== -1" };
                                     format!(
-                                        "new Promise(r => {{ var has = () => (document.body ? document.body.innerText.indexOf({n_json}) : -1) {want}; if (has()) return r('ready'); const t = setTimeout(() => {{ if (o) o.disconnect(); r('timeout'); }}, {timeout_ms}); const o = new MutationObserver(() => {{ if (has()) {{ o.disconnect(); clearTimeout(t); r('ready'); }} }}); o.observe(document.documentElement, {{childList: true, subtree: true, characterData: true}}); }})"
+                                        "new Promise(r => {{ var t0 = performance.now(); var has = () => (document.body ? document.body.innerText.indexOf({n_json}) : -1) {want}; (function poll() {{ if (has()) return r('ready'); if (performance.now() - t0 >= {timeout_ms}) return r('timeout'); setTimeout(poll, 100); }})(); }})"
                                     )
                                 }
                                 // Treat anything else as a CSS selector
                                 selector => {
                                     let sel_json = serde_json::to_string(selector).unwrap_or_default();
                                     format!(
-                                        "new Promise(r => {{ if (document.querySelector({sel_json})) return r('ready'); const t = setTimeout(() => {{ if (o) o.disconnect(); r('timeout'); }}, {timeout_ms}); const o = new MutationObserver(() => {{ if (document.querySelector({sel_json})) {{ o.disconnect(); clearTimeout(t); r('ready'); }} }}); o.observe(document.documentElement, {{childList: true, subtree: true}}); }})"
+                                        "new Promise(r => {{ var t0 = performance.now(); (function poll() {{ if (document.querySelector({sel_json})) return r('ready'); if (performance.now() - t0 >= {timeout_ms}) return r('timeout'); setTimeout(poll, 100); }})(); }})"
                                     )
                                 }
                             };
@@ -6052,7 +6239,7 @@ fn main() {
                             let response_cb = response.clone();
                             let gen0 = tab_nav::get(target_id);
                             let wk = wv.webview();
-                            let tabs_cb = workspace_manager.at(ws_idx).tabs.clone();
+                            let proxy_cb = proxy.clone();
                             let zoom = zoom_level;
                             async_eval::eval_async_expr(wv, &script, move |res| {
                                 let val = match res {
@@ -6070,8 +6257,8 @@ fn main() {
                                         &NativeActionCtx {
                                             tab_id: target_id,
                                             gen0,
-                                            tabs: tabs_cb.clone(),
                                             response: response_cb.clone(),
+                                            proxy: proxy_cb.clone(),
                                         },
                                         format!("Dismissed overlay via {} control \"{}\"", t.kind, t.desc),
                                         None,
@@ -6102,8 +6289,8 @@ fn main() {
                                     }
                                 }
                             });
-                            mcp_nav_watchdog_hard!(ws_idx, response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
-                                |url: String| Ok(format!("Dismissed overlay → page navigated to {url}")),
+                            mcp_nav_watchdog_hard!(response, dom_actions::WATCHDOG_MS, target_id, tab_nav::hard_get(target_id),
+                                "Dismissed overlay".to_string(),
                                 format!(
                                     "browser_dismiss_overlay got no answer within {}s and the tab did not navigate.",
                                     dom_actions::WATCHDOG_MS / 1000
@@ -6709,6 +6896,7 @@ fn main() {
                 // quit-when-the-last-tab-goes rule.
                 workspace_manager.active().tabs.lock().unwrap().close(tab_id);
                 tab_nav::forget(tab_id);
+                driven_tabs.forget(tab_id);
                 if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
@@ -9043,6 +9231,33 @@ fn main() {
                 }
             }
 
+            Event::UserEvent(AppEvent::McpSettleNav(tab_id, reply, verb)) => {
+                let tabs = workspace_manager
+                    .index_of_tab(tab_id)
+                    .map(|i| workspace_manager.at(i).tabs.clone());
+                match (workspace_manager.webview_of_tab(tab_id), tabs) {
+                    (Some(wv), Some(tabs)) => {
+                        // A full navigation is still loading: answer on PageLoadFinished.
+                        let loading: bool = unsafe { objc2::msg_send![&*wv.webview(), isLoading] };
+                        if loading {
+                            mcp_settle_pending.entry(tab_id).or_default().push((
+                                std::time::Instant::now(),
+                                reply,
+                                verb,
+                            ));
+                        } else {
+                            settle_after_nav(wv, tab_id, tabs, reply, verb);
+                        }
+                    }
+                    _ => {
+                        if let Some(tx) = reply.lock().unwrap().take() {
+                            let _ = tx.send(Ok(format!(
+                                "{verb} → page navigated, and tab {tab_id} no longer has a live page"
+                            )));
+                        }
+                    }
+                }
+            }
             Event::UserEvent(AppEvent::PageLoadFinished(tab_id)) => {
                 // A completed load means the renderer is healthy again.
                 webcontent_crashes.remove(&tab_id);
@@ -9106,6 +9321,15 @@ fn main() {
                         let _ = response.send(Ok(mcp::NavigateOutcome::tab(tab_id)));
                     }
                 }
+                // MCP actions that navigated this tab: same probe, same moment.
+                for (_, reply, verb) in mcp_settle_pending.remove(&tab_id).unwrap_or_default() {
+                    if let (Some(wv), Some(i)) = (
+                        workspace_manager.webview_of_tab(tab_id),
+                        workspace_manager.index_of_tab(tab_id),
+                    ) {
+                        settle_after_nav(wv, tab_id, workspace_manager.at(i).tabs.clone(), reply, verb);
+                    }
+                }
             }
 
             Event::UserEvent(AppEvent::NavigationError(tab_id, url, error)) => {
@@ -9163,6 +9387,12 @@ fn main() {
                 if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err(format!("Navigation error: {error}")));
                 }
+                // The action happened; the page it led to did not load.
+                for (_, reply, verb) in mcp_settle_pending.remove(&tab_id).unwrap_or_default() {
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        let _ = tx.send(Ok(format!("{verb} → navigation to {url} failed: {error}")));
+                    }
+                }
                 // Hide progress bar immediately on error (only if active tab)
                 if tab_id == active_wv_id && progress_visible {
                     let _ = progress_wv.evaluate_script("window.__stop && window.__stop()");
@@ -9198,6 +9428,11 @@ fn main() {
                 // Fail pending MCP navigate
                 if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err("WebContent process crashed".into()));
+                }
+                for (_, reply, _) in mcp_settle_pending.remove(&tab_id).unwrap_or_default() {
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        let _ = tx.send(Err("WebContent process crashed while loading the page this action opened".into()));
+                    }
                 }
                 // Prefer the deferred URL (mid-snapshot-restore) over TabManager
                 // since the latter may transiently hold "about:blank".
@@ -11097,19 +11332,20 @@ fn tab_url(tabs: &Arc<Mutex<TabManager>>, tab_id: usize) -> String {
 type McpReply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>>;
 
 /// Everything `finish_native_action` needs about the MCP action's tab: which
-/// tab ran it, the nav-generation snapshot taken before delivery, and where
-/// the reply goes. One bundle instead of four loose arguments.
+/// tab ran it, the nav-generation snapshot taken before delivery, where the
+/// reply goes, and the loop that answers a navigation once it settles.
 struct NativeActionCtx {
     tab_id: usize,
     gen0: u64,
-    tabs: Arc<Mutex<TabManager>>,
     response: McpReply,
+    proxy: tao::event_loop::EventLoopProxy<AppEvent>,
 }
 
 /// Second half of a trusted pointer/key action: deliver the native event,
-/// then run the effect probe and answer `<verb> → <what changed>`. When the
-/// probe's callback dies because the action navigated, that navigation *is*
-/// the effect and is reported as success — not as a dropped call.
+/// then run the effect probe and answer `<verb> → <what changed>`. An action
+/// that navigated is handed to the main loop (`AppEvent::McpSettleNav`) and
+/// answered once the destination has settled — answering on the spot gave the
+/// agent the frame between two routes: an article page with no article in it.
 fn finish_native_action<T: objc2::Message + 'static>(
     wk: objc2::rc::Retained<T>,
     ctx: &NativeActionCtx,
@@ -11119,8 +11355,8 @@ fn finish_native_action<T: objc2::Message + 'static>(
 ) {
     let tab_id = ctx.tab_id;
     let gen0 = ctx.gen0;
-    let tabs = ctx.tabs.clone();
     let response = ctx.response.clone();
+    let proxy = ctx.proxy.clone();
     let ptr = objc2::rc::Retained::as_ptr(&wk) as *mut objc2::runtime::AnyObject;
     let downloads_before = tab_nav::download_state(tab_id).0;
     deliver(ptr);
@@ -11132,46 +11368,103 @@ fn finish_native_action<T: objc2::Message + 'static>(
         &dom_actions::effect_script(expect.as_deref()),
         move |res| {
             let _ = &keep;
+            // A same-document route with an `expect` stays the probe's to judge
+            // (it can check `url:#/x`); any other navigation is answered once
+            // the destination settles. A dropped probe callback means a full
+            // navigation tore the context down.
+            if tab_nav::get(tab_id) != gen0 && (expect.is_none() || res.is_err()) {
+                // Typed text a same-document route threw away shows up only here.
+                let lost = res
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| serde_json::from_str::<String>(v).ok())
+                    .and_then(|payload| mcp::lost_text_note_json(&payload));
+                let verb = match lost {
+                    Some(note) => format!("{verb} · {note}"),
+                    None => verb.clone(),
+                };
+                let _ = proxy.send_event(AppEvent::McpSettleNav(tab_id, response.clone(), verb));
+                return;
+            }
             let Some(tx) = response.lock().unwrap().take() else {
                 return;
             };
-            let navigated = tab_nav::get(tab_id) != gen0;
             let (downloads_after, filename) = tab_nav::download_state(tab_id);
             let download = (downloads_after > downloads_before).then_some(filename);
             let msg = match res {
-                // The probe ran (same-document): trust its settle result. This
-                // covers SPA pushState routes, where the nav generation bumps but
-                // the context survives — an `expect: url:#/x` must be checked here,
-                // not short-circuited to "navigated". With no expectation, a
-                // nav-gen change is itself the reportable effect.
                 Ok(val) => {
                     let settled: String = serde_json::from_str(&val).unwrap_or(val);
-                    if expect.is_none() && navigated {
-                        format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id))
-                    } else {
-                        format!(
-                            "{verb}{}",
-                            mcp::format_effect_with_download(&settled, download.as_deref())
-                        )
-                    }
+                    format!(
+                        "{verb}{}",
+                        mcp::format_effect_with_download(&settled, download.as_deref())
+                    )
                 }
-                // Callback discarded — a full navigation tore the context down.
-                Err(e) => {
-                    if navigated {
-                        format!("{verb} → page navigated to {}", tab_url(&tabs, tab_id))
-                    } else {
-                        match download {
-                            Some(name) => {
-                                format!("{verb} → download started: {name} (saved to ~/Downloads)")
-                            }
-                            None => format!("{verb} (delivered; effect probe failed: {e})"),
-                        }
+                Err(e) => match download {
+                    Some(name) => {
+                        format!("{verb} → download started: {name} (saved to ~/Downloads)")
                     }
-                }
+                    None => format!("{verb} (delivered; effect probe failed: {e})"),
+                },
             };
             let _ = tx.send(Ok(msg));
         },
     );
+}
+
+/// Ceiling on answering a settled navigation. The readiness probe stops itself
+/// at 8 s; this only fires when a further navigation dropped its callback.
+const SETTLE_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Answer an MCP action whose effect was a navigation, once the destination has
+/// settled — the same readiness probe browser_navigate waits on — with where
+/// the tab landed, the page title and how it settled.
+fn settle_after_nav(
+    wv: &WebView,
+    tab_id: usize,
+    tabs: Arc<Mutex<TabManager>>,
+    reply: McpReply,
+    verb: String,
+) {
+    let script = format!(
+        "({}).then(function(r){{ return {{ readiness: r, title: document.title }}; }})",
+        readiness_js::READINESS_JS
+    );
+    let (reply_wd, tabs_wd, verb_wd) = (reply.clone(), tabs.clone(), verb.clone());
+    async_eval::eval_async_expr(wv, &script, move |res| {
+        let Some(tx) = reply.lock().unwrap().take() else {
+            return;
+        };
+        let url = tab_url(&tabs, tab_id);
+        let settled = res
+            .ok()
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
+        let msg = match settled {
+            Some(v) => format!(
+                "{verb} → page navigated to {url} · title \"{}\" · readiness {}",
+                v["title"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+                v["readiness"].as_str().unwrap_or("unknown"),
+            ),
+            None => format!(
+                "{verb} → page navigated to {url} (still navigating — re-snapshot before acting)"
+            ),
+        };
+        let _ = tx.send(Ok(msg));
+    });
+    std::thread::spawn(move || {
+        std::thread::sleep(SETTLE_WATCHDOG);
+        if let Some(tx) = reply_wd.lock().unwrap().take() {
+            let _ = tx.send(Ok(format!(
+                "{verb_wd} → page navigated to {} (did not settle within {} s — re-snapshot before acting)",
+                tab_url(&tabs_wd, tab_id),
+                SETTLE_WATCHDOG.as_secs()
+            )));
+        }
+    });
 }
 
 #[cfg(test)]

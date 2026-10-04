@@ -59,6 +59,8 @@ pub const KEY_WAIT_MS: u64 = 3000;
 const EFFECT_PRE_JS: &str = r#"
   function __pre() {
     try { if (window.__octoweb_pre && window.__octoweb_pre.mo) window.__octoweb_pre.mo.disconnect(); } catch (e) {}
+    // A readback belongs to the write that armed it, never to a later action.
+    try { delete window.__octoweb_verify; } catch (e) {}
     // Trusted keystrokes (native_input::type_text) reach the page one IPC
     // round trip at a time, and evaluateJavaScript overtakes that queue — so
     // an effect probe sent right after typing reads a half-typed field, and so
@@ -78,7 +80,7 @@ const EFFECT_PRE_JS: &str = r#"
       var label = a.getAttribute('aria-label') || a.placeholder || a.name || a.id || '';
       return a.tagName.toLowerCase() + (label ? ' "' + String(label).substring(0, 40) + '"' : '');
     }
-    var st = { url: location.href, title: document.title, seq: (window.__octoweb_netseq || 0),
+    var st = { url: location.href, title: document.title, seq: (window.__octoweb_netseq || 0), t0: performance.now(),
                added: 0, removed: 0, texts: [], textLen: 0, dialogs: dialogs().length, focus: focusDesc(), mo: null };
     function pushText(t) {
       t = String(t || '').trim().replace(/\s+/g, ' ');
@@ -131,20 +133,23 @@ const EFFECT_PRE_JS: &str = r#"
       // stays quiet.
       try {
         var typed = window.__octoweb_typed;
-        if (typed && out.url) {
-          var body = document.body ? document.body.innerText : '';
-          var live = document.body ? document.body.innerHTML : '';
-          if (body.indexOf(typed.probe) === -1 && live.indexOf(typed.probe) === -1) {
-            out.lost = { sel: typed.sel, len: typed.len, head: typed.head };
-            delete window.__octoweb_typed;
+        // Only a marker an EARLIER action armed: the typing action's own
+        // settle used to consume it, so the click after it never saw one.
+        if (typed && typed.at < st.t0) {
+          if (out.url) {
+            var body = document.body ? document.body.innerText : '';
+            var live = document.body ? document.body.innerHTML : '';
+            if (body.indexOf(typed.probe) === -1 && live.indexOf(typed.probe) === -1) {
+              out.lost = { sel: typed.sel, len: typed.len, head: typed.head };
+            }
           }
+          // Arm-once. The marker exists to catch the action that immediately
+          // follows the typing; leaving it set meant a later SPA route change --
+          // where the text is legitimately gone because it was already sent --
+          // reported it as lost.
+          delete window.__octoweb_typed;
         }
       } catch (e) {}
-      // Arm-once. The marker exists to catch the action that immediately
-      // follows the typing; leaving it set meant a later SPA route change --
-      // where the text is legitimately gone because it was already sent --
-      // reported it as lost.
-      try { delete window.__octoweb_typed; } catch (e) {}
       return out;
     };
     // Is an expectation currently satisfied? `exp` is {kind, value} or null.
@@ -273,6 +278,21 @@ new Promise(function(__resolve){
     return { x: x, y: y };
   }
 
+  // Where to aim: the element's own box, or — for a `display: contents`
+  // wrapper or an inline around blocks — its first rendered descendant's.
+  // Null when nothing renders (display:none, a collapsed menu): aiming at that
+  // zero box sent the trusted click to (0,0), whatever sits top-left.
+  function box(el) {
+    var r = el.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) return r;
+    var kids = el.querySelectorAll('*');
+    for (var i = 0; i < kids.length && i < 50; i++) {
+      var k = kids[i].getBoundingClientRect();
+      if (k.width >= 1 && k.height >= 1) return k;
+    }
+    return null;
+  }
+
   function retry() {
     if (performance.now() >= DEADLINE) return __done(lastErr);
     setTimeout(attempt, 120);
@@ -287,8 +307,15 @@ new Promise(function(__resolve){
     }
     var el = r.el;
     __GATE__
-    try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) {}
+    // Pointer actions only (__STABILITY__): bringing the target into view is
+    // how a click reaches it, but it re-centred a scroll action's anchor and
+    // undid the very scroll that followed.
     var rect = el.getBoundingClientRect();
+    if (__STABILITY__) {
+      try { el.scrollIntoView({ block: 'center', behavior: 'instant' }); } catch (e) {}
+      rect = box(el);
+      if (!rect) { lastErr = 'hidden'; return retry(); }
+    }
     if (__STABILITY__ && performance.now() < DEADLINE) {
       if (!prevRect || Math.abs(rect.left - prevRect.left) > 1 || Math.abs(rect.top - prevRect.top) > 1) {
         prevRect = rect;
@@ -305,6 +332,19 @@ new Promise(function(__resolve){
       if (hit && hit !== el && !within(el, hit) && !within(hit, el)) {
         lastErr = 'occluded:' + describe(hit);
         return retry();
+      }
+      // Inside a same-origin frame that test saw only the frame's document;
+      // the native click lands in the top one, where a wall over the whole
+      // frame takes it.
+      if (el.ownerDocument !== document) {
+        var outer = el.ownerDocument.defaultView.frameElement;
+        while (outer && outer.ownerDocument !== document) outer = outer.ownerDocument.defaultView.frameElement;
+        var tp = top(el, x, y), topHit = null;
+        try { topHit = document.elementFromPoint(tp.x, tp.y); } catch (e) {}
+        if (outer && topHit && topHit !== outer && !within(outer, topHit)) {
+          lastErr = 'occluded:' + describe(topHit);
+          return retry();
+        }
       }
     }
     var W = el.ownerDocument.defaultView || window;
@@ -530,14 +570,12 @@ new Promise(function(__resolve){
   var best = null, bestScore = -1, acceptFallback = null;
   for (var i = 0; i < clickables.length; i++){
     var el = clickables[i], t = txt(el); if (!t) continue;
-    var ov = inOverlay(el), score = -1, kind = null;
-    if (REJECT.test(t)) { score = ov ? 100 : 55; kind = 'reject'; }
-    else if (CLOSE.test(t)) { score = ov ? 80 : 25; kind = 'close'; }
-    else if (ov && ACCEPT.test(t)) { if (!acceptFallback) acceptFallback = t; continue; }
-    else continue;
-    // Require overlay context unless it's an unambiguous close glyph, so we
-    // never nuke a real page button that merely says "close".
-    if (!ov && kind !== 'close') continue;
+    var kind = REJECT.test(t) ? 'reject' : CLOSE.test(t) ? 'close' : ACCEPT.test(t) ? 'accept' : null;
+    // Overlay controls only: the page's own "Close" (an editor, a chat
+    // panel) is not ours to press, and with no overlay there is nothing to get past.
+    if (!kind || !inOverlay(el)) continue;
+    if (kind === 'accept') { if (!acceptFallback) acceptFallback = t; continue; }
+    var score = kind === 'reject' ? 100 : 80;
     if (score > bestScore){ bestScore = score; best = { el: el, t: t, kind: kind }; }
   }
 
@@ -559,14 +597,15 @@ pub fn parse_dismiss(val: &str) -> Result<DismissTarget, String> {
 }
 
 /// Standalone effect+expectation probe for the native-input path (click / hover
-/// / press_key). Reads `window.__octoweb_pre` (armed by the locate phase) and
-/// resolves to `{diff, met, expect}` — the same payload shape the harness emits
-/// after `true|`. With no expectation it waits `EFFECT_MS`; with one it polls
-/// up to `SETTLE_MS` for it to hold.
+/// / press_key / keystroke typing). Reads `window.__octoweb_pre` (armed by the
+/// locate phase) and resolves to `{diff, met, expect, val?}` — the same payload
+/// shape the harness emits after `true|`, including the readback a keystroke
+/// `browser_type` left in `__octoweb_verify`. With no expectation it waits
+/// `EFFECT_MS`; with one it polls up to `SETTLE_MS` for it to hold.
 pub fn effect_script(expect: Option<&str>) -> String {
     let exp = expect_json(expect);
     format!(
-        "new Promise(function(r){{ var p = window.__octoweb_pre;          if (!p) return r(JSON.stringify({{ diff: {{}}, met: {no_exp} }}));          p.settle({exp}, {EFFECT_MS}, {SETTLE_MS}).then(function(x){{ r(JSON.stringify(x)); }}); }})",
+        "new Promise(function(r){{ var p = window.__octoweb_pre;          if (!p) return r(JSON.stringify({{ diff: {{}}, met: {no_exp} }}));          p.settle({exp}, {EFFECT_MS}, {SETTLE_MS}).then(function(x){{            var f = window.__octoweb_verify;            if (f) {{ try {{ delete window.__octoweb_verify; }} catch (e) {{}} try {{ x.val = f(); }} catch (e) {{ x.val = {{ ok: false }}; }} }}            r(JSON.stringify(x)); }}); }})",
         no_exp = if exp == "null" { "true" } else { "false" },
     )
 }
@@ -576,11 +615,13 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     //
     //  - contenteditable → a fallback chain, because no single primitive works
     //    across editors AND background tabs:
-    //      1. Synthetic `paste` (DataTransfer text/plain). Model-backed editors
+    //      1. Synthetic `paste` (DataTransfer text/plain, plus text/html with
+    //         one <p> per line when there are several). Model-backed editors
     //         (Lexical, DraftJS, ProseMirror, Medium) keep their own model and
     //         have paste handlers that route through it, so the model updates
     //         and any submit button gated on it enables. Focus-independent, so
-    //         it works on background tabs too.
+    //         it works on background tabs too. Medium puts plain-text lines
+    //         into one block; the HTML gives it a title and real paragraphs.
     //      2. If the paste didn't land (plain contenteditable has no paste
     //         handler), WebKit's editing commands — one block per line, so
     //         paragraphs survive instead of collapsing into one.
@@ -592,14 +633,19 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     //    swap spaces for nbsp and re-typeset quotes, so a literal match on the
     //    pasted text fails on exactly the editors the paste path exists for —
     //    and a false "failed" would double-insert via the next step.
-    //    Existing content is cleared first with a range scoped to the target:
-    //    `execCommand('selectAll')` would widen it to the whole editing host
-    //    and wipe sibling blocks (a title above the body paragraph).
+    //    Nothing is deleted ahead of the paste: deleting the whole target also
+    //    deleted the block structure the editor's model hangs on (Medium's
+    //    title and body grafs), and the text that followed landed as loose
+    //    DIVs the editor did not recognise. An empty target (placeholders
+    //    only) gets a caret in its first block; a filled one gets its content
+    //    selected, which the editor's paste replaces. Only the editing-command
+    //    fallback deletes — that path is for editors with no model to break.
     //
     //  - <input>/<textarea> → set value via the prototype setter (bypasses
     //    React's controlled-input cache) and fire input+change.
     //
-    // `keys_only` skips the paste/command attempts: clear, then `'keys'`.
+    // `keys_only` skips the paste/command attempts: aim the same way, then
+    // `'keys'` — keystrokes typed over a selection replace it natively.
     //
     // Value setter must come from the element's own interface AND window
     // (iframe elements have their own constructors); WebKit brand-checks
@@ -620,6 +666,12 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       }
       k.want = k.got + String(TXT).replace(/\r/g, '').length;
     }
+    // Marker for the NEXT action's effect diff: did it throw this text away?
+    function armTyped() {
+      var t = String(TXT || '');
+      if (t.length < 40) { try { delete window.__octoweb_typed; } catch (e) {} return; }
+      window.__octoweb_typed = { sel: String(SEL), len: t.length, probe: t.substring(0, 24), head: t.substring(0, 60), at: performance.now() };
+    }
     try { el.focus(); } catch (e) {}
     if (el.isContentEditable) {
       var doc = el.ownerDocument;
@@ -635,98 +687,153 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       }
       // Letters and digits only: blind to block splitting, nbsp, smart quotes.
       function norm(s) { return String(s || '').replace(/[^\p{L}\p{N}]+/gu, ''); }
-      var orig = norm(host.textContent);
-      selAll();
-      try { doc.execCommand('delete', false, null); } catch (e) {}
-      if (KEYS_ONLY) { armKeys(); return __resolve('keys'); }
-      var want = norm(TXT), probe = want.substring(0, 24);
-      if (TXT === '') return __done('true');
-      var before = norm(host.textContent).length, mutated = 0, mo = null;
-      try {
-        mo = new MutationObserver(function (rs) { mutated += rs.length; });
-        mo.observe(host, { childList: true, subtree: true, characterData: true });
-      } catch (e) {}
-      function landed() {
-        var now = norm(host.textContent);
-        if (probe) return now.indexOf(probe) !== -1 || (mutated > 0 && now !== orig && now.length > before);
-        return mutated > 0;
+      // Placeholder text some editors render as real nodes (Medium's "Title" /
+      // "Tell your story…") is not content.
+      function realText(n) {
+        return Array.prototype.reduce.call(
+          n.querySelectorAll('[class*="placeholder" i],[class*="defaultvalue" i]'),
+          function (t, p) { return t.replace(p.textContent, ''); }, n.textContent);
       }
-      function finish(ok) {
-        try { if (mo) mo.disconnect(); } catch (e) {}
-        if (!ok) { armKeys(); return __resolve('keys'); }
-        // landed() only proves the first 24 characters arrived. Check the whole
-        // string here: a rich editor that truncated at its character limit, or
-        // dropped the tail, is the difference between a posted draft and a
-        // silently mangled one.
+      var BLOCKS = 'h1,h2,h3,h4,h5,h6,p,li,pre,blockquote,[data-block]';
+      var empty = !norm(realText(el));
+      // What the target held before, so the readback can tell a replace from
+      // an insert in front of the old text — both contain what was sent.
+      var oldProbe = norm(realText(el)).substring(0, 24);
+      function sel(range) {
+        try {
+          var root = el.getRootNode(), s = (root.getSelection ? root : doc).getSelection();
+          s.removeAllRanges(); s.addRange(range);
+        } catch (e) {}
+      }
+      // An empty target gets a caret at the start of its first block; a
+      // filled one (the cut below did not empty it) gets its content selected.
+      function aim() {
+        if (!empty) return selAll();
+        var block = el.querySelector(BLOCKS) || el, rg = doc.createRange();
+        rg.setStart(block, 0); rg.collapse(true); sel(rg);
+      }
+      // A filled target is emptied the way a user would: select its blocks
+      // and cut. Editors delete a cut selection through their own model
+      // (Medium, Draft.js, Lexical, ProseMirror) and keep their block
+      // structure; pasting over the selection did not — Medium inserted in
+      // front of it. Draft.js removes the fragment on a timer, hence the wait.
+      function cut(next) {
+        if (empty) return next();
+        try {
+          var blocks = el.querySelectorAll(BLOCKS), rg = doc.createRange();
+          if (blocks.length) {
+            var last = blocks[blocks.length - 1];
+            rg.setStart(blocks[0], 0); rg.setEnd(last, last.childNodes.length);
+          } else rg.selectNodeContents(el);
+          sel(rg);
+          el.dispatchEvent(new ClipboardEvent('cut', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() }));
+        } catch (e) {}
+        setTimeout(function () { empty = !norm(realText(el)); next(); }, 60);
+      }
+      var want = norm(TXT), probe = want.substring(0, 24);
+      // Read back after the settle window — on every path, the native
+      // keystrokes too: landed() only proves the first 24 characters
+      // arrived, and a rich editor that truncated at its character limit, or
+      // dropped the tail, is the difference between a posted draft and a
+      // silently mangled one.
+      function armVerify() {
         window.__octoweb_verify = function () {
           var live = host.isConnected;
           var now = live ? norm(host.textContent) : '';
+          var stale = !!oldProbe && want.indexOf(oldProbe) === -1 && now.indexOf(oldProbe) !== -1;
           return {
-            ok: live && (want === '' || now.indexOf(want) !== -1),
+            ok: live && (want === '' || now.indexOf(want) !== -1) && !stale,
             connected: live,
+            stale: stale,
             got: (live ? String(host.textContent || '') : '').substring(0, 60),
             len: now.length,
             want: want.length
           };
         };
-        window.__octoweb_typed = (function () {
-          var t = String(TXT || '');
-          if (t.length < 40) { try { delete window.__octoweb_typed; } catch (e) {} return undefined; }
-          return { sel: String(SEL), len: t.length, probe: t.substring(0, 24), head: t.substring(0, 60) };
-        })();
-        return __done('true');
+        armTyped();
       }
-      try {
-        var dt = new DataTransfer(); dt.setData('text/plain', TXT);
-        el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
-      } catch (e) {}
-      var tries = 0;
-      (function check() {
-        if (landed()) return finish(true);
-        if (tries++ < 8) return setTimeout(check, 40);
+      // Clearing is a deliberate wipe, in either mode.
+      if (TXT === '') {
         selAll();
         try { doc.execCommand('delete', false, null); } catch (e) {}
-        before = norm(host.textContent).length; mutated = 0;
-        var lines = TXT.replace(/\r\n?/g, '\n').split('\n');
-        for (var i = 0; i < lines.length; i++) {
-          try {
-            if (i > 0) doc.execCommand('insertParagraph', false, null);
-            if (lines[i]) doc.execCommand('insertText', false, lines[i]);
-          } catch (e) {}
+        return __done('true');
+      }
+      if (KEYS_ONLY) return cut(function () { aim(); armKeys(); armVerify(); __resolve('keys'); });
+      cut(function () {
+        var orig = norm(host.textContent), before = orig.length, mutated = 0, mo = null;
+        try {
+          mo = new MutationObserver(function (rs) { mutated += rs.length; });
+          mo.observe(host, { childList: true, subtree: true, characterData: true });
+        } catch (e) {}
+        function landed() {
+          var now = norm(host.textContent);
+          if (probe) return now.indexOf(probe) !== -1 || (mutated > 0 && now !== orig && now.length > before);
+          return mutated > 0;
         }
-        setTimeout(function () { finish(landed()); }, 40);
-      })();
+        function finish(ok) {
+          try { if (mo) mo.disconnect(); } catch (e) {}
+          armVerify();
+          if (!ok) { armKeys(); return __resolve('keys'); }
+          return __done('true');
+        }
+        var paras = TXT.replace(/\r\n?/g, '\n').split('\n');
+        try {
+          aim();
+          var dt = new DataTransfer(); dt.setData('text/plain', TXT);
+          if (paras.length > 1) {
+            dt.setData('text/html', paras.map(function (l) {
+              return '<p>' + (l ? l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '<br>') + '</p>';
+            }).join(''));
+          }
+          el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+        } catch (e) {}
+        var tries = 0;
+        (function check() {
+          if (landed()) return finish(true);
+          if (tries++ < 8) return setTimeout(check, 40);
+          selAll();
+          try { doc.execCommand('delete', false, null); } catch (e) {}
+          before = norm(host.textContent).length; mutated = 0;
+          for (var i = 0; i < paras.length; i++) {
+            try {
+              if (i > 0) doc.execCommand('insertParagraph', false, null);
+              if (paras[i]) doc.execCommand('insertText', false, paras[i]);
+            } catch (e) {}
+          }
+          setTimeout(function () { finish(landed()); }, 40);
+        })();
+      });
       return;
     }
     var setter;
     if (el instanceof W.HTMLTextAreaElement) setter = Object.getOwnPropertyDescriptor(W.HTMLTextAreaElement.prototype, 'value').set;
     else if (el instanceof W.HTMLInputElement) setter = Object.getOwnPropertyDescriptor(W.HTMLInputElement.prototype, 'value').set;
     var IE = W.InputEvent || Event;
+    function armFieldVerify() {
+      window.__octoweb_verify = function () {
+        var live = el.isConnected;
+        var now = live ? String(el.value == null ? '' : el.value) : '';
+        return {
+          ok: live && now === TXT,
+          connected: live,
+          got: now.substring(0, 60),
+          len: now.length,
+          want: String(TXT).length
+        };
+      };
+      armTyped();
+    }
     if (KEYS_ONLY) {
       if (setter) setter.call(el, ''); else el.value = '';
       fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'deleteContentBackward' }));
       armKeys();
+      armFieldVerify();
       return __resolve('keys');
     }
     if (setter) setter.call(el, TXT); else el.value = TXT;
     fire(el, new IE('input', { bubbles: true, composed: true, inputType: 'insertReplacementText', data: TXT }));
     fire(el, new Event('change', { bubbles: true }));
-    window.__octoweb_verify = function () {
-      var live = el.isConnected;
-      var now = live ? String(el.value == null ? '' : el.value) : '';
-      return {
-        ok: live && now === TXT,
-        connected: live,
-        got: now.substring(0, 60),
-        len: now.length,
-        want: String(TXT).length
-      };
-    };
-    window.__octoweb_typed = (function () {
-      var t = String(TXT || '');
-      if (t.length < 40) { try { delete window.__octoweb_typed; } catch (e) {} return undefined; }
-      return { sel: String(SEL), len: t.length, probe: t.substring(0, 24), head: t.substring(0, 60) };
-    })();
+    armFieldVerify();
     __done('true');
 "#
     .replace("__TXT__", &json(text))

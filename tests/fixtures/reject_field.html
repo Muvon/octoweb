@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Reject Field</title>
+</head>
+<body>
+  <!-- A controlled field that keeps only three characters of what it is given. -->
+  <input id="code" type="text" placeholder="code">
+  <input id="name" type="text" placeholder="name">
+  <button id="go" onclick="document.getElementById('status').textContent='submitted'">Submit</button>
+  <div id="status">idle</div>
+  <!-- maxlength holds for real keystrokes, not for a scripted value. -->
+  <input id="short" type="text" maxlength="3" placeholder="short">
+  <script>
+    var code = document.getElementById('code');
+    code.addEventListener('input', function () {
+      setTimeout(function () { code.value = code.value.substring(0, 3); }, 50);
+    });
+  </script>
+</body>
+</html>

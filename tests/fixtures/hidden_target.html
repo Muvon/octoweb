@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Hidden Target</title>
+</head>
+<body style="margin:0">
+  <!-- Whatever sits at (0,0) is what a click aimed at a zero box would hit. -->
+  <button id="corner" style="position:fixed;left:0;top:0;width:60px;height:40px"
+          onclick="document.getElementById('status').textContent='corner-clicked'">Home</button>
+  <div id="status" style="margin-top:60px">idle</div>
+  <!-- A menu item that exists but is not rendered: the menu is closed. -->
+  <div id="menu" style="display:none">
+    <button id="menu-item" onclick="document.getElementById('status').textContent='item-clicked'">Delete</button>
+  </div>
+</body>
+</html>

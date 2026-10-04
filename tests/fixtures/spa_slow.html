@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: SPA Slow Route</title>
+</head>
+<body>
+  <!-- A feed whose links route in place and fetch the article afterwards, the
+       way Medium's do: right after the click the view is empty. -->
+  <a id="open" href="/spa_slow.html#/article">Open article</a>
+  <div id="view">feed</div>
+  <script>
+    document.getElementById('open').addEventListener('click', function (e) {
+      e.preventDefault();
+      history.pushState({}, '', '/spa_slow.html#/article');
+      var view = document.getElementById('view');
+      view.textContent = '';
+      fetch('/api/slow?ms=1200').then(function (r) { return r.json(); }).then(function () {
+        view.innerHTML = '<article>Article body loaded</article>';
+      });
+    });
+  </script>
+</body>
+</html>

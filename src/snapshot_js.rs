@@ -149,6 +149,11 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     if (wrap) return wrap.innerText || wrap.textContent || '';
     return '';
   }
+  // Image- and icon-only links and buttons carry their name on a child.
+  function childName(el) {
+    var n = el.querySelector('img[alt]:not([alt=""]),[aria-label]:not([aria-label=""]),svg title');
+    return n ? (n.getAttribute('alt') || n.getAttribute('aria-label') || n.textContent || '') : '';
+  }
   function getText(el) {
     var tag = el.tagName;
     var isControl = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
@@ -158,7 +163,7 @@ const SNAPSHOT_TEMPLATE: &str = r#"
       || el.getAttribute('title')
       || el.getAttribute('alt')
       || el.getAttribute('placeholder')
-      || (isControl ? '' : (el.innerText || ''));
+      || (isControl ? '' : (el.innerText || '').trim() || childName(el));
     return (text || '').trim().replace(/\s+/g, ' ').substring(0, 80);
   }
 
@@ -206,7 +211,12 @@ const SNAPSHOT_TEMPLATE: &str = r#"
       // textareas get val= above; give the editors the same, or "re-read each
       // part before you submit" is not executable on the sites that use them.
       if (!isSensitiveInput(el)) {
-        var ce = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        // innerText keeps a space between blocks; placeholder nodes (Medium's
+        // "Title" / "Tell your story…") are not content.
+        var ce = el.innerText || el.textContent || '';
+        Array.prototype.forEach.call(el.querySelectorAll('[class*="placeholder" i],[class*="defaultvalue" i]'),
+          function (p) { ce = ce.replace(p.innerText || p.textContent, ''); });
+        ce = ce.trim().replace(/\s+/g, ' ');
         parts.push('val=' + (ce.length > 40 ? ce.substring(0, 40) + '…' : ce));
       }
     }
@@ -311,18 +321,31 @@ const SNAPSHOT_TEMPLATE: &str = r#"
   }
   Object.defineProperty(window, '__octoweb_refs', { value: nextRefs, configurable: true });
 
+  // Refs of the last snapshot that this one no longer lists. Under `within`
+  // the unscanned rest of the page is absent from `cur` without having gone
+  // anywhere, so only a ref that was inside the scope — or has left the
+  // document — counts, and leaves the registries.
+  function inScope(el) {
+    for (var n = el; n; n = n.parentNode || n.host) if (n === root) return true;
+    return false;
+  }
+  var removed = [];
+  for (var pk in prev) {
+    if (!Object.prototype.hasOwnProperty.call(prev, pk) || pk in cur) continue;
+    var pel = prevRefs && prevRefs.get ? prevRefs.get(pk) : null;
+    if (WITHIN === null || !pel || !pel.isConnected || inScope(pel)) removed.push(pk);
+  }
+  if (WITHIN !== null) {
+    removed.forEach(function (k) { if (nextRefs.delete) nextRefs.delete(k); delete nextLines[k]; });
+  }
+
   // Diff against the previous snapshot of this tab, then store the new baseline.
-  var outLines, removed = [];
+  var outLines;
   if (DIFF) {
     outLines = [];
     for (var oi = 0; oi < order.length; oi++) {
       var rref = order[oi];
       if (cur[rref] !== prev[rref]) outLines.push(cur[rref]);
-    }
-    // Under `within` the unscanned rest of the page is absent from `cur` but
-    // was never removed — only a full scan can tell the difference.
-    if (WITHIN === null) {
-      for (var pk in prev) { if (Object.prototype.hasOwnProperty.call(prev, pk) && !(pk in cur)) removed.push(pk); }
     }
   } else {
     outLines = order.map(function (r) { return cur[r]; });

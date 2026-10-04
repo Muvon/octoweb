@@ -359,7 +359,9 @@ fn interpolate_curve(ram_gb: f64, curve: &[ThresholdPoint]) -> (f64, f64, f64, f
 /// - **Cold** (idle > threshold): hibernate if too many background tabs OR this
 ///   tab's WebContent process exceeds the RSS threshold.
 ///
-/// Protected tabs (active, audio-playing, about:blank, pending-swap) are skipped.
+/// Protected tabs (active, audio-playing, about:blank, pending-swap) are skipped;
+/// `agent_driven` tabs are skipped too, unless they trip the runaway guard.
+#[allow(clippy::too_many_arguments)]
 pub fn pick_proactive_victims(
     tabs: &[Tab],
     tab_webviews: &HashMap<usize, WebView>,
@@ -367,6 +369,7 @@ pub fn pick_proactive_victims(
     pending_swap: Option<(usize, usize)>,
     active_id: usize,
     media_playing: &HashSet<usize>,
+    agent_driven: &HashSet<usize>,
     config: &ProactiveConfig,
 ) -> Vec<usize> {
     let now = Instant::now();
@@ -404,6 +407,9 @@ pub fn pick_proactive_victims(
                 }
             }
 
+            if agent_driven.contains(&t.id) {
+                return false;
+            }
             // Frozen: idle > threshold — always hibernate.
             if idle > config.frozen_idle_secs {
                 return true;
@@ -449,7 +455,8 @@ fn sample_tab_rss(tab_id: usize, tab_webviews: &HashMap<usize, WebView>) -> u64 
 /// (not already pending/hibernated).
 ///
 /// `pending_swap` contains (old_visible_id, new_loading_id) for tabs mid-transition.
-/// Both tabs are protected from hibernation until the swap completes.
+/// Both tabs are protected from hibernation until the swap completes, as are
+/// the `agent_driven` tabs an MCP agent is working in.
 #[allow(clippy::too_many_arguments)]
 pub fn pick_victims(
     tabs: &[Tab],
@@ -459,6 +466,7 @@ pub fn pick_victims(
     mru: &[usize],
     active_id: usize,
     media_playing: &HashSet<usize>,
+    agent_driven: &HashSet<usize>,
     pressure: MemoryPressure,
 ) -> Vec<usize> {
     let max_victims = match pressure {
@@ -486,6 +494,7 @@ pub fn pick_victims(
             // Exclude tabs involved in pending_swap
             swap_old != Some(t.id) && swap_new != Some(t.id)
         })
+        .filter(|t| !agent_driven.contains(&t.id))
         .filter_map(|t| {
             let mru_pos = mru.iter().position(|&id| id == t.id).unwrap_or(mru_len);
             let rss = sample_tab_rss(t.id, tab_webviews);

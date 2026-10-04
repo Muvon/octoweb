@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: API Shell</title>
+</head>
+<body>
+  <!-- An SPA shell: loaded and DOM-quiet while it waits on the API that fills
+       it, the way a Bluesky profile is. -->
+  <div id="app">Loading…</div>
+  <script>
+    fetch('/api/slow?ms=1500').then(function (r) { return r.json(); }).then(function (d) {
+      document.getElementById('app').innerHTML = '<h2>Loaded profile</h2><p>value ' + d.value + '</p>';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: rAF Splash</title>
+</head>
+<body>
+  <button id="buy" onclick="document.getElementById('status').textContent='bought'">Buy</button>
+  <div id="status">idle</div>
+  <!-- A splash that animates itself away with requestAnimationFrame, as
+       Bluesky's does. A hidden page runs no frames, so it would cover the
+       page forever. -->
+  <div id="splash" style="position:fixed;inset:0;background:#08f;z-index:9999"></div>
+  <script>
+    var frames = 0;
+    (function step() {
+      if (++frames >= 10) return document.getElementById('splash').remove();
+      requestAnimationFrame(step);
+    })();
+  </script>
+</body>
+</html>

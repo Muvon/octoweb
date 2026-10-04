@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Medium Editor</title>
+</head>
+<body>
+  <!-- Medium's new-story editor: one editing host whose title and body blocks
+       carry real placeholder spans, and a paste handler that inserts at the
+       caret's block — HTML paragraphs become blocks, plain text stays in one.
+       It needs its block structure: with the blocks deleted there is nowhere
+       to insert, which is how a select-all-delete before the paste broke it. -->
+  <div id="host" contenteditable="true" style="border:1px solid #999;padding:6px">
+    <section><div class="section-inner">
+      <h3 class="graf graf--title"><span class="defaultValue">Title</span><br></h3>
+      <p class="graf graf--p"><span class="defaultValue">Tell your story…</span><br></p>
+    </div></section>
+  </div>
+  <script>
+    var host = document.getElementById('host');
+    // Medium's own cut: the text of the selection goes, a block to type into stays.
+    host.addEventListener('cut', function (e) {
+      e.preventDefault();
+      var blocks = host.querySelectorAll('h3, p');
+      for (var i = 1; i < blocks.length; i++) blocks[i].remove();
+      blocks[0].innerHTML = '<br>';
+    });
+    // Paste inserts at the caret's block and ignores the rest of a selection,
+    // so pasting over a filled editor leaves the old paragraphs behind.
+    host.addEventListener('paste', function (e) {
+      var sel = document.getSelection();
+      var block = sel.anchorNode;
+      while (block && !(block.nodeType === 1 && /^(H3|P)$/.test(block.tagName))) block = block.parentNode;
+      if (!block || !host.contains(block)) return;
+      e.preventDefault();
+      var html = e.clipboardData.getData('text/html');
+      var lines = html
+        ? Array.prototype.map.call(new DOMParser().parseFromString(html, 'text/html').querySelectorAll('p'),
+            function (p) { return p.textContent; })
+        : [e.clipboardData.getData('text/plain')];
+      host.querySelectorAll('.defaultValue').forEach(function (s) { s.remove(); });
+      block.textContent = lines[0];
+      for (var i = 1; i < lines.length; i++) {
+        var p = document.createElement('p');
+        p.className = 'graf graf--p';
+        p.textContent = lines[i];
+        block.parentNode.insertBefore(p, block.nextSibling);
+        block = p;
+      }
+    });
+  </script>
+</body>
+</html>

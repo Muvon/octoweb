@@ -11,6 +11,7 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── config.rs             ← Config, session persistence, favicon cache, prompt history
    ├── acp.rs                ← ACP integration (sidebar AI + background learning agent)
    ├── mcp.rs                ← MCP server — 31 browser control tools over HTTP JSON-RPC
+   ├── agent_tabs.rs         ← MCP-driven tabs: kept rendering off-screen, exempt from hibernation
    │
    ├── url.rs                ← URL resolution (user input → navigable URL)
    ├── webview_utils.rs      ← Injected JS scripts, favicon cache lookup, overlay data

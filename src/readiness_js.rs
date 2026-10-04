@@ -6,7 +6,7 @@
 //!
 //! # Signals
 //!
-//! All four must hold simultaneously:
+//! All five must hold simultaneously:
 //!
 //! 1. `document.readyState === 'complete'` — base lifecycle gate.
 //! 2. **LCP settled** — no new `largest-contentful-paint` candidate for
@@ -16,6 +16,11 @@
 //!    roughly flat over the last 2 s. The steady-state fallback is what
 //!    handles live dashboards / chat / tickers without hanging.
 //! 4. **No long task** (> 50 ms main-thread block) in the last 300 ms.
+//! 5. **Network quiet** — no fetch/XHR younger than 3 s in flight, and none
+//!    finished in the last 400 ms. An SPA shell is DOM-quiet while it waits
+//!    on the API that fills it; without this a Bluesky profile read "ready"
+//!    as an empty frame. Requests older than 3 s are long-polls and streams,
+//!    which never finish and must not hold the page hostage.
 //!
 //! # Why MutationObserver is `childList + subtree` only
 //!
@@ -72,11 +77,15 @@ new Promise(function(r){
       var recent=0,older=0;
       for(var i=0;i<s.muts.length;i++){var dt=n-s.muts[i];if(dt<500)recent++;if(dt>1000)older++;}
       var newer=s.muts.length-older;
-      var steady=s.muts.length>=4&&newer>=older*0.7;
+      // Flat means both halves of the 2 s window carry mutations at a similar
+      // rate; with an empty older half a render burst read as a live feed.
+      var steady=elapsed>=2000&&older>=2&&newer>=older*0.5&&newer<=older*2;
       var domOk=recent<=3||steady;
       var lcpOk=s.lcp?(n-s.lcp)>=500:elapsed>=1000;
       var lngOk=!s.lng||(n-s.lng)>=300;
-      if(domOk&&lcpOk&&lngOk){finish(steady&&recent>3?'live':'ready');return;}
+      var w=window.__octoweb_inflight,netOk=true;
+      if(w){w.inflight.forEach(function(t){if(n-t<3000)netOk=false;});if(n-w.lastDone<400)netOk=false;}
+      if(domOk&&lcpOk&&lngOk&&netOk){finish(steady&&recent>3?'live':'ready');return;}
     }
     setTimeout(tick,200);
   }

@@ -129,15 +129,15 @@ pub enum McpCommand {
         keys_only: bool,
         response: oneshot::Sender<Result<String, String>>,
     },
-    /// Navigate back in browser history
+    /// Navigate back in browser history — Ok carries where the tab settled
     GoBack {
         tab_id: Option<usize>,
-        response: oneshot::Sender<Result<(), String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
-    /// Navigate forward in browser history
+    /// Navigate forward in browser history — Ok carries where the tab settled
     GoForward {
         tab_id: Option<usize>,
-        response: oneshot::Sender<Result<(), String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     /// Get browsing history entries
     GetHistory {
@@ -158,12 +158,12 @@ pub enum McpCommand {
     GetPlayingTabs {
         response: oneshot::Sender<Result<Vec<TabInfo>, String>>,
     },
-    /// Reload a tab
+    /// Reload a tab — Ok carries how the reloaded page settled
     Reload {
         tab_id: Option<usize>,
         /// Bypass the HTTP cache (`reloadFromOrigin`).
         hard: bool,
-        response: oneshot::Sender<Result<(), String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     /// Get readable text content of a page
     GetPageContent {
@@ -279,6 +279,7 @@ pub enum McpCommand {
 /// - `"detached"`     — `@ref` resolved but the element is no longer in the DOM.
 /// - `"invalid:<msg>"`— `document.querySelector` threw on a malformed selector.
 /// - `"disabled"`     — element stayed disabled/readonly through the retry window.
+/// - `"hidden"`       — click/hover target rendered no box through the retry window.
 /// - `"occluded:<el>"`— another element kept covering the click point; `<el>`
 ///   describes the cover (tag#id.class) so the AI knows what to dismiss.
 ///
@@ -313,6 +314,10 @@ pub fn dom_status_error(status: &str, selector: &str) -> String {
         ),
         "disabled" => format!(
             "Element '{selector}' stayed disabled/readonly — wait for the page to enable it or pick another element"
+        ),
+        "hidden" => format!(
+            "Element '{selector}' is not rendered (display:none or zero size) — it sits in a closed menu, \
+             collapsed section or inactive view. Open that first, or re-snapshot for the visible control"
         ),
         "noteditable" => format!(
             "Element '{selector}' is not a text field — it is not an <input>, <textarea>, or contenteditable. \
@@ -371,6 +376,7 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
             return None;
         }
         let connected = v.get("connected").and_then(|x| x.as_bool()).unwrap_or(true);
+        let stale = v.get("stale").and_then(|x| x.as_bool()).unwrap_or(false);
         let got = v.get("got").and_then(|x| x.as_str()).unwrap_or("");
         let len = v.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
         let want = v.get("want").and_then(|x| x.as_u64()).unwrap_or(0);
@@ -378,6 +384,12 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
             "⚠ TEXT DID NOT STICK: the field was removed from the page after typing — \
              the value is gone. Re-snapshot and type into the new element."
                 .to_string()
+        } else if stale {
+            format!(
+                "⚠ TEXT DID NOT REPLACE: what you sent is there, but so is the text the field held \
+                 before (now starts \"{got}\") — the editor inserted instead of replacing. Clear the \
+                 field (type an empty string) and type again."
+            )
         } else {
             format!(
                 "⚠ TEXT DID NOT STICK: the field now holds {len} chars, not the {want} sent \
@@ -411,18 +423,8 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
     // Loudest thing in the line, and first: an action that navigated away from
     // text the caller typed destroyed work, and every other signal for it is an
     // anonymous node count that reads like a successful render.
-    if let Some(lost) = obj.get("lost").and_then(|l| l.as_object()) {
-        let sel = lost
-            .get("sel")
-            .and_then(|x| x.as_str())
-            .unwrap_or("the field");
-        let len = lost.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
-        let head = lost.get("head").and_then(|x| x.as_str()).unwrap_or("");
-        parts.push(format!(
-            "⚠ TEXT LOST: the {len} chars you typed into {sel} (\"{head}…\") are no longer \
-             anywhere in this document — this action discarded them. Retype into the new \
-             element before submitting."
-        ));
+    if let Some(note) = lost_text_note(&obj) {
+        parts.push(note);
     }
     let str_of = |k: &str| obj.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
     if let Some(u) = str_of("url") {
@@ -472,6 +474,31 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
     } else {
         format!(" → {}", parts.join(" · "))
     }
+}
+
+/// The `⚠ TEXT LOST` warning for an effect payload (settle shape or bare
+/// diff), if the action discarded text the caller had typed. Separate from
+/// [`format_effect`] because a navigating action is answered by the settle
+/// path, which reports the navigation itself but must not drop this.
+pub fn lost_text_note_json(payload_json: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(payload_json).ok()?;
+    let obj = v.get("diff").unwrap_or(&v).as_object()?;
+    lost_text_note(obj)
+}
+
+fn lost_text_note(diff: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let lost = diff.get("lost")?.as_object()?;
+    let sel = lost
+        .get("sel")
+        .and_then(|x| x.as_str())
+        .unwrap_or("the field");
+    let len = lost.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
+    let head = lost.get("head").and_then(|x| x.as_str()).unwrap_or("");
+    Some(format!(
+        "⚠ TEXT LOST: the {len} chars you typed into {sel} (\"{head}…\") are no longer \
+         anywhere in this document — this action discarded them. Retype into the new \
+         element before submitting."
+    ))
 }
 
 impl McpCommand {
@@ -706,6 +733,10 @@ pub struct TabIdRequest {
 /// short enough that one call cannot consume an agent's whole context window.
 pub const DEFAULT_PAGE_CONTENT_LIMIT: usize = 20_000;
 
+/// Ceiling on `browser_wait` and `browser_execute_js` timeouts — below
+/// send_command's 30 s window, so a maxed-out wait answers "timeout" itself.
+pub const MAX_WAIT_MS: u64 = 25_000;
+
 /// `browser_get_page_content` — a long article or a chat log is hundreds of KB
 /// of innerText, and returning it whole leaves an agent no context for the task
 /// it was reading the page for. Paged, with the total always reported.
@@ -904,7 +935,7 @@ pub struct WaitRequest {
     #[schemars(description = "Tab to target. Omit for the user's visible tab.")]
     pub tab_id: Option<usize>,
     #[schemars(
-        description = "What to wait for: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves \"ready\"/\"live\"/\"partial\") | \"text:<phrase>\" (until that visible text appears) | \"text_gone:<phrase>\" (until it disappears) | a CSS selector (until it matches). Resolves \"ready\" or \"timeout\"."
+        description = "What to wait for: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — same probe browser_navigate uses; resolves \"ready\"/\"live\"/\"partial\") | \"networkidle\" (no fetch/XHR in flight for 500 ms) | \"text:<phrase>\" (until that visible text appears) | \"text_gone:<phrase>\" (until it disappears) | a CSS selector (until it matches). Resolves \"ready\" or \"timeout\"."
     )]
     pub event: Option<String>,
     #[schemars(
@@ -1185,53 +1216,49 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Go back in this tab's history. Defaults to the visible tab.",
+        description = "Go back in this tab's history. Waits for the page to settle and reports where it landed, its title and readiness; errors if there is no earlier page. Defaults to the visible tab.",
         annotations(destructive_hint = false)
     )]
     async fn browser_go_back(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        browser_try!(
+        let outcome = browser_try!(
             self.send_command(|tx| McpCommand::GoBack {
                 tab_id: req.tab_id,
                 response: tx,
             })
             .await?
         );
-        Ok(CallToolResult::success(vec![Content::text(
-            "Navigated back",
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(outcome)]))
     }
 
     #[tool(
-        description = "Go forward in this tab's history. Defaults to the visible tab.",
+        description = "Go forward in this tab's history. Waits for the page to settle and reports where it landed, its title and readiness; errors if there is no later page. Defaults to the visible tab.",
         annotations(destructive_hint = false)
     )]
     async fn browser_go_forward(
         &self,
         Parameters(req): Parameters<TabIdRequest>,
     ) -> Result<CallToolResult, McpError> {
-        browser_try!(
+        let outcome = browser_try!(
             self.send_command(|tx| McpCommand::GoForward {
                 tab_id: req.tab_id,
                 response: tx,
             })
             .await?
         );
-        Ok(CallToolResult::success(vec![Content::text(
-            "Navigated forward",
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(outcome)]))
     }
 
     #[tool(
-        description = "Reload the tab. hard=true bypasses the HTTP cache so updated JS/CSS is refetched. Defaults to the visible tab."
+        description = "Reload the tab and wait for it to settle (reports URL, title and readiness). hard=true bypasses the HTTP cache so updated JS/CSS is refetched. Reloading discards anything typed into the page. Defaults to the visible tab."
     )]
     async fn browser_reload(
         &self,
         Parameters(req): Parameters<ReloadRequest>,
     ) -> Result<CallToolResult, McpError> {
-        browser_try!(
+        let outcome = browser_try!(
             self.send_command(|tx| McpCommand::Reload {
                 tab_id: req.tab_id,
                 hard: req.hard.unwrap_or(false),
@@ -1239,13 +1266,11 @@ impl McpServer {
             })
             .await?
         );
-        Ok(CallToolResult::success(vec![Content::text(
-            "Page reloaded",
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(outcome)]))
     }
 
     #[tool(
-        description = "Wait for a condition. Rarely needed: browser_navigate already waits for SPA readiness and every action reports its effect. Use for lazily-loaded content or after an action that reported a route change. event: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — main content rendered + DOM/JS quiet, with a steady-state fallback for live feeds; returns \"ready\" | \"live\" | \"partial\") | a CSS selector to wait for. Other events return \"ready\" or \"timeout\".",
+        description = "Wait for a condition. Rarely needed: browser_navigate and any action that navigates already wait for the new page to settle, and every action reports its effect. Use for lazily-loaded content. event: \"load\" (default) | \"domcontentloaded\" | \"ready\" (full SPA readiness — main content rendered, DOM/JS and fetch/XHR quiet, with a steady-state fallback for live feeds; returns \"ready\" | \"live\" | \"partial\") | \"networkidle\" (no fetch/XHR in flight for 500 ms; long-polls and streams are ignored) | \"text:<phrase>\" (until that text is on the page) | \"text_gone:<phrase>\" (until it is not) | a CSS selector (until it matches). Other events return \"ready\" or \"timeout\".",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     async fn browser_wait(
@@ -1253,9 +1278,7 @@ impl McpServer {
         Parameters(req): Parameters<WaitRequest>,
     ) -> Result<CallToolResult, McpError> {
         let event = req.event.unwrap_or_else(|| "load".to_string());
-        // Cap below send_command's 30 s ceiling so a maxed-out wait returns a
-        // clean "timeout" instead of racing the generic MCP-timeout error.
-        let timeout_ms = req.timeout_ms.unwrap_or(10_000).min(25_000);
+        let timeout_ms = req.timeout_ms.unwrap_or(10_000).min(MAX_WAIT_MS);
         let result = browser_try!(
             self.send_command(|tx| McpCommand::Wait {
                 tab_id: req.tab_id,
@@ -1434,7 +1457,7 @@ impl McpServer {
             self.send_command(|tx| McpCommand::ExecuteJs {
                 tab_id: req.tab_id,
                 script: req.script,
-                timeout_ms: req.timeout_ms.unwrap_or(10_000).clamp(1_000, 25_000),
+                timeout_ms: req.timeout_ms.unwrap_or(10_000).clamp(1_000, MAX_WAIT_MS),
                 response: tx,
             })
             .await?
@@ -1467,7 +1490,7 @@ impl McpServer {
     // ── Interaction ─────────────────────────────────────────────────
 
     #[tool(
-        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, waits until it is stable and unobstructed, then delivers a TRUSTED native click (isTrusted=true, real user gesture — works on sites that ignore synthetic events, and grants popup/clipboard/fullscreen permissions). The result tells you what happened: navigation, SPA URL change, new text that appeared (toasts, confirmations, errors), dialogs opened, network requests fired, DOM/focus changes — or explicitly 'no observable change'. Trust that line for what happened ON THIS PAGE; it says nothing about whether a server accepted anything, so verify a created artifact by loading it fresh. If the click navigates while you have unsubmitted typed text in the tab, the result says so — that text is gone and must be retyped in the new document. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone; occluded → dismiss the named overlay. Defaults to the visible tab."
+        description = "Click an element by CSS selector or @ref from browser_snapshot. Scrolls into view, waits until it is stable and unobstructed, then delivers a TRUSTED native click (isTrusted=true, real user gesture — works on sites that ignore synthetic events, and grants popup/clipboard/fullscreen permissions). The result tells you what happened: new text that appeared (toasts, confirmations, errors), dialogs opened, network requests fired, DOM/focus changes — or explicitly 'no observable change'. A click that navigates (full load or SPA route) returns once the new page has settled, with its URL, title and readiness — read or snapshot it right away, no wait needed. Trust that line for what happened ON THIS PAGE; it says nothing about whether a server accepted anything, so verify a created artifact by loading it fresh. If the click navigates while you have unsubmitted typed text in the tab, the result says so — that text is gone and must be retyped in the new document. On error you get a specific reason: stale @ref → re-snapshot; missing → no element; detached → element gone; occluded → dismiss the named overlay. Defaults to the visible tab."
     )]
     async fn browser_click(
         &self,
@@ -1536,7 +1559,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Fill several fields and (optionally) submit in ONE call — the whole form instead of N round-trips. Each field is {selector, value} (CSS or @ref); values replace, not append. Pass `submit` (a button selector/@ref) to click after filling, and `expect` to verify the result (see browser_click). Reports each field ✓/✗ plus the submit's effect. Defaults to the visible tab."
+        description = "Fill several fields and (optionally) submit in ONE call — the whole form instead of N round-trips. Each field is {selector, value} (CSS or @ref); values replace, not append. Pass `submit` (a button selector/@ref) to click after filling, and `expect` to verify the result (see browser_click). Reports each field ✓/✗ plus the submit's effect; submit is skipped when any field failed or did not keep its value. Defaults to the visible tab."
     )]
     async fn browser_fill_form(
         &self,
@@ -1568,7 +1591,7 @@ impl McpServer {
                 // claim-instead-of-observation this tool surface is being cured
                 // of — and it is the shape that hid a value the page threw away.
                 Ok(effect) => {
-                    let stuck = !effect.contains("TEXT DID NOT STICK");
+                    let stuck = !effect.contains("TEXT DID NOT");
                     if stuck {
                         filled += 1;
                     }
@@ -1585,7 +1608,11 @@ impl McpServer {
             // underneath them. If one of them navigated the tab, everything after
             // it lands in a different document and the submit fires on a form the
             // caller never filled — stop instead.
-            if idx < last_idx && lines.last().is_some_and(|l| l.contains("url → ")) {
+            if idx < last_idx
+                && lines
+                    .last()
+                    .is_some_and(|l| l.contains("url → ") || l.contains("navigated to"))
+            {
                 lines.push(
                     "⏹ stopped: filling this field navigated the tab, so the remaining fields \
                      would land in a different document and submit would fire on a form you \
@@ -1601,6 +1628,13 @@ impl McpServer {
                 Some(_) => "\nsubmit: SKIPPED — the tab navigated mid-fill".to_string(),
                 None => String::new(),
             }
+        } else if req.submit.is_some() && filled < req.fields.len() {
+            // Submitting a form with a field missing or rewritten sends data
+            // the caller never meant to send.
+            format!(
+                "\nsubmit: SKIPPED — {} field(s) above did not take their value; fix them, then click submit",
+                req.fields.len() - filled
+            )
         } else if let Some(sub) = &req.submit {
             let r = self
                 .send_command(|tx| McpCommand::Click {
@@ -1890,10 +1924,9 @@ impl McpServer {
             "accept" => true,
             "dismiss" => false,
             other => {
-                return Err(McpError::invalid_params(
-                    format!("action must be \"accept\" or \"dismiss\", got \"{other}\""),
-                    None,
-                ))
+                return Ok(err_result(format!(
+                    "action must be \"accept\" or \"dismiss\", got \"{other}\""
+                )))
             }
         };
         let count = req.count.unwrap_or(1).clamp(1, 20);
@@ -1912,17 +1945,13 @@ impl McpServer {
         Parameters(req): Parameters<UploadFileRequest>,
     ) -> Result<CallToolResult, McpError> {
         if req.paths.is_empty() {
-            return Err(McpError::invalid_params(
-                "paths must contain at least one file",
-                None,
+            return Ok(err_result(
+                "paths must contain at least one file".to_string(),
             ));
         }
         for path in &req.paths {
             if !std::path::Path::new(path).is_file() {
-                return Err(McpError::invalid_params(
-                    format!("File not found: {path}"),
-                    None,
-                ));
+                return Ok(err_result(format!("File not found: {path}")));
             }
         }
         let count = req.paths.len();
@@ -2158,13 +2187,16 @@ impl ServerHandler for McpServer {
                 follow with browser_press_key(key=\"Enter\") — a native Enter that submits the form. For \
                 single keys use browser_press_key, not browser_type.\n\
                 \n\
-                Waiting: browser_navigate blocks until the page goes quiet and reports how it settled in \
-                its `readiness` field — 'ready'/'live' mean it rendered, 'partial' means it hit the 8s \
-                ceiling still changing. \
+                Waiting: browser_navigate blocks until the page goes quiet (DOM, JS and its fetch/XHR) and \
+                reports how it settled in its `readiness` field — 'ready'/'live' mean it rendered, 'partial' \
+                means it hit the 8s ceiling still changing. A click, key press, go_back/go_forward or reload \
+                that navigates — a full load or an SPA route — waits the same way and reports the new URL, \
+                title and readiness, so your next read sees the new page. \
                 Interactions auto-retry for ~2.5s until the element is present, stable, and unobstructed, \
-                so you rarely need explicit waits; after an action reports a route change, re-snapshot or \
-                browser_wait with a CSS selector for the new content. A tool reporting a navigation means \
-                one really happened (tracked natively); a timeout means the script is still running.\n\
+                so you rarely need explicit waits; for content that loads later (infinite scroll, lazy \
+                panels) use browser_wait with text:<phrase>, a CSS selector, or networkidle. A tool reporting \
+                a navigation means one really happened (tracked natively); a timeout means the script is \
+                still running.\n\
                 \n\
                 Debugging: when a page misbehaves or an interaction has no effect, check \
                 browser_console_messages (JS errors, with real messages) and browser_network_requests \
@@ -2451,6 +2483,16 @@ mod tests {
         let out = format_effect_with_download("{\"dom\":\"+1/-0\"}", Some("a.jpg"));
         assert!(out.starts_with(" → download started: a.jpg"), "{out}");
         assert!(out.contains("dom +1/-0 nodes"), "{out}");
+    }
+
+    #[test]
+    fn effect_flags_text_that_did_not_replace() {
+        let out = format_effect_with_download(
+            "{\"diff\":{},\"met\":true,\"val\":{\"ok\":false,\"connected\":true,\"stale\":true,\"got\":\"New Old\",\"len\":6,\"want\":3}}",
+            None,
+        );
+        assert!(out.contains("DID NOT REPLACE"), "{out}");
+        assert!(!out.contains("DID NOT STICK"), "{out}");
     }
 
     #[test]

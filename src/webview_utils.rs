@@ -755,6 +755,15 @@ pub const COMBINED_SCRIPT: &str = r#"
     var BODY_CAP = 20000;
     function textyType(ct) { return /json|text|xml|javascript|urlencoded|graphql/i.test(ct || ''); }
 
+    // fetch/XHR in flight, by start time. An SPA shell sits DOM-quiet while it
+    // waits on the API that fills it, so the readiness probe also waits for
+    // the network to go quiet (readiness_js.rs).
+    var inflight = new Map(), reqSeq = 0;
+    var netState = { inflight: inflight, lastDone: 0 };
+    Object.defineProperty(window, '__octoweb_inflight', { value: netState, configurable: true });
+    function reqStart() { var id = ++reqSeq; inflight.set(id, performance.now()); return id; }
+    function reqEnd(id) { if (inflight.delete(id)) netState.lastDone = performance.now(); }
+
     // fetch wrap
     var origFetch = window.fetch;
     if (origFetch) window.fetch = _mask(function (input, init) {
@@ -767,9 +776,12 @@ pub const COMBINED_SCRIPT: &str = r#"
                   ms: Math.round(performance.now() - t0), ts: Date.now(), error: error };
         net.push2(entry);
       }
-      return origFetch.apply(this, arguments).then(
+      var rid = reqStart(), p;
+      try { p = origFetch.apply(this, arguments); } catch (e) { reqEnd(rid); throw e; }
+      return p.then(
         function (res) {
           rec(res.status);
+          var bodyRead = false;
           try {
             var ct = res.headers && res.headers.get ? res.headers.get('content-type') : '';
             // event-stream matches /text/ but never resolves: the truncation to
@@ -777,12 +789,17 @@ pub const COMBINED_SCRIPT: &str = r#"
             // for the life of the connection. AI chat UIs are exactly this
             // traffic, and .text() never delivered a usable body for them anyway.
             if (entry && textyType(ct) && !/event-stream/i.test(ct || '')) {
-              res.clone().text().then(function (t) { if (entry) entry.body = String(t).substring(0, BODY_CAP); }).catch(function () {});
+              // Headers are not the data: the request stays in flight until
+              // the body the page is about to render has arrived.
+              bodyRead = true;
+              res.clone().text().then(function (t) { if (entry) entry.body = String(t).substring(0, BODY_CAP); })
+                .catch(function () {}).then(function () { reqEnd(rid); });
             }
           } catch (e) {}
+          if (!bodyRead) reqEnd(rid);
           return res;
         },
-        function (err) { rec(0, String(err).substring(0, 200)); throw err; }
+        function (err) { reqEnd(rid); rec(0, String(err).substring(0, 200)); throw err; }
       );
     }, origFetch);
 
@@ -805,8 +822,9 @@ pub const COMBINED_SCRIPT: &str = r#"
     var XO = XMLHttpRequest.prototype.open, XS = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = _mask(function (m, u) { this.__ow_req = [String(m), String(u)]; return XO.apply(this, arguments); }, XO);
     XMLHttpRequest.prototype.send = _mask(function () {
-      var x = this, t0 = performance.now();
+      var x = this, t0 = performance.now(), rid = reqStart();
       x.addEventListener('loadend', function () {
+        reqEnd(rid);
         var i = x.__ow_req || ['?', '?'];
         var entry = { method: i[0], url: i[1].substring(0, 300), status: x.status, type: 'xhr',
                       ms: Math.round(performance.now() - t0), ts: Date.now() };
@@ -818,7 +836,7 @@ pub const COMBINED_SCRIPT: &str = r#"
         } catch (e) {}
         net.push2(entry);
       });
-      return XS.apply(this, arguments);
+      try { return XS.apply(this, arguments); } catch (e) { reqEnd(rid); throw e; }
     }, XS);
 
     // Click-listener tagging: lets browser_snapshot surface <div>-buttons whose

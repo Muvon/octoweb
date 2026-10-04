@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Reveal</title>
+</head>
+<body>
+  <!-- Present from the start, revealed by flipping attributes only: no node is
+       added, so a wait that watches for added nodes never fires. -->
+  <p id="msg" hidden>Payment confirmed</p>
+  <div id="badge" class="pending">status</div>
+  <script>
+    setTimeout(function () {
+      document.getElementById('msg').hidden = false;
+      document.getElementById('badge').className = 'success';
+    }, 600);
+  </script>
+</body>
+</html>

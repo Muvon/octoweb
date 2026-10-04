@@ -7,8 +7,9 @@ Prerequisites:
     http://127.0.0.1:3434/mcp (stateless streamable-http, plain JSON).
 
 The suite starts its own fixture HTTP server on http://127.0.0.1:8765
-serving tests/fixtures/ plus two dynamic endpoints:
+serving tests/fixtures/ plus dynamic endpoints:
     /api/data   -> JSON payload (network-capture tests)
+    /api/slow   -> same payload after ?ms= milliseconds (SPA data loads)
     /submitted  -> echoes query params in the body (form-submit tests)
 
 Each test opens a fresh background tab pointed at a fixture page, drives
@@ -66,7 +67,9 @@ class TestFailure(Exception):
 class FixtureHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/data":
+        if parsed.path in ("/api/data", "/api/slow"):
+            if parsed.path == "/api/slow":
+                time.sleep(int(dict(parse_qsl(parsed.query)).get("ms", "1000")) / 1000)
             body = json.dumps({"ok": True, "value": 42}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -882,6 +885,31 @@ def paragraph_editor_type():
 
 
 @test
+def medium_editor_keeps_its_structure():
+    """Typing into a Medium-shaped editor fills its title and paragraphs. Deleting everything
+    before the paste used to wipe the blocks the editor needs; real Medium then showed loose,
+    unstyled text. Placeholders are not content in the snapshot either."""
+    with fixture_tab("medium_editor.html") as tab:
+        snap = tool_text("browser_snapshot", {"tab_id": tab, "find": "contenteditable"})
+        # The placeholder may name the field; it must not read as its value.
+        expect(re.search(r"contenteditable val=\s*$", snap, re.M),
+               f"placeholder reported as editor content: {snap[:400]!r}")
+        tool_text("browser_type", {"tab_id": tab, "selector": "#host",
+                                   "text": "A title\nFirst paragraph.\nSecond paragraph."}, timeout=15)
+        title = exec_js(tab, "document.querySelector('#host section h3.graf--title').textContent")
+        expect(title.strip('"') == "A title", f"title block wrong: {title!r}")
+        paras = exec_js(tab, "Array.from(document.querySelectorAll('#host p.graf--p')).map(p => p.textContent).join('|')")
+        expect("First paragraph.|Second paragraph." in paras, f"paragraph blocks wrong: {paras!r}")
+        # Replacing a filled editor: an insert in front of the old text also contains what was sent.
+        result = tool_text("browser_type", {"tab_id": tab, "selector": "#host",
+                                            "text": "New title\nNew body."}, timeout=15)
+        expect("DID NOT" not in result, f"replace reported as failed: {result!r}")
+        text = exec_js(tab, "document.getElementById('host').textContent")
+        expect("New title" in text and "New body." in text and "First paragraph" not in text,
+               f"old content survived the replace: {text!r}")
+
+
+@test
 def type_keys_mode():
     """mode=\"keys\" types with trusted native keystrokes: the text lands in a
     plain contenteditable, and a newline becomes a real Enter (a new block)."""
@@ -1040,13 +1068,15 @@ def upload_file():
 
 @test
 def container_scroll():
-    """browser_scroll with a selector scrolls the nearest scrollable container."""
+    """browser_scroll with a selector scrolls the nearest scrollable container — and keeps
+    going: re-centring the anchor first used to undo each step."""
     with fixture_tab("scroll_container.html") as tab:
-        tool_text("browser_scroll",
-                  {"tab_id": tab, "selector": "#inner-top", "direction": "down", "pixels": 300})
-        result = exec_js(tab, "document.getElementById('box').scrollTop > 0")
-        expect("true" in result.lower(),
-               f"#box.scrollTop did not increase after container scroll: {result!r}")
+        for _ in range(2):
+            tool_text("browser_scroll",
+                      {"tab_id": tab, "selector": "#inner-top", "direction": "down", "pixels": 300})
+        result = exec_js(tab, "document.getElementById('box').scrollTop")
+        expect(int(float(result.strip('"'))) >= 600,
+               f"#box.scrollTop should be 600 after two 300px scrolls, got {result!r}")
 
 
 @test
@@ -1182,6 +1212,8 @@ def snapshot_labels_and_state():
         expect('alert: "Access denied for this account"' in snap, f"role=alert missing: {snap[:800]!r}")
         expect("present-but-hidden controls" in snap, f"hidden toolbar count missing: {snap[:800]!r}")
         expect("Download" not in snap.split("elements")[1], "hidden buttons must not get @refs")
+        expect('link "Ada Lovelace"' in snap, f"image-only link unnamed: {snap[:1200]!r}")
+        expect('button "Bookmark"' in snap, f"icon-only button unnamed: {snap[:1200]!r}")
 
 
 @test
@@ -1210,6 +1242,156 @@ def click_reports_navigation():
         elapsed = time.monotonic() - start
         expect("navigated to" in text and "basic.html" in text, f"navigation not reported: {text!r}")
         expect(elapsed < 6, f"navigation report took {elapsed:.1f}s — should not wait for the watchdog")
+
+
+@test
+def click_into_spa_route_waits_for_the_new_view():
+    """A click that routes an SPA answers once the new view rendered — a Medium article read empty before."""
+    with fixture_tab("spa_slow.html") as tab:
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#open"}, timeout=20)
+        expect("navigated to" in text and "#/article" in text and "readiness" in text,
+               f"route change not reported as a settled navigation: {text!r}")
+        content = tool_text("browser_get_page_content", {"tab_id": tab})
+        expect("Article body loaded" in content,
+               f"click answered before the routed view rendered: {content[:300]!r}")
+
+
+@test
+def navigate_waits_for_api_data():
+    """An SPA shell is DOM-quiet while its API call is in flight — navigate must wait for the data."""
+    info = navigate(fixture_url("api_shell.html"))
+    tab_id = info["tab_id"]
+    try:
+        content = tool_text("browser_get_page_content", {"tab_id": tab_id})
+        expect("Loaded profile" in content,
+               f"navigate returned before the API data rendered ({info.get('readiness')}): {content[:300]!r}")
+    finally:
+        close_tab(tab_id)
+
+
+@test
+def background_tab_runs_animation_frames():
+    """MCP tabs are background tabs; a page animating its splash away must still get frames."""
+    with fixture_tab("raf_splash.html") as tab:
+        is_err, _, text = call_tool("browser_click", {"tab_id": tab, "selector": "#buy"}, timeout=15)
+        expect(not is_err and "bought" in js_text(tab, "status"),
+               f"click blocked by a splash that never animated away: {text!r}")
+        vis = exec_js(tab, "document.visibilityState")
+        expect("visible" in vis, f"a driven background tab must render as visible, got {vis!r}")
+        tabs = get_tabs()
+        expect(not tab_entry(tabs, tab).get("is_active"), "waking a tab must not show it to the user")
+
+
+@test
+def history_steps_report_landing_or_refuse():
+    """go_back/forward and reload answer where the tab settled; go_back on a fresh tab refuses."""
+    with fixture_tab("effects.html") as tab:
+        is_err, _, text = call_tool("browser_go_back", {"tab_id": tab}, timeout=15)
+        expect(is_err and "no earlier page" in text, f"go_back with no history must refuse: {text!r}")
+        tool_text("browser_click", {"tab_id": tab, "selector": "#navigate"}, timeout=20)
+        text = tool_text("browser_go_back", {"tab_id": tab}, timeout=20)
+        expect("effects.html" in text and "readiness" in text, f"go_back must report where it settled: {text!r}")
+        text = tool_text("browser_go_forward", {"tab_id": tab}, timeout=20)
+        expect("basic.html" in text and "readiness" in text, f"go_forward must report where it settled: {text!r}")
+        text = tool_text("browser_reload", {"tab_id": tab}, timeout=20)
+        expect("Reloaded" in text and "basic.html" in text and "readiness" in text,
+               f"reload must report how the page settled: {text!r}")
+
+
+@test
+def go_back_across_spa_route_settles_promptly():
+    """Back across a pushState entry is no page load; it must not wait out the stale timer (X did)."""
+    with fixture_tab("spa.html") as tab:
+        tool_text("browser_click", {"tab_id": tab, "selector": "#to-settings"}, timeout=15)
+        start = time.monotonic()
+        text = tool_text("browser_go_back", {"tab_id": tab}, timeout=25)
+        elapsed = time.monotonic() - start
+        expect("readiness" in text and "#/settings" not in text, f"go_back did not settle on the home route: {text!r}")
+        expect(elapsed < 6, f"go_back across an SPA route took {elapsed:.1f}s")
+
+
+@test
+def wait_networkidle():
+    """networkidle waits out an in-flight fetch instead of resolving at once."""
+    with fixture_tab("basic.html") as tab:
+        exec_js(tab, "(fetch('/api/slow?ms=1200'), 1)")
+        start = time.monotonic()
+        text = tool_text("browser_wait", {"tab_id": tab, "event": "networkidle", "timeout_ms": 5000}, timeout=15)
+        elapsed = time.monotonic() - start
+        expect("ready" in text, f"networkidle should resolve ready: {text!r}")
+        expect(elapsed >= 1.0, f"networkidle resolved in {elapsed:.2f}s with a fetch still in flight")
+
+
+@test
+def click_refuses_unrendered_target():
+    """A display:none target is refused, not clicked at (0,0) — where the page's home button sits."""
+    with fixture_tab("hidden_target.html") as tab:
+        is_err, _, text = call_tool("browser_click", {"tab_id": tab, "selector": "#menu-item"}, timeout=15)
+        expect(is_err and "not rendered" in text, f"unrendered target must be refused: {text!r}")
+        status = js_text(tab, "status")
+        expect("idle" in status, f"a click meant for a hidden item landed elsewhere: {status!r}")
+
+
+@test
+def fill_form_skips_submit_when_a_field_did_not_stick():
+    """Submitting after a field was rewritten sends data the caller never meant to send."""
+    with fixture_tab("reject_field.html") as tab:
+        text = tool_text("browser_fill_form", {"tab_id": tab, "submit": "#go", "fields": [
+            {"selector": "#name", "value": "Ada"}, {"selector": "#code", "value": "123456"}]}, timeout=30)
+        expect("SKIPPED" in text and "Filled 1/2" in text, f"submit must be skipped: {text!r}")
+        expect("idle" in js_text(tab, "status"), "the form was submitted anyway")
+
+
+@test
+def keystroke_typing_reads_the_field_back():
+    """mode:keys reports a value the field refused, like the scripted path does."""
+    with fixture_tab("reject_field.html") as tab:
+        text = tool_text("browser_type", {"tab_id": tab, "selector": "#short", "text": "abcdef", "mode": "keys"},
+                         timeout=20)
+        expect("DID NOT STICK" in text, f"maxlength truncation went unreported: {text!r}")
+
+
+@test
+def navigation_that_discards_a_draft_says_so():
+    """Typed text a route change throws away is reported by the action that threw it away."""
+    with fixture_tab("draft_loss.html") as tab:
+        draft = "A reply long enough to matter, typed before switching tabs in the app."
+        tool_text("browser_type", {"tab_id": tab, "selector": "#draft", "text": draft})
+        text = tool_text("browser_click", {"tab_id": tab, "selector": "#tab-b"}, timeout=20)
+        expect("TEXT LOST" in text, f"discarded draft not reported: {text!r}")
+
+
+@test
+def dismiss_overlay_leaves_page_buttons_alone():
+    """With no overlay on the page, the page's own Close button is not pressed."""
+    with fixture_tab("plain_close.html") as tab:
+        out = tool_text("browser_dismiss_overlay", {"tab_id": tab}, timeout=15)
+        expect("No dismissible overlay" in out, f"should find nothing to dismiss: {out!r}")
+        still = exec_js(tab, "!!document.getElementById('panel')")
+        expect("true" in still.lower(), "the page's own panel was closed")
+
+
+@test
+def waits_see_attribute_only_reveals():
+    """text: and selector waits resolve when a reveal only flips attributes."""
+    with fixture_tab("reveal.html") as tab:
+        text = tool_text("browser_wait", {"tab_id": tab, "event": "text:Payment confirmed", "timeout_ms": 4000},
+                         timeout=15)
+        expect("ready" in text, f"text wait missed an attribute-only reveal: {text!r}")
+        text = tool_text("browser_wait", {"tab_id": tab, "event": "#badge.success", "timeout_ms": 4000}, timeout=15)
+        expect("ready" in text, f"selector wait missed a class change: {text!r}")
+
+
+@test
+def scoped_diff_reports_removals():
+    """A within+diff snapshot names refs that left the scope."""
+    with fixture_tab("spa.html") as tab:
+        first = tool_text("browser_snapshot", {"tab_id": tab, "within": "#save-form"}, timeout=15)
+        ref, _ = find_ref(first, 'button "Save"')
+        exec_js(tab, "(document.getElementById('save').remove(), 1)")
+        diff = tool_text("browser_snapshot", {"tab_id": tab, "within": "#save-form", "diff": True}, timeout=15)
+        expect(re.search(r"removed \(.*" + re.escape(ref) + r"\b", diff),
+               f"scoped diff did not report {ref} removed: {diff[:400]!r}")
 
 
 DOWNLOADS_DIR = os.path.expanduser("~/Downloads")

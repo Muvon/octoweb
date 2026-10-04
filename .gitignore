@@ -21,3 +21,5 @@ Thumbs.db
 .env.local
 /.marketing
 /.playwright-mcp/
+/__pycache__/
+

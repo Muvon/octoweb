@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Draft Loss</title>
+</head>
+<body>
+  <!-- A composer that a route change remounts, discarding the draft. -->
+  <div id="view"><textarea id="draft"></textarea></div>
+  <button id="tab-b">Notifications</button>
+  <script>
+    document.getElementById('tab-b').addEventListener('click', function () {
+      history.pushState({}, '', '/draft_loss.html#/notifications');
+      document.getElementById('view').innerHTML = '<p>No notifications</p>';
+    });
+  </script>
+</body>
+</html>
