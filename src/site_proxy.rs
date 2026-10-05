@@ -14,9 +14,9 @@
 //! navigations and hand the URL to the tab's reopen callback.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, Once, OnceLock, RwLock};
 
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{msg_send, sel};
@@ -47,6 +47,21 @@ static TABS: OnceLock<Mutex<HashMap<usize, TabEntry>>> = OnceLock::new();
 fn tabs() -> &'static Mutex<HashMap<usize, TabEntry>> {
     TABS.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+#[link(name = "Network", kind = "framework")]
+extern "C" {
+    fn nw_parameters_create() -> *mut c_void;
+    fn nw_release(obj: *mut c_void);
+}
+
+/// Network.framework bug: the `com.apple.system.networkd.settings` handler
+/// holds the settings lock while it creates the process's implicit
+/// `nw_context` on first use, and creating it takes that lock again — an
+/// `os_unfair_lock` recursive abort. wry's `nw_proxy_config_*` calls install
+/// the handler without creating the context, so the next networkd settings
+/// change kills the app. Creating any `nw_parameters` builds the context
+/// first; it lives for the rest of the process.
+static IMPLICIT_NW_CONTEXT: Once = Once::new();
 
 /// Replace the active rule set. Disabled rules and endpoints wry would panic
 /// on are dropped here.
@@ -82,6 +97,7 @@ pub fn store_id(workspace_store: Option<[u8; 16]>, rule: &ProxyRule) -> [u8; 16]
 }
 
 pub fn wry_config(rule: &ProxyRule) -> wry::ProxyConfig {
+    IMPLICIT_NW_CONTEXT.call_once(|| unsafe { nw_release(nw_parameters_create()) });
     let host = match rule.kind {
         ProxyKind::Ssh => "127.0.0.1".to_string(),
         ProxyKind::Socks5 | ProxyKind::Http => rule.host.clone(),
