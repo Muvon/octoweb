@@ -957,7 +957,7 @@ pub struct SnapshotRequest {
     )]
     pub diff: Option<bool>,
     #[schemars(
-        description = "Keep only elements whose line contains this text (case-insensitive) \u{2014} label, role, placeholder or value. The cheap way to find one control on a dense page: no second scan, and far fewer tokens than a full map."
+        description = "Keep only elements whose line contains this text (case-insensitive) \u{2014} label, role, placeholder or value. The cheap way to find one control on a dense page: no second scan, and far fewer tokens than a full map. When nothing visible matches but a closed menu, collapsed section or inactive tab holds a match, the result names it and the @ref of the button that opens it \u{2014} click that, then find again."
     )]
     pub find: Option<String>,
     #[schemars(
@@ -1447,7 +1447,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Run JavaScript in the page and return its JSON-encoded result. Escape hatch — prefer browser_snapshot (page state + @refs), browser_get_page_content (text) and the action tools (each reports what changed). Last expression is the return value; a returned Promise is awaited; wrap multi-statement code in an IIFE. Exceptions come back with their real message and line. Default watchdog 10 s (timeout_ms up to 25000); a timeout means the script is still running, NOT that the page navigated — a real navigation is reported as such. Defaults to the visible tab."
+        description = "Run JavaScript in the page and return its JSON-encoded result. Escape hatch for data the other tools cannot express \u{2014} NOT for finding or operating controls: browser_snapshot already sees open shadow DOM (web components) and same-origin iframes, and when a control is in a closed menu its find: result names the @ref that opens it. A control you locate here and .click() gets untrusted events and no effect report. Prefer browser_snapshot (page state + @refs), browser_get_page_content (text) and the action tools (each reports what changed). Last expression is the return value; a returned Promise is awaited; wrap multi-statement code in an IIFE. Exceptions come back with their real message and line. Default watchdog 10 s (timeout_ms up to 25000); a timeout means the script is still running, NOT that the page navigated \u{2014} a real navigation is reported as such. Defaults to the visible tab."
     )]
     async fn browser_execute_js(
         &self,

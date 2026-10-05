@@ -98,13 +98,15 @@ const SNAPSHOT_TEMPLATE: &str = r#"
   var crossFrames = 0;        // iframes we could not see into (cross-origin)
   var crossFrameUrls = [];
 
-  function isVisible(el) {
+  // `quiet` checks don't count toward the present-but-hidden note: that note is
+  // about the scan, not about probing for a menu trigger.
+  function isVisible(el, quiet) {
     if (el.tagName === 'INPUT' && el.type === 'hidden') return true;
     var style = getComputedStyle(el);
     if (style.display === 'none') return false;
     if (style.visibility === 'hidden' || style.opacity === '0') {
       var r0 = el.getBoundingClientRect();
-      if (r0.width > 0 && r0.height > 0) hiddenControls++;
+      if (!quiet && r0.width > 0 && r0.height > 0) hiddenControls++;
       return false;
     }
     if (el.offsetParent === null && style.position !== 'fixed' && style.position !== 'sticky') return false;
@@ -239,12 +241,20 @@ const SNAPSHOT_TEMPLATE: &str = r#"
     + '[role=textbox],[role=combobox],[role=searchbox],[role=slider],[role=spinbutton],'
     + '[role=treeitem],[onclick],[contenteditable]:not([contenteditable=false])';
 
+  // Controls that match `find` but are not rendered — an item of a closed menu,
+  // a collapsed section, an inactive tab. "No elements matching" alone sends an
+  // agent into browser_execute_js to hunt for a control it cannot click anyway.
+  var hiddenMatches = [];
   function scan(node) {
     var elements = node.querySelectorAll(SEL);
     for (var i = 0; i < elements.length; i++) {
       var el = elements[i];
       if (seen.has(el)) continue;
-      if (!isVisible(el)) continue;
+      if (!isVisible(el)) {
+        if (FIND && hiddenMatches.length < 3 && hiddenMatches.indexOf(el) === -1
+            && getText(el).toLowerCase().indexOf(FIND.toLowerCase()) !== -1) hiddenMatches.push(el);
+        continue;
+      }
       seen.add(el);
       record(el, getRole(el));
     }
@@ -405,6 +415,32 @@ const SNAPSHOT_TEMPLATE: &str = r#"
       ? (FIND ? '(no elements matching find: ' + FIND + ')' : '(no interactive elements found)')
       : matched + ' elements' + (FIND ? ' matching ' + FIND : '') + ' (refs stable until navigation):';
   }
+  // The opener of a hidden control is the nearest visible menu button or
+  // collapsed toggle that shares an ancestor with it in the same tree: a web
+  // component keeps a menu and its trigger in one shadow root, and past <body>
+  // any header menu on the page would match.
+  function opener(el) {
+    for (var n = el.parentNode; n && n.nodeName !== 'BODY'; n = n.parentNode) {
+      var cands = n.querySelectorAll('[aria-haspopup]:not([aria-haspopup=false]),[aria-expanded=false]');
+      for (var c = 0; c < cands.length; c++) {
+        if (!cands[c].contains(el) && isVisible(cands[c], true)) return cands[c];
+      }
+    }
+    return null;
+  }
+  var hiddenNote = '';
+  if (FIND && !DIFF && matched === 0 && hiddenMatches.length) {
+    var notes = hiddenMatches.map(function (h) {
+      var line = 'not rendered: ' + getRole(h) + ' "' + getText(h).replace(/"/g, '\\"') + '"';
+      var op = opener(h);
+      if (!op) return { line: line + ' — present but not displayed in this state of the page; clicking it fails' };
+      var oref = assignRef(op);
+      nextRefs.set(oref, op);
+      return { opens: true, line: line + ' — in a closed menu: browser_click ' + oref + ' ' + getRole(op) + ' "' + getText(op).replace(/"/g, '\\"') + '" to open it, then find again' };
+    });
+    notes.sort(function (a, b) { return (b.opens ? 1 : 0) - (a.opens ? 1 : 0); });
+    hiddenNote = notes.map(function (n) { return n.line; }).join('\n');
+  }
   if (dropped) header += ' — showing first ' + LIMIT + ', +' + dropped + ' more (narrow with find:"text" or within:"<selector>", or raise limit)';
   if (hiddenControls) header += ' +' + hiddenControls + ' present-but-hidden controls (auto-hiding UI: browser_hover a visible element or the page centre to reveal, then re-snapshot)';
   if (crossFrames) header += ' +' + crossFrames + ' cross-origin frame(s) NOT scannable' + (crossFrameUrls.length ? ' (' + crossFrameUrls.join(' ') + ')' : '') + ' — browser_navigate to the frame URL to work inside it';
@@ -413,6 +449,7 @@ const SNAPSHOT_TEMPLATE: &str = r#"
   if (state.length) out.push(state.join('\n'));
   out.push(header);
   if (outLines.length) out.push(outLines.join('\n'));
+  if (hiddenNote) out.push(hiddenNote);
   return out.join('\n');
 })()
 "#;

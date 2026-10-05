@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head><title>Shadow menu</title></head>
+<body>
+  <!-- Reddit's composer: the mode toggle exists twice, but in edit mode only the
+       copy inside the toolbar's closed overflow menu can be opened. -->
+  <button id="repost" aria-haspopup="menu">Repost</button>
+  <x-composer></x-composer>
+  <p id="status">rich</p>
+  <script>
+    customElements.define('x-toolbar', class extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = '<div><button>Bold</button>'
+          + '<div><button id="more" aria-label="More options" aria-haspopup="menu" aria-expanded="false">…</button></div>'
+          + '<div id="menu" role="menu" style="display:none"><div role="menuitem" tabindex="0">Switch to Markdown</div></div></div>';
+        const more = root.getElementById('more'), menu = root.getElementById('menu');
+        more.addEventListener('click', () => {
+          const open = menu.style.display === 'none';
+          menu.style.display = open ? 'block' : 'none';
+          more.setAttribute('aria-expanded', String(open));
+        });
+        root.querySelector('[role=menuitem]').addEventListener('click', () => {
+          document.getElementById('status').textContent = 'markdown';
+        });
+      }
+    });
+    customElements.define('x-composer', class extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = '<button style="display:none">Switch to Markdown</button>'
+          + '<x-toolbar></x-toolbar><div contenteditable="true">Body</div>';
+      }
+    });
+  </script>
+</body>
+</html>

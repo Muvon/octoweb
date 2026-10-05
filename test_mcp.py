@@ -1394,6 +1394,22 @@ def scoped_diff_reports_removals():
                f"scoped diff did not report {ref} removed: {diff[:400]!r}")
 
 
+@test
+def find_names_the_menu_that_hides_a_match():
+    """A control in a closed shadow-DOM menu is reported with the @ref that opens it."""
+    with fixture_tab("shadow_menu.html") as tab:
+        text = tool_text("browser_snapshot", {"tab_id": tab, "find": "Switch to"}, timeout=15)
+        m = re.search(r'menuitem "Switch to Markdown" .*browser_click (@\d+) button "More options"', text)
+        expect(m, f"closed-menu match not traced to its opener: {text!r}")
+        expect("Repost" not in text, f"an unrelated page menu was offered as the opener: {text!r}")
+        expect("not displayed in this state" in text, f"the unrendered top toggle went unreported: {text!r}")
+        tool_text("browser_click", {"tab_id": tab, "selector": m.group(1)}, timeout=15)
+        opened = tool_text("browser_snapshot", {"tab_id": tab, "find": "Switch to"}, timeout=15)
+        item, _ = find_ref(opened, 'menuitem "Switch to Markdown"')
+        tool_text("browser_click", {"tab_id": tab, "selector": item}, timeout=15)
+        expect("markdown" in js_text(tab, "status"), "the menu item was not reachable through the opener")
+
+
 DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
 
 
