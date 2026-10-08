@@ -533,10 +533,7 @@ pub(crate) fn run_node(name: &str, source: &str, flags: &[&str]) -> Option<std::
     // keeps one run's cleanup from deleting another run's script mid-flight.
     static CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let call = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "octoweb-js-{}-{name}-{call}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("octoweb-js-{}-{name}-{call}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{name}.js"));
     std::fs::write(&path, source).expect("write script");
