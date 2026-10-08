@@ -528,7 +528,15 @@ pub const CORE: &str = r##"
 /// skips; CI runners have it.
 #[cfg(test)]
 pub(crate) fn run_node(name: &str, source: &str, flags: &[&str]) -> Option<std::process::Output> {
-    let dir = std::env::temp_dir().join(format!("octoweb-js-{}-{name}", std::process::id()));
+    // Two tests can check the same surface concurrently (e.g. the sidebar is
+    // covered here and by sidebar_html's own gate); a per-invocation suffix
+    // keeps one run's cleanup from deleting another run's script mid-flight.
+    static CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let call = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "octoweb-js-{}-{name}-{call}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{name}.js"));
     std::fs::write(&path, source).expect("write script");
