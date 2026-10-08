@@ -550,6 +550,10 @@ pub struct Config {
     /// The sidebar's account card shows usage details, not just its row
     #[serde(default)]
     pub account_expanded: bool,
+    /// ⌘⇧F link hints stay up through clicks, scrolling and page loads in
+    /// their tab until the chord is pressed again.
+    #[serde(default)]
+    pub link_hints_sticky: bool,
     /// Auto-hide inline AI edit modal after submitting (show loading cursor instead)
     #[serde(default)]
     pub ai_edit_auto_hide: bool,
@@ -711,6 +715,7 @@ impl Default for Config {
             appearance: Appearance::Auto,
             terminal_appearance: TerminalAppearance::General,
             account_expanded: false,
+            link_hints_sticky: false,
             ai_edit_auto_hide: false,
             max_prompt_history: 50,
             max_ai_prompt_history: 50,

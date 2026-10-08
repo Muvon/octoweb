@@ -1322,6 +1322,9 @@ fn main() {
     // URL may still be the failed external URL, so URL alone cannot authorize
     // the error page's retry/copy IPC.
     let mut error_page_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Tabs whose ⌘⇧F hints are sticky (Config::link_hints_sticky): the overlay
+    // dies with each document, so every page load in these tabs restores it.
+    let mut sticky_hint_tabs: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // Full-text memory of visited pages (palette `/query`, MCP search tool).
     let mut page_index = page_index::PageIndex::load();
     let mut page_index_save_at: Option<std::time::Instant> = None;
@@ -6911,6 +6914,7 @@ fn main() {
                 deferred_nav.remove(&tab_id);
                 restoring_tabs.remove(&tab_id);
                 webcontent_crashes.remove(&tab_id);
+                sticky_hint_tabs.remove(&tab_id);
                 if let Some((_, response)) = mcp_nav_pending.remove(&tab_id) {
                     let _ = response.send(Err("Tab moved to another workspace".into()));
                 }
@@ -7015,6 +7019,18 @@ fn main() {
                     }
                     "ai_edit_auto_hide" => {
                         cfg.ai_edit_auto_hide = val == "true";
+                    }
+                    "link_hints_sticky" => {
+                        cfg.link_hints_sticky = val == "true";
+                        // Only ⌘⇧F closes a sticky overlay, and with the setting
+                        // off it no longer would.
+                        if !cfg.link_hints_sticky {
+                            for tab_id in sticky_hint_tabs.drain() {
+                                if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
+                                    let _ = wv.evaluate_script(&link_hints_js::script(link_hints_js::Mode::Off));
+                                }
+                            }
+                        }
                     }
                     "max_prompt_history" => {
                         if let Ok(n) = val.parse::<usize>() {
@@ -7500,6 +7516,7 @@ fn main() {
                     tab_snapshots.remove(&id);
                     deferred_nav.remove(&id);
                     restoring_tabs.remove(&id);
+                    sticky_hint_tabs.remove(&id);
                     if let Some((_, response)) = mcp_nav_pending.remove(&id) {
                         let _ = response.send(Err("Tab closed".into()));
                     }
@@ -9173,6 +9190,11 @@ fn main() {
             Event::UserEvent(AppEvent::PageLoadStarted(tab_id)) => {
                 tracing::debug!(tab_id, active_wv_id, ?pending_swap, "PageLoadStarted");
                 tab_nav::bump_hard(tab_id);
+                if sticky_hint_tabs.contains(&tab_id) {
+                    if let Some(wv) = workspace_manager.webview_of_tab(tab_id) {
+                        let _ = wv.evaluate_script(&link_hints_js::script(link_hints_js::Mode::Restore));
+                    }
+                }
                 // Deferred swap: first bytes received (didCommitNavigation) — page is rendering,
                 // safe to show it now and hide the old tab.
                 if let Some((_, new_id)) = pending_swap {
@@ -9785,8 +9807,16 @@ fn main() {
                 // surface owns key, but a click on chrome can leave the window
                 // focused with the WebView not responding.
                 focus_active_webview!();
+                let mode = if !cfg.link_hints_sticky {
+                    link_hints_js::Mode::Once
+                } else if sticky_hint_tabs.remove(&active_wv_id) {
+                    link_hints_js::Mode::Off
+                } else {
+                    sticky_hint_tabs.insert(active_wv_id);
+                    link_hints_js::Mode::On
+                };
                 if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
-                    let _ = wv.evaluate_script(link_hints_js::SCRIPT);
+                    let _ = wv.evaluate_script(&link_hints_js::script(mode));
                 }
             }
 
@@ -12204,7 +12234,12 @@ mod chrome_js_syntax_tests {
         // capture, network capture, snapshots or navigate's readiness probe —
         // and the failure surfaces as a confusing MCP error, not a build break.
         assert_parses("combined_script", crate::webview_utils::COMBINED_SCRIPT);
-        assert_parses("link_hints", crate::link_hints_js::SCRIPT);
+        {
+            use crate::link_hints_js::{script, Mode};
+            for mode in [Mode::Once, Mode::On, Mode::Restore, Mode::Off] {
+                assert_parses(&format!("link_hints_{mode:?}"), &script(mode));
+            }
+        }
         assert_parses(
             "readiness",
             &format!("void ({});", crate::readiness_js::READINESS_JS),

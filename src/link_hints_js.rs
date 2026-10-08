@@ -5,8 +5,12 @@
 //! must see the page as it is *now*, not as it was at document-start.
 //!
 //! Draws a short label next to every clickable element in the viewport; the
-//! user types a label to activate it. Running it a second time toggles the
-//! overlay off, so the same chord opens and closes.
+//! user types a label to activate it. By default ([`Mode::Once`]) the overlay
+//! closes after one use, on scroll, and on any other key, and the chord
+//! toggles it. With `link_hints_sticky` it stays up ([`Mode::On`]): badges
+//! are re-placed after clicks, scrolling and DOM changes, step aside while a
+//! text field has focus, and are restored on every page load in the tab
+//! ([`Mode::Restore`]) until the chord turns them off ([`Mode::Off`]).
 //!
 //! Activation is a plain `el.click()`, deliberately NOT
 //! `dom_actions::click_locate_script`: that wraps the whole MCP harness
@@ -14,10 +18,42 @@
 //! a click, which is right for an agent driving a page it cannot see and wrong
 //! for an element the user just picked off the screen.
 
-/// Toggle the hint overlay in the page this is evaluated in.
-pub const SCRIPT: &str = r#"(function () {
+/// What an evaluation of [`script`] does to the overlay in the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Toggle a one-shot overlay.
+    Once,
+    /// Open the sticky overlay, taking focus away from a text field.
+    On,
+    /// Bring the sticky overlay back after a page load; a no-op when it is up.
+    Restore,
+    /// Close whatever overlay is open.
+    Off,
+}
+
+/// The script for `mode`, ready for `evaluate_script`.
+pub fn script(mode: Mode) -> String {
+    let mode = match mode {
+        Mode::Once => "once",
+        Mode::On => "on",
+        Mode::Restore => "restore",
+        Mode::Off => "off",
+    };
+    format!("{SCRIPT}('{mode}');")
+}
+
+const SCRIPT: &str = r#"(function (mode) {
   var NS = '__octoweb_hints';
-  if (window[NS]) { window[NS].cancel(); return; }
+  var sticky = mode === 'on' || mode === 'restore';
+  var live = window[NS];
+  if (live) {
+    // A sticky overlay is refreshed in place; every other combination closes
+    // what is open, and ⌘⇧F without sticky hints is a toggle.
+    if (live.sticky && sticky) { live.wake(mode === 'on'); return; }
+    live.cancel();
+    if (!sticky) return;
+  }
+  if (mode === 'off') return;
 
   // Home row only — every label is typed without moving the hands.
   var ALPHABET = 'asdfghjkl';
@@ -32,7 +68,12 @@ pub const SCRIPT: &str = r#"(function () {
   ].join(',');
   // Guards a pathological page from freezing the UI mid-walk.
   var MAX_TARGETS = 500;
-
+  // Sticky badges are re-placed once scrolling and DOM changes go quiet for
+  // SETTLE_MS; a page that never goes quiet still gets them every MAX_STALE_MS.
+  var SETTLE_MS = 120;
+  var MAX_STALE_MS = 500;
+  // Inputs that take a click, not typing — hints stay up while they have focus.
+  var NOT_TEXT = ['button', 'submit', 'reset', 'checkbox', 'radio', 'image', 'file', 'range', 'color'];
   // Every same-origin document, top frame first. Cross-origin frames throw on
   // contentDocument and are skipped — unreachable, same limit the snapshot
   // tool reports.
@@ -128,12 +169,38 @@ pub const SCRIPT: &str = r#"(function () {
     return out;
   }
 
-  var targets = collect();
-  if (!targets.length) return;
-  var codes = labelsFor(targets.length);
+  // Deepest focused element, through open shadow roots and same-origin frames.
+  function focused() {
+    var el = document.activeElement;
+    for (;;) {
+      if (el && el.shadowRoot && el.shadowRoot.activeElement) { el = el.shadowRoot.activeElement; continue; }
+      if (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+        var inner = null;
+        try { inner = el.contentDocument && el.contentDocument.activeElement; } catch (e) { /* cross-origin */ }
+        if (inner) { el = inner; continue; }
+      }
+      return el;
+    }
+  }
+
+  function editable(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.isContentEditable) return true;
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true;
+    return el.tagName === 'INPUT' && NOT_TEXT.indexOf((el.type || '').toLowerCase()) === -1;
+  }
+
+  function blurField() {
+    var f = focused();
+    if (editable(f)) f.blur();
+  }
+
+  var first = sticky ? [] : collect();
+  if (!first.length && !sticky) return;
 
   // Closed shadow root: the page's own CSS and scripts cannot restyle, read,
-  // or remove the overlay.
+  // or remove the overlay. Mutations inside it are also invisible to the
+  // page-wide MutationObserver below, so redrawing never re-triggers it.
   var host = document.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none';
   var root = host.attachShadow({ mode: 'closed' });
@@ -146,44 +213,138 @@ pub const SCRIPT: &str = r#"(function () {
     '.h b{color:#b38600;font-weight:bold}' +
     '.h.off{display:none}';
   root.appendChild(style);
+  var layer = document.createElement('div');
+  root.appendChild(layer);
 
-  for (var i = 0; i < targets.length; i++) {
-    var b = document.createElement('div');
-    b.className = 'h';
-    b.textContent = codes[i];
-    // Clamped so a badge for an element at the very edge stays on screen.
-    b.style.left = Math.max(0, Math.min(targets[i].x, window.innerWidth - 28)) + 'px';
-    b.style.top = Math.max(0, Math.min(targets[i].y, window.innerHeight - 16)) + 'px';
-    root.appendChild(b);
-    targets[i].badge = b;
-  }
-  document.documentElement.appendChild(host);
-
+  var targets = [];
+  var codes = [];
   var typed = '';
+
+  function draw(next) {
+    layer.textContent = '';
+    targets = next;
+    codes = labelsFor(targets.length);
+    typed = '';
+    for (var i = 0; i < targets.length; i++) {
+      var b = document.createElement('div');
+      b.className = 'h';
+      b.textContent = codes[i];
+      // Clamped so a badge for an element at the very edge stays on screen.
+      b.style.left = Math.max(0, Math.min(targets[i].x, window.innerWidth - 28)) + 'px';
+      b.style.top = Math.max(0, Math.min(targets[i].y, window.innerHeight - 16)) + 'px';
+      layer.appendChild(b);
+      targets[i].badge = b;
+    }
+  }
+
+  // Unchanged targets keep their labels, and a half-typed label survives.
+  function same(next) {
+    if (next.length !== targets.length) return false;
+    for (var i = 0; i < next.length; i++) {
+      if (next[i].el !== targets[i].el || next[i].x !== targets[i].x || next[i].y !== targets[i].y) return false;
+    }
+    return true;
+  }
+
+  // Badges hide while what they point at moves, and while a text field owns
+  // the keyboard.
+  var moving = false;
+  function sync() {
+    layer.style.display = moving || editable(focused()) ? 'none' : '';
+  }
+  // focusout fires before the next element takes focus.
+  function onFocus() { setTimeout(sync, 0); }
+
+  var timer = 0;
+  var staleSince = 0;
+  function schedule() {
+    var now = Date.now();
+    if (!timer) staleSince = now;
+    clearTimeout(timer);
+    timer = setTimeout(refresh, Math.max(0, Math.min(SETTLE_MS, staleSince + MAX_STALE_MS - now)));
+  }
+
+  function refresh() {
+    clearTimeout(timer);
+    timer = 0;
+    if (document.hidden) return; // visibilitychange refreshes on return
+    if (!host.isConnected) document.documentElement.appendChild(host);
+    listen();
+    var next = collect();
+    if (!same(next)) draw(next);
+    moving = false;
+    sync();
+  }
+
   var scrollAt = [window.scrollX, window.scrollY];
-  function onScroll() {
+  function onScroll(e) {
+    if (sticky) {
+      // Only scrolls that carry a target hide the badges: a ticker scrolling
+      // on its own elsewhere on the page would otherwise blank them for good.
+      var s = e.target;
+      for (var i = 0; i < targets.length && s && s.contains; i++) {
+        if (s.contains(targets[i].el)) { moving = true; sync(); break; }
+      }
+      schedule();
+      return;
+    }
     if (window.scrollX !== scrollAt[0] || window.scrollY !== scrollAt[1]) cancel();
   }
+  function onResize() {
+    if (!sticky) { cancel(); return; }
+    moving = true;
+    sync();
+    schedule();
+  }
+  function onVisible() { if (!document.hidden) refresh(); }
+  var observer = sticky ? new MutationObserver(schedule) : null;
+
   // Every same-origin window, so the keys are caught wherever focus sits.
-  var windows = [window];
-  var docs = documents();
-  for (var w = 1; w < docs.length; w++) {
-    try { if (docs[w].defaultView) windows.push(docs[w].defaultView); } catch (e) { /* gone */ }
+  // Re-run on refresh: frames come and go while a sticky overlay is up.
+  var windows = [];
+  function listen() {
+    var docs = documents();
+    for (var i = 0; i < docs.length; i++) {
+      var w = docs[i].defaultView;
+      if (!w || windows.indexOf(w) !== -1) continue;
+      windows.push(w);
+      try {
+        w.addEventListener('keydown', onKey, true);
+        if (sticky) {
+          w.addEventListener('focusin', onFocus, true);
+          w.addEventListener('focusout', onFocus, true);
+        }
+      } catch (e) { /* gone */ }
+    }
   }
 
   function cancel() {
     for (var i = 0; i < windows.length; i++) {
-      try { windows[i].removeEventListener('keydown', onKey, true); } catch (e) { /* gone */ }
+      try {
+        windows[i].removeEventListener('keydown', onKey, true);
+        windows[i].removeEventListener('focusin', onFocus, true);
+        windows[i].removeEventListener('focusout', onFocus, true);
+      } catch (e) { /* gone */ }
     }
-    try { window.removeEventListener('resize', cancel, true); } catch (e) { /* gone */ }
+    try { window.removeEventListener('resize', onResize, true); } catch (e) { /* gone */ }
     try { window.removeEventListener('scroll', onScroll, true); } catch (e) { /* gone */ }
+    try { window.removeEventListener('pagehide', cancel); } catch (e) { /* gone */ }
+    document.removeEventListener('visibilitychange', onVisible);
+    document.removeEventListener('DOMContentLoaded', start);
+    if (observer) observer.disconnect();
+    clearTimeout(timer);
     if (host.parentNode) host.parentNode.removeChild(host);
     try { delete window[NS]; } catch (e) { window[NS] = undefined; }
   }
 
   function activate(t, newTab) {
     var el = t.el;
-    cancel();
+    if (sticky) {
+      typed = '';
+      repaint();
+    } else {
+      cancel();
+    }
     // Same message and same guard the target="_blank" interceptor in
     // COMBINED_SCRIPT uses — one new-tab path, not two.
     var href = el.tagName === 'A' ? el.href : null;
@@ -216,10 +377,33 @@ pub const SCRIPT: &str = r#"(function () {
 
   function onKey(e) {
     if (e.metaKey || e.altKey || e.ctrlKey) return; // let real shortcuts through
+    var k = e.key;
+    if (sticky) {
+      // A text field keeps its keys; Escape hands them back to the hints.
+      var f = focused();
+      if (editable(f)) {
+        if (k === 'Escape') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          f.blur();
+        }
+        return;
+      }
+      // Keys the hints have no use for stay the page's: Space and arrows
+      // scroll, Escape closes the page's own popups.
+      if (!targets.length) return;
+      if (k === 'Escape' || k === 'Backspace') {
+        if (!typed) return;
+      } else if (!k || k.length !== 1 || ALPHABET.indexOf(k.toLowerCase()) === -1) {
+        return;
+      }
+    }
     e.preventDefault();
     e.stopImmediatePropagation();
-    var k = e.key;
-    if (k === 'Escape') { cancel(); return; }
+    if (k === 'Escape') {
+      if (sticky) { typed = ''; repaint(); } else cancel();
+      return;
+    }
     if (k === 'Backspace') {
       typed = typed.slice(0, -1);
       repaint();
@@ -230,21 +414,57 @@ pub const SCRIPT: &str = r#"(function () {
     if (ALPHABET.indexOf(ch) === -1) { cancel(); return; }
     typed += ch;
     var matches = repaint();
-    if (!matches.length) { cancel(); return; }
+    if (!matches.length) {
+      if (sticky) { typed = ''; repaint(); } else cancel();
+      return;
+    }
     // Fixed-width codes, so a full-length match is the only match.
     if (typed.length === codes[0].length) activate(targets[matches[0]], e.shiftKey);
   }
 
-  for (var j = 0; j < windows.length; j++) {
-    try { windows[j].addEventListener('keydown', onKey, true); } catch (e) { /* gone */ }
+  var started = false;
+  function start() {
+    started = true;
+    if (mode === 'on') blurField();
+    document.documentElement.appendChild(host);
+    listen();
+    // Badges are placed in viewport coordinates and go stale the moment the
+    // page moves under them: a one-shot overlay is dropped rather than left
+    // pointing at the wrong thing, a sticky one is re-placed. The one-shot
+    // check compares against the recorded offset rather than firing on any
+    // scroll event: capture-phase catches inner scrollers too, and a page
+    // with a ticker or a scroll-driven animation would otherwise cancel the
+    // overlay instantly.
+    window.addEventListener('resize', onResize, true);
+    window.addEventListener('scroll', onScroll, true);
+    // A page put in the back/forward cache must not come back with an
+    // overlay the browser no longer knows is up.
+    window.addEventListener('pagehide', cancel);
+    if (sticky) {
+      document.addEventListener('visibilitychange', onVisible);
+      observer.observe(document, {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['class', 'style', 'hidden', 'disabled', 'aria-hidden', 'open']
+      });
+      refresh();
+    } else {
+      draw(first);
+    }
   }
-  // Badges are placed in viewport coordinates and go stale the moment the page
-  // moves under them; dropping the overlay beats pointing at the wrong thing.
-  // Compared against the recorded offset rather than firing on any scroll
-  // event: capture-phase catches inner scrollers too, and a page with a ticker
-  // or a scroll-driven animation would otherwise cancel the overlay instantly.
-  window.addEventListener('resize', cancel, true);
-  window.addEventListener('scroll', onScroll, true);
 
-  window[NS] = { cancel: cancel };
-})();"#;
+  window[NS] = {
+    sticky: sticky,
+    cancel: cancel,
+    wake: function (blur) {
+      if (!started) return;
+      if (blur) blurField();
+      refresh();
+    }
+  };
+  // Restored as soon as a new page commits, before its body exists.
+  if (sticky && document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})"#;

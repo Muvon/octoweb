@@ -516,6 +516,13 @@ pub fn html() -> String {
         </div>
         <input type="number" id="max_history" data-key="max_history" min="0" step="1">
       </div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <label class="row-label" id="link_hints_sticky_label" for="link_hints_sticky">Keep link hints on</label>
+          <span class="row-hint"><span id="follow-link-key">⌘⇧F</span> hints stay through clicks, scrolling and page loads until you press it again.</span>
+        </div>
+        <button class="toggle" id="link_hints_sticky" data-key="link_hints_sticky" role="switch" aria-checked="false" aria-labelledby="link_hints_sticky_label"></button>
+      </div>
     </div>
 
     <div class="section">
@@ -1223,6 +1230,8 @@ pub fn html() -> String {
 
     var inlineEdit = actionFor(data, 'inline_edit');
     if (inlineEdit) document.getElementById('inline-edit-key').textContent = inlineEdit.keys.join('');
+    var followLink = actionFor(data, 'follow_link');
+    if (followLink) document.getElementById('follow-link-key').textContent = followLink.keys.join('');
   };
 
   // Delegate clicks: start recording on a binding, reset on the ↺ button.
