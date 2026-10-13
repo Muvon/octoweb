@@ -669,6 +669,16 @@ pub fn html() -> String {
         <button class="kb-reset-all" id="mail-add">Add account</button>
       </div>
       <div class="section">
+        <div class="section-title">Privacy</div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <label class="row-label" id="mail_block_images_label" for="mail_block_images">Block remote images</label>
+            <span class="row-hint">Senders can't see when you open their mail. Show images per message or always for a sender.</span>
+          </div>
+          <button class="toggle" id="mail_block_images" data-key="mail_block_images" role="switch" aria-checked="false" aria-labelledby="mail_block_images_label"></button>
+        </div>
+      </div>
+      <div class="section">
         <div class="section-title">AI</div>
         <div class="row with-hint">
           <div class="row-label-stack">

@@ -17,6 +17,7 @@
 //!   --glass/-thick/-thin    translucent panel fills (pair with --glass-blur)
 //!   --glass-shine           specular top edge + inner hairline of a glass pane
 //!   --fill/-hover/-press    neutral control fills
+//!   --card                  raised content on the canvas
 //!   --accent/--on-accent    system accent + text on accent
 //!   --ok/--warn/--err       semantic status colors
 //!   --brand                 octomind purple for the brand mark only
@@ -59,6 +60,8 @@ pub const CSS: &str = r#"
     --glass-shine: inset 0 1px 0 rgba(255, 255, 255, 0.65),
                    inset 0 0 0 0.5px rgba(255, 255, 255, 0.40);
     --hairline: rgba(0, 0, 0, 0.10);
+    /* Raised content on the canvas: a message, a selected segment. */
+    --card: #ffffff;
     --shadow-float: 0 0 0 0.5px rgba(0, 0, 0, 0.10),
                     0 24px 60px rgba(0, 0, 0, 0.20),
                     0 3px 10px rgba(0, 0, 0, 0.07);
@@ -106,6 +109,7 @@ pub const CSS: &str = r#"
       --glass-shine: inset 0 1px 0 rgba(255, 255, 255, 0.12),
                      inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
       --hairline: rgba(255, 255, 255, 0.14);
+      --card: rgb(44, 44, 48);
       --shadow-float: 0 0 0 0.5px rgba(0, 0, 0, 0.45),
                       0 24px 60px rgba(0, 0, 0, 0.55),
                       0 3px 10px rgba(0, 0, 0, 0.30);

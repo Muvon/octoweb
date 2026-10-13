@@ -396,6 +396,11 @@ pub enum PageRequest {
         message: i64,
         index: usize,
     },
+    /// An attachment's contents for the in-pane preview (READ-4).
+    Preview {
+        message: i64,
+        index: usize,
+    },
     SaveDraft {
         draft: Draft,
     },
@@ -1622,6 +1627,30 @@ fn script(name: &str, value: &impl Serialize) -> String {
     )
 }
 
+/// Name and contents of attachment `index` of stored message `message`, which
+/// must belong to one of `accounts`.
+async fn attachment(
+    shared: &Shared,
+    accounts: &[String],
+    message: i64,
+    index: usize,
+) -> Result<(String, Vec<u8>), String> {
+    let (account_key, folder, uid, message_id) = shared
+        .store()
+        .message_by_id(message)
+        .ok_or_else(|| "Message not found".to_string())?;
+    let account = shared
+        .account(&account_key)
+        .filter(|_| accounts.contains(&account_key))
+        .ok_or_else(|| "Account not available".to_string())?;
+    let r = ServerRef {
+        uid,
+        folder,
+        message_id,
+    };
+    let raw = fetch_raw(shared, &account, &r).await?;
+    mail_parse::attachment_bytes(&raw, index).ok_or_else(|| "Attachment not found".to_string())
+}
 async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: PageRequest) {
     let to_page = |script: String| {
         shared.emit(Event::ToPage {
@@ -1737,26 +1766,7 @@ async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: Page
             ));
         }
         PageRequest::Attachment { message, index } => {
-            let Some((account_key, folder, uid, message_id)) =
-                shared.store().message_by_id(message)
-            else {
-                return;
-            };
-            let (Some(account), true) = (
-                shared.account(&account_key),
-                accounts.contains(&account_key),
-            ) else {
-                return;
-            };
-            let r = ServerRef {
-                uid,
-                folder,
-                message_id,
-            };
-            match fetch_raw(shared, &account, &r).await.and_then(|raw| {
-                mail_parse::attachment_bytes(&raw, index)
-                    .ok_or_else(|| "Attachment not found".to_string())
-            }) {
+            match attachment(shared, &accounts, message, index).await {
                 Ok((name, bytes)) => match save_download(&name, &bytes) {
                     Ok(path) => shared.emit(Event::Saved(path)),
                     Err(e) => shared.emit(Event::Toast {
@@ -1769,6 +1779,16 @@ async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: Page
                     text: e,
                 }),
             }
+        }
+        PageRequest::Preview { message, index } => {
+            let reply = match attachment(shared, &accounts, message, index).await {
+                Ok((_, bytes)) => serde_json::json!({
+                    "message": message, "index": index,
+                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                }),
+                Err(e) => serde_json::json!({ "message": message, "index": index, "error": e }),
+            };
+            to_page(script("preview", &reply));
         }
         PageRequest::SaveDraft { draft } => {
             let json = serde_json::to_string(&draft).expect("draft");

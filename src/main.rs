@@ -3874,7 +3874,9 @@ fn main() {
                     })
                 })
                 .collect();
-            let setup = serde_json::json!({ "ws": ws.id, "accounts": accounts, "ai": cfg.mail_ai });
+            let setup = serde_json::json!({
+                "ws": ws.id, "accounts": accounts, "ai": cfg.mail_ai, "block_images": cfg.mail_block_images,
+            });
             let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.setup({setup})"));
             push_mail_unread!();
         }};
@@ -7843,8 +7845,12 @@ fn main() {
                         }
                         Err(e) => tracing::warn!(error = %e, "ignoring malformed mail accounts from settings"),
                     },
-                    "mail_ai" => {
-                        cfg.mail_ai = val == "true";
+                    "mail_ai" | "mail_block_images" => {
+                        if key == "mail_ai" {
+                            cfg.mail_ai = val == "true";
+                        } else {
+                            cfg.mail_block_images = val == "true";
+                        }
                         if mail_visible {
                             mount_mail!();
                         }

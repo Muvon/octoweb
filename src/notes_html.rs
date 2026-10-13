@@ -65,18 +65,19 @@ pub fn html(keybindings_json: &str) -> String {
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 32px;
-    padding: 0 10px 0 14px;
+    height: 40px;
+    padding: 0 10px;
     box-shadow: 0 0.5px 0 var(--hairline);
     font-family: var(--font-text);
     font-size: var(--fs-caption);
     color: var(--label-2);
     -webkit-user-select: none; user-select: none;
   }
-  .tab { border: none; background: transparent; padding: 3px 8px; border-radius: var(--r-ctl); color: var(--label-2); cursor: pointer; display: flex; align-items: center; gap: 5px; font: inherit; }
-  .tab:hover { background: var(--fill-hover); }
-  .tab.active { background: var(--fill-press); color: var(--label); }
-  .badge { min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent); font-size: 10px; line-height: 16px; text-align: center; }
+  .seg { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-capsule); background: var(--fill); }
+  .tab { border: none; background: transparent; padding: 3px 11px; border-radius: var(--r-capsule); color: var(--label-2); font: inherit; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 5px; transition: background var(--t-fast), color var(--t-fast); }
+  .tab:hover { color: var(--label); }
+  .tab.active { background: var(--card); color: var(--label); box-shadow: 0 0 0 0.5px var(--hairline), 0 1px 3px rgba(0, 0, 0, 0.08); }
+  .badge { min-width: 16px; padding: 0 5px; box-sizing: border-box; border-radius: var(--r-capsule); background: var(--accent); color: var(--on-accent); font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; }
   .badge:empty { display: none; }
   #space { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #reveal-btn, #fullscreen-btn, #close-btn {
@@ -84,16 +85,16 @@ pub fn html(keybindings_json: &str) -> String {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px; height: 24px;
+    width: 28px; height: 28px;
     padding: 0;
     border: none;
-    border-radius: var(--r-ctl);
+    border-radius: var(--r-capsule);
     background: transparent;
     color: var(--label-2);
     cursor: pointer;
     transition: background var(--t-fast), color var(--t-fast);
   }
-  #reveal-btn svg, #fullscreen-btn svg, #close-btn svg { width: 14px; height: 14px; }
+  #reveal-btn svg, #fullscreen-btn svg, #close-btn svg { width: 15px; height: 15px; }
   #reveal-btn:hover, #fullscreen-btn:hover, #close-btn:hover { background: var(--fill-hover); }
   #reveal-btn:active, #fullscreen-btn:active, #close-btn:active { background: var(--fill-press); }
   #fullscreen-btn.active {
@@ -145,8 +146,10 @@ pub fn html(keybindings_json: &str) -> String {
 <div id="panel">
   <div id="resize-handle" role="separator" aria-label="Resize notes" aria-orientation="vertical" tabindex="0"></div>
   <div id="bar">
-    <button class="tab active" id="tab-notes" type="button">Notes</button>
-    <button class="tab" id="tab-mail" type="button">Mail <span class="badge" id="unread"></span></button>
+    <div class="seg" role="tablist">
+      <button class="tab active" id="tab-notes" type="button" role="tab" aria-selected="true">Notes</button>
+      <button class="tab" id="tab-mail" type="button" role="tab">Mail <span class="badge" id="unread"></span></button>
+    </div>
     <span id="space"></span>
     <button id="reveal-btn" type="button" title="Show file in Finder" aria-label="Show notes file in Finder">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">

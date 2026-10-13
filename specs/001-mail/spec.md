@@ -192,12 +192,15 @@ are joined by links, not merged into one list.
   expanded and earlier ones collapsed to one line each, with quoted text and
   signatures folded.
 - **READ-2** HTML mail shall render in an isolated view with JavaScript
-  disabled and remote content blocked; the user shall be able to load remote
-  images for this message or always for this sender.
+  disabled. Remote images load by default; with "Block remote images" on
+  (Settings → Mail), remote content is blocked and the user shall be able to
+  load it for this message or always for this sender.
 - **READ-3** Links in mail shall open in a new browser tab of the current
   workspace; the full URL shall show on hover before clicking.
-- **READ-4** Attachments shall be listed with name and size; opening one shall
-  save it to Downloads and reveal it, using the existing download flow.
+- **READ-4** Attachments shall be listed with name, size and file type;
+  opening one shall preview it in the pane (PDF, images, text; ←/→ between a
+  message's attachments) with a Download action that saves it to Downloads
+  and reveals it, using the existing download flow.
 - **READ-5** Opening a thread shall mark it read on the server.
 
 ## Writing
@@ -307,7 +310,7 @@ context already uses, so instructions inside an email are treated as data.
   subject within 30 days when a participant is shared. Gmail's `X-GM-THRID`
   is not used: one rule for all providers.
 - **Rendering.** Mail HTML in a sandboxed iframe without `allow-scripts`, under
-  a CSP that blocks every remote load until images are allowed; inline `cid:`
+  a CSP that allows remote images unless the user blocks them; inline `cid:`
   images are inlined as data URIs when the message is parsed.
 - **Panel.** Mail is the second tab of the notes pane: two WebViews in the
   same column, sharing its width, resize and fullscreen (`pane_bounds!`), only

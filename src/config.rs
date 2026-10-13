@@ -601,6 +601,10 @@ pub struct Config {
     /// Whether the first-run welcome toast has been shown. Internal flag.
     #[serde(default)]
     pub first_run_completed: bool,
+    /// Hold back remote images in mail until allowed per message or sender.
+    /// Off by default: mail renders as its sender designed it.
+    #[serde(default)]
+    pub mail_block_images: bool,
     /// Mail AI features (summaries, drafts, brief, task extraction). Off until
     /// the user turns them on: mail text then goes to the configured agent.
     #[serde(default)]
@@ -853,6 +857,7 @@ impl Default for Config {
             first_run_completed: false,
             mail_ai: false,
             mail_ai_summaries: false,
+            mail_block_images: false,
             mail_brief_morning: false,
             mail_brief_last: String::new(),
             mail_accounts: Vec::new(),
