@@ -14,7 +14,7 @@
 //!   window.__termDrop(ws)             — a workspace was deleted
 //!   window.__termShow(fullscreen)     — panel took focus
 //!   window.__termOpened(id, error)    — a shell started, or failed to
-//!   window.__termNew() / __termClose() / __termCycle(step) — keymap actions
+//!   window.__termNew() / __termClose() / __termPane(step) — keymap actions
 //!   window.__setShortcuts(data)       — update control titles
 //!   window.__termOptionAsMeta(on)     — ⌥ sends Meta, or types ⌥ characters
 
@@ -711,10 +711,18 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
     if (space.active) closePane(space.active.focused);
   };
 
-  window.__termCycle = function(step) {
-    const tabs = space.tabs;
-    if (tabs.length < 2) return;
-    showTab(tabs[(tabs.indexOf(space.active) + step + tabs.length) % tabs.length]);
+  // ⌘[ / ⌘] step through the active tab's splits in reading order, wrapping
+  // as Ghostty does; ⌘1–⌘9 pick the tab.
+  window.__termPane = function(step) {
+    const tab = space.active;
+    if (!tab) return;
+    const order = Array.prototype.map.call(tab.el.querySelectorAll('.pane'), function(el) {
+      return panes.get(Number(el.dataset.pane));
+    });
+    if (order.length < 2) return;
+    const p = order[(order.indexOf(tab.focused) + step + order.length) % order.length];
+    focusPane(p);
+    p.term.focus();
   };
 
   // Control titles follow the effective keymap rather than compiled defaults.

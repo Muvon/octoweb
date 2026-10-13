@@ -125,14 +125,14 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
     (
         Action::Back,
         "back",
-        "Back / previous terminal",
+        "Back / previous terminal split",
         "Tabs & Navigation",
         "cmd+bracketleft",
     ),
     (
         Action::Forward,
         "forward",
-        "Forward / next terminal",
+        "Forward / next terminal split",
         "Tabs & Navigation",
         "cmd+bracketright",
     ),
