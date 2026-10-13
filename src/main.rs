@@ -9959,34 +9959,37 @@ fn main() {
                 }
             },
 
-            // ── Settings → Mail: OAuth sign-in with the user's own client ─────
+            // ── Settings → Mail: OAuth sign-in (built-in or the user's own client) ─
             Event::UserEvent(AppEvent::MailSignIn(key)) => {
                 let Some(a) = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == key) else {
                     return;
                 };
-                let error = if a.oauth_client_id.trim().is_empty() {
-                    Some("Enter your OAuth client ID first.")
-                } else if mail_oauth::endpoints(a.provider).is_none() {
+                let client = mail::oauth_client(a);
+                let error = if mail_oauth::endpoints(a.provider).is_none() {
                     Some("OAuth works for Gmail and Outlook accounts.")
+                } else if client.is_none() {
+                    Some("Enter your OAuth client ID first.")
                 } else {
                     None
                 };
-                match (error, &mail_engine) {
-                    (Some(e), _) => {
+                match (error, client, &mail_engine) {
+                    (Some(e), _, _) => {
                         let _ = settings_wv.evaluate_script(&format!(
                             "window.__mailVerified && window.__mailVerified({}, {})",
                             serde_json::to_string(&key).unwrap(),
                             serde_json::to_string(e).unwrap(),
                         ));
                     }
-                    (None, Some(engine)) => engine.send(mail::Command::SignIn {
-                        key,
-                        provider: a.provider,
-                        client_id: a.oauth_client_id.trim().to_string(),
-                        client_secret: mail::client_secret(&a.id).unwrap_or_default(),
-                        hint: a.address.clone(),
-                    }),
-                    (None, None) => {}
+                    (None, Some((client_id, client_secret)), Some(engine)) => {
+                        engine.send(mail::Command::SignIn {
+                            key,
+                            provider: a.provider,
+                            client_id,
+                            client_secret,
+                            hint: a.address.clone(),
+                        })
+                    }
+                    _ => {}
                 }
             }
 
@@ -9998,7 +10001,7 @@ fn main() {
                     Some(a) => mail::usable(a).and_then(|()| {
                         mail::password(&a.id)
                             .ok_or_else(|| "Enter the password first.".to_string())
-                            .map(|pw| mail::Account::resolve(a, pw, mail::client_secret(&a.id).unwrap_or_default()))
+                            .map(|pw| mail::Account::resolve(a, pw))
                     }),
                 };
                 match (checked, &mail_engine) {

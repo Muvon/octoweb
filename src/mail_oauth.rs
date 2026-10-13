@@ -52,6 +52,17 @@ pub fn endpoints(provider: MailProvider) -> Option<Endpoints> {
     }
 }
 
+/// The Google client `build.sh` compiles in from the builder's Keychain, so
+/// Gmail users sign in without making their own. Builds without it offer app
+/// passwords and the user's own client instead.
+pub fn bundled_google() -> Option<(&'static str, &'static str)> {
+    let id = option_env!("OCTOWEB_GOOGLE_CLIENT_ID").filter(|id| !id.is_empty())?;
+    Some((
+        id,
+        option_env!("OCTOWEB_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+    ))
+}
+
 /// The client an account signs in with, and its refresh token.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Client {

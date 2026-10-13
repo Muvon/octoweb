@@ -52,7 +52,7 @@ fn account(address: &str, gatekeeper: bool) -> Account {
     if address != "me@local.test" {
         a.id = [8; 16];
     }
-    Account::resolve(&a, "secret".into(), String::new())
+    Account::resolve(&a, "secret".into())
 }
 
 fn rt() -> tokio::runtime::Runtime {

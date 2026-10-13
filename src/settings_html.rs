@@ -1300,6 +1300,10 @@ pub fn html() -> String {
     outlook: 'In <a class="mail-link" data-url="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra \u2192 App registrations</a>, register an app, add the <b>Mobile and desktop</b> platform with redirect URI <code>http://127.0.0.1</code>, and the delegated permissions IMAP.AccessAsUser.All, SMTP.Send and offline_access. Paste its client ID; no secret is needed.'
   };
   function oauthCapable(a) { return a.provider === 'gmail' || a.provider === 'outlook'; }
+  // This build carries a Google client (build.sh), so Gmail needs no setup.
+  var GOOGLE_BUILT_IN = /*@@GOOGLE_BUILT_IN@@*/false;
+  function ownClient(a) { return a.provider !== 'gmail' || !GOOGLE_BUILT_IN || !!a.oauth_client_id; }
+  function preferGoogle(a) { if (a.provider === 'gmail' && GOOGLE_BUILT_IN && !a.has_password) a.auth = 'oauth'; }
 
   function mailHex(a) {
     return a.id.map(function(b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
@@ -1348,18 +1352,20 @@ pub fn html() -> String {
       return '<button data-provider="' + p + '" aria-pressed="' + (a.provider === p) + '">' + PROVIDERS[p] + '</button>';
     }).join('');
     var html = '<div class="row with-hint"><div class="row-label-stack"><span class="row-label" id="' + id + '-provider">Provider</span>' +
-        '<span class="row-hint">' + (a.auth === 'oauth' && a.provider !== 'outlook' ? 'Signs in with your own OAuth client, below.' : PROVIDER_HINTS[a.provider]) + '</span></div>' +
+        '<span class="row-hint">' + (a.auth === 'oauth' && a.provider !== 'outlook' ? (ownClient(a) ? 'Signs in with your own OAuth client, below.' : 'Signs in with your Google account.') : PROVIDER_HINTS[a.provider]) + '</span></div>' +
         '<span class="seg" role="group" aria-labelledby="' + id + '-provider">' + providers + '</span></div>' +
       proxyRow('Address', id + '-address', '<input type="email" id="' + id + '-address" data-mail="address" placeholder="you@example.com" value="' + esc(a.address) + '" spellcheck="false">') +
       (oauthCapable(a) && a.provider !== 'outlook'
         ? '<div class="row"><span class="row-label" id="' + id + '-auth">Sign-in</span><span class="seg" role="group" aria-labelledby="' + id + '-auth">' +
             '<button data-auth="password" aria-pressed="' + (a.auth !== 'oauth') + '">App password</button>' +
-            '<button data-auth="oauth" aria-pressed="' + (a.auth === 'oauth') + '">OAuth (your own client)</button></span></div>'
+            '<button data-auth="oauth" aria-pressed="' + (a.auth === 'oauth') + '">' + (ownClient(a) ? 'OAuth (your own client)' : 'Sign in with Google') + '</button></span></div>'
         : '') +
       (a.auth === 'oauth'
-        ? '<div class="row with-hint"><div class="row-label-stack"><span class="row-label">OAuth client</span><span class="row-hint">' + OAUTH_HELP[a.provider] + '</span></div></div>' +
-          proxyRow('Client ID', id + '-cid', '<input type="text" id="' + id + '-cid" data-mail="oauth_client_id" placeholder="\u2026apps.googleusercontent.com" value="' + esc(a.oauth_client_id) + '" spellcheck="false">') +
-          (a.provider === 'gmail'
+        ? (ownClient(a)
+          ? '<div class="row with-hint"><div class="row-label-stack"><span class="row-label">OAuth client</span><span class="row-hint">' + OAUTH_HELP[a.provider] + '</span></div></div>' +
+            proxyRow('Client ID', id + '-cid', '<input type="text" id="' + id + '-cid" data-mail="oauth_client_id" placeholder="…apps.googleusercontent.com" value="' + esc(a.oauth_client_id) + '" spellcheck="false">')
+          : '') +
+          (a.provider === 'gmail' && ownClient(a)
             ? proxyRow('Client secret', id + '-csec', '<span class="proxy-inline"><input type="password" id="' + id + '-csec" data-mail="client_secret" autocomplete="off" placeholder="' + (a.has_client_secret ? 'Saved in Keychain' : 'From the same client') + '"></span>')
             : '') +
           '<div class="row"><span class="row-label">Account</span><span class="proxy-inline"><span class="kb-note">' + (a.has_password ? 'Signed in' : 'Not signed in') + '</span>' +
@@ -1456,6 +1462,7 @@ pub fn html() -> String {
       a.provider = prov.dataset.provider;
       if (a.provider === 'outlook') a.auth = 'oauth';
       if (!oauthCapable(a)) a.auth = 'password';
+      preferGoogle(a);
       saveMail();
       renderMail('[data-mail-i="' + i + '"] [data-provider="' + a.provider + '"]');
       return;
@@ -1523,6 +1530,7 @@ pub fn html() -> String {
       if (guess && a.provider !== guess && a.provider !== 'other') {
         a.provider = guess;
         if (guess === 'outlook') a.auth = 'oauth';
+        preferGoogle(a);
       }
     }
     saveMail();
@@ -1771,4 +1779,12 @@ pub fn html() -> String {
 </body>
 </html>"#
     .replace("/*@@THEME@@*/", crate::theme::CSS)
+    .replace(
+        "/*@@GOOGLE_BUILT_IN@@*/false",
+        if crate::mail_oauth::bundled_google().is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    )
 }

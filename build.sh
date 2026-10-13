@@ -14,6 +14,13 @@
 #        --apple-id don@muvon.io \
 #        --team-id 34TUP8A7GK \
 #        --password YOUR_APP_SPECIFIC_PASSWORD
+#
+# Google sign-in for Gmail (optional; builds without it offer app passwords
+# and the user's own OAuth client). Import the Desktop OAuth client once:
+#   f=~/Downloads/client_secret_….json
+#   security add-generic-password -U -s octoweb.google-oauth -a client_id -w "$(jq -r .installed.client_id "$f")"
+#   security add-generic-password -U -s octoweb.google-oauth -a client_secret -w "$(jq -r .installed.client_secret "$f")"
+# OCTOWEB_GOOGLE_CLIENT_ID / OCTOWEB_GOOGLE_CLIENT_SECRET in the environment win.
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -70,6 +77,19 @@ for arg in "$@"; do
   [[ "$arg" == "--no-dmg" ]] && SKIP_DMG=true
   [[ "$arg" == "--sign" ]] && NOTARIZE=true
 done
+
+# ── Google sign-in client (compiled in when the builder has one) ──────────────
+GOOGLE_KEYCHAIN="octoweb.google-oauth"
+if [[ -z "${OCTOWEB_GOOGLE_CLIENT_ID:-}" ]]; then
+  OCTOWEB_GOOGLE_CLIENT_ID=$(security find-generic-password -s "$GOOGLE_KEYCHAIN" -a client_id -w 2>/dev/null || true)
+  OCTOWEB_GOOGLE_CLIENT_SECRET=$(security find-generic-password -s "$GOOGLE_KEYCHAIN" -a client_secret -w 2>/dev/null || true)
+fi
+export OCTOWEB_GOOGLE_CLIENT_ID OCTOWEB_GOOGLE_CLIENT_SECRET="${OCTOWEB_GOOGLE_CLIENT_SECRET:-}"
+if [[ -n "$OCTOWEB_GOOGLE_CLIENT_ID" ]]; then
+  echo "▶ Google sign-in: built in"
+else
+  echo "▶ Google sign-in: not configured (Gmail uses app passwords or the user's own client)"
+fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 if $DEV_BUILD; then

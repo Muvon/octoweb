@@ -71,9 +71,8 @@ pub struct Account {
 
 impl Account {
     /// Servers from the provider preset (spec Accounts table), or as entered.
-    /// `secret` is the password, or the refresh token of an OAuth account;
-    /// `client_secret` is its OAuth client's secret, if it has one.
-    pub fn resolve(a: &MailAccount, secret: String, client_secret: String) -> Self {
+    /// `secret` is the password, or the refresh token of an OAuth account.
+    pub fn resolve(a: &MailAccount, secret: String) -> Self {
         let address = a.address.trim().to_ascii_lowercase();
         let local = address.split('@').next().unwrap_or_default().to_string();
         let custom_login = if a.login.trim().is_empty() {
@@ -134,12 +133,15 @@ impl Account {
         let oauth = (a.auth == MailAuth::Oauth)
             .then(|| crate::mail_oauth::endpoints(a.provider))
             .flatten()
-            .map(|endpoints| crate::mail_oauth::Client {
-                endpoints,
-                client_id: a.oauth_client_id.trim().to_string(),
-                client_secret,
-                refresh_token: secret.clone(),
-            });
+            .zip(oauth_client(a))
+            .map(
+                |(endpoints, (client_id, client_secret))| crate::mail_oauth::Client {
+                    endpoints,
+                    client_id,
+                    client_secret,
+                    refresh_token: secret.clone(),
+                },
+            );
         Self {
             key: hex(&a.id),
             provider: a.provider,
@@ -186,7 +188,7 @@ pub fn usable(a: &MailAccount) -> Result<(), String> {
         if crate::mail_oauth::endpoints(a.provider).is_none() {
             return Err("OAuth works for Gmail and Outlook accounts.".into());
         }
-        if a.oauth_client_id.trim().is_empty() {
+        if oauth_client(a).is_none() {
             return Err("Enter your OAuth client ID.".into());
         }
     }
@@ -201,6 +203,19 @@ pub fn usable(a: &MailAccount) -> Result<(), String> {
     Ok(())
 }
 
+/// The OAuth client `a` signs in with, as id and secret: its own when it
+/// names one, else the built-in Google client for Gmail.
+pub fn oauth_client(a: &MailAccount) -> Option<(String, String)> {
+    let own = a.oauth_client_id.trim();
+    if !own.is_empty() {
+        return Some((own.to_string(), client_secret(&a.id).unwrap_or_default()));
+    }
+    (a.provider == MailProvider::Gmail)
+        .then(crate::mail_oauth::bundled_google)
+        .flatten()
+        .map(|(id, secret)| (id.to_string(), secret.to_string()))
+}
+
 /// The accounts ready to connect, and the keys of those still missing a
 /// password or settings.
 pub fn resolve_all(accounts: &[MailAccount]) -> (Vec<Account>, Vec<String>) {
@@ -208,11 +223,7 @@ pub fn resolve_all(accounts: &[MailAccount]) -> (Vec<Account>, Vec<String>) {
     let mut missing = Vec::new();
     for a in accounts {
         match (usable(a), password(&a.id)) {
-            (Ok(()), Some(pw)) => ready.push(Account::resolve(
-                a,
-                pw,
-                client_secret(&a.id).unwrap_or_default(),
-            )),
+            (Ok(()), Some(pw)) => ready.push(Account::resolve(a, pw)),
             _ => missing.push(hex(&a.id)),
         }
     }
@@ -3166,7 +3177,7 @@ mod tests {
                 address: address.into(),
                 ..base.clone()
             };
-            let account = Account::resolve(&a, "wrong-password-123".into(), String::new());
+            let account = Account::resolve(&a, "wrong-password-123".into());
             let imap = connect(&account)
                 .await
                 .map(|_| ())
@@ -3213,7 +3224,7 @@ mod tests {
                 auth: MailAuth::Oauth,
                 ..base.clone()
             };
-            let mut account = Account::resolve(&a, String::new(), String::new());
+            let mut account = Account::resolve(&a, String::new());
             account.oauth = None;
             // XOAUTH2 straight to IMAP with a token that is not one.
             let tcp =
@@ -3304,7 +3315,7 @@ mod tests {
 
             client_secret: None,
         };
-        let r = Account::resolve(&a, "pw".into(), String::new());
+        let r = Account::resolve(&a, "pw".into());
         assert_eq!(r.imap_host, "imap.mail.me.com");
         assert_eq!(r.imap_logins, vec!["john", "john@icloud.com"]);
         assert_eq!(
@@ -3318,7 +3329,7 @@ mod tests {
         a.smtp_host = "127.0.0.1".into();
         a.smtp_port = 3025;
         a.smtp_security = SmtpSecurity::Plain;
-        let r = Account::resolve(&a, String::new(), String::new());
+        let r = Account::resolve(&a, String::new());
         assert!(!r.imap_tls);
         assert!(usable(&a).is_ok());
         a.smtp_host = "smtp.example.com".into();
@@ -3356,7 +3367,6 @@ mod tests {
                 client_secret: None,
             },
             "pw".into(),
-            String::new(),
         );
         let original = MessageView {
             id: 1,
