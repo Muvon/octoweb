@@ -72,6 +72,8 @@ pub enum Action {
     CopyLinkMarkdown,
     SaveLater,
     Terminal,
+    Notes,
+    NoteCapture,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -325,6 +327,20 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Toggle terminal",
         "Tools",
         "cmd+backquote",
+    ),
+    (
+        Action::Notes,
+        "notes",
+        "Toggle notes",
+        "Tools",
+        "cmd+shift+j",
+    ),
+    (
+        Action::NoteCapture,
+        "note_capture",
+        "Capture page as task, or selection as quote, to notes",
+        "Tools",
+        "cmd+opt+j",
     ),
 ];
 

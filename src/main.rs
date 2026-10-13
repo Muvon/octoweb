@@ -31,6 +31,8 @@ mod mcp;
 mod native_input;
 mod nav_error_patch;
 mod newtab_html;
+mod notes;
+mod notes_html;
 mod notification_html;
 mod overlay_html;
 mod page_index;
@@ -229,6 +231,10 @@ enum AppEvent {
     TerminalScript(&'static str),  // keymap action run in the terminal page (new/close/cycle tab)
     Terminal(terminal::Request),   // message from the terminal panel page
     TerminalOutput(u32),           // (terminal_id) — shell output or exit: answer the panel's read
+    ToggleNotes,                   // ⌘⇧J — show/hide the notes column
+    ToggleNotesFullscreen,         // ⌘⇧Return in the notes / header icon — fill the window
+    NoteCaptureRequest,            // ⌥⌘J — add the page, or quote the selection, to notes
+    Notes(notes::Request),         // message from the notes panel page
     Extension(extensions::Event),  // extension UI command, download result, or WebKit request
     Quit,
 }
@@ -250,6 +256,7 @@ enum PanelFocusTarget {
     AddressBar,
     Sidebar,
     Terminal,
+    Notes,
     ActiveTab,
 }
 
@@ -388,6 +395,8 @@ fn keybind_to_event(
         }
         A::TogglePin if !overlay => AppEvent::TogglePin,
         A::Terminal if !overlay => AppEvent::ToggleTerminal,
+        A::Notes if !overlay => AppEvent::ToggleNotes,
+        A::NoteCapture if !overlay && !inline && !address_edit => AppEvent::NoteCaptureRequest,
         _ => return None,
     })
 }
@@ -400,6 +409,7 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
     use keybindings::Action as A;
     Some(match action {
         A::Terminal => AppEvent::ToggleTerminal,
+        A::Notes => AppEvent::ToggleNotes,
         A::SidebarFullscreen => AppEvent::ToggleTerminalFullscreen,
         A::NewSession => AppEvent::TerminalScript("window.__termNew()"),
         A::CloseTab => AppEvent::TerminalScript("window.__termClose()"),
@@ -412,6 +422,24 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
         A::Sidebar => AppEvent::ToggleSidebar,
         A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
         A::Fullscreen => AppEvent::ToggleFullscreen,
+        _ => return None,
+    })
+}
+
+/// Map a keybinding while the notes panel has the keyboard. `None` hands the
+/// key to the editor: ⌃ keys move the caret there and ⌘↩ toggles a task.
+fn notes_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
+    use keybindings::Action as A;
+    Some(match action {
+        A::Notes | A::CloseTab => AppEvent::ToggleNotes,
+        A::SidebarFullscreen => AppEvent::ToggleNotesFullscreen,
+        A::Terminal => AppEvent::ToggleTerminal,
+        A::Quit => AppEvent::Quit,
+        A::CommandPalette => AppEvent::ToggleOverlay,
+        A::Settings => AppEvent::ToggleSettings,
+        A::Shortcuts => AppEvent::ToggleShortcuts,
+        A::Sidebar => AppEvent::ToggleSidebar,
+        A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
         _ => return None,
     })
 }
@@ -576,6 +604,9 @@ const PAGE_TEXT_JS: &str = "setTimeout(function(){try{if(!/^https?:$/.test(locat
 
 /// Posts the current selection back to Rust for "ask AI about selection".
 const SELECTION_TEXT_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({type:'selection_text',purpose:'ask',text:s.trim().slice(0,4000)}))})()";
+
+/// Posts the selection, maybe empty, for the notes capture chord.
+const NOTE_SELECTION_JS: &str = "(function(){var s='';try{s=String(window.getSelection()||'')}catch(e){}window.webkit.messageHandlers.ipc.postMessage(JSON.stringify({type:'selection_text',purpose:'note',text:s.trim().slice(0,4000)}))})()";
 
 /// Posts what ⌘⇧C should copy: the selection, or for the markdown variant
 /// with no selection, the whole page rendered by `markdown_js`.
@@ -2785,6 +2816,19 @@ fn main() {
     };
     let mut terminal_height_logical = cfg.terminal_height;
     let mut terminal_fullscreen = false;
+    // The notes column sits left of a docked sidebar and keeps at least
+    // PAGE_MIN_W_LOGICAL of the page beside it.
+    const NOTES_W_LOGICAL: u32 = 360;
+    const NOTES_MIN_W_LOGICAL: u32 = 260;
+    let clamp_notes_width = |width: u32, free_width: u32, scale_factor: f64| {
+        let free_logical = (f64::from(free_width) / scale_factor) as u32;
+        let max_width = free_logical
+            .saturating_sub(PAGE_MIN_W_LOGICAL)
+            .max(NOTES_MIN_W_LOGICAL);
+        width.clamp(NOTES_MIN_W_LOGICAL, max_width)
+    };
+    let mut notes_width_logical = cfg.notes_width;
+    let mut notes_fullscreen = false;
     // Each workspace's terminal tabs from the last run, and every pane's shell,
     // started again in its directory once the panel opens the pane.
     let saved_terminals = config::load_terminals();
@@ -2832,6 +2876,30 @@ fn main() {
     );
     let mut terminal_visible = false;
     let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
+    // Notes panel: shares the terminal's slot and height, one of them at a time.
+    let notes_wv = WebViewBuilder::new()
+        .with_html(notes_html::html(
+            &keymap.read().unwrap().ui_json().to_string(),
+        ))
+        .with_transparent(true)
+        .with_accept_first_mouse(true)
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| {
+                if let Ok(request) = serde_json::from_str::<notes::Request>(msg.body()) {
+                    let _ = p.send_event(AppEvent::Notes(request));
+                }
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create notes WebView");
+    let _ = notes_wv.set_visible(false);
+    let notes_view = objc2::rc::Retained::as_ptr(&notes_wv.webview()) as usize;
+    let mut notes_visible = false;
+    let mut notes_focus_target = PanelFocusTarget::ActiveTab;
+    // The active workspace's notes as the panel and the file last agreed, to
+    // spot edits made in another editor.
+    let mut notes_known = String::new();
     // The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
     let mut chrome_title_panel: Option<&'static str> = None;
     let mut chrome_panel_title = String::new();
@@ -2907,6 +2975,15 @@ fn main() {
             let action = km.read().ok().and_then(|k| k.lookup(mods, keycode));
             if key_focus_in(terminal_view) {
                 return match action.and_then(terminal_keybind_to_event) {
+                    Some(ev) => {
+                        let _ = p.send_event(ev);
+                        consume
+                    }
+                    None => pass,
+                };
+            }
+            if key_focus_in(notes_view) {
+                return match action.and_then(notes_keybind_to_event) {
                     Some(ev) => {
                         let _ = p.send_event(ev);
                         consume
@@ -3017,6 +3094,19 @@ fn main() {
         }};
     }
 
+    /// Hand the keyboard to the notes panel's editor.
+    macro_rules! focus_notes {
+        () => {{
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                let _: () = msg_send![ns_win, makeKeyWindow];
+            }
+            let _ = notes_wv.focus();
+            let _ = notes_wv.evaluate_script("window.__notesFocus()");
+        }};
+    }
     macro_rules! capture_panel_focus {
         () => {{
             let chrome_is_key = unsafe {
@@ -3028,6 +3118,8 @@ fn main() {
             };
             if key_focus_in(terminal_view) {
                 PanelFocusTarget::Terminal
+            } else if key_focus_in(notes_view) {
+                PanelFocusTarget::Notes
             } else if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
                 PanelFocusTarget::Sidebar
             } else if address_bar_editing {
@@ -3069,6 +3161,7 @@ fn main() {
                             .evaluate_script("window.__urlEditFocus && window.__urlEditFocus()");
                     }
                     PanelFocusTarget::Terminal if terminal_visible => focus_terminal!(),
+                    PanelFocusTarget::Notes if notes_visible => focus_notes!(),
                     _ => {
                         unsafe {
                             use objc2::msg_send;
@@ -3110,6 +3203,10 @@ fn main() {
                     json
                 ));
                 let _ = terminal_wv.evaluate_script(&format!(
+                    "window.__setShortcuts && window.__setShortcuts({})",
+                    json
+                ));
+                let _ = notes_wv.evaluate_script(&format!(
                     "window.__setShortcuts && window.__setShortcuts({})",
                     json
                 ));
@@ -3457,9 +3554,49 @@ fn main() {
     /// size every time — every show path must use it, because a tab shown with
     /// bounds computed at some earlier moment paints under the footer and the
     /// user cannot see or click what is behind it.
+    /// Physical width of the notes column while it is docked: its stored
+    /// width, clamped to the room left of a docked sidebar.
+    macro_rules! docked_notes_w {
+        () => {{
+            let sz = browser_win.inner_size();
+            let scale = browser_win.scale_factor();
+            let sidebar_w = if sidebar_visible && !sidebar_fullscreen {
+                sidebar_width_physical(sidebar_width_logical, scale)
+            } else {
+                0
+            };
+            let free = sz.width.saturating_sub(sidebar_w);
+            let logical = clamp_notes_width(notes_width_logical, free, scale);
+            ((f64::from(logical) * scale) as u32).min(free)
+        }};
+    }
+
+    /// The notes column's frame: full height at the right edge, left of a
+    /// docked sidebar, or all the width left of it in fullscreen.
+    macro_rules! notes_bounds {
+        () => {{
+            let sz = browser_win.inner_size();
+            let sidebar_w = if sidebar_visible && !sidebar_fullscreen {
+                sidebar_width_physical(sidebar_width_logical, browser_win.scale_factor())
+            } else {
+                0
+            };
+            let free = sz.width.saturating_sub(sidebar_w);
+            let w = if notes_fullscreen {
+                free
+            } else {
+                docked_notes_w!()
+            };
+            wry::Rect {
+                position: tao::dpi::PhysicalPosition::new(free - w, 0u32).into(),
+                size: tao::dpi::PhysicalSize::new(w, sz.height).into(),
+            }
+        }};
+    }
+
     /// The terminal panel's frame: docked above the footer at its stored
     /// height, or the whole page area in fullscreen. It stops at an open
-    /// sidebar rather than covering it.
+    /// sidebar and a docked notes column rather than covering them.
     macro_rules! terminal_bounds {
         () => {{
             let sz = browser_win.inner_size();
@@ -3476,17 +3613,28 @@ fn main() {
             } else {
                 0
             };
+            let notes_w = if notes_visible && !notes_fullscreen {
+                docked_notes_w!()
+            } else {
+                0
+            };
             wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(0u32, address_bar_h + page_h - h).into(),
-                size: tao::dpi::PhysicalSize::new(sz.width.saturating_sub(sidebar_w), h).into(),
+                size: tao::dpi::PhysicalSize::new(sz.width.saturating_sub(sidebar_w + notes_w), h)
+                    .into(),
             }
         }};
     }
 
+    /// Re-place the terminal panel and the notes column after the window, the
+    /// sidebar or either of them changed size.
     macro_rules! layout_terminal {
         () => {{
             if terminal_visible {
                 let _ = terminal_wv.set_bounds(terminal_bounds!());
+            }
+            if notes_visible {
+                let _ = notes_wv.set_bounds(notes_bounds!());
             }
         }};
     }
@@ -3498,6 +3646,50 @@ fn main() {
             // Reset on hide so the next open is docked, as the sidebar does.
             terminal_fullscreen = false;
             restore_panel_focus!(terminal_focus_target);
+        }};
+    }
+
+    /// Take the notes column off screen, saving what it holds first.
+    macro_rules! park_notes {
+        () => {{
+            let _ = notes_wv.evaluate_script("window.__notesFlush()");
+            let _ = notes_wv.set_visible(false);
+            notes_visible = false;
+            // Reset on hide so the next open is docked, as the sidebar does.
+            notes_fullscreen = false;
+            layout_terminal!();
+        }};
+    }
+
+    /// Load the active workspace's notes into the panel; `$reveal` puts the
+    /// caret at the end, after a capture.
+    macro_rules! mount_notes {
+        ($reveal:expr) => {{
+            let ws = workspace_manager.active();
+            let script = match notes::load(&ws.id) {
+                Ok(text) => {
+                    let script = format!(
+                        "window.__notesLoad({}, {}, {}, {})",
+                        serde_json::to_string(&ws.id).unwrap(),
+                        serde_json::to_string(&ws.name).unwrap(),
+                        serde_json::to_string(&text).unwrap(),
+                        $reveal,
+                    );
+                    notes_known = text;
+                    script
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, ws = %ws.id, "Failed to read notes");
+                    let message = format!("Could not read {}: {e}", notes::path(&ws.id).display());
+                    format!(
+                        "window.__notesError({}, {}, {})",
+                        serde_json::to_string(&ws.id).unwrap(),
+                        serde_json::to_string(&ws.name).unwrap(),
+                        serde_json::to_string(&message).unwrap(),
+                    )
+                }
+            };
+            let _ = notes_wv.evaluate_script(&script);
         }};
     }
 
@@ -6825,6 +7017,9 @@ fn main() {
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
                 mount_terminal_space!();
+                if notes_visible {
+                    mount_notes!(false);
+                }
                 relive_pending_a2ui!();
                 sync_quickslots_ui!();
                 sync_later_ui!();
@@ -6890,6 +7085,9 @@ fn main() {
                 reset_sys_stats!();
                 push_acp_sessions_to_sidebar!();
                 mount_terminal_space!();
+                if notes_visible {
+                    mount_notes!(false);
+                }
                 sync_quickslots_ui!();
                 sync_later_ui!();
                 refresh_workspace_switcher!();
@@ -6993,6 +7191,9 @@ fn main() {
                     reset_sys_stats!();
                     push_acp_sessions_to_sidebar!();
                     mount_terminal_space!();
+                    if notes_visible {
+                        mount_notes!(false);
+                    }
                     relive_pending_a2ui!();
                     save_quickslots!();
                     sync_quickslots_ui!();
@@ -8480,8 +8681,9 @@ fn main() {
                     && !settings_visible
                     && !shortcuts_visible
                     && !workspace_switcher_visible.load(Ordering::Relaxed)
-                    // chrome_win also turns key when the terminal takes focus.
+                    // chrome_win also turns key when the terminal or notes take focus.
                     && !key_focus_in(terminal_view)
+                    && !key_focus_in(notes_view)
                     && is_app_active()
                     && unsafe { macos::window_is_key(chrome_win.ns_window()) } =>
             {
@@ -8535,6 +8737,38 @@ fn main() {
                         webview_utils::copy_text_to_pasteboard(&out);
                         toast!(what, "\u{1F4CB}", "Copied");
                     }
+                    // ⌥⌘J: into the notes of the tab's workspace.
+                    "note" => {
+                        if text.is_empty() && !url.starts_with("http") {
+                            toast!("Select text, or open a web page, to capture it", "\u{1F4DD}", "Notes");
+                            return;
+                        }
+                        let ws = workspace_manager.index_of_tab(tab_id).map_or_else(
+                            || workspace_manager.active().id.clone(),
+                            |i| workspace_manager.at(i).id.clone(),
+                        );
+                        let entry = notes::capture_entry(&title, &url, &text);
+                        let saved = notes::load(&ws).and_then(|current| {
+                            notes::save(&ws, &notes::append(&current, &notes::today(), &entry))
+                        });
+                        match saved {
+                            Ok(()) => {
+                                if notes_visible && ws == workspace_manager.active().id {
+                                    mount_notes!(true);
+                                }
+                                let what = if text.is_empty() {
+                                    "Task added to notes"
+                                } else {
+                                    "Quote added to notes"
+                                };
+                                toast!(what, "\u{1F4DD}", "Notes");
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, ws = %ws, "Failed to capture to notes");
+                                toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes");
+                            }
+                        }
+                    }
                     _ => {
                         let url = sanitize::sanitize_url(&url);
                         let prompt = if text.is_empty() {
@@ -8543,6 +8777,18 @@ fn main() {
                             format!("Explain this, from {title} ({url}):\n\n{text}")
                         };
                         let _ = proxy.send_event(AppEvent::AskAI(prompt));
+                    }
+                }
+            }
+            // ── Capture to notes (⌥⌘J) ────────────────────────────────────────
+            Event::UserEvent(AppEvent::NoteCaptureRequest) => {
+                match workspace_manager.active().webviews.get(&active_wv_id) {
+                    Some(wv) => {
+                        let _ = wv.evaluate_script(NOTE_SELECTION_JS);
+                    }
+                    // Hibernated or blank tab — nothing selected, add the page.
+                    None => {
+                        let _ = proxy.send_event(AppEvent::SelectionCaptured(active_wv_id, String::new(), "note".into(), false));
                     }
                 }
             }
@@ -9138,6 +9384,121 @@ fn main() {
                 terminal::Request::Blur => panel_focus!("Terminal", None),
             },
             Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
+
+            // ── Notes column (⌘⇧J) — right edge, left of a docked sidebar ─────
+            Event::UserEvent(AppEvent::ToggleNotes) => {
+                if notes_visible {
+                    park_notes!();
+                    restore_panel_focus!(notes_focus_target);
+                } else {
+                    notes_focus_target = capture_panel_focus!();
+                    mount_notes!(false);
+                    notes_visible = true;
+                    layout_terminal!();
+                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({notes_fullscreen})"));
+                    let _ = notes_wv.set_visible(true);
+                    focus_notes!();
+                }
+            }
+            // ── Notes fullscreen — the column fills the window left of a docked
+            //     sidebar (⌘⇧Return while it has focus, or the icon in its header)
+            Event::UserEvent(AppEvent::ToggleNotesFullscreen) => {
+                if notes_visible {
+                    notes_fullscreen = !notes_fullscreen;
+                    layout_terminal!();
+                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({notes_fullscreen})"));
+                    focus_notes!();
+                } else {
+                    // Surface it first, already expanded.
+                    notes_fullscreen = true;
+                    let _ = proxy.send_event(AppEvent::ToggleNotes);
+                }
+            }
+            Event::UserEvent(AppEvent::Notes(request)) => match request {
+                notes::Request::Save { ws, text } => {
+                    // A save can trail the deletion of its workspace.
+                    if workspace_manager.index_of(&ws).is_none() {
+                        return;
+                    }
+                    match notes::save(&ws, &text.0) {
+                        Ok(()) if ws == workspace_manager.active().id => notes_known = text.0,
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!(error = %e, ws = %ws, "Failed to save notes");
+                            toast!(format!("Could not save notes: {e}"), "\u{26A0}\u{FE0F}", "Notes");
+                        }
+                    }
+                }
+                notes::Request::OpenUrl { url } => {
+                    let existing_tab = {
+                        let tm = workspace_manager.active().tabs.lock().unwrap();
+                        let normalized = url.trim_end_matches('/');
+                        tm.tabs()
+                            .iter()
+                            .find(|t| t.url.trim_end_matches('/') == normalized)
+                            .map(|t| t.id)
+                    };
+                    let _ = proxy.send_event(match existing_tab {
+                        Some(tab_id) => AppEvent::SwitchTab(tab_id),
+                        None => AppEvent::OpenInNewTab(url, None),
+                    });
+                }
+                notes::Request::Reveal => {
+                    let ws = workspace_manager.active().id.clone();
+                    let path = notes::path(&ws);
+                    // Finder can only select a file that exists.
+                    let ready = if path.exists() { Ok(()) } else { notes::save(&ws, "") };
+                    match ready {
+                        Ok(()) => webview_utils::reveal_file_in_finder(&path.to_string_lossy()),
+                        Err(e) => toast!(
+                            format!("Could not create {}: {e}", path.display()),
+                            "\u{26A0}\u{FE0F}",
+                            "Notes"
+                        ),
+                    }
+                }
+                notes::Request::Hide => {
+                    if notes_visible {
+                        park_notes!();
+                        restore_panel_focus!(notes_focus_target);
+                    }
+                }
+                notes::Request::Focus => {
+                    let (edited_elsewhere, title) = {
+                        let ws = workspace_manager.active();
+                        (
+                            notes::load(&ws.id).is_ok_and(|disk| disk != notes_known),
+                            format!("Notes — {}", ws.name),
+                        )
+                    };
+                    if edited_elsewhere {
+                        mount_notes!(false);
+                    }
+                    panel_focus!("Notes", Some(title));
+                }
+                notes::Request::Blur => panel_focus!("Notes", None),
+                notes::Request::Fullscreen => {
+                    let _ = proxy.send_event(AppEvent::ToggleNotesFullscreen);
+                }
+                notes::Request::Resize { width } => {
+                    notes_width_logical = width;
+                    layout_terminal!();
+                }
+                notes::Request::ResizeEnd { width } => {
+                    notes_width_logical = width;
+                    let width = docked_notes_w!();
+                    notes_width_logical = (f64::from(width) / browser_win.scale_factor()).round() as u32;
+                    layout_terminal!();
+                    cfg.notes_width = notes_width_logical;
+                    cfg.save();
+                }
+                notes::Request::ResizeReset => {
+                    notes_width_logical = NOTES_W_LOGICAL;
+                    layout_terminal!();
+                    cfg.notes_width = NOTES_W_LOGICAL;
+                    cfg.save();
+                }
+            },
 
             // ── Find bar: hide (Esc / close button) ─────────────────────────
             Event::UserEvent(AppEvent::HideFindBar) if find_bar_visible => {
@@ -12059,8 +12420,8 @@ mod persistence_and_paging_tests {
 #[cfg(test)]
 mod keybinding_dispatch_tests {
     use super::{
-        keybind_to_event, push_closed_tab, terminal_keybind_to_event, wants_browser_context,
-        AppEvent,
+        keybind_to_event, notes_keybind_to_event, push_closed_tab, terminal_keybind_to_event,
+        wants_browser_context, AppEvent,
     };
     use crate::keybindings::Action as A;
 
@@ -12203,6 +12564,37 @@ mod keybinding_dispatch_tests {
         assert!(matches!(
             terminal_keybind_to_event(A::SidebarFullscreen),
             Some(AppEvent::ToggleTerminalFullscreen)
+        ));
+    }
+
+    #[test]
+    fn focused_notes_keep_editing_keys_and_close_with_their_chords() {
+        // ⌃ keys move the caret and ⌘↩ toggles a task in the editor.
+        for action in [
+            A::ScrollDown,
+            A::ScrollUp,
+            A::ScrollTop,
+            A::ScrollBottom,
+            A::PrevTab,
+            A::NextTab,
+            A::Fullscreen,
+            A::NoteCapture,
+        ] {
+            assert!(
+                notes_keybind_to_event(action).is_none(),
+                "{} must reach the editor",
+                action.id()
+            );
+        }
+        for action in [A::Notes, A::CloseTab] {
+            assert!(matches!(
+                notes_keybind_to_event(action),
+                Some(AppEvent::ToggleNotes)
+            ));
+        }
+        assert!(matches!(
+            notes_keybind_to_event(A::SidebarFullscreen),
+            Some(AppEvent::ToggleNotesFullscreen)
         ));
     }
 
@@ -12354,6 +12746,7 @@ mod chrome_js_syntax_tests {
             ("find_bar", crate::find_bar_html::html()),
             ("inline_edit", crate::inline_edit_html::html()),
             ("newtab", crate::newtab_html::html("[]", "[]")),
+            ("notes", crate::notes_html::html("null")),
             ("notification", crate::notification_html::html()),
             ("overlay", crate::overlay_html::html()),
             ("progress_bar", crate::progress_bar_html::html()),

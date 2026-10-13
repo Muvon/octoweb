@@ -538,6 +538,9 @@ pub struct Config {
     /// AI sidebar width in logical pixels
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: u32,
+    /// Notes column width in logical pixels
+    #[serde(default = "default_notes_width")]
+    pub notes_width: u32,
     /// Terminal panel height in logical pixels
     #[serde(default = "default_terminal_height")]
     pub terminal_height: u32,
@@ -682,6 +685,10 @@ fn default_sidebar_width() -> u32 {
     440
 }
 
+fn default_notes_width() -> u32 {
+    360
+}
+
 fn default_terminal_height() -> u32 {
     320
 }
@@ -719,6 +726,7 @@ impl Default for Config {
             window_width: 1280,
             window_height: 800,
             sidebar_width: default_sidebar_width(),
+            notes_width: default_notes_width(),
             terminal_height: default_terminal_height(),
             appearance: Appearance::Auto,
             terminal_appearance: TerminalAppearance::General,
