@@ -26,6 +26,15 @@ pub enum Request {
     Reveal,
     Hide,
     Fullscreen,
+    /// Switch the pane to `mail` (spec PANE-3).
+    Tab {
+        tab: String,
+    },
+    /// A task linking a mail conversation was ticked or unticked (TRI-10).
+    Task {
+        url: String,
+        done: bool,
+    },
     /// The panel took the keyboard.
     Focus,
     /// The panel lost the keyboard.
@@ -125,21 +134,63 @@ pub fn append(text: &str, date: &str, entry: &str) -> String {
     out
 }
 
+/// `text` without the first line that is exactly `entry`, or `None` when no
+/// line is — undoing a capture must not touch anything the user wrote.
+pub fn remove_entry(text: &str, entry: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines.iter().position(|line| *line == entry)?;
+    let mut kept: Vec<&str> = lines[..at].to_vec();
+    kept.extend_from_slice(&lines[at + 1..]);
+    let mut out = kept.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// Local broken-down time of `ts` (Unix seconds).
+fn local_tm(ts: i64) -> libc::tm {
+    // SAFETY: localtime_r fills the zeroed `tm` on this stack from `ts`.
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&(ts as libc::time_t), &mut tm);
+        tm
+    }
+}
+
+/// The local hour, 0–23.
+pub fn local_hour() -> i32 {
+    // SAFETY: time(NULL) only reads the clock.
+    local_tm(unsafe { libc::time(std::ptr::null_mut()) }).tm_hour
+}
+
 /// Today's local date as `YYYY-MM-DD`.
 pub fn today() -> String {
-    // SAFETY: time(NULL) only returns the clock; localtime_r fills the
-    // zeroed `tm` on this stack from `now`.
-    let tm = unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&now, &mut tm);
-        tm
-    };
+    // SAFETY: time(NULL) only reads the clock.
+    let tm = local_tm(unsafe { libc::time(std::ptr::null_mut()) });
     format!(
         "{:04}-{:02}-{:02}",
         tm.tm_year + 1900,
         tm.tm_mon + 1,
         tm.tm_mday
+    )
+}
+
+/// `Tue, 13 Oct 2026 at 10:00` in local time, for quoted mail.
+pub fn format_time(ts: i64) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let tm = local_tm(ts);
+    format!(
+        "{}, {} {} {} at {:02}:{:02}",
+        DAYS[tm.tm_wday as usize],
+        tm.tm_mday,
+        MONTHS[tm.tm_mon as usize],
+        tm.tm_year + 1900,
+        tm.tm_hour,
+        tm.tm_min
     )
 }
 

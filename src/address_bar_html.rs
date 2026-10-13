@@ -441,6 +441,15 @@ pub fn html() -> String {
     border-radius: 50%;
     box-shadow: 0 0 0 1.5px var(--glass-thick);
   }
+  /* NTF-3: the dot carries the workspace's unread Important mail. */
+  .ws-dot.count {
+    bottom: 0; right: 0;
+    width: auto; min-width: 12px; height: 12px;
+    padding: 0 3px; box-sizing: border-box;
+    border-radius: 6px;
+    font: 600 8.5px/12px var(--font-text);
+    color: #fff; text-align: center;
+  }
 
   #ai-btn {
     background: transparent;
@@ -1198,6 +1207,15 @@ pub fn html() -> String {
   window.__setWorkspace = function(color, name) {
     var dot = document.getElementById('ws-dot');
     if (dot) dot.style.background = color;
+  };
+
+  // Unread Important mail in this workspace, on the dot.
+  window.__setMailUnread = function(n) {
+    var dot = document.getElementById('ws-dot');
+    if (!dot) return;
+    dot.textContent = n > 0 ? (n > 99 ? '99+' : String(n)) : '';
+    dot.classList.toggle('count', n > 0);
+    document.getElementById('workspace-btn').title = n > 0 ? 'Workspaces · ' + n + ' unread' : 'Workspaces';
   };
 
   // Settings

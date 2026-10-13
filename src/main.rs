@@ -26,6 +26,13 @@ mod keybindings;
 mod later;
 mod link_hints_js;
 mod macos;
+mod mail;
+#[cfg(test)]
+mod mail_e2e;
+mod mail_html;
+mod mail_oauth;
+mod mail_parse;
+mod mail_store;
 mod markdown_js;
 mod mcp;
 mod native_input;
@@ -232,10 +239,16 @@ enum AppEvent {
     Terminal(terminal::Request),   // message from the terminal panel page
     TerminalOutput(u32),           // (terminal_id) — shell output or exit: answer the panel's read
     ToggleNotes,                   // ⌘⇧J — show/hide the notes column
-    ToggleNotesFullscreen,         // ⌘⇧Return in the notes / header icon — fill the window
+    TogglePaneFullscreen,          // ⌘⇧Return in the notes / header icon — fill the window
     NoteCaptureRequest,            // ⌥⌘J — add the page, or quote the selection, to notes
     Notes(notes::Request),         // message from the notes panel page
-    Extension(extensions::Event),  // extension UI command, download result, or WebKit request
+    ToggleInbox,                   // ⌘⇧I — show/hide the pane on Mail
+    Mail(mail::Event),             // from the mail engine
+    MailPage(mail::Message),       // message from the mail page
+    OpenMailThread(mail::Item, bool), // open a conversation in the mail tab; true when from notes
+    MailVerify(String),            // Settings → Mail "Check connection" for this account key
+    MailSignIn(String), // Settings → Mail "Sign in with Google/Microsoft" for this account key
+    Extension(extensions::Event), // extension UI command, download result, or WebKit request
     Quit,
 }
 
@@ -257,6 +270,7 @@ enum PanelFocusTarget {
     Sidebar,
     Terminal,
     Notes,
+    Mail,
     ActiveTab,
 }
 
@@ -396,6 +410,7 @@ fn keybind_to_event(
         A::TogglePin if !overlay => AppEvent::TogglePin,
         A::Terminal if !overlay => AppEvent::ToggleTerminal,
         A::Notes if !overlay => AppEvent::ToggleNotes,
+        A::Inbox if !overlay => AppEvent::ToggleInbox,
         A::NoteCapture if !overlay && !inline && !address_edit => AppEvent::NoteCaptureRequest,
         _ => return None,
     })
@@ -410,6 +425,7 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
     Some(match action {
         A::Terminal => AppEvent::ToggleTerminal,
         A::Notes => AppEvent::ToggleNotes,
+        A::Inbox => AppEvent::ToggleInbox,
         A::SidebarFullscreen => AppEvent::ToggleTerminalFullscreen,
         A::NewSession => AppEvent::TerminalScript("window.__termNew()"),
         A::CloseTab => AppEvent::TerminalScript("window.__termClose()"),
@@ -426,13 +442,24 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
     })
 }
 
-/// Map a keybinding while the notes panel has the keyboard. `None` hands the
-/// key to the editor: ⌃ keys move the caret there and ⌘↩ toggles a task.
-fn notes_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
+/// Which tab of the right-hand pane has the keyboard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneTab {
+    Notes,
+    Mail,
+}
+
+/// Map a keybinding while the right-hand pane has the keyboard. `None` hands
+/// the key to the page: ⌃ keys move the caret in notes, single letters
+/// triage mail, ⌘↩ toggles a task or sends.
+fn pane_keybind_to_event(action: keybindings::Action, tab: PaneTab) -> Option<AppEvent> {
     use keybindings::Action as A;
     Some(match action {
-        A::Notes | A::CloseTab => AppEvent::ToggleNotes,
-        A::SidebarFullscreen => AppEvent::ToggleNotesFullscreen,
+        A::CloseTab if tab == PaneTab::Notes => AppEvent::ToggleNotes,
+        A::CloseTab => AppEvent::ToggleInbox,
+        A::Notes => AppEvent::ToggleNotes,
+        A::Inbox => AppEvent::ToggleInbox,
+        A::SidebarFullscreen => AppEvent::TogglePaneFullscreen,
         A::Terminal => AppEvent::ToggleTerminal,
         A::Quit => AppEvent::Quit,
         A::CommandPalette => AppEvent::ToggleOverlay,
@@ -546,6 +573,10 @@ const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
 
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
+/// Quiet time after mail changes before the summarizer runs (AI-1).
+const MAIL_SUMMARY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Local hour from which the morning brief may run (AI-4).
+const MAIL_BRIEF_HOUR: i32 = 5;
 
 /// Width in points for the frozen tab snapshot shown while a hibernated tab
 /// reloads. It is stretched to fill the viewport and swapped for the real page
@@ -1574,6 +1605,21 @@ fn main() {
                                 let _ = p.send_event(AppEvent::ContentSearch(q.to_string()));
                             }
                         }
+                        Some("open_mail") => {
+                            dismiss();
+                            let _ = p.send_event(AppEvent::HideOverlay);
+                            if let (Some(account), Some(thread)) =
+                                (v["account"].as_str(), v["thread"].as_str())
+                            {
+                                let _ = p.send_event(AppEvent::OpenMailThread(
+                                    mail::Item {
+                                        account: account.to_string(),
+                                        thread: thread.to_string(),
+                                    },
+                                    false,
+                                ));
+                            }
+                        }
                         Some("navigate") => {
                             dismiss();
                             if let Some(url) = v["url"].as_str() {
@@ -1773,6 +1819,26 @@ fn main() {
                                 let _ = p.send_event(AppEvent::Extension(
                                     extensions::Event::OpenOptions(id.to_string()),
                                 ));
+                            }
+                        }
+                        Some("mail_sign_in") => {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = p.send_event(AppEvent::MailSignIn(id.to_string()));
+                            }
+                        }
+                        Some("mail_verify") => {
+                            if let Some(id) = v["id"].as_str() {
+                                let _ = p.send_event(AppEvent::MailVerify(id.to_string()));
+                            }
+                        }
+                        // Provider pages that make app passwords (ACC-1b).
+                        Some("open_url") => {
+                            if let Some(url) =
+                                v["url"].as_str().filter(|u| u.starts_with("https://"))
+                            {
+                                sw.set_visible(false);
+                                let _ = p.send_event(AppEvent::HideSettings);
+                                let _ = p.send_event(AppEvent::OpenInNewTab(url.to_string(), None));
                             }
                         }
                         _ => {}
@@ -2771,6 +2837,13 @@ fn main() {
     // it (like session agents) since ControlFlow::Exit skips destructors and
     // would otherwise orphan a mid-run learning agent on every quit.
     let mut learning_pid: Option<u32> = None;
+    // Background mail summarizer (spec AI-1): a hidden assistant run that
+    // saves one-line summaries through `mail_set_summaries`.
+    let mut mail_ai_handle: Option<acp::AcpHandle> = None;
+    let mut mail_ai_pid: Option<u32> = None;
+    let mut mail_ai_due: Option<std::time::Instant> = None;
+    // Checked once a minute for the morning brief (AI-4).
+    let mut mail_brief_check_at = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut learning_next_at: Option<std::time::Instant> = if cfg.proactive_learning {
         // First run after 2 minutes so there's some history to analyze
         Some(std::time::Instant::now() + std::time::Duration::from_secs(120))
@@ -2818,17 +2891,17 @@ fn main() {
     let mut terminal_fullscreen = false;
     // The notes column sits left of a docked sidebar and keeps at least
     // PAGE_MIN_W_LOGICAL of the page beside it.
-    const NOTES_W_LOGICAL: u32 = 360;
-    const NOTES_MIN_W_LOGICAL: u32 = 260;
-    let clamp_notes_width = |width: u32, free_width: u32, scale_factor: f64| {
+    const PANE_W_LOGICAL: u32 = 360;
+    const PANE_MIN_W_LOGICAL: u32 = 260;
+    let clamp_pane_width = |width: u32, free_width: u32, scale_factor: f64| {
         let free_logical = (f64::from(free_width) / scale_factor) as u32;
         let max_width = free_logical
             .saturating_sub(PAGE_MIN_W_LOGICAL)
-            .max(NOTES_MIN_W_LOGICAL);
-        width.clamp(NOTES_MIN_W_LOGICAL, max_width)
+            .max(PANE_MIN_W_LOGICAL);
+        width.clamp(PANE_MIN_W_LOGICAL, max_width)
     };
-    let mut notes_width_logical = cfg.notes_width;
-    let mut notes_fullscreen = false;
+    let mut pane_width_logical = cfg.notes_width;
+    let mut pane_fullscreen = false;
     // Each workspace's terminal tabs from the last run, and every pane's shell,
     // started again in its directory once the panel opens the pane.
     let saved_terminals = config::load_terminals();
@@ -2876,12 +2949,14 @@ fn main() {
     );
     let mut terminal_visible = false;
     let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
-    // Notes panel: shares the terminal's slot and height, one of them at a time.
+    // Notes: the right-hand pane's first tab, beside a docked sidebar.
     let notes_wv = WebViewBuilder::new()
         .with_html(notes_html::html(
             &keymap.read().unwrap().ui_json().to_string(),
         ))
         .with_transparent(true)
+        // Built hidden: it must not take the keyboard until it is shown.
+        .with_focused(false)
         .with_accept_first_mouse(true)
         .with_ipc_handler({
             let p = proxy.clone();
@@ -2896,10 +2971,64 @@ fn main() {
     let _ = notes_wv.set_visible(false);
     let notes_view = objc2::rc::Retained::as_ptr(&notes_wv.webview()) as usize;
     let mut notes_visible = false;
-    let mut notes_focus_target = PanelFocusTarget::ActiveTab;
+    let mut pane_focus_target = PanelFocusTarget::ActiveTab;
     // The active workspace's notes as the panel and the file last agreed, to
     // spot edits made in another editor.
     let mut notes_known = String::new();
+    // Mail: the pane's second tab (spec PANE-1), and the engine that keeps
+    // every account in sync on its own thread.
+    let mail_wv = WebViewBuilder::new()
+        .with_html(mail_html::html(
+            &keymap.read().unwrap().ui_json().to_string(),
+        ))
+        .with_transparent(true)
+        // Built hidden: it must not take the keyboard until it is shown.
+        .with_focused(false)
+        .with_accept_first_mouse(true)
+        .with_ipc_handler({
+            let p = proxy.clone();
+            move |msg| match serde_json::from_str::<mail::Message>(msg.body()) {
+                Ok(message) => {
+                    let _ = p.send_event(AppEvent::MailPage(message));
+                }
+                Err(e) => tracing::warn!(error = %e, "malformed mail page message"),
+            }
+        })
+        .build_as_child(&*chrome_win)
+        .expect("Failed to create mail WebView");
+    let _ = mail_wv.set_visible(false);
+    let mail_view = objc2::rc::Retained::as_ptr(&mail_wv.webview()) as usize;
+    let mut mail_visible = false;
+    let mail_engine = {
+        let p = proxy.clone();
+        mail::Mail::start(
+            config::base_dir().join("octoweb").join("mail.sqlite"),
+            move |event| {
+                let _ = p.send_event(AppEvent::Mail(event));
+            },
+        )
+    };
+    let mail_engine = match mail_engine {
+        Ok(engine) => Some(engine),
+        Err(e) => {
+            tracing::error!(error = %e, "mail engine did not start");
+            None
+        }
+    };
+    // Each account's connection state, for the pane banner and Settings.
+    let mut mail_status: HashMap<String, (&'static str, String)> = HashMap::new();
+    // Unread Important conversations per account (NTF-3).
+    let mut mail_unread: HashMap<String, usize> = HashMap::new();
+    if let Some(engine) = &mail_engine {
+        let (ready, missing) = mail::resolve_all(&cfg.mail_accounts);
+        for key in missing {
+            mail_status.insert(key, ("nopassword", String::new()));
+        }
+        let configured = cfg.mail_accounts.iter().map(|a| mail::hex(&a.id)).collect();
+        engine.send(mail::Command::SetAccounts { ready, configured });
+    }
+    // A notification click opens this conversation in its workspace.
+    let mut mail_notif_origin: Option<(String, mail::Item)> = None;
     // The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
     let mut chrome_title_panel: Option<&'static str> = None;
     let mut chrome_panel_title = String::new();
@@ -2982,8 +3111,15 @@ fn main() {
                     None => pass,
                 };
             }
-            if key_focus_in(notes_view) {
-                return match action.and_then(notes_keybind_to_event) {
+            let pane_tab = if key_focus_in_shown(notes_view) {
+                Some(PaneTab::Notes)
+            } else if key_focus_in_shown(mail_view) {
+                Some(PaneTab::Mail)
+            } else {
+                None
+            };
+            if let Some(tab) = pane_tab {
+                return match action.and_then(|a| pane_keybind_to_event(a, tab)) {
                     Some(ev) => {
                         let _ = p.send_event(ev);
                         consume
@@ -3107,6 +3243,19 @@ fn main() {
             let _ = notes_wv.evaluate_script("window.__notesFocus()");
         }};
     }
+    /// Hand the keyboard to the mail tab.
+    macro_rules! focus_mail {
+        () => {{
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+                let _: () = msg_send![ns_win, makeKeyWindow];
+            }
+            let _ = mail_wv.focus();
+            let _ = mail_wv.evaluate_script("window.__mail && window.__mail.focus()");
+        }};
+    }
     macro_rules! capture_panel_focus {
         () => {{
             let chrome_is_key = unsafe {
@@ -3118,8 +3267,10 @@ fn main() {
             };
             if key_focus_in(terminal_view) {
                 PanelFocusTarget::Terminal
-            } else if key_focus_in(notes_view) {
+            } else if key_focus_in_shown(notes_view) {
                 PanelFocusTarget::Notes
+            } else if key_focus_in_shown(mail_view) {
+                PanelFocusTarget::Mail
             } else if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
                 PanelFocusTarget::Sidebar
             } else if address_bar_editing {
@@ -3162,6 +3313,7 @@ fn main() {
                     }
                     PanelFocusTarget::Terminal if terminal_visible => focus_terminal!(),
                     PanelFocusTarget::Notes if notes_visible => focus_notes!(),
+                    PanelFocusTarget::Mail if mail_visible => focus_mail!(),
                     _ => {
                         unsafe {
                             use objc2::msg_send;
@@ -3207,6 +3359,10 @@ fn main() {
                     json
                 ));
                 let _ = notes_wv.evaluate_script(&format!(
+                    "window.__setShortcuts && window.__setShortcuts({})",
+                    json
+                ));
+                let _ = mail_wv.evaluate_script(&format!(
                     "window.__setShortcuts && window.__setShortcuts({})",
                     json
                 ));
@@ -3556,7 +3712,7 @@ fn main() {
     /// user cannot see or click what is behind it.
     /// Physical width of the notes column while it is docked: its stored
     /// width, clamped to the room left of a docked sidebar.
-    macro_rules! docked_notes_w {
+    macro_rules! docked_pane_w {
         () => {{
             let sz = browser_win.inner_size();
             let scale = browser_win.scale_factor();
@@ -3566,14 +3722,14 @@ fn main() {
                 0
             };
             let free = sz.width.saturating_sub(sidebar_w);
-            let logical = clamp_notes_width(notes_width_logical, free, scale);
+            let logical = clamp_pane_width(pane_width_logical, free, scale);
             ((f64::from(logical) * scale) as u32).min(free)
         }};
     }
 
     /// The notes column's frame: full height at the right edge, left of a
     /// docked sidebar, or all the width left of it in fullscreen.
-    macro_rules! notes_bounds {
+    macro_rules! pane_bounds {
         () => {{
             let sz = browser_win.inner_size();
             let sidebar_w = if sidebar_visible && !sidebar_fullscreen {
@@ -3582,10 +3738,10 @@ fn main() {
                 0
             };
             let free = sz.width.saturating_sub(sidebar_w);
-            let w = if notes_fullscreen {
+            let w = if pane_fullscreen {
                 free
             } else {
-                docked_notes_w!()
+                docked_pane_w!()
             };
             wry::Rect {
                 position: tao::dpi::PhysicalPosition::new(free - w, 0u32).into(),
@@ -3613,8 +3769,8 @@ fn main() {
             } else {
                 0
             };
-            let notes_w = if notes_visible && !notes_fullscreen {
-                docked_notes_w!()
+            let notes_w = if (notes_visible || mail_visible) && !pane_fullscreen {
+                docked_pane_w!()
             } else {
                 0
             };
@@ -3626,15 +3782,18 @@ fn main() {
         }};
     }
 
-    /// Re-place the terminal panel and the notes column after the window, the
-    /// sidebar or either of them changed size.
+    /// Re-place the terminal panel and the right-hand pane after the window,
+    /// the sidebar or either of them changed size.
     macro_rules! layout_terminal {
         () => {{
             if terminal_visible {
                 let _ = terminal_wv.set_bounds(terminal_bounds!());
             }
             if notes_visible {
-                let _ = notes_wv.set_bounds(notes_bounds!());
+                let _ = notes_wv.set_bounds(pane_bounds!());
+            }
+            if mail_visible {
+                let _ = mail_wv.set_bounds(pane_bounds!());
             }
         }};
     }
@@ -3649,15 +3808,120 @@ fn main() {
         }};
     }
 
-    /// Take the notes column off screen, saving what it holds first.
+    /// Take the notes tab off screen, saving what it holds first.
     macro_rules! park_notes {
         () => {{
             let _ = notes_wv.evaluate_script("window.__notesFlush()");
             let _ = notes_wv.set_visible(false);
             notes_visible = false;
+        }};
+    }
+
+    macro_rules! park_mail {
+        () => {{
+            let _ = mail_wv.set_visible(false);
+            mail_visible = false;
+        }};
+    }
+
+    /// Hide the right-hand pane, whichever tab it shows.
+    macro_rules! hide_pane {
+        () => {{
+            if notes_visible {
+                park_notes!();
+            }
+            if mail_visible {
+                park_mail!();
+            }
             // Reset on hide so the next open is docked, as the sidebar does.
-            notes_fullscreen = false;
+            pane_fullscreen = false;
             layout_terminal!();
+            restore_panel_focus!(pane_focus_target);
+        }};
+    }
+
+    /// Unread Important mail of the workspace on screen, on the Mail tab,
+    /// the Notes tab and the workspace dot (NTF-3, PANE-3).
+    macro_rules! push_mail_unread {
+        () => {{
+            let keys = mail::accounts_in(&cfg.mail_accounts, &workspace_manager.active().id);
+            let n: usize = keys.iter().filter_map(|k| mail_unread.get(k)).sum();
+            let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.unread({n})"));
+            let _ = notes_wv
+                .evaluate_script(&format!("window.__paneUnread && window.__paneUnread({n})"));
+            let _ = address_bar_wv.evaluate_script(&format!(
+                "window.__setMailUnread && window.__setMailUnread({n})"
+            ));
+        }};
+    }
+
+    /// Tell the mail page which workspace is on screen and its accounts.
+    macro_rules! mount_mail {
+        () => {{
+            let ws = workspace_manager.active();
+            let accounts: Vec<serde_json::Value> = cfg
+                .mail_accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.scope.includes(&ws.id))
+                .map(|(i, a)| {
+                    let key = mail::hex(&a.id);
+                    let (state, message) =
+                        mail_status.get(&key).cloned().unwrap_or(("connecting", String::new()));
+                    serde_json::json!({
+                        "key": key, "address": a.address, "name": a.name, "color": mail::account_color(a, i),
+                        "state": state, "message": message,
+                    })
+                })
+                .collect();
+            let setup = serde_json::json!({ "ws": ws.id, "accounts": accounts, "ai": cfg.mail_ai });
+            let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.setup({setup})"));
+            push_mail_unread!();
+        }};
+    }
+
+    /// Show the pane on its Mail tab, switching from Notes when that is showing.
+    macro_rules! show_mail {
+        () => {{
+            if !mail_visible {
+                if notes_visible {
+                    park_notes!();
+                } else {
+                    pane_focus_target = capture_panel_focus!();
+                }
+                mail_visible = true;
+                layout_terminal!();
+                let _ = mail_wv.evaluate_script(&format!(
+                    "window.__mail && window.__mail.fullscreen({pane_fullscreen})"
+                ));
+                let _ = mail_wv.set_visible(true);
+                mount_mail!();
+            }
+            focus_mail!();
+        }};
+    }
+
+    /// Hand the configured accounts to the engine and refresh what shows
+    /// them: Settings, and the mail tab when it is open.
+    macro_rules! sync_mail_accounts {
+        () => {{
+            let keys: Vec<String> = cfg.mail_accounts.iter().map(|a| mail::hex(&a.id)).collect();
+            mail_status.retain(|k, _| keys.contains(k));
+            if let Some(engine) = &mail_engine {
+                let (ready, missing) = mail::resolve_all(&cfg.mail_accounts);
+                for key in missing {
+                    mail_status.insert(key, ("nopassword", String::new()));
+                }
+                engine.send(mail::Command::SetAccounts {
+                    ready,
+                    configured: keys,
+                });
+            }
+            let _ = settings_wv.evaluate_script(&mail_status_script(&mail_status));
+            if mail_visible {
+                mount_mail!();
+            }
+            push_mail_unread!();
         }};
     }
 
@@ -3690,6 +3954,16 @@ fn main() {
                 }
             };
             let _ = notes_wv.evaluate_script(&script);
+            let colors: serde_json::Map<String, serde_json::Value> = cfg
+                .mail_accounts
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (mail::hex(&a.id), mail::account_color(a, i).into()))
+                .collect();
+            let _ = notes_wv.evaluate_script(&format!(
+                "window.__notesMailAccounts && window.__notesMailAccounts({})",
+                serde_json::Value::Object(colors)
+            ));
         }};
     }
 
@@ -4431,6 +4705,7 @@ fn main() {
         ($text:expr, $icon:expr, $title:expr) => {{
             let escaped = webview_utils::escape_js_template(&$text);
             notif_origin = None;
+            mail_notif_origin = None;
             if !notification_visible {
                 let _ = notification_wv.set_visible(true);
                 notification_visible = true;
@@ -5442,6 +5717,55 @@ fn main() {
             }
         }
 
+        // ── Mail AI: background summaries (AI-1) and the morning brief (AI-4) ──
+        if let Some(ref mut h) = mail_ai_handle {
+            for ev in h.poll() {
+                match ev {
+                    acp::AgentEvent::ProcessPid(pid) => mail_ai_pid = Some(pid),
+                    acp::AgentEvent::Done => {
+                        tracing::info!("mail summaries run completed");
+                        mail_ai_handle = None;
+                        mail_ai_pid = None;
+                    }
+                    acp::AgentEvent::Error(err) => {
+                        tracing::warn!(error = %err, "mail summaries run failed");
+                        mail_ai_handle = None;
+                        mail_ai_pid = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if mail_ai_due.is_some_and(|due| std::time::Instant::now() >= due) && mail_ai_handle.is_none() {
+            mail_ai_due = None;
+            if let Some(engine) = &mail_engine {
+                let ws = workspace_manager.active().id.clone();
+                let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
+                if !accounts.is_empty() {
+                    engine.send(mail::Command::SummaryPrompt { ws, accounts });
+                }
+            }
+        }
+        if std::time::Instant::now() >= mail_brief_check_at {
+            mail_brief_check_at = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let today = notes::today();
+            if cfg.mail_ai
+                && cfg.mail_brief_morning
+                && cfg.mail_brief_last != today
+                && notes::local_hour() >= MAIL_BRIEF_HOUR
+                && is_app_active()
+            {
+                let ws = workspace_manager.active().id.clone();
+                let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
+                if let (Some(engine), false) = (&mail_engine, accounts.is_empty()) {
+                    cfg.mail_brief_last = today;
+                    cfg.save();
+                    let req = mail::PageRequest::Ai { kind: "brief".into(), item: None, text: String::new() };
+                    engine.send(mail::Command::Page { ws, accounts, req });
+                }
+            }
+        }
+
         // Drain MCP commands and execute on main thread (WebView is not thread-safe).
         if let Some(ref mut handle) = mcp_handle {
             while let Some((mcp_ws_id, cmd)) = handle.poll() {
@@ -6057,6 +6381,16 @@ fn main() {
                     McpCommand::SearchPageText { query, limit, response } => {
                         let _ = response.send(Ok(page_index.search(&query, limit.unwrap_or(10))));
                     }
+                    McpCommand::Mail { request, response } => match &mail_engine {
+                        Some(engine) => {
+                            let ws = workspace_manager.at(ws_idx).id.clone();
+                            let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
+                            engine.send(mail::Command::Mcp { ws, accounts, req: request, reply: response });
+                        }
+                        None => {
+                            let _ = response.send(Err("Mail is unavailable: its store could not be opened.".into()));
+                        }
+                    },
                     McpCommand::GetLater { response } => {
                         let _ = response.send(Ok(workspace_manager.at(ws_idx).later.clone()));
                     }
@@ -7020,6 +7354,11 @@ fn main() {
                 if notes_visible {
                     mount_notes!(false);
                 }
+                if mail_visible {
+                    mount_mail!();
+                } else {
+                    push_mail_unread!();
+                }
                 relive_pending_a2ui!();
                 sync_quickslots_ui!();
                 sync_later_ui!();
@@ -7088,6 +7427,11 @@ fn main() {
                 if notes_visible {
                     mount_notes!(false);
                 }
+                if mail_visible {
+                    mount_mail!();
+                } else {
+                    push_mail_unread!();
+                }
                 sync_quickslots_ui!();
                 sync_later_ui!();
                 refresh_workspace_switcher!();
@@ -7115,6 +7459,18 @@ fn main() {
             Event::UserEvent(AppEvent::DeleteWorkspace(id)) => {
                 if workspace_manager.list().len() <= 1 {
                     return; // refuse to remove the last workspace
+                }
+                // ACC-4c: the workspace drops out of every mail account's scope.
+                let mut scopes_changed = false;
+                for account in &mut cfg.mail_accounts {
+                    if let extension_store::Scope::Only(ids) = &mut account.scope {
+                        let before = ids.len();
+                        ids.retain(|w| *w != id);
+                        scopes_changed |= ids.len() != before;
+                    }
+                }
+                if scopes_changed {
+                    cfg.save();
                 }
                 // Hang up its terminals: dropping the workspace alone would leave
                 // the shells running.
@@ -7193,6 +7549,11 @@ fn main() {
                     mount_terminal_space!();
                     if notes_visible {
                         mount_notes!(false);
+                    }
+                    if mail_visible {
+                        mount_mail!();
+                    } else {
+                        push_mail_unread!();
                     }
                     relive_pending_a2ui!();
                     save_quickslots!();
@@ -7450,6 +7811,46 @@ fn main() {
                             "Proactive hibernation config updated"
                         );
                     }
+                    "mail_accounts" => match serde_json::from_str::<Vec<config::MailAccount>>(&val) {
+                        Ok(mut accounts) => {
+                            for account in &mut accounts {
+                                if let Some(secret) = account.client_secret.take() {
+                                    if secret.is_empty() {
+                                        mail::forget_client_secret(&account.id);
+                                    } else if let Err(e) = mail::save_client_secret(&account.id, &secret) {
+                                        tracing::warn!(error = %e, "failed to store OAuth client secret in Keychain");
+                                    }
+                                    account.has_client_secret = !secret.is_empty();
+                                }
+                                let Some(password) = account.password.take() else {
+                                    continue;
+                                };
+                                if password.is_empty() {
+                                    mail::forget_password(&account.id);
+                                } else if let Err(e) = mail::save_password(&account.id, &password) {
+                                    tracing::warn!(error = %e, "failed to store mail password in Keychain");
+                                }
+                                account.has_password = !password.is_empty();
+                            }
+                            for old in &cfg.mail_accounts {
+                                if !accounts.iter().any(|a| a.id == old.id) {
+                                    mail::forget_password(&old.id);
+                                    mail::forget_client_secret(&old.id);
+                                }
+                            }
+                            cfg.mail_accounts = accounts;
+                            sync_mail_accounts!();
+                        }
+                        Err(e) => tracing::warn!(error = %e, "ignoring malformed mail accounts from settings"),
+                    },
+                    "mail_ai" => {
+                        cfg.mail_ai = val == "true";
+                        if mail_visible {
+                            mount_mail!();
+                        }
+                    }
+                    "mail_ai_summaries" => cfg.mail_ai_summaries = val == "true",
+                    "mail_brief_morning" => cfg.mail_brief_morning = val == "true",
                     "proxies" => match serde_json::from_str::<Vec<config::ProxyRule>>(&val) {
                         Ok(mut rules) => {
                             for rule in &mut rules {
@@ -7990,6 +8391,14 @@ fn main() {
             // Queued in order, so the session switch runs once the workspace
             // it lives in is active.
             Event::UserEvent(AppEvent::OpenNotifiedSession) => {
+                // A mail toast opens its conversation in its workspace (NTF-1).
+                if let Some((ws_id, item)) = mail_notif_origin.take() {
+                    if ws_id != workspace_manager.active().id {
+                        let _ = proxy.send_event(AppEvent::SwitchWorkspace(ws_id));
+                    }
+                    let _ = proxy.send_event(AppEvent::OpenMailThread(item, false));
+                    return;
+                }
                 if let Some((ws_id, sid)) = notif_origin.take() {
                     if ws_id != workspace_manager.active().id {
                         let _ = proxy.send_event(AppEvent::SwitchWorkspace(ws_id));
@@ -8683,7 +9092,7 @@ fn main() {
                     && !workspace_switcher_visible.load(Ordering::Relaxed)
                     // chrome_win also turns key when the terminal or notes take focus.
                     && !key_focus_in(terminal_view)
-                    && !key_focus_in(notes_view)
+                    && !key_focus_in_shown(notes_view)
                     && is_app_active()
                     && unsafe { macos::window_is_key(chrome_win.ns_window()) } =>
             {
@@ -8869,6 +9278,14 @@ fn main() {
                 let _ = overlay_wv.evaluate_script(&format!(
                     "window.__setContentResults && window.__setContentResults({json})"
                 ));
+                // SRCH-3: the workspace's mail answers on its own, through
+                // `mail::Event::PaletteResults`.
+                if let Some(engine) = &mail_engine {
+                    let accounts = mail::accounts_in(&cfg.mail_accounts, &workspace_manager.active().id);
+                    if !accounts.is_empty() {
+                        engine.send(mail::Command::Palette { accounts, query: q });
+                    }
+                }
             }
 
             Event::UserEvent(AppEvent::AskAI(text)) => {
@@ -9385,32 +9802,56 @@ fn main() {
             },
             Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
 
-            // ── Notes column (⌘⇧J) — right edge, left of a docked sidebar ─────
+            // ── Right-hand pane: Notes (⌘⇧J) and Mail (⌘⇧I) tabs, left of a docked
+            //     sidebar. Each chord opens its tab, switches to it, or hides it.
             Event::UserEvent(AppEvent::ToggleNotes) => {
                 if notes_visible {
-                    park_notes!();
-                    restore_panel_focus!(notes_focus_target);
+                    hide_pane!();
                 } else {
-                    notes_focus_target = capture_panel_focus!();
+                    if mail_visible {
+                        park_mail!();
+                    } else {
+                        pane_focus_target = capture_panel_focus!();
+                    }
                     mount_notes!(false);
                     notes_visible = true;
                     layout_terminal!();
-                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({notes_fullscreen})"));
+                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
                     let _ = notes_wv.set_visible(true);
                     focus_notes!();
                 }
             }
-            // ── Notes fullscreen — the column fills the window left of a docked
-            //     sidebar (⌘⇧Return while it has focus, or the icon in its header)
-            Event::UserEvent(AppEvent::ToggleNotesFullscreen) => {
-                if notes_visible {
-                    notes_fullscreen = !notes_fullscreen;
+            Event::UserEvent(AppEvent::ToggleInbox) => {
+                if mail_visible {
+                    hide_pane!();
+                } else {
+                    show_mail!();
+                }
+            }
+            Event::UserEvent(AppEvent::OpenMailThread(item, from_notes)) => {
+                show_mail!();
+                let _ = mail_wv.evaluate_script(&format!(
+                    "window.__mail && window.__mail.open({}, {}, {from_notes})",
+                    serde_json::to_string(&item.account).unwrap(),
+                    serde_json::to_string(&item.thread).unwrap(),
+                ));
+            }
+            // ── Pane fullscreen — fills the window left of a docked sidebar (⌘⇧Return
+            //     while it has focus, or the icon in its header)
+            Event::UserEvent(AppEvent::TogglePaneFullscreen) => {
+                if notes_visible || mail_visible {
+                    pane_fullscreen = !pane_fullscreen;
                     layout_terminal!();
-                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({notes_fullscreen})"));
-                    focus_notes!();
+                    if notes_visible {
+                        let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
+                        focus_notes!();
+                    } else {
+                        let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.fullscreen({pane_fullscreen})"));
+                        focus_mail!();
+                    }
                 } else {
                     // Surface it first, already expanded.
-                    notes_fullscreen = true;
+                    pane_fullscreen = true;
                     let _ = proxy.send_event(AppEvent::ToggleNotes);
                 }
             }
@@ -9427,6 +9868,11 @@ fn main() {
                             tracing::error!(error = %e, ws = %ws, "Failed to save notes");
                             toast!(format!("Could not save notes: {e}"), "\u{26A0}\u{FE0F}", "Notes");
                         }
+                    }
+                }
+                notes::Request::OpenUrl { url } if url.starts_with("octoweb-mail:") => {
+                    if let Some(item) = mail::parse_thread_url(&url) {
+                        let _ = proxy.send_event(AppEvent::OpenMailThread(item, true));
                     }
                 }
                 notes::Request::OpenUrl { url } => {
@@ -9459,44 +9905,379 @@ fn main() {
                 }
                 notes::Request::Hide => {
                     if notes_visible {
-                        park_notes!();
-                        restore_panel_focus!(notes_focus_target);
+                        hide_pane!();
                     }
                 }
+                notes::Request::Tab { tab } => {
+                    if tab == "mail" {
+                        let _ = proxy.send_event(AppEvent::ToggleInbox);
+                    }
+                }
+                notes::Request::Task { url, done } => {
+                    if let (Some(item), Some(engine)) = (mail::parse_thread_url(&url), &mail_engine) {
+                        engine.send(mail::Command::TaskToggled { item, done });
+                    }
+                }
+                // A hidden page can get focus events; only a pane on screen counts.
+                notes::Request::Focus if !notes_visible => {}
                 notes::Request::Focus => {
-                    let (edited_elsewhere, title) = {
-                        let ws = workspace_manager.active();
-                        (
-                            notes::load(&ws.id).is_ok_and(|disk| disk != notes_known),
-                            format!("Notes — {}", ws.name),
-                        )
-                    };
+                    let edited_elsewhere = notes::load(&workspace_manager.active().id)
+                        .is_ok_and(|disk| disk != notes_known);
                     if edited_elsewhere {
                         mount_notes!(false);
                     }
-                    panel_focus!("Notes", Some(title));
+                    // The workspace is already in the window title's brackets.
+                    panel_focus!("Notes", Some(String::new()));
                 }
                 notes::Request::Blur => panel_focus!("Notes", None),
                 notes::Request::Fullscreen => {
-                    let _ = proxy.send_event(AppEvent::ToggleNotesFullscreen);
+                    let _ = proxy.send_event(AppEvent::TogglePaneFullscreen);
                 }
                 notes::Request::Resize { width } => {
-                    notes_width_logical = width;
+                    pane_width_logical = width;
                     layout_terminal!();
                 }
                 notes::Request::ResizeEnd { width } => {
-                    notes_width_logical = width;
-                    let width = docked_notes_w!();
-                    notes_width_logical = (f64::from(width) / browser_win.scale_factor()).round() as u32;
+                    pane_width_logical = width;
+                    let width = docked_pane_w!();
+                    pane_width_logical = (f64::from(width) / browser_win.scale_factor()).round() as u32;
                     layout_terminal!();
-                    cfg.notes_width = notes_width_logical;
+                    cfg.notes_width = pane_width_logical;
                     cfg.save();
                 }
                 notes::Request::ResizeReset => {
-                    notes_width_logical = NOTES_W_LOGICAL;
+                    pane_width_logical = PANE_W_LOGICAL;
                     layout_terminal!();
-                    cfg.notes_width = NOTES_W_LOGICAL;
+                    cfg.notes_width = PANE_W_LOGICAL;
                     cfg.save();
+                }
+            },
+
+            // ── Settings → Mail: OAuth sign-in with the user's own client ─────
+            Event::UserEvent(AppEvent::MailSignIn(key)) => {
+                let Some(a) = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == key) else {
+                    return;
+                };
+                let error = if a.oauth_client_id.trim().is_empty() {
+                    Some("Enter your OAuth client ID first.")
+                } else if mail_oauth::endpoints(a.provider).is_none() {
+                    Some("OAuth works for Gmail and Outlook accounts.")
+                } else {
+                    None
+                };
+                match (error, &mail_engine) {
+                    (Some(e), _) => {
+                        let _ = settings_wv.evaluate_script(&format!(
+                            "window.__mailVerified && window.__mailVerified({}, {})",
+                            serde_json::to_string(&key).unwrap(),
+                            serde_json::to_string(e).unwrap(),
+                        ));
+                    }
+                    (None, Some(engine)) => engine.send(mail::Command::SignIn {
+                        key,
+                        provider: a.provider,
+                        client_id: a.oauth_client_id.trim().to_string(),
+                        client_secret: mail::client_secret(&a.id).unwrap_or_default(),
+                        hint: a.address.clone(),
+                    }),
+                    (None, None) => {}
+                }
+            }
+
+            // ── Settings → Mail "Check connection" (ACC-2) ─────────────────────
+            Event::UserEvent(AppEvent::MailVerify(key)) => {
+                let account = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == key);
+                let checked = match account {
+                    None => Err("Unknown account".to_string()),
+                    Some(a) => mail::usable(a).and_then(|()| {
+                        mail::password(&a.id)
+                            .ok_or_else(|| "Enter the password first.".to_string())
+                            .map(|pw| mail::Account::resolve(a, pw, mail::client_secret(&a.id).unwrap_or_default()))
+                    }),
+                };
+                match (checked, &mail_engine) {
+                    (Ok(account), Some(engine)) => engine.send(mail::Command::Verify(account)),
+                    (Err(e), _) => {
+                        let _ = settings_wv.evaluate_script(&format!(
+                            "window.__mailVerified && window.__mailVerified({}, {})",
+                            serde_json::to_string(&key).unwrap(),
+                            serde_json::to_string(&e).unwrap(),
+                        ));
+                    }
+                    (Ok(_), None) => {}
+                }
+            }
+
+            // ── Mail page messages ─────────────────────────────────────────────
+            Event::UserEvent(AppEvent::MailPage(message)) => match message {
+                mail::Message::Pane(pane) => match pane {
+                    mail::Pane::Ready => mount_mail!(),
+                    mail::Pane::Hide => {
+                        if mail_visible {
+                            hide_pane!();
+                        }
+                    }
+                    mail::Pane::Fullscreen => {
+                        let _ = proxy.send_event(AppEvent::TogglePaneFullscreen);
+                    }
+                    mail::Pane::Tab { tab } => {
+                        if tab == "notes" {
+                            let _ = proxy.send_event(AppEvent::ToggleNotes);
+                        }
+                    }
+                    mail::Pane::BackToNotes => {
+                        if mail_visible {
+                            let _ = proxy.send_event(AppEvent::ToggleNotes);
+                        }
+                    }
+                    mail::Pane::Focus if mail_visible => panel_focus!("Mail", Some(String::new())),
+                    mail::Pane::Focus => {}
+                    mail::Pane::Blur => panel_focus!("Mail", None),
+                    // The pane is one column whichever tab shows: the notes
+                    // handler owns its width.
+                    mail::Pane::Resize { width } => {
+                        let _ = proxy.send_event(AppEvent::Notes(notes::Request::Resize { width }));
+                    }
+                    mail::Pane::ResizeEnd { width } => {
+                        let _ = proxy.send_event(AppEvent::Notes(notes::Request::ResizeEnd { width }));
+                    }
+                    mail::Pane::ResizeReset => {
+                        let _ = proxy.send_event(AppEvent::Notes(notes::Request::ResizeReset));
+                    }
+                    mail::Pane::OpenUrl { url } => {
+                        let _ = proxy.send_event(AppEvent::Notes(notes::Request::OpenUrl { url }));
+                    }
+                    mail::Pane::PickFiles { key } => {
+                        let files: Vec<serde_json::Value> = macos::pick_files()
+                            .into_iter()
+                            .filter_map(|path| {
+                                let bytes = match std::fs::read(&path) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, path = %path.display(), "could not read attachment");
+                                        return None;
+                                    }
+                                };
+                                use base64::Engine;
+                                Some(serde_json::json!({
+                                    "name": path.file_name()?.to_string_lossy(),
+                                    "mime": "",
+                                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+                                }))
+                            })
+                            .collect();
+                        if !files.is_empty() {
+                            let _ = mail_wv.evaluate_script(&format!(
+                                "window.__mail && window.__mail.files({}, {})",
+                                serde_json::to_string(&key).unwrap(),
+                                serde_json::Value::Array(files)
+                            ));
+                        }
+                    }
+                    mail::Pane::Settings => {
+                        if !settings_visible {
+                            let _ = proxy.send_event(AppEvent::ToggleSettings);
+                        }
+                        let _ = settings_wv.evaluate_script("window.__showTab && window.__showTab('tab-mail')");
+                    }
+                },
+                mail::Message::Engine(req) => {
+                    let req = *req;
+                    let Some(engine) = &mail_engine else {
+                        return;
+                    };
+                    // Mail reaches the AI only once the user turned it on (AI-8).
+                    if matches!(req, mail::PageRequest::Ai { .. }) && !cfg.mail_ai {
+                        toast!("Turn on mail AI in Settings → Mail first.", "\u{2709}\u{FE0F}", "Mail");
+                        return;
+                    }
+                    let ws = workspace_manager.active().id.clone();
+                    let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
+                    engine.send(mail::Command::Page { ws, accounts, req });
+                }
+            },
+
+            // ── Mail engine events ─────────────────────────────────────────────
+            Event::UserEvent(AppEvent::Mail(event)) => match event {
+                mail::Event::ToPage { ws, script } => {
+                    if ws == workspace_manager.active().id {
+                        let _ = mail_wv.evaluate_script(&script);
+                    }
+                }
+                mail::Event::Changed { accounts } => {
+                    let here = mail::accounts_in(&cfg.mail_accounts, &workspace_manager.active().id);
+                    if accounts.iter().any(|a| here.contains(a)) {
+                        let _ = mail_wv.evaluate_script("window.__mail && window.__mail.changed()");
+                        // New mail may need summaries; wait for a quiet moment.
+                        if cfg.mail_ai && cfg.mail_ai_summaries && mail_ai_handle.is_none() {
+                            mail_ai_due.get_or_insert(std::time::Instant::now() + MAIL_SUMMARY_DELAY);
+                        }
+                    }
+                }
+                mail::Event::Summarize { ws, prompt } => {
+                    if mail_ai_handle.is_none() && cfg.mail_ai && cfg.mail_ai_summaries {
+                        let token = workspace_manager
+                            .index_of(&ws)
+                            .and_then(|i| workspace_manager.at(i).mcp_token.clone());
+                        let wake = proxy.clone();
+                        mail_ai_handle = acp::AcpHandle::connect(
+                            "octomind acp octoweb:assistant",
+                            token,
+                            move || {
+                                let _ = wake.send_event(AppEvent::LearningWake);
+                            },
+                        )
+                        .ok();
+                        if let Some(ref h) = mail_ai_handle {
+                            h.send_prompt(prompt, vec![]);
+                        }
+                    }
+                }
+                mail::Event::Status { account, state, message } => {
+                    let _ = mail_wv.evaluate_script(&format!(
+                        "window.__mail && window.__mail.status({}, {}, {})",
+                        serde_json::to_string(&account).unwrap(),
+                        serde_json::to_string(state).unwrap(),
+                        serde_json::to_string(&message).unwrap(),
+                    ));
+                    mail_status.insert(account, (state, message));
+                    let _ = settings_wv.evaluate_script(&mail_status_script(&mail_status));
+                }
+                mail::Event::OpenUrl(url) => {
+                    // The sign-in page needs the window: Settings steps aside.
+                    if settings_visible {
+                        let _ = proxy.send_event(AppEvent::ToggleSettings);
+                    }
+                    let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                }
+                mail::Event::SignedIn { account, result } => {
+                    let outcome = result.and_then(|refresh| {
+                        let a = cfg
+                            .mail_accounts
+                            .iter_mut()
+                            .find(|a| mail::hex(&a.id) == account)
+                            .ok_or("The account was removed")?;
+                        mail::save_password(&a.id, &refresh)?;
+                        a.has_password = true;
+                        Ok(())
+                    });
+                    match outcome {
+                        Ok(()) => {
+                            cfg.save();
+                            sync_mail_accounts!();
+                            let _ = settings_wv.evaluate_script(&format!(
+                                "window.__setConfig && window.__setConfig({})",
+                                serde_json::to_string(&cfg).unwrap_or_default()
+                            ));
+                            toast!("Signed in. Mail is syncing.", "\u{2709}\u{FE0F}", "Mail");
+                        }
+                        Err(e) => {
+                            toast!(format!("Sign-in failed: {e}"), "\u{26A0}\u{FE0F}", "Mail");
+                            let _ = settings_wv.evaluate_script(&format!(
+                                "window.__mailVerified && window.__mailVerified({}, {})",
+                                serde_json::to_string(&account).unwrap(),
+                                serde_json::to_string(&e).unwrap(),
+                            ));
+                        }
+                    }
+                }
+                mail::Event::Verified { account, result } => {
+                    let _ = settings_wv.evaluate_script(&format!(
+                        "window.__mailVerified && window.__mailVerified({}, {})",
+                        serde_json::to_string(&account).unwrap(),
+                        serde_json::to_string(&result.err()).unwrap(),
+                    ));
+                }
+                mail::Event::Notify { item, from, subject } => {
+                    let Some(acct) = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == item.account) else {
+                        return;
+                    };
+                    let scoped: Vec<String> = workspace_manager
+                        .list()
+                        .iter()
+                        .filter(|w| acct.scope.includes(&w.id))
+                        .map(|w| w.id.clone())
+                        .collect();
+                    // An account in no workspace stays quiet (ACC-4c).
+                    let Some(first) = scoped.first() else {
+                        return;
+                    };
+                    let active = workspace_manager.active().id.clone();
+                    let here = scoped.contains(&active);
+                    if here && mail_visible && is_app_active() {
+                        return;
+                    }
+                    let target = if here { active } else { first.clone() };
+                    let subject = if subject.trim().is_empty() { "(no subject)".to_string() } else { subject };
+                    toast!(format!("{from} — {subject}"), "\u{2709}\u{FE0F}", "New mail");
+                    mail_notif_origin = Some((target, item));
+                }
+                mail::Event::Counts(counts) => {
+                    mail_unread = counts;
+                    push_mail_unread!();
+                }
+                mail::Event::ToNotes { ws, entry } => {
+                    let ws = if ws.is_empty() { workspace_manager.active().id.clone() } else { ws };
+                    let saved = notes::load(&ws).and_then(|text| notes::save(&ws, &notes::append(&text, &notes::today(), &entry)));
+                    match saved {
+                        Ok(()) => {
+                            if notes_visible && ws == workspace_manager.active().id {
+                                mount_notes!(false);
+                            }
+                        }
+                        Err(e) => toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes"),
+                    }
+                }
+                mail::Event::RemoveNote { ws, entry } => {
+                    let ws = if ws.is_empty() { workspace_manager.active().id.clone() } else { ws };
+                    if let Ok(text) = notes::load(&ws) {
+                        if let Some(rest) = notes::remove_entry(&text, &entry) {
+                            match notes::save(&ws, &rest) {
+                                Ok(()) => {
+                                    if notes_visible && ws == workspace_manager.active().id {
+                                        mount_notes!(false);
+                                    }
+                                }
+                                Err(e) => toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes"),
+                            }
+                        }
+                    }
+                }
+                mail::Event::Ask { ws, prompt } => {
+                    if ws == workspace_manager.active().id {
+                        let _ = proxy.send_event(AppEvent::AskAI(prompt));
+                    }
+                }
+                mail::Event::OpenDraft { ws, draft } => {
+                    if ws == workspace_manager.active().id {
+                        show_mail!();
+                        let _ = mail_wv.evaluate_script(&format!(
+                            "window.__mail && window.__mail.openDraft({})",
+                            serde_json::to_string(&draft).unwrap()
+                        ));
+                    } else {
+                        toast!("A draft is ready in another workspace.", "\u{2709}\u{FE0F}", "Mail");
+                    }
+                }
+                mail::Event::Show { ws, items, title } => {
+                    if ws == workspace_manager.active().id {
+                        show_mail!();
+                        let _ = mail_wv.evaluate_script(&format!(
+                            "window.__mail && window.__mail.show({})",
+                            serde_json::json!({ "title": title, "items": items })
+                        ));
+                    }
+                }
+                mail::Event::Saved(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    webview_utils::reveal_file_in_finder(&path.to_string_lossy());
+                    toast!(name, "\u{1F4CE}", "Saved to Downloads");
+                }
+                mail::Event::Toast { title, text } => toast!(text, "\u{2709}\u{FE0F}", title),
+                mail::Event::PaletteResults(json) => {
+                    let _ = overlay_wv.evaluate_script(&format!(
+                        "window.__setMailResults && window.__setMailResults({json})"
+                    ));
                 }
             },
 
@@ -9618,7 +10399,7 @@ fn main() {
                     &ai_prompt_history,
                     cfg.max_acp_session_messages,
                     cfg.max_history,
-                    learning_pid,
+                    learning_pid.into_iter().chain(mail_ai_pid).collect(),
                     control_flow,
                 );
             }
@@ -10476,7 +11257,7 @@ fn main() {
                             &ai_prompt_history,
                             cfg.max_acp_session_messages,
                             cfg.max_history,
-                            learning_pid,
+                            learning_pid.into_iter().chain(mail_ai_pid).collect(),
                             control_flow,
                         );
                     } else if window_id == chrome_win_id {
@@ -11498,7 +12279,7 @@ fn save_and_exit(
     ai_prompt_history: &[String],
     max_acp_session_messages: usize,
     max_history: usize,
-    learning_pid: Option<u32>,
+    background_pids: Vec<u32>,
     control_flow: &mut ControlFlow,
 ) {
     // Persists every workspace, not just the active one — `WorkspaceManager`
@@ -11562,7 +12343,7 @@ fn save_and_exit(
         .list()
         .iter()
         .flat_map(|ws| ws.acp_sessions.iter().filter_map(|s| s.octomind_pid))
-        .chain(learning_pid)
+        .chain(background_pids)
         .collect();
     terminate_octomind_pids(&pids);
     crash_report::log_clean_shutdown();
@@ -11627,6 +12408,17 @@ fn key_focus_in(view: usize) -> bool {
         }
         msg_send![responder, isDescendantOf: view as *mut AnyObject]
     }
+}
+
+/// Like `key_focus_in`, for a view that may be hidden: AppKit can leave a
+/// hidden WebView as the window's first responder, and a pane that is not on
+/// screen must not claim the keyboard.
+fn key_focus_in_shown(view: usize) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    // SAFETY: `view` is a live NSView owned by a WebView that outlives the app loop.
+    let hidden: bool = unsafe { msg_send![view as *mut AnyObject, isHiddenOrHasHiddenAncestor] };
+    !hidden && key_focus_in(view)
 }
 
 /// Force every window light or dark, or follow macOS for `Auto`. WebKit
@@ -11705,6 +12497,23 @@ fn build_browser_context(
          an approval, or a form.",
     );
     Some(out)
+}
+
+/// Script pushing `{account key: {state, message}}` into Settings → Mail.
+fn mail_status_script(status: &HashMap<String, (&'static str, String)>) -> String {
+    let json: serde_json::Map<String, serde_json::Value> = status
+        .iter()
+        .map(|(k, (state, message))| {
+            (
+                k.clone(),
+                serde_json::json!({ "state": state, "message": message }),
+            )
+        })
+        .collect();
+    format!(
+        "window.__setMailStatus && window.__setMailStatus({})",
+        serde_json::Value::Object(json)
+    )
 }
 
 /// Script pushing `{hex id: {state, message}}` into Settings → Proxies.
@@ -12420,8 +13229,8 @@ mod persistence_and_paging_tests {
 #[cfg(test)]
 mod keybinding_dispatch_tests {
     use super::{
-        keybind_to_event, notes_keybind_to_event, push_closed_tab, terminal_keybind_to_event,
-        wants_browser_context, AppEvent,
+        keybind_to_event, pane_keybind_to_event, push_closed_tab, terminal_keybind_to_event,
+        wants_browser_context, AppEvent, PaneTab,
     };
     use crate::keybindings::Action as A;
 
@@ -12581,20 +13390,38 @@ mod keybinding_dispatch_tests {
             A::NoteCapture,
         ] {
             assert!(
-                notes_keybind_to_event(action).is_none(),
+                pane_keybind_to_event(action, PaneTab::Notes).is_none(),
                 "{} must reach the editor",
                 action.id()
             );
         }
         for action in [A::Notes, A::CloseTab] {
             assert!(matches!(
-                notes_keybind_to_event(action),
+                pane_keybind_to_event(action, PaneTab::Notes),
                 Some(AppEvent::ToggleNotes)
             ));
         }
         assert!(matches!(
-            notes_keybind_to_event(A::SidebarFullscreen),
-            Some(AppEvent::ToggleNotesFullscreen)
+            pane_keybind_to_event(A::SidebarFullscreen, PaneTab::Notes),
+            Some(AppEvent::TogglePaneFullscreen)
+        ));
+        // In mail, single letters and ⌃ keys triage; ⌘W closes the mail tab.
+        for action in [
+            A::ScrollDown,
+            A::PrevTab,
+            A::NextTab,
+            A::Fullscreen,
+            A::Reload,
+        ] {
+            assert!(pane_keybind_to_event(action, PaneTab::Mail).is_none());
+        }
+        assert!(matches!(
+            pane_keybind_to_event(A::CloseTab, PaneTab::Mail),
+            Some(AppEvent::ToggleInbox)
+        ));
+        assert!(matches!(
+            pane_keybind_to_event(A::Notes, PaneTab::Mail),
+            Some(AppEvent::ToggleNotes)
         ));
     }
 
@@ -12747,6 +13574,7 @@ mod chrome_js_syntax_tests {
             ("inline_edit", crate::inline_edit_html::html()),
             ("newtab", crate::newtab_html::html("[]", "[]")),
             ("notes", crate::notes_html::html("null")),
+            ("mail", crate::mail_html::html("null")),
             ("notification", crate::notification_html::html()),
             ("overlay", crate::overlay_html::html()),
             ("progress_bar", crate::progress_bar_html::html()),

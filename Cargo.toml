@@ -39,6 +39,15 @@ anyhow = "1.0.102"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Mail: IMAP sync, SMTP send, MIME parsing, local store with full-text search.
+# TLS goes through native-tls, i.e. macOS Security.framework and its trust store.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-native-tls = "0.3"
+futures = "0.3"
+mail-parser = "0.11"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls", "hostname"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+
 # MCP Server for AI assistant control (HTTP JSON-RPC)
 rmcp = { version = "1.6", features = ["server", "transport-streamable-http-server"] }
 schemars = "1.0"

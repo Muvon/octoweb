@@ -440,6 +440,7 @@ pub fn html() -> String {
   .ext-error { color: var(--err); white-space: normal; }
   #ext-pick { flex-shrink: 0; margin-left: 12px; }
   .ext-scope .seg { flex-wrap: wrap; }
+  .mail-link { color: var(--accent); cursor: pointer; text-decoration: underline; }
   .ext-scope .ws-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
 </style>
 </head>
@@ -462,6 +463,7 @@ pub fn html() -> String {
       <button class="tab" data-pane="tab-keybindings">Keyboard shortcuts</button>
       <button class="tab" data-pane="tab-proxies">Proxies</button>
       <button class="tab" data-pane="tab-extensions">Extensions</button>
+      <button class="tab" data-pane="tab-mail">Mail</button>
     </div>
 
     <div id="tab-general" class="tab-pane active">
@@ -659,6 +661,38 @@ pub fn html() -> String {
         </div>
       </div>
     </div>
+
+    <div id="tab-mail" class="tab-pane">
+      <div id="mail-list"></div>
+      <div class="kb-footer">
+        <span class="kb-note">Passwords are kept in the macOS Keychain. Mail stays on this Mac and your mail server.</span>
+        <button class="kb-reset-all" id="mail-add">Add account</button>
+      </div>
+      <div class="section">
+        <div class="section-title">AI</div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <label class="row-label" id="mail_ai_label" for="mail_ai">Mail AI</label>
+            <span class="row-hint">Summaries, drafts, the daily brief and task extraction. Mail text you use them on goes to your assistant agent.</span>
+          </div>
+          <button class="toggle" id="mail_ai" data-key="mail_ai" role="switch" aria-checked="false" aria-labelledby="mail_ai_label"></button>
+        </div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <label class="row-label" id="mail_ai_summaries_label" for="mail_ai_summaries">Summaries as mail arrives</label>
+            <span class="row-hint">A one-line summary on each Important conversation.</span>
+          </div>
+          <button class="toggle" id="mail_ai_summaries" data-key="mail_ai_summaries" role="switch" aria-checked="false" aria-labelledby="mail_ai_summaries_label"></button>
+        </div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <label class="row-label" id="mail_brief_morning_label" for="mail_brief_morning">Morning brief</label>
+            <span class="row-hint">The assistant sorts your inbox into Needs reply, Waiting, FYI and Can archive the first time you open octoweb each day.</span>
+          </div>
+          <button class="toggle" id="mail_brief_morning" data-key="mail_brief_morning" role="switch" aria-checked="false" aria-labelledby="mail_brief_morning_label"></button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -771,6 +805,8 @@ pub fn html() -> String {
     }
     proxies = cfg.proxies;
     renderProxies();
+    mailAccounts = cfg.mail_accounts || [];
+    renderMail();
     syncSearchEngine();
     showAppearance('appearance-seg', cfg.appearance);
     showAppearance('terminal-appearance-seg', cfg.terminal_appearance);
@@ -1117,6 +1153,7 @@ pub fn html() -> String {
   var extRemoveArmed = null;
   var extItems = {};
   var extWorkspaces = [];
+  var extActive = null;
 
   // "all" also covers workspaces created later; ticking every workspace by
   // hand does not.
@@ -1152,6 +1189,8 @@ pub fn html() -> String {
   window.__setExtensions = function(data) {
     extRemoveArmed = null;
     extWorkspaces = data.workspaces;
+    extActive = data.active;
+    renderMail();
     extItems = {};
     data.items.forEach(function(x) { extItems[x.id] = x; });
     document.getElementById('ext-controls').style.display = data.supported ? '' : 'none';
@@ -1227,16 +1266,291 @@ pub fn html() -> String {
     ipc({ type: 'ext_pick' });
   });
 
-  // ── Tabs ──────────────────────────────────────────────────────────────
-  document.querySelectorAll('.tab').forEach(function(t) {
-    t.addEventListener('click', function() {
-      document.querySelectorAll('.tab').forEach(function(x) { x.classList.remove('active'); });
-      document.querySelectorAll('.tab-pane').forEach(function(x) { x.classList.remove('active'); });
-      t.classList.add('active');
-      document.getElementById(t.dataset.pane).classList.add('active');
-      cancelRecord();
-    });
+  // ── Mail ───────────────────────────────────────────────────────────────────
+  // Like proxies, the list round-trips as one JSON value with ids made here
+  // once; a typed password rides along once and Rust moves it to the Keychain.
+  var mailAccounts = [];
+  var mailStatus = {};
+  var mailCheck = {};
+  var openMail = -1;
+  var mailRemoveArmed = null;
+  var mailList = document.getElementById('mail-list');
+  var PROVIDERS = { gmail: 'Gmail', icloud: 'iCloud', privateemail: 'Private Email', outlook: 'Outlook / 365', other: 'Other IMAP' };
+  var PROVIDER_HINTS = {
+    gmail: 'Use an <a class="mail-link" data-url="https://myaccount.google.com/apppasswords">app password</a>, which needs 2-Step Verification.',
+    icloud: 'Use an <a class="mail-link" data-url="https://account.apple.com/account/manage">app-specific password</a>, which needs two-factor authentication.',
+    privateemail: 'Your mailbox password. Servers: mail.privateemail.com.',
+    outlook: 'Microsoft accounts sign in with OAuth through an app you register.',
+    other: 'IMAP over TLS, usually port 993; SMTP with TLS (465) or STARTTLS (587).'
+  };
+  var MAIL_COLORS = ['#0a84ff', '#ff9f0a', '#30d158', '#bf5af2', '#ff375f', '#64d2ff'];
+  // Own-client OAuth (spec: Gmail OAuth). How to make the client, per provider.
+  var OAUTH_HELP = {
+    gmail: 'In <a class="mail-link" data-url="https://console.cloud.google.com/apis/credentials">Google Cloud Console</a>, create an OAuth client of type <b>Desktop app</b>, and set the OAuth consent screen to <b>In production</b> \u2014 in Testing, Google ends the sign-in after 7 days. Paste its client ID and secret, then sign in.',
+    outlook: 'In <a class="mail-link" data-url="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra \u2192 App registrations</a>, register an app, add the <b>Mobile and desktop</b> platform with redirect URI <code>http://127.0.0.1</code>, and the delegated permissions IMAP.AccessAsUser.All, SMTP.Send and offline_access. Paste its client ID; no secret is needed.'
+  };
+  function oauthCapable(a) { return a.provider === 'gmail' || a.provider === 'outlook'; }
+
+  function mailHex(a) {
+    return a.id.map(function(b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+  }
+  function guessProvider(address) {
+    var domain = (address.split('@')[1] || '').toLowerCase();
+    if (domain === 'gmail.com' || domain === 'googlemail.com') return 'gmail';
+    if (domain === 'icloud.com' || domain === 'me.com' || domain === 'mac.com') return 'icloud';
+    if (domain === 'outlook.com' || domain === 'hotmail.com' || domain === 'live.com' || domain === 'msn.com') return 'outlook';
+    return null;
+  }
+  function saveMail() {
+    ipc({ type: 'settings_update', key: 'mail_accounts', value: JSON.stringify(mailAccounts) });
+    mailAccounts.forEach(function(a) { delete a.password; delete a.client_secret; });
+  }
+  function mailState(a) {
+    var k = mailHex(a), c = mailCheck[k], s = mailStatus[k];
+    if (c === 'checking') return { state: 'connecting', text: 'Checking sign-in…' };
+    if (c && c !== 'ok') return { state: 'failed', text: c };
+    if (!a.address || a.address.indexOf('@') < 0) return { state: 'off', text: 'Needs an address' };
+    if (!a.has_password) return { state: 'off', text: a.auth === 'oauth' ? 'Needs sign-in' : 'Needs its password' };
+    // ACC-4c: an account left in no workspace stays quiet.
+    if (a.scope !== 'all' && !(a.scope.only || []).length) return { state: 'off', text: 'Not in any workspace' };
+    if (s && s.state === 'online') return { state: 'connected', text: c === 'ok' ? 'Connected · IMAP and SMTP sign-in work' : 'Connected' };
+    if (s && s.state === 'auth') return { state: 'failed', text: 'Sign-in failed' + (s.message ? ' — ' + s.message : '') };
+    if (s && s.state === 'offline') return { state: 'failed', text: 'Offline, retrying' + (s.message ? ' — ' + s.message : '') };
+    if (s && s.state === 'nopassword') return { state: 'off', text: 'Needs its password' };
+    return { state: 'connecting', text: 'Connecting…' };
+  }
+  function mailScope(a, i) {
+    var all = a.scope === 'all';
+    var chips = '<button data-mail-scope-all aria-pressed="' + all + '">All workspaces</button>' +
+      extWorkspaces.map(function(w) {
+        var on = all || (a.scope.only || []).indexOf(w.id) >= 0;
+        return '<button data-mail-ws="' + esc(w.id) + '" aria-pressed="' + on + '">' +
+          '<span class="ws-dot" style="background:' + esc(w.color) + '"></span>' + esc(w.name) + '</button>';
+      }).join('');
+    return '<div class="row ext-scope with-hint"><div class="row-label-stack"><span class="row-label" id="mail-' + i + '-scope">Workspaces</span>' +
+      '<span class="row-hint">Its inbox, search and notifications appear only there.</span></div>' +
+      '<span class="seg" role="group" aria-labelledby="mail-' + i + '-scope">' + chips + '</span></div>';
+  }
+  function mailBody(a, i) {
+    var id = 'mail-' + i;
+    var st = mailState(a);
+    var providers = Object.keys(PROVIDERS).map(function(p) {
+      return '<button data-provider="' + p + '" aria-pressed="' + (a.provider === p) + '">' + PROVIDERS[p] + '</button>';
+    }).join('');
+    var html = '<div class="row with-hint"><div class="row-label-stack"><span class="row-label" id="' + id + '-provider">Provider</span>' +
+        '<span class="row-hint">' + (a.auth === 'oauth' && a.provider !== 'outlook' ? 'Signs in with your own OAuth client, below.' : PROVIDER_HINTS[a.provider]) + '</span></div>' +
+        '<span class="seg" role="group" aria-labelledby="' + id + '-provider">' + providers + '</span></div>' +
+      proxyRow('Address', id + '-address', '<input type="email" id="' + id + '-address" data-mail="address" placeholder="you@example.com" value="' + esc(a.address) + '" spellcheck="false">') +
+      (oauthCapable(a) && a.provider !== 'outlook'
+        ? '<div class="row"><span class="row-label" id="' + id + '-auth">Sign-in</span><span class="seg" role="group" aria-labelledby="' + id + '-auth">' +
+            '<button data-auth="password" aria-pressed="' + (a.auth !== 'oauth') + '">App password</button>' +
+            '<button data-auth="oauth" aria-pressed="' + (a.auth === 'oauth') + '">OAuth (your own client)</button></span></div>'
+        : '') +
+      (a.auth === 'oauth'
+        ? '<div class="row with-hint"><div class="row-label-stack"><span class="row-label">OAuth client</span><span class="row-hint">' + OAUTH_HELP[a.provider] + '</span></div></div>' +
+          proxyRow('Client ID', id + '-cid', '<input type="text" id="' + id + '-cid" data-mail="oauth_client_id" placeholder="\u2026apps.googleusercontent.com" value="' + esc(a.oauth_client_id) + '" spellcheck="false">') +
+          (a.provider === 'gmail'
+            ? proxyRow('Client secret', id + '-csec', '<span class="proxy-inline"><input type="password" id="' + id + '-csec" data-mail="client_secret" autocomplete="off" placeholder="' + (a.has_client_secret ? 'Saved in Keychain' : 'From the same client') + '"></span>')
+            : '') +
+          '<div class="row"><span class="row-label">Account</span><span class="proxy-inline"><span class="kb-note">' + (a.has_password ? 'Signed in' : 'Not signed in') + '</span>' +
+            '<button class="proxy-link" data-mail-signin>' + (a.has_password ? 'Sign in again' : (a.provider === 'gmail' ? 'Sign in with Google' : 'Sign in with Microsoft')) + '</button></span></div>'
+        : proxyRow('Password', id + '-password',
+        '<span class="proxy-inline"><input type="password" id="' + id + '-password" data-mail="password" autocomplete="off" placeholder="' +
+          (a.has_password ? 'Saved in Keychain' : (a.provider === 'gmail' || a.provider === 'icloud' ? 'App password' : 'Password')) + '">' +
+          (a.has_password ? '<button class="proxy-link" data-mail-forget>Forget</button>' : '') + '</span>')) +
+      proxyRow('Name', id + '-name', '<input type="text" id="' + id + '-name" data-mail="name" placeholder="Shown on mail you send" value="' + esc(a.name) + '">');
+    if (a.provider === 'other') {
+      html += proxyRow('IMAP server', id + '-imap',
+          '<span class="proxy-inline"><input type="text" id="' + id + '-imap" data-mail="imap_host" placeholder="imap.example.com" value="' + esc(a.imap_host) + '" spellcheck="false">' +
+          '<input type="number" data-mail="imap_port" min="1" max="65535" value="' + (a.imap_port || 993) + '" aria-label="IMAP port"></span>') +
+        proxyRow('SMTP server', id + '-smtp',
+          '<span class="proxy-inline"><input type="text" id="' + id + '-smtp" data-mail="smtp_host" placeholder="smtp.example.com" value="' + esc(a.smtp_host) + '" spellcheck="false">' +
+          '<input type="number" data-mail="smtp_port" min="1" max="65535" value="' + (a.smtp_port || 465) + '" aria-label="SMTP port"></span>') +
+        '<div class="row"><span class="row-label" id="' + id + '-sec">SMTP security</span><span class="seg" role="group" aria-labelledby="' + id + '-sec">' +
+          [['tls', 'TLS'], ['starttls', 'STARTTLS'], ['plain', 'None (this Mac only)']].map(function(s) {
+            return '<button data-security="' + s[0] + '" aria-pressed="' + (a.smtp_security === s[0]) + '">' + s[1] + '</button>';
+          }).join('') + '</span></div>' +
+        proxyRow('Login', id + '-login', '<input type="text" id="' + id + '-login" data-mail="login" placeholder="Same as the address" value="' + esc(a.login) + '" spellcheck="false">');
+    }
+    html += proxyRow('Signature', id + '-signature', '<textarea id="' + id + '-signature" data-mail="signature" rows="3" placeholder="Optional">' + esc(a.signature) + '</textarea>') +
+      '<div class="row with-hint"><div class="row-label-stack"><span class="row-label" id="' + id + '-gk">Gatekeeper</span>' +
+        '<span class="row-hint">Mail from senders you never wrote to or heard from waits in New senders until you accept or block them.</span></div>' +
+        '<button class="toggle' + (a.gatekeeper ? ' on' : '') + '" data-mail-gk role="switch" aria-checked="' + a.gatekeeper + '" aria-labelledby="' + id + '-gk"></button></div>' +
+      proxyRow('Color', id + '-color', '<input type="color" id="' + id + '-color" data-mail="color" value="' + esc(a.color || MAIL_COLORS[i % MAIL_COLORS.length]) + '">') +
+      proxyRow('Archive folder', id + '-archive', '<input type="text" id="' + id + '-archive" data-mail="archive_folder" placeholder="Found on the server" value="' + esc(a.archive_folder) + '" spellcheck="false">',
+        'Where Done moves mail. Leave empty unless your server needs a specific folder.') +
+      mailScope(a, i) +
+      '<div class="row"><span class="proxy-status"><span class="proxy-dot ' + st.state + '"></span><span class="proxy-status-text">' + esc(st.text) + '</span></span>' +
+        '<button class="proxy-link" data-mail-check>Check connection</button>' +
+        '<button class="proxy-remove" data-mail-remove>Remove</button></div>';
+    return '<div class="proxy-body" id="' + id + '-body">' + html + '</div>';
+  }
+  function mailCard(a, i) {
+    var st = mailState(a);
+    var open = i === openMail;
+    return '<div class="section proxy' + (open ? ' open' : '') + '" data-mail-i="' + i + '"><div class="proxy-head">' +
+      '<button class="proxy-open" aria-expanded="' + open + '" aria-controls="mail-' + i + '-body">' +
+        '<span class="proxy-dot" style="background:' + esc(a.color || MAIL_COLORS[i % MAIL_COLORS.length]) + '" title="Account color"></span>' +
+        '<span class="proxy-text"><span class="proxy-name">' + esc(a.address || 'New account') + '</span>' +
+        '<span class="proxy-sub">' + esc(PROVIDERS[a.provider] + ' · ' + st.text) + '</span></span>' +
+        '<span class="proxy-chev" aria-hidden="true">›</span></button></div>' +
+      (open ? mailBody(a, i) : '') + '</div>';
+  }
+  function renderMail(focusSelector) {
+    mailRemoveArmed = null;
+    mailList.innerHTML = mailAccounts.length
+      ? mailAccounts.map(mailCard).join('')
+      : '<div class="section proxy-empty"><div class="row-label">No mail accounts yet</div>' +
+        '<span class="kb-note">Add Gmail, iCloud, Namecheap Private Email or any IMAP account. Open the inbox with ⌘⇧I.</span></div>';
+    var el = focusSelector && mailList.querySelector(focusSelector);
+    if (el) el.focus();
+  }
+  window.__setMailStatus = function(status) { mailStatus = status; renderMailKeepFocus(); };
+  window.__mailVerified = function(key, error) { mailCheck[key] = error || 'ok'; renderMailKeepFocus(); };
+  function renderMailKeepFocus() {
+    var active = document.activeElement;
+    if (active && mailList.contains(active) && active.tagName !== 'BUTTON') return;
+    renderMail();
+  }
+  function checkMail(a) {
+    var k = mailHex(a);
+    mailCheck[k] = 'checking';
+    ipc({ type: 'mail_verify', id: k });
+  }
+
+  mailList.addEventListener('click', function(e) {
+    var link = e.target.closest('[data-url]');
+    if (link) { e.preventDefault(); ipc({ type: 'open_url', url: link.dataset.url }); return; }
+    var card = e.target.closest('[data-mail-i]');
+    if (!card) return;
+    var i = Number(card.dataset.mailI);
+    var a = mailAccounts[i];
+    var remove = e.target.closest('[data-mail-remove]');
+    if (mailRemoveArmed && remove !== mailRemoveArmed) { mailRemoveArmed.textContent = 'Remove'; mailRemoveArmed = null; }
+    if (remove) {
+      // Two clicks: removing deletes the account's local mail (not the server's).
+      if (!mailRemoveArmed) { mailRemoveArmed = remove; remove.textContent = 'Click again — removes its mail from this Mac'; return; }
+      mailAccounts.splice(i, 1);
+      openMail = -1;
+      saveMail();
+      renderMail();
+      return;
+    }
+    if (e.target.closest('.proxy-open')) {
+      openMail = openMail === i ? -1 : i;
+      renderMail('[data-mail-i="' + i + '"] .proxy-open');
+      return;
+    }
+    var prov = e.target.closest('[data-provider]');
+    if (prov) {
+      a.provider = prov.dataset.provider;
+      if (a.provider === 'outlook') a.auth = 'oauth';
+      if (!oauthCapable(a)) a.auth = 'password';
+      saveMail();
+      renderMail('[data-mail-i="' + i + '"] [data-provider="' + a.provider + '"]');
+      return;
+    }
+    var authBtn = e.target.closest('[data-auth]');
+    if (authBtn) {
+      if (a.auth !== authBtn.dataset.auth) {
+        a.auth = authBtn.dataset.auth;
+        // The stored secret belongs to the other method.
+        a.password = ''; a.has_password = false;
+        saveMail();
+        renderMail();
+      }
+      return;
+    }
+    if (e.target.closest('[data-mail-signin]')) {
+      mailCheck[mailHex(a)] = 'checking';
+      ipc({ type: 'mail_sign_in', id: mailHex(a) });
+      renderMail();
+      return;
+    }
+    var sec = e.target.closest('[data-security]');
+    if (sec) { a.smtp_security = sec.dataset.security; saveMail(); renderMail(); return; }
+    if (e.target.closest('[data-mail-gk]')) { a.gatekeeper = !a.gatekeeper; saveMail(); renderMail('[data-mail-i="' + i + '"] [data-mail-gk]'); return; }
+    if (e.target.closest('[data-mail-forget]')) { a.password = ''; a.has_password = false; saveMail(); renderMail(); return; }
+    if (e.target.closest('[data-mail-check]')) { checkMail(a); renderMail(); return; }
+    if (e.target.closest('[data-mail-scope-all]')) {
+      if (a.scope !== 'all') { a.scope = 'all'; saveMail(); renderMail(); }
+      return;
+    }
+    var chip = e.target.closest('[data-mail-ws]');
+    if (chip) {
+      var current = a.scope === 'all' ? extWorkspaces.map(function(w) { return w.id; }) : (a.scope.only || []).slice();
+      var at = current.indexOf(chip.dataset.mailWs);
+      if (at >= 0) current.splice(at, 1); else current.push(chip.dataset.mailWs);
+      a.scope = { only: current };
+      saveMail();
+      renderMail();
+    }
   });
+
+  mailList.addEventListener('change', function(e) {
+    var el = e.target;
+    var card = el.closest('[data-mail-i]');
+    if (!card || !el.dataset.mail) return;
+    var i = Number(card.dataset.mailI);
+    var a = mailAccounts[i];
+    var field = el.dataset.mail;
+    var value = field === 'signature' ? el.value : el.value.trim();
+    if (field === 'password') {
+      if (!el.value) return;
+      a.password = el.value;
+      a.has_password = true;
+    } else if (field === 'client_secret') {
+      if (!el.value) return;
+      a.client_secret = el.value;
+      a.has_client_secret = true;
+    } else if (field === 'imap_port' || field === 'smtp_port') {
+      a[field] = Number(value) || 0;
+    } else {
+      a[field] = value;
+    }
+    if (field === 'address') {
+      var guess = guessProvider(value);
+      if (guess && a.provider !== guess && a.provider !== 'other') {
+        a.provider = guess;
+        if (guess === 'outlook') a.auth = 'oauth';
+      }
+    }
+    saveMail();
+    // A new password or address is worth checking at once (ACC-2).
+    if ((field === 'password' || field === 'address') && a.auth !== 'oauth' && a.has_password && a.address.indexOf('@') > 0) checkMail(a);
+    renderMail();
+  });
+
+  document.getElementById('mail-add').addEventListener('click', function() {
+    mailAccounts.push({
+      id: Array.from(crypto.getRandomValues(new Uint8Array(16))),
+      provider: 'gmail',
+      address: '',
+      name: '',
+      color: MAIL_COLORS[mailAccounts.length % MAIL_COLORS.length],
+      signature: '',
+      gatekeeper: false,
+      // ACC-4: a new account starts in the workspace it was added in.
+      scope: extActive ? { only: [extActive] } : 'all',
+      imap_host: '', imap_port: 993, smtp_host: '', smtp_port: 465, smtp_security: 'tls',
+      login: '', archive_folder: '', has_password: false,
+      auth: 'password', oauth_client_id: '', has_client_secret: false
+    });
+    openMail = mailAccounts.length - 1;
+    renderMail('[data-mail-i="' + openMail + '"] [data-mail="address"]');
+    saveMail();
+  });
+
+  // ── Tabs ──────────────────────────────────────────────────────────────────
+  function showTab(pane) {
+    document.querySelectorAll('.tab').forEach(function(x) { x.classList.toggle('active', x.dataset.pane === pane); });
+    document.querySelectorAll('.tab-pane').forEach(function(x) { x.classList.toggle('active', x.id === pane); });
+    cancelRecord();
+  }
+  document.querySelectorAll('.tab').forEach(function(t) {
+    t.addEventListener('click', function() { showTab(t.dataset.pane); });
+  });
+  window.__showTab = showTab;
 
   // ── Keybindings ───────────────────────────────────────────────────────
   function esc(s) {

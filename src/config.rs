@@ -601,6 +601,23 @@ pub struct Config {
     /// Whether the first-run welcome toast has been shown. Internal flag.
     #[serde(default)]
     pub first_run_completed: bool,
+    /// Mail AI features (summaries, drafts, brief, task extraction). Off until
+    /// the user turns them on: mail text then goes to the configured agent.
+    #[serde(default)]
+    pub mail_ai: bool,
+    /// One-line AI summaries of Important conversations as they arrive.
+    #[serde(default)]
+    pub mail_ai_summaries: bool,
+    /// Ask the assistant for the daily brief each morning.
+    #[serde(default)]
+    pub mail_brief_morning: bool,
+    /// Local date (`YYYY-MM-DD`) of the last morning brief. Internal.
+    #[serde(default)]
+    pub mail_brief_last: String,
+    /// Mail accounts (Settings → Mail). Before `proxies`: both are TOML
+    /// arrays of tables, which must follow every plain value.
+    #[serde(default)]
+    pub mail_accounts: Vec<MailAccount>,
     /// Per-site proxies (Settings → Proxies). Kept last: TOML emits it as
     /// `[[proxies]]` tables, which must follow every plain value.
     #[serde(default)]
@@ -635,6 +652,97 @@ pub struct ProxyRule {
     pub password: Option<String>,
     /// Domains or pasted URLs; each also covers its subdomains.
     pub sites: Vec<String>,
+}
+
+/// One mail account. Servers come from `provider`'s preset unless it is
+/// `Other`; the password lives in the Keychain (see `mail::save_password`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct MailAccount {
+    /// Random, assigned once by the settings UI; keys the Keychain entry and
+    /// the account's local mail.
+    pub id: [u8; 16],
+    pub provider: MailProvider,
+    pub address: String,
+    /// Display name on sent mail.
+    #[serde(default)]
+    pub name: String,
+    /// Dot shown on its messages, `#rrggbb`.
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub signature: String,
+    #[serde(default)]
+    pub gatekeeper: bool,
+    #[serde(default)]
+    pub scope: crate::extension_store::Scope,
+    /// `Other` only: servers and login.
+    #[serde(default)]
+    pub imap_host: String,
+    #[serde(default)]
+    pub imap_port: u16,
+    #[serde(default)]
+    pub smtp_host: String,
+    #[serde(default)]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub smtp_security: SmtpSecurity,
+    /// Login name when it is not the address.
+    #[serde(default)]
+    pub login: String,
+    /// Folder Done moves mail to; empty finds it on the server.
+    #[serde(default)]
+    pub archive_folder: String,
+    #[serde(default)]
+    pub auth: MailAuth,
+    /// The user's own OAuth client (Gmail, Outlook).
+    #[serde(default)]
+    pub oauth_client_id: String,
+    /// The OAuth client secret is stored in the Keychain.
+    #[serde(default)]
+    pub has_client_secret: bool,
+    /// Typed in Settings, moved to the Keychain on arrival. Never persisted.
+    #[serde(default, skip_serializing)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub has_password: bool,
+    /// Typed in Settings, moved to the Keychain on arrival. Never persisted.
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MailProvider {
+    Gmail,
+    Icloud,
+    Privateemail,
+    /// Outlook.com and Microsoft 365: OAuth only, Microsoft turned off passwords.
+    Outlook,
+    Other,
+}
+
+/// How an account signs in.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MailAuth {
+    /// A password or app password.
+    #[default]
+    Password,
+    /// The user's own OAuth client; the refresh token takes the password's
+    /// place in the Keychain (see `mail_oauth`).
+    Oauth,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// Implicit TLS, usually port 465.
+    #[default]
+    Tls,
+    /// STARTTLS, usually port 587.
+    Starttls,
+    /// No encryption: allowed only to this machine (a local bridge or test server).
+    Plain,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -743,6 +851,11 @@ impl Default for Config {
             max_tabs: 500,
             later_days: 14,
             first_run_completed: false,
+            mail_ai: false,
+            mail_ai_summaries: false,
+            mail_brief_morning: false,
+            mail_brief_last: String::new(),
+            mail_accounts: Vec::new(),
             proxies: Vec::new(),
         }
     }

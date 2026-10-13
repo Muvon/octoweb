@@ -1,6 +1,31 @@
 //! macOS-specific setup: environment init, dock icon, Edit menu, MRU list,
 //! automatic termination disable.
 
+/// Files the user picks in an open panel, for mail attachments. Empty when
+/// they cancel.
+pub fn pick_files() -> Vec<std::path::PathBuf> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::NSString;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(false);
+    panel.setCanChooseFiles(true);
+    panel.setAllowsMultipleSelection(true);
+    panel.setMessage(Some(&NSString::from_str("Choose files to attach")));
+    if panel.runModal() != NSModalResponseOK {
+        return Vec::new();
+    }
+    panel
+        .URLs()
+        .iter()
+        .filter_map(|u| u.path())
+        .map(|p| std::path::PathBuf::from(p.to_string()))
+        .collect()
+}
 /// Set the app's preferred language to English for WKWebView's Accept-Language header.
 ///
 /// By default, WKWebView sends all system preferred languages in Accept-Language.

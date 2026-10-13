@@ -318,7 +318,8 @@ pub fn html() -> String {
     globe: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>',
     tab: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line></svg>',
     history: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"></path><path d="M3.05 13A9 9 0 1 0 6 6.3L3 8"></path><line x1="12" y1="7" x2="12" y2="12"></line><line x1="12" y1="12" x2="15" y2="15"></line></svg>',
-    ai: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.09 6.26L20 10l-5.91 1.74L12 18l-2.09-6.26L4 10l5.91-1.74L12 2z"></path><path d="M18 14l1.18 3.54L22.72 19l-3.54 1.18L18 24l-1.18-3.54L13.28 19l3.54-1.18L18 14z"></path></svg>'
+    ai: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.09 6.26L20 10l-5.91 1.74L12 18l-2.09-6.26L4 10l5.91-1.74L12 2z"></path><path d="M18 14l1.18 3.54L22.72 19l-3.54 1.18L18 24l-1.18-3.54L13.28 19l3.54-1.18L18 14z"></path></svg>',
+    mail: '<svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 7l9 6 9-6"></path></svg>'
   };
 
   window.__setItems = function(data) {
@@ -534,6 +535,10 @@ pub fn html() -> String {
     }
 
     const item = filtered[sel];
+    if (item.kind === 'mail') {
+      window.ipc.postMessage(JSON.stringify({ type: 'open_mail', account: item.account, thread: item.thread }));
+      return;
+    }
     if (item.kind === 'tab') {
       if (isolated) {
         navigate(item.url, true);
@@ -611,15 +616,32 @@ pub fn html() -> String {
     updateBadge();
   }
 
-  window.__setContentResults = function(hits) {
-    // Stale reply after the user left `/` mode — ignore it.
-    if (userQuery.trim().charAt(0) !== '/') return;
-    filtered = (hits || []).map(function(h) {
-      return { kind: 'history', title: h.title || h.url, url: h.url, snippet: h.snippet, pill: 'Text', visited_at: h.visited_at };
-    });
+  // `/` results: mail conversations (SRCH-3) above page text, each arriving
+  // on its own.
+  let contentHits = [];
+  let mailHits = [];
+  function showSlashResults() {
+    filtered = mailHits.concat(contentHits);
     sel = 0;
     renderItems();
     updateBadge();
+  }
+
+  window.__setContentResults = function(hits) {
+    // Stale reply after the user left `/` mode — ignore it.
+    if (userQuery.trim().charAt(0) !== '/') return;
+    contentHits = (hits || []).map(function(h) {
+      return { kind: 'history', title: h.title || h.url, url: h.url, snippet: h.snippet, pill: 'Text', visited_at: h.visited_at };
+    });
+    showSlashResults();
+  };
+
+  window.__setMailResults = function(hits) {
+    if (userQuery.trim().charAt(0) !== '/') return;
+    mailHits = (hits || []).map(function(h) {
+      return { kind: 'mail', title: h.subject || '(no subject)', url: '', snippet: (h.from_name || h.from_addr) + ' \u2014 ' + h.preview, pill: 'Mail', account: h.account, thread: h.thread };
+    });
+    showSlashResults();
   };
 
   function render(rawQuery) {
@@ -631,6 +653,7 @@ pub fn html() -> String {
     if (raw.charAt(0) === '/') {
       const cq = raw.slice(1).trim();
       if (cq) {
+        contentHits = []; mailHits = [];
         window.ipc.postMessage(JSON.stringify({ type: 'content_search', q: cq }));
       } else {
         filtered = []; sel = 0; renderItems(); updateBadge();
@@ -704,6 +727,7 @@ pub fn html() -> String {
     else if (item.kind === 'history') actionBadge.textContent = '↵ Open';
     else if (item.kind === 'url')     actionBadge.textContent = '↵ Open URL';
     else if (item.kind === 'ask')     actionBadge.textContent = '↵ Ask AI';
+    else if (item.kind === 'mail')    actionBadge.textContent = '↵ Open mail';
     else                              actionBadge.textContent = '↵ Search';
   }
 
@@ -835,6 +859,7 @@ pub fn html() -> String {
             : item.kind === 'history' || item.kind === 'later' ? ICONS.history
             : item.kind === 'url' ? ICONS.globe
             : item.kind === 'ask' ? ICONS.ai
+            : item.kind === 'mail' ? ICONS.mail
             : ICONS.search;
     }
     var cls = 'icon-slot' + (item.hibernated ? ' hibernated' : '');

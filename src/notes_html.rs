@@ -73,7 +73,11 @@ pub fn html(keybindings_json: &str) -> String {
     color: var(--label-2);
     -webkit-user-select: none; user-select: none;
   }
-  #title { color: var(--label); }
+  .tab { border: none; background: transparent; padding: 3px 8px; border-radius: var(--r-ctl); color: var(--label-2); cursor: pointer; display: flex; align-items: center; gap: 5px; font: inherit; }
+  .tab:hover { background: var(--fill-hover); }
+  .tab.active { background: var(--fill-press); color: var(--label); }
+  .badge { min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: var(--on-accent); font-size: 10px; line-height: 16px; text-align: center; }
+  .badge:empty { display: none; }
   #space { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #reveal-btn, #fullscreen-btn, #close-btn {
     flex-shrink: 0;
@@ -141,7 +145,8 @@ pub fn html(keybindings_json: &str) -> String {
 <div id="panel">
   <div id="resize-handle" role="separator" aria-label="Resize notes" aria-orientation="vertical" tabindex="0"></div>
   <div id="bar">
-    <span id="title">Notes</span>
+    <button class="tab active" id="tab-notes" type="button">Notes</button>
+    <button class="tab" id="tab-mail" type="button">Mail <span class="badge" id="unread"></span></button>
     <span id="space"></span>
     <button id="reveal-btn" type="button" title="Show file in Finder" aria-label="Show notes file in Finder">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -188,8 +193,11 @@ pub fn html(keybindings_json: &str) -> String {
   const TASK = /^(\s*[-*] )\[([ xX])\]/;
   // A list or quote line Enter continues: indent, then the marker.
   const LIST = /^(\s*)([-*] (?:\[[ xX]\] )?|> )/;
-  // Markdown link, <autolink> or bare URL; only http(s) ever opens.
-  const LINK = /\[[^\]\n]*\]\((https?:\/\/[^)\s]+)\)|<(https?:\/\/[^>\s]+)>|(https?:\/\/[^\s<>()\]]+)/g;
+  // Markdown link, <autolink> or bare URL; only http(s) and links to mail
+  // conversations (`octoweb-mail://account/thread`) ever open.
+  const LINK = /\[[^\]\n]*\]\(((?:https?|octoweb-mail):\/\/[^)\s]+)\)|<(https?:\/\/[^>\s]+)>|(https?:\/\/[^\s<>()\]]+)/g;
+  const MAIL_LINK = /octoweb-mail:\/\/([0-9a-f]+)\//;
+  let mailColors = {};
 
   let ws = null;     // workspace whose notes are in the editor; null while unreadable
   let saved = '';    // what Rust last stored for it
@@ -210,7 +218,10 @@ pub fn html(keybindings_json: &str) -> String {
     let last = 0;
     s.replace(LINK, function(m) {
       const at = arguments[arguments.length - 2];
-      out += esc(s.slice(last, at)) + '<span class="link">' + esc(m) + '</span>';
+      // A mail conversation's link takes its account's colour (TRI-9).
+      const mail = MAIL_LINK.exec(m);
+      const style = mail && mailColors[mail[1]] ? ' style="color:' + esc(mailColors[mail[1]]) + '"' : '';
+      out += esc(s.slice(last, at)) + '<span class="link"' + style + '>' + esc(m) + '</span>';
       last = at + m.length;
       return m;
     });
@@ -265,8 +276,12 @@ pub fn html(keybindings_json: &str) -> String {
     const pos = text.selectionStart;
     if (task) {
       const at = l.start + task[1].length + 1;
-      replaceRange(at, at + 1, task[2] === ' ' ? 'x' : ' ');
+      const done = task[2] === ' ';
+      replaceRange(at, at + 1, done ? 'x' : ' ');
       text.setSelectionRange(pos, pos);
+      // TRI-10: ticking a task made from an email closes the email too.
+      const mail = /octoweb-mail:\/\/[^)\s]+/.exec(l.text);
+      if (mail) ipc({ type: 'task', url: mail[0], done: done });
       return;
     }
     // A plain line becomes a task, keeping its indent and dropping a bullet.
@@ -451,6 +466,18 @@ pub fn html(keybindings_json: &str) -> String {
   };
 
   window.__notesFlush = save;
+
+  document.getElementById('tab-mail').addEventListener('click', function() { ipc({ type: 'tab', tab: 'mail' }); });
+
+  window.__paneUnread = function(n) {
+    document.getElementById('unread').textContent = n ? String(n) : '';
+  };
+
+  // Account key -> colour, for links to mail conversations.
+  window.__notesMailAccounts = function(colors) {
+    mailColors = colors || {};
+    render();
+  };
 
   window.__notesFocus = function() {
     text.focus();

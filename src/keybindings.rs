@@ -74,6 +74,7 @@ pub enum Action {
     Terminal,
     Notes,
     NoteCapture,
+    Inbox,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -238,7 +239,7 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "devtools",
         "Toggle DevTools",
         "Tools",
-        "cmd+shift+i",
+        "cmd+opt+i",
     ),
     // AI & panels
     (
@@ -341,6 +342,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
         "Capture page as task, or selection as quote, to notes",
         "Tools",
         "cmd+opt+j",
+    ),
+    (
+        Action::Inbox,
+        "inbox",
+        "Toggle inbox (mail)",
+        "AI & Panels",
+        "cmd+shift+i",
     ),
 ];
 
