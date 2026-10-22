@@ -333,6 +333,10 @@ pub struct WorkspaceAcpHistory {
 	/// Last-active session id. Restored as the foreground session.
 	#[serde(default)]
 	pub active_id: u64,
+	/// Chats closed in this workspace, most recent last — ⌘⇧T in the sidebar
+	/// reopens them. Persisted so an accidental close survives a restart.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub closed: Vec<AcpSessionSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -387,6 +391,7 @@ pub fn load_acp_history() -> Option<AcpHistory> {
 		WorkspaceAcpHistory {
 			sessions: legacy.sessions,
 			active_id: legacy.active_id,
+			closed: Vec::new(),
 		},
 	);
 	Some(AcpHistory { workspaces })

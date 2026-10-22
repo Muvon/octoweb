@@ -64,6 +64,10 @@ pub struct Workspace {
 	/// not persisted — session restore already brings back the tabs that were
 	/// open at quit.
 	pub closed_tabs: Vec<String>,
+	/// Assistant chats closed in this workspace, most recent last, popped by
+	/// ⌘⇧T in the sidebar. Unlike `closed_tabs` these are persisted (in
+	/// `acp_history.json`): a closed chat's messages exist nowhere else.
+	pub closed_acp_sessions: Vec<crate::config::AcpSessionSnapshot>,
 	/// This workspace's MCP token. Agents spawned here send it in
 	/// `mcp::WORKSPACE_HEADER`, so their tool calls act on this workspace's
 	/// tabs no matter which workspace is on screen.
@@ -86,6 +90,7 @@ impl Workspace {
 			quick_slots: Default::default(),
 			later: Vec::new(),
 			closed_tabs: Vec::new(),
+			closed_acp_sessions: Vec::new(),
 			mcp_token: None,
 		}
 	}

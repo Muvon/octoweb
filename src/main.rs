@@ -142,6 +142,7 @@ enum AppEvent {
 	AcpSessionCreatePanel,                          // ⌘T in sidebar — open the new-session input panel
 	AcpSessionClose(u64),                           // (session_id) — close session (refused if last one)
 	AcpSessionCloseActive,                          // ⌘W in sidebar — close currently active session
+	AcpSessionReopen,                               // ⌘⇧T in sidebar — reopen the last session closed in this workspace
 	AcpSessionSwitch(u64),                          // (session_id) — switch active session
 	AcpSessionRename(u64, String),                  // (session_id, title) — rename session
 	SidebarReady,                                   // sidebar JS finished initializing — push restore
@@ -332,11 +333,10 @@ fn wants_browser_context(text: &str) -> bool {
 	!text.trim_start().starts_with('/')
 }
 
-/// Remember a closed tab's URL for ⌘⇧T: newest last, oldest evicted at
-/// `CLOSED_TAB_HISTORY`.
-fn push_closed_tab(stack: &mut Vec<String>, url: String) {
-	stack.push(url);
-	if stack.len() > CLOSED_TAB_HISTORY {
+/// Remember something closed for ⌘⇧T: newest last, oldest evicted at `cap`.
+fn push_closed<T>(stack: &mut Vec<T>, item: T, cap: usize) {
+	stack.push(item);
+	if stack.len() > cap {
 		stack.remove(0);
 	}
 }
@@ -411,6 +411,7 @@ fn keybind_to_event(
 		A::Back if !overlay && !inline && !sidebar && !address_edit => AppEvent::Back,
 		A::Forward if !overlay && !inline && !sidebar && !address_edit => AppEvent::Forward,
 		A::NewTab if !overlay && !inline => AppEvent::NewTab,
+		A::ReopenTab if sidebar && !overlay && !inline => AppEvent::AcpSessionReopen,
 		A::ReopenTab if !overlay && !inline => AppEvent::ReopenTab,
 		A::FollowLink if !overlay && !inline && !sidebar && !address_edit && !workspaces => AppEvent::FollowLink,
 		A::StopLoad if !overlay && !inline => AppEvent::StopLoad,
@@ -585,6 +586,44 @@ pub(crate) struct AcpSession {
 	account_json: Option<String>,
 }
 
+impl AcpSession {
+	/// A persisted chat back in the strip: its saved log and octomind session,
+	/// unconnected unless `handle` is given (see `AcpSessionSwitch`).
+	fn from_snapshot(id: u64, snap: config::AcpSessionSnapshot, handle: Option<agent::AgentHandle>) -> Self {
+		Self {
+			id,
+			title: snap.title,
+			tag: snap.tag,
+			handle,
+			retry_count: 0,
+			reconnect_gen: 0,
+			last_cancel_at: None,
+			prompt_in_flight: false,
+			acp_session_id: snap.acp_session_id,
+			messages: snap.messages,
+			agent_buf: String::new(),
+			specialist_runs: specialist::Cache::default(),
+			tool_buf: Vec::new(),
+			tool_starts: HashMap::new(),
+			tool_since_text: false,
+			turn_started: None,
+			available_commands_json: None,
+			account_json: None,
+		}
+	}
+
+	/// What `acp_history.json` keeps of this session.
+	fn snapshot(&self, max_msgs: usize) -> config::AcpSessionSnapshot {
+		config::AcpSessionSnapshot {
+			id: self.id,
+			title: self.title.clone(),
+			tag: self.tag.clone(),
+			acp_session_id: self.acp_session_id.clone(),
+			messages: acp_messages_snapshot(self, max_msgs),
+		}
+	}
+}
+
 /// Hard cap on parallel assistant sessions per workspace.
 pub const MAX_SESSIONS: usize = 10;
 
@@ -600,6 +639,9 @@ const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
 
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
+/// How many closed assistant chats per workspace ⌘⇧T in the sidebar can bring
+/// back. Each keeps its message log on disk, so this stays small.
+const CLOSED_SESSION_HISTORY: usize = 10;
 /// Quiet time after mail changes before the summarizer runs (AI-1).
 const MAIL_SUMMARY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Local hour from which the morning brief may run (AI-4).
@@ -2672,7 +2714,10 @@ fn main() {
 		// straight into the live session. Cloning first copied every message
 		// (and its tool payloads) before the cap was applied two lines later,
 		// on the main thread ahead of first paint.
-		let persisted = persisted_acp.as_mut().and_then(|h| h.workspaces.remove(&ws.id));
+		let mut persisted = persisted_acp.as_mut().and_then(|h| h.workspaces.remove(&ws.id));
+		if let Some(h) = persisted.as_mut() {
+			ws.closed_acp_sessions = std::mem::take(&mut h.closed);
+		}
 		let (built_sessions, active_id) = match persisted {
 			Some(h) if !h.sessions.is_empty() => {
 				let cap = cfg.max_acp_session_messages;
@@ -2701,26 +2746,7 @@ fn main() {
 					} else {
 						None // lazy: connect on AcpSessionSwitch / workspace switch
 					};
-					built.push(AcpSession {
-						id: snap.id,
-						title: snap.title,
-						tag: snap.tag,
-						handle,
-						retry_count: 0,
-						reconnect_gen: 0,
-						last_cancel_at: None,
-						acp_session_id: snap.acp_session_id,
-						messages: snap.messages,
-						agent_buf: String::new(),
-						specialist_runs: specialist::Cache::default(),
-						tool_buf: Vec::new(),
-						tool_starts: HashMap::new(),
-						tool_since_text: false,
-						turn_started: None,
-						prompt_in_flight: false,
-						available_commands_json: None,
-						account_json: None,
-					});
+					built.push(AcpSession::from_snapshot(snap.id, snap, handle));
 				}
 				let active = if built.iter().any(|s| s.id == persisted_active_id) {
 					persisted_active_id
@@ -8670,7 +8696,7 @@ fn main() {
                             .filter(|u| !u.is_empty() && u != "about:blank")
                     };
                     if let Some(url) = closed_url {
-                        push_closed_tab(&mut workspace_manager.active_mut().closed_tabs, url);
+                        push_closed(&mut workspace_manager.active_mut().closed_tabs, url, CLOSED_TAB_HISTORY);
                     }
                     workspace_manager.active().tabs.lock().unwrap().close(id);
                     tab_nav::forget(id);
@@ -9382,6 +9408,13 @@ fn main() {
                     tracing::debug!(session_id = sid, "session close ignored — last session");
                 } else if let Some(pos) = workspace_manager.active().acp_sessions.iter().position(|s| s.id == sid) {
                     let removed = workspace_manager.active_mut().acp_sessions.remove(pos);
+                    // Kept for ⌘⇧T. A chat that never reached octomind and has
+                    // no messages has nothing to bring back.
+                    if removed.acp_session_id.is_some() || !removed.messages.is_empty() {
+                        let snap = removed.snapshot(cfg.max_acp_session_messages);
+                        push_closed(&mut workspace_manager.active_mut().closed_acp_sessions, snap, CLOSED_SESSION_HISTORY);
+                        persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                    }
                     if let Some(handle) = removed.handle {
                         handle.close();
                     }
@@ -9403,6 +9436,36 @@ fn main() {
                         "window.__removeSession && window.__removeSession({sid})"
                     ));
                     persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
+                }
+            }
+
+            // ── ⌘⇧T in sidebar — reopen the last session closed here ──────────────
+            Event::UserEvent(AppEvent::AcpSessionReopen) => {
+                if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
+                    tracing::warn!(max = MAX_SESSIONS, "session reopen rejected — cap reached");
+                } else if let Some(snap) = workspace_manager.active_mut().closed_acp_sessions.pop() {
+                    let sid = next_acp_session_id();
+                    tracing::debug!(session_id = sid, acp_session_id = ?snap.acp_session_id, "reopening closed session");
+                    let etitle = webview_utils::escape_js_template(&snap.title);
+                    let etag = webview_utils::escape_js_template(&snap.tag);
+                    let msgs_json = if snap.messages.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&snap.messages).ok()
+                    };
+                    workspace_manager.active_mut().acp_sessions.push(AcpSession::from_snapshot(sid, snap, None));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'ready')"
+                    ));
+                    if let Some(msgs_json) = msgs_json {
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
+                        ));
+                    }
+                    persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                    // Connects it the way any persisted chat connects, brings it
+                    // to the front, and persists the strip.
+                    let _ = proxy.send_event(AppEvent::AcpSessionSwitch(sid));
                 }
             }
 
@@ -13131,16 +13194,7 @@ static ACP_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// message log at `max_msgs` (oldest dropped first).
 fn persist_acp_history(workspace_id: &str, sessions: &[AcpSession], active_id: u64, max_msgs: usize) {
 	let workspace_id = workspace_id.to_string();
-	let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions
-		.iter()
-		.map(|s| config::AcpSessionSnapshot {
-			id: s.id,
-			title: s.title.clone(),
-			tag: s.tag.clone(),
-			acp_session_id: s.acp_session_id.clone(),
-			messages: acp_messages_snapshot(s, max_msgs),
-		})
-		.collect();
+	let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions.iter().map(|s| s.snapshot(max_msgs)).collect();
 	// Read-modify-write: other workspaces' slots must survive this save,
 	// not just the one that changed. Locked so two concurrent calls (e.g.
 	// outgoing and incoming workspace both persisting right after a switch)
@@ -13148,13 +13202,33 @@ fn persist_acp_history(workspace_id: &str, sessions: &[AcpSession], active_id: u
 	std::thread::spawn(move || {
 		let _guard = ACP_HISTORY_WRITE_LOCK.lock().unwrap();
 		let mut history = config::load_acp_history().unwrap_or_default();
+		// The closed stack has its own writer (`persist_acp_closed`); carry it over.
+		let closed = history
+			.workspaces
+			.remove(&workspace_id)
+			.map(|w| w.closed)
+			.unwrap_or_default();
 		history.workspaces.insert(
 			workspace_id,
 			config::WorkspaceAcpHistory {
 				sessions: snap_sessions,
 				active_id,
+				closed,
 			},
 		);
+		config::save_acp_history(&history);
+	});
+}
+
+/// Write one workspace's closed-chat stack (⌘⇧T), leaving its live sessions as
+/// they are on disk. Same lock and read-modify-write as `persist_acp_history`.
+fn persist_acp_closed(workspace_id: &str, closed: &[config::AcpSessionSnapshot]) {
+	let workspace_id = workspace_id.to_string();
+	let closed = closed.to_vec();
+	std::thread::spawn(move || {
+		let _guard = ACP_HISTORY_WRITE_LOCK.lock().unwrap();
+		let mut history = config::load_acp_history().unwrap_or_default();
+		history.workspaces.entry(workspace_id).or_default().closed = closed;
 		config::save_acp_history(&history);
 	});
 }
@@ -13202,15 +13276,10 @@ fn save_and_exit(
 				sessions: ws
 					.acp_sessions
 					.iter()
-					.map(|s| config::AcpSessionSnapshot {
-						id: s.id,
-						title: s.title.clone(),
-						tag: s.tag.clone(),
-						acp_session_id: s.acp_session_id.clone(),
-						messages: acp_messages_snapshot(s, max_acp_session_messages),
-					})
+					.map(|s| s.snapshot(max_acp_session_messages))
 					.collect(),
 				active_id: ws.acp_active_session_id,
+				closed: ws.closed_acp_sessions.clone(),
 			};
 			(ws.id.clone(), snapshot)
 		})
@@ -14102,7 +14171,7 @@ mod persistence_and_paging_tests {
 #[cfg(test)]
 mod keybinding_dispatch_tests {
 	use super::{
-		keybind_to_event, pane_keybind_to_event, push_closed_tab, terminal_keybind_to_event, wants_browser_context,
+		keybind_to_event, pane_keybind_to_event, push_closed, terminal_keybind_to_event, wants_browser_context,
 		AppEvent, PaneTab,
 	};
 	use crate::keybindings::Action as A;
@@ -14202,6 +14271,13 @@ mod keybinding_dispatch_tests {
 		let sidebar = keybind_to_event(A::CloseTab, false, false, false, true, false, false);
 		assert!(matches!(sidebar, Some(AppEvent::AcpSessionCloseActive)));
 		assert!(matches!(idle(A::CloseTab), Some(AppEvent::CloseTab(0))));
+	}
+
+	#[test]
+	fn the_sidebar_reopen_key_targets_the_session_not_the_tab() {
+		let sidebar = keybind_to_event(A::ReopenTab, false, false, false, true, false, false);
+		assert!(matches!(sidebar, Some(AppEvent::AcpSessionReopen)));
+		assert!(matches!(idle(A::ReopenTab), Some(AppEvent::ReopenTab)));
 	}
 
 	#[test]
@@ -14328,7 +14404,11 @@ mod keybinding_dispatch_tests {
 	fn the_closed_tab_stack_pops_newest_first_and_evicts_oldest() {
 		let mut stack = Vec::new();
 		for i in 0..super::CLOSED_TAB_HISTORY + 5 {
-			push_closed_tab(&mut stack, format!("https://example.com/{i}"));
+			push_closed(
+				&mut stack,
+				format!("https://example.com/{i}"),
+				super::CLOSED_TAB_HISTORY,
+			);
 		}
 		assert_eq!(stack.len(), super::CLOSED_TAB_HISTORY, "cap not applied");
 		let newest = format!("https://example.com/{}", super::CLOSED_TAB_HISTORY + 4);

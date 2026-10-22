@@ -265,7 +265,7 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 	(
 		Action::ReopenTab,
 		"reopen_tab",
-		"Reopen closed tab",
+		"Reopen closed tab / session",
 		"Tabs & Navigation",
 		"cmd+shift+t",
 	),

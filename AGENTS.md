@@ -279,6 +279,8 @@ Run with `RUST_LOG=debug cargo run` to see debug output. Default is `warn`.
 - `send_prompt(text, images)` → queues prompt, returns false if the session task exited
 - `poll()` → drains pending `AgentEvent`s (non-blocking)
 - Handle dropped → disconnects (chat stays loaded for a resume; one-shot is unloaded); `close()` → unloads
+- Closing a sidebar chat (⌘W) pushes its snapshot onto `Workspace::closed_acp_sessions` (persisted as `closed` in
+  `acp_history.json`, last 10); ⌘⇧T in the sidebar (`AcpSessionReopen`) puts it back and resumes its octomind session
 
 **MCP tool pattern:**
 ```rust
