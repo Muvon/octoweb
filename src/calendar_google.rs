@@ -194,6 +194,7 @@ pub fn occurrence(e: &Value, cal: &Calendar, address: &str) -> Option<CalEvent> 
 		attendees,
 		etag: String::new(),
 		recurrence_id: String::new(),
+		uid: e["iCalUID"].as_str().unwrap_or_default().to_string(),
 		id,
 	})
 }
@@ -356,6 +357,95 @@ pub async fn rsvp(cal: &Calendar, ctx: &Ctx, event: &CalEvent, response: &str) -
 	Ok(())
 }
 
+/// A start or end of an imported event, keeping its zone.
+fn import_time(t: &crate::calendar_dav::Time) -> Value {
+	use crate::calendar_dav::{wall, TimeKind};
+	match &t.kind {
+		TimeKind::Date => json!({ "date": t.date.iso() }),
+		TimeKind::Utc => json!({ "dateTime": t::rfc3339_utc(t.ts()) }),
+		TimeKind::Zone(z) => match t::zone_name(z) {
+			Some(name) => json!({ "dateTime": wall(t), "timeZone": name }),
+			None => json!({ "dateTime": t::rfc3339_utc(t.ts()), "timeZone": t::local_zone() }),
+		},
+		TimeKind::Floating => json!({ "dateTime": wall(t), "timeZone": t::local_zone() }),
+	}
+}
+
+/// The import body for one calendar object (a series with its overrides is
+/// imported as the series); `None` when there is nothing to add.
+pub fn import_body(object: &str) -> Option<Value> {
+	use crate::calendar_dav::TimeKind;
+	let events = crate::calendar_dav::parse_ics(object, "");
+	let ev = events.iter().find(|e| e.recurrence_id.is_none() && !e.cancelled)?;
+	let start = ev.start.as_ref()?;
+	let mut start_json = import_time(start);
+	if start.kind == TimeKind::Utc && ev.rrule.is_some() {
+		// A series needs a zone to repeat in.
+		start_json["timeZone"] = json!(t::local_zone());
+	}
+	let end_json = match (&ev.end, ev.duration) {
+		(Some(end), _) => import_time(end),
+		(None, d) if start.kind == TimeKind::Date => {
+			json!({ "date": start.date.add_days(d.map_or(1, |d| (d / 86_400).max(1))).iso() })
+		}
+		(None, d) => {
+			let mut j = json!({ "dateTime": t::rfc3339_utc(start.ts() + d.unwrap_or(3600)) });
+			if let Some(z) = start_json.get("timeZone") {
+				j["timeZone"] = z.clone();
+			}
+			j
+		}
+	};
+	let mut body = json!({
+		"iCalUID": ev.uid,
+		"summary": ev.summary,
+		"description": ev.description,
+		"location": ev.location,
+		"start": start_json,
+		"end": end_json,
+	});
+	if ev.transparent {
+		body["transparency"] = json!("transparent");
+	}
+	if let Some(rule) = &ev.rrule {
+		let mut lines = vec![format!("RRULE:{rule}")];
+		lines.extend(ev.exdates.iter().map(|x| format!("EXDATE{}", x.ical())));
+		lines.extend(ev.rdates.iter().map(|x| format!("RDATE{}", x.ical())));
+		body["recurrence"] = json!(lines);
+	}
+	if !ev.organizer.is_empty() {
+		body["organizer"] = json!({ "email": ev.organizer });
+	}
+	if !ev.attendees.is_empty() {
+		body["attendees"] = Value::Array(
+			ev.attendees
+				.iter()
+				.map(|a| {
+					let status = match a.status.as_str() {
+						"accepted" => "accepted",
+						"declined" => "declined",
+						"tentative" => "tentative",
+						_ => "needsAction",
+					};
+					json!({ "email": a.email, "displayName": a.name, "responseStatus": status })
+				})
+				.collect(),
+		);
+	}
+	Some(body)
+}
+
+/// Add one calendar object as a private copy (`events.import`): nobody is
+/// invited or told. Importing the same UID again updates that copy.
+pub async fn import(cal: &Calendar, ctx: &Ctx, object: &str) -> Result<bool, ApiError> {
+	let Some(body) = import_body(object) else {
+		return Ok(false);
+	};
+	let url = format!("{API}/calendars/{}/events/import", http::encode(&cal.id));
+	check(http::send(ctx.apply(Request::new("POST", &url)).json(&body)).await?)?;
+	Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -455,6 +545,35 @@ mod tests {
 		assert_eq!(emails, ["me@x.com", "anna@x.com", "new@x.com"]);
 		assert_eq!(edited["attendees"][1]["responseStatus"], "accepted");
 		assert!(edited.get("recurrence").is_none() && edited.get("conferenceData").is_none());
+	}
+
+	#[test]
+	fn imports_keep_zones_repeats_and_guests() {
+		let object = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x@y\r\nSUMMARY:Sync\r\nDTSTART;TZID=/mozilla.org/20050126_1/Europe/Berlin:20261019T100000\r\n\
+DURATION:PT30M\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nEXDATE;TZID=Europe/Berlin:20261026T100000\r\nORGANIZER:mailto:boss@x.com\r\n\
+ATTENDEE;PARTSTAT=ACCEPTED;CN=Me:mailto:me@x.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+		let b = import_body(object).unwrap();
+		assert_eq!(b["iCalUID"], "x@y");
+		assert_eq!(
+			b["start"],
+			json!({ "dateTime": "2026-10-19T10:00:00", "timeZone": "Europe/Berlin" })
+		);
+		assert_eq!(b["end"]["dateTime"], "2026-10-19T08:30:00Z");
+		assert_eq!(b["end"]["timeZone"], "Europe/Berlin");
+		assert_eq!(
+			b["recurrence"],
+			json!([
+				"RRULE:FREQ=WEEKLY;BYDAY=MO",
+				"EXDATE;TZID=Europe/Berlin:20261026T100000"
+			])
+		);
+		assert_eq!(b["attendees"][0]["responseStatus"], "accepted");
+		let all_day = import_body("BEGIN:VEVENT\nUID:d\nDTSTART;VALUE=DATE:20261224\nSUMMARY:Eve\nEND:VEVENT").unwrap();
+		assert_eq!(
+			(all_day["start"]["date"].as_str(), all_day["end"]["date"].as_str()),
+			(Some("2026-12-24"), Some("2026-12-25"))
+		);
+		assert!(import_body("BEGIN:VEVENT\nUID:c\nSTATUS:CANCELLED\nDTSTART:20261019T100000Z\nEND:VEVENT").is_none());
 	}
 
 	#[test]

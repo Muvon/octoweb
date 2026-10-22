@@ -253,6 +253,18 @@ pub fn html(keybindings_json: &str) -> String {
   .images-bar span { flex: 1; }
   .images-bar .pill { background: var(--card); box-shadow: 0 0 0 0.5px var(--hairline); }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 14px 14px; }
+  .invite { display: flex; gap: 12px; margin: 0 14px 14px; padding: 12px; border-radius: var(--r-card); background: var(--card); box-shadow: 0 0 0 0.5px var(--hairline), 0 1px 3px rgba(0, 0, 0, 0.06); }
+  .invite.pending { color: var(--label-3); }
+  .invite.cancelled .inv-title { text-decoration: line-through; color: var(--label-2); }
+  .inv-date { flex: 0 0 44px; height: 48px; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; align-items: center; background: var(--fill); }
+  .inv-date .mon { width: 100%; text-align: center; font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--on-accent); background: var(--err); line-height: 15px; }
+  .inv-date .day { font-size: 20px; font-weight: 600; line-height: 32px; }
+  .inv-body { flex: 1 1 auto; min-width: 0; }
+  .inv-title { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+  .inv-when { font-size: 12px; color: var(--label-2); margin-top: 2px; overflow-wrap: anywhere; }
+  .inv-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+  .inv-note { font-size: 12px; color: var(--label-2); margin-right: 2px; }
+  .invite .pill.on, .invite .pill.primary { background: var(--accent); color: var(--on-accent); }
   .att { display: flex; gap: 10px; align-items: center; max-width: 100%; box-sizing: border-box; border: none; border-radius: 12px; padding: 6px 12px 6px 6px; background: var(--fill); cursor: pointer; text-align: left; transition: background var(--t-fast); }
   .att:hover { background: var(--fill-hover); }
   .att .nm, .att .size { display: block; }
@@ -1222,6 +1234,84 @@ pub fn html(keybindings_json: &str) -> String {
       (row.class === 'important' ? '<button class="pill" type="button" data-act="other" title="Later mail from this sender goes to Other">Move sender to Other</button>' : '') +
       '</div></div>';
   }
+  // ── Calendar invitations (spec 002-calendar INV-*) ──
+  // An invitation's `text/calendar` part becomes a card: the event, and the
+  // user's answer when their calendar already has it, else Add to calendar.
+  const INVITES = {};
+  function isInvite(a) {
+    const mime = (a.mime || '').toLowerCase();
+    return mime === 'text/calendar' || mime === 'application/ics' || /\.ics$/i.test(a.name || '');
+  }
+  const INV_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const INV_DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function invClock(ts) {
+    return new Date(ts * 1000).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+  function invWhen(c) {
+    if (c.all_day) {
+      const a = new Date(c.start_date + 'T00:00'), b = new Date(c.end_date + 'T00:00');
+      b.setDate(b.getDate() - 1);
+      const day = function(d) { return INV_DAY[d.getDay()] + ' ' + d.getDate() + ' ' + INV_MON[d.getMonth()]; };
+      return a.getTime() === b.getTime() ? day(a) + ' · all day' : day(a) + ' – ' + day(b);
+    }
+    const d = new Date(c.start * 1000);
+    return INV_DAY[d.getDay()] + ' ' + d.getDate() + ' ' + INV_MON[d.getMonth()] + ' · ' + invClock(c.start) + ' – ' + invClock(c.end);
+  }
+  function inviteCard(id, c) {
+    if (!c) return '<div class="invite pending" data-inv="' + id + '"><div class="inv-body"><div class="inv-when">Calendar invitation…</div></div></div>';
+    if (c.error) return '<div class="invite" data-inv="' + id + '"><div class="inv-body"><div class="inv-when">' + esc(c.error) + '</div></div></div>';
+    const d = new Date((c.all_day ? new Date(c.start_date + 'T00:00').getTime() / 1000 : c.start) * 1000);
+    const e = c.event;
+    let actions = '';
+    if (c.cancelled) {
+      actions = '<span class="inv-note">This event was cancelled</span>';
+    } else if (e) {
+      if (e.me) {
+        actions = '<span class="inv-note">Going?</span>' + [['accepted', 'Yes'], ['tentative', 'Maybe'], ['declined', 'No']].map(function(r) {
+          return '<button class="pill' + (e.me === r[0] ? ' on' : '') + '" type="button" data-inv-rsvp="' + r[0] + '" data-key="' + esc(e.key) + '" data-series="' + (c.recurring ? 1 : 0) + '">' + r[1] + '</button>';
+        }).join('');
+      } else {
+        actions = '<span class="inv-note">In your calendar</span>';
+      }
+      actions += '<button class="pill" type="button" data-inv-open="' + esc(e.key) + '">Open in Calendar</button>';
+    } else {
+      actions = '<button class="pill primary" type="button" data-inv-add="' + id + '">Add to calendar</button>';
+    }
+    if (c.join && !c.cancelled && c.end * 1000 > Date.now()) actions += '<button class="pill" type="button" data-inv-join="' + esc(c.join) + '">Join</button>';
+    return '<div class="invite' + (c.cancelled ? ' cancelled' : '') + '" data-inv="' + id + '">' +
+      '<div class="inv-date"><span class="mon">' + INV_MON[d.getMonth()] + '</span><span class="day">' + d.getDate() + '</span></div>' +
+      '<div class="inv-body"><div class="inv-title">' + esc(c.title) + '</div>' +
+      '<div class="inv-when">' + esc(invWhen(c)) + (c.recurring ? ' · repeats' : '') + '</div>' +
+      (c.location ? '<div class="inv-when">' + esc(c.location) + '</div>' : '') +
+      (c.organizer ? '<div class="inv-when">From ' + esc(c.organizer) + '</div>' : '') +
+      '<div class="inv-actions">' + actions + '</div></div></div>';
+  }
+  function inviteHtml(m, j) {
+    if (!(m.id in INVITES)) {
+      INVITES[m.id] = null;
+      ipc({ type: 'invite', message: m.id, index: j });
+    }
+    return inviteCard(m.id, INVITES[m.id]);
+  }
+  document.addEventListener('click', function(e) {
+    const t = e.target.closest && e.target.closest('[data-inv-rsvp],[data-inv-add],[data-inv-open],[data-inv-join]');
+    if (!t) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (t.dataset.invRsvp) {
+      ipc({ type: 'invite_rsvp', key: t.dataset.key, response: t.dataset.invRsvp, series: t.dataset.series === '1' });
+      t.parentNode.querySelectorAll('[data-inv-rsvp]').forEach(function(b) { b.classList.toggle('on', b === t); });
+    } else if (t.dataset.invAdd) {
+      ipc({ type: 'invite_add', message: Number(t.dataset.invAdd) });
+      t.disabled = true;
+      t.textContent = 'Adding…';
+    } else if (t.dataset.invOpen) {
+      ipc({ type: 'invite_open', key: t.dataset.invOpen });
+    } else if (t.dataset.invJoin) {
+      ipc({ type: 'invite_join', url: t.dataset.invJoin });
+    }
+  }, true);
+
   function messageHtml(t, m, i) {
     const open = i === t.messages.length - 1 || t.open.has(i);
     if (!open) {
@@ -1242,9 +1332,12 @@ pub fn html(keybindings_json: &str) -> String {
     html += '<div class="msg-body">' + (m.html ? '<iframe class="mail ' + frameKind(m.html) + '" sandbox="allow-same-origin allow-popups" data-i="' + i + '" title="Message"></iframe>' :
       '<div class="msg-text">' + textHtml(m.text || (m.body_loaded ? '' : 'Loading…')) + '</div>') + '</div>';
     if (hasQuote(m)) html += '<button class="pill quote-toggle" type="button" data-quotes="' + i + '">Show quoted text</button>';
-    if (m.attachments && m.attachments.length) {
-      html += '<div class="attachments">' + m.attachments.map(function(a, j) {
-        const ft = fileType(a);
+    const invite = (m.attachments || []).findIndex(isInvite);
+    if (invite >= 0) html += inviteHtml(m, invite);
+    const files = (m.attachments || []).map(function(a, j) { return [a, j]; }).filter(function(p) { return !isInvite(p[0]); });
+    if (files.length) {
+      html += '<div class="attachments">' + files.map(function(p) {
+        const a = p[0], j = p[1], ft = fileType(a);
         return '<button class="att" type="button" data-att="' + i + ':' + j + '" title="Preview ' + esc(a.name) + '"><span class="ft ' + ft.cls + '">' + esc(ft.label) + '</span>' +
           '<span><span class="nm">' + esc(a.name) + '</span><span class="size">' + fmtSize(a.size) + '</span></span></button>';
       }).join('') + '</div>';
@@ -2367,6 +2460,12 @@ pub fn html(keybindings_json: &str) -> String {
     },
     changed: refresh,
     open: function(acc, thread, fromNotes) { S.mode = 'inbox'; openThread(acc, thread, fromNotes); },
+    invite: function(d) {
+      INVITES[d.message] = d.card || { error: d.error || 'This invitation could not be read.' };
+      document.querySelectorAll('[data-inv="' + d.message + '"]').forEach(function(el) {
+        el.outerHTML = inviteCard(d.message, INVITES[d.message]);
+      });
+    },
     openDraft: function(draft) { draft.attachments = draft.attachments || []; openComposer(draft); showUndo('Draft ready — review and send', null, 4000); },
     // The writer's reply so far for the composer with draft key `key`.
     draftStream: function(data) {

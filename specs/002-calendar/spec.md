@@ -43,7 +43,8 @@ calendars, iCloud and any CalDAV server · unified, colour-coded calendars per
 workspace · next-meeting card, address-bar chip and ⌘J join · meeting alerts
 · list, day and week views · event details with guests and RSVP · create,
 edit and delete, with guests, video link and simple repeats · quick add in
-plain English · copy free times · meeting notes into Notes · MCP tools.
+plain English · copy free times · meeting notes into Notes · MCP tools ·
+ICS subscriptions (`webcal://`) · `.ics` import · invitations in mail.
 
 **Out:** month and year grids, drag to move or resize, booking pages, room
 booking, task time-blocking, AI auto-scheduling, secondary time zones (v2),
@@ -147,6 +148,38 @@ editing repeating CalDAV events, answering CalDAV invitations (done in mail).
   creates it in the last-used calendar, ⌘Enter opens the full form.
 - **QCK-3** A time already past today, with no day given, means tomorrow;
   without a time the event is all-day.
+
+## Subscriptions, files and invitations
+
+The interchange every calendar app supports: iCalendar (`.ics`) files,
+`webcal://` feeds and invitations sent by mail.
+
+- **SUB-1** The user shall subscribe to an ICS feed (`webcal://`, `webcals://`
+  or `https://`) from the Calendars menu; it shows as a read-only calendar of
+  the workspace it was added in, refreshed every 30 minutes, named by the
+  feed (`X-WR-CALNAME`) unless renamed.
+- **SUB-2** Settings → Mail → Calendar shall list subscriptions to rename,
+  scope to workspaces or remove; the Calendars menu can unsubscribe too.
+- **SUB-3** Following a `webcal://` link in a page shall open the Calendars
+  menu with the link filled in, rather than handing it to another app.
+- **IMP-1** The user shall import an `.ics` file by choosing it or dropping it
+  on the pane; a sheet shows how many events and the first few, and the
+  calendar to add them to.
+- **IMP-2** Import shall keep each event's UID, time zone and repeat rule,
+  invite nobody, and skip events the calendar already has, so importing
+  twice adds nothing. Google uses `events.import`; Outlook gets each event
+  with its repeat pattern when Graph can express it; CalDAV stores the
+  objects as they are.
+- **INV-1** A mail message carrying an invitation (`text/calendar`, or an
+  `.ics` attachment) shall show a card with the event's title, time, place
+  and organizer instead of an attachment chip.
+- **INV-2** When the workspace's calendar already holds the event (same UID,
+  as Google and Outlook add invitations themselves), the card shall answer it
+  with Yes / Maybe / No — the whole series for a repeating one — and open it
+  in the Calendar tab; otherwise it offers **Add to calendar**, which imports
+  it into the default calendar.
+- **INV-3** A cancellation (`METHOD:CANCEL`) shows as cancelled; a video link
+  offers Join.
 
 ## Availability
 

@@ -463,6 +463,12 @@ pub enum PageRequest {
 		message: i64,
 		index: usize,
 	},
+	/// A calendar invitation (`text/calendar` or `.ics` attachment) to show
+	/// as a card (spec 002-calendar INV-1).
+	Invite {
+		message: i64,
+		index: usize,
+	},
 	SaveDraft {
 		draft: Draft,
 	},
@@ -534,6 +540,25 @@ pub enum Pane {
 	BackToNotes,
 	/// Open Settings → Mail to add an account.
 	Settings,
+	/// Answer the invitation's event in the user's calendar.
+	InviteRsvp {
+		key: String,
+		response: String,
+		#[serde(default)]
+		series: bool,
+	},
+	/// Add the invitation of message `message` to the calendar.
+	InviteAdd {
+		message: i64,
+	},
+	/// Show the invitation's event in the calendar.
+	InviteOpen {
+		key: String,
+	},
+	/// Join the invitation's video call.
+	InviteJoin {
+		url: String,
+	},
 }
 
 #[derive(Debug, Deserialize)]
@@ -699,6 +724,13 @@ pub enum Event {
 		text: String,
 	},
 	PaletteResults(String),
+	/// The `text/calendar` of an invitation in message `message`, for the
+	/// calendar to read (main.rs); `Err` when it could not be fetched.
+	Invite {
+		ws: String,
+		message: i64,
+		text: Result<String, String>,
+	},
 	/// A one-shot AI job to run on `job.agent()` with `prompt` (`mail_jobs.rs`).
 	Job {
 		job: Job,
@@ -1910,6 +1942,16 @@ async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: Page
 				Err(e) => serde_json::json!({ "message": message, "index": index, "error": e }),
 			};
 			to_page(script("preview", &reply));
+		}
+		PageRequest::Invite { message, index } => {
+			let text = attachment(shared, &accounts, message, index)
+				.await
+				.map(|(_, bytes)| String::from_utf8_lossy(&bytes).into_owned());
+			shared.emit(Event::Invite {
+				ws: ws.clone(),
+				message,
+				text,
+			});
 		}
 		PageRequest::SaveDraft { draft } => {
 			let json = serde_json::to_string(&draft).expect("draft");

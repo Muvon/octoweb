@@ -200,6 +200,7 @@ pub fn occurrence(e: &Value, cal: &Calendar, address: &str) -> Option<CalEvent> 
 		attendees,
 		etag: String::new(),
 		recurrence_id: String::new(),
+		uid: e["iCalUId"].as_str().unwrap_or_default().to_string(),
 		id,
 	})
 }
@@ -316,6 +317,117 @@ pub async fn rsvp(ctx: &Ctx, event: &CalEvent, response: &str) -> Result<(), Api
 	Ok(())
 }
 
+/// Graph's pattern and range for an RRULE starting on `start`; `None` for
+/// what Graph can't express (BYSETPOS, several BYMONTHDAYs, …).
+pub fn recurrence(rule: &str, start: Date) -> Option<Value> {
+	const DAYS: [&str; 7] = [
+		"sunday",
+		"monday",
+		"tuesday",
+		"wednesday",
+		"thursday",
+		"friday",
+		"saturday",
+	];
+	const INDEX: [(i32, &str); 5] = [(1, "first"), (2, "second"), (3, "third"), (4, "fourth"), (-1, "last")];
+	let r = crate::calendar_dav::parse_rule(rule)?;
+	if !r.by_set_pos.is_empty()
+		|| r.by_month_day.len() > 1
+		|| r.by_month.len() > 1
+		|| r.by_month_day.iter().any(|d| *d < 1)
+	{
+		return None;
+	}
+	let interval = r.interval;
+	let plain_days = r.by_day.iter().all(|(ord, _)| *ord == 0);
+	let pattern = match r.freq.as_str() {
+		"DAILY" if r.by_day.is_empty() => json!({ "type": "daily", "interval": interval }),
+		"DAILY" | "WEEKLY" if plain_days => {
+			let days: Vec<&str> = if r.by_day.is_empty() {
+				vec![DAYS[start.weekday() as usize]]
+			} else {
+				r.by_day.iter().map(|(_, wd)| DAYS[*wd as usize]).collect()
+			};
+			json!({ "type": "weekly", "interval": interval, "daysOfWeek": days, "firstDayOfWeek": DAYS[r.week_start as usize] })
+		}
+		"MONTHLY" if r.by_day.is_empty() => {
+			let day = r.by_month_day.first().map_or(start.d, |d| *d as u32);
+			json!({ "type": "absoluteMonthly", "interval": interval, "dayOfMonth": day })
+		}
+		"MONTHLY" if r.by_day.len() == 1 => {
+			let (ord, wd) = r.by_day[0];
+			let index = INDEX.iter().find(|(o, _)| *o == ord)?.1;
+			json!({ "type": "relativeMonthly", "interval": interval, "daysOfWeek": [DAYS[wd as usize]], "index": index })
+		}
+		"YEARLY" if r.by_day.is_empty() => {
+			let day = r.by_month_day.first().map_or(start.d, |d| *d as u32);
+			let month = r.by_month.first().copied().unwrap_or(start.m);
+			json!({ "type": "absoluteYearly", "interval": interval, "dayOfMonth": day, "month": month })
+		}
+		"YEARLY" if r.by_day.len() == 1 && r.by_month.len() == 1 => {
+			let (ord, wd) = r.by_day[0];
+			let index = INDEX.iter().find(|(o, _)| *o == ord)?.1;
+			json!({ "type": "relativeYearly", "interval": interval, "daysOfWeek": [DAYS[wd as usize]], "index": index, "month": r.by_month[0] })
+		}
+		_ => return None,
+	};
+	let range = match (&r.count, &r.until) {
+		(Some(n), _) => json!({ "type": "numbered", "startDate": start.iso(), "numberOfOccurrences": n }),
+		(None, Some(u)) => json!({ "type": "endDate", "startDate": start.iso(), "endDate": u.date.iso() }),
+		_ => json!({ "type": "noEnd", "startDate": start.iso() }),
+	};
+	Some(json!({ "pattern": pattern, "range": range }))
+}
+
+/// Add one calendar object to an Outlook calendar. Guests are left out:
+/// adding them through Graph would invite them. `transactionId` keeps a
+/// retry from making a second copy.
+pub async fn import(cal: &Calendar, ctx: &Ctx, object: &str) -> Result<bool, ApiError> {
+	use crate::calendar_dav::TimeKind;
+	let events = crate::calendar_dav::parse_ics(object, "");
+	let Some(ev) = events.iter().find(|e| e.recurrence_id.is_none() && !e.cancelled) else {
+		return Ok(false);
+	};
+	let Some(start) = ev.start.as_ref() else {
+		return Ok(false);
+	};
+	let all_day = start.kind == TimeKind::Date;
+	let s = start.ts();
+	let e = match (&ev.end, ev.duration) {
+		(Some(end), _) => end.ts(),
+		(None, Some(d)) => s + d,
+		_ if all_day => s + 86_400,
+		_ => s + 3600,
+	};
+	let when = |ts: i64, date: Date| {
+		if all_day {
+			json!({ "dateTime": format!("{}T00:00:00", date.iso()), "timeZone": t::local_zone() })
+		} else {
+			json!({ "dateTime": t::rfc3339_utc(ts).trim_end_matches('Z'), "timeZone": "UTC" })
+		}
+	};
+	let end_date = match &ev.end {
+		Some(end) if all_day => end.date,
+		_ => start.date.add_days(((e - s) / 86_400).max(1)),
+	};
+	let mut body = json!({
+		"subject": ev.summary,
+		"body": { "contentType": "text", "content": ev.description },
+		"location": { "displayName": ev.location },
+		"isAllDay": all_day,
+		"start": when(s, start.date),
+		"end": when(e, end_date),
+		"showAs": if ev.transparent { "free" } else { "busy" },
+		"transactionId": format!("import-{}", ev.uid),
+	});
+	if let Some(rec) = ev.rrule.as_deref().and_then(|r| recurrence(r, start.date)) {
+		body["recurrence"] = rec;
+	}
+	let url = format!("{API}/me/calendars/{}/events", http::encode(&cal.id));
+	check(http::send(ctx.apply(Request::new("POST", &url)).json(&body)).await?)?;
+	Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -365,6 +477,31 @@ mod tests {
 		);
 		assert_eq!(o.kind, "ooo");
 		assert!(o.editable && o.me.is_empty());
+	}
+
+	#[test]
+	fn rrules_map_to_graph_patterns() {
+		let start = Date::new(2026, 10, 22);
+		let r = recurrence("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=5", start).unwrap();
+		assert_eq!(r["pattern"]["daysOfWeek"], json!(["monday", "wednesday"]));
+		assert_eq!(
+			r["range"],
+			json!({ "type": "numbered", "startDate": "2026-10-22", "numberOfOccurrences": 5 })
+		);
+		let r = recurrence("FREQ=MONTHLY;BYDAY=-1FR;UNTIL=20271231T000000Z", start).unwrap();
+		assert_eq!(r["pattern"]["type"], "relativeMonthly");
+		assert_eq!(r["pattern"]["index"], "last");
+		assert_eq!(r["range"]["endDate"], "2027-12-31");
+		let r = recurrence("FREQ=YEARLY", start).unwrap();
+		assert_eq!(
+			(r["pattern"]["month"].as_u64(), r["pattern"]["dayOfMonth"].as_u64()),
+			(Some(10), Some(22))
+		);
+		assert_eq!(
+			recurrence("FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR", start).unwrap()["pattern"]["type"],
+			"weekly"
+		);
+		assert!(recurrence("FREQ=MONTHLY;BYDAY=MO,TU;BYSETPOS=-1", start).is_none());
 	}
 
 	#[test]

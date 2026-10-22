@@ -532,16 +532,16 @@ pub fn parse_ics(text: &str, address: &str) -> Vec<VEvent> {
 
 #[derive(Debug, Default)]
 pub struct Rule {
-	freq: String,
-	interval: i64,
-	count: Option<usize>,
-	until: Option<Time>,
+	pub freq: String,
+	pub interval: i64,
+	pub count: Option<usize>,
+	pub until: Option<Time>,
 	/// (ordinal, weekday 0 = Sunday); ordinal 0 = every such day.
-	by_day: Vec<(i32, u32)>,
-	by_month_day: Vec<i32>,
-	by_month: Vec<u32>,
-	by_set_pos: Vec<i32>,
-	week_start: u32,
+	pub by_day: Vec<(i32, u32)>,
+	pub by_month_day: Vec<i32>,
+	pub by_month: Vec<u32>,
+	pub by_set_pos: Vec<i32>,
+	pub week_start: u32,
 }
 
 fn weekday(code: &str) -> Option<u32> {
@@ -896,7 +896,121 @@ fn to_event(ev: &VEvent, i: Instance, href: &str, etag: &str, cal: &Calendar, ad
 		kind: String::new(),
 		etag: etag.to_string(),
 		recurrence_id: rid,
+		uid: ev.uid.clone(),
 	}
+}
+
+// ── Files and feeds ───────────────────────────────────────────────────────────
+
+/// One calendar object per UID from a file or feed holding many: the
+/// calendar's VERSION and PRODID, the VTIMEZONEs its events use, and that
+/// UID's VEVENTs (the series and its overrides). METHOD is dropped: CalDAV
+/// stores objects, not messages.
+pub fn split_objects(text: &str) -> Vec<(String, String)> {
+	let mut header: Vec<String> = Vec::new();
+	let mut zones: Vec<(String, Vec<String>)> = Vec::new();
+	let mut events: Vec<(String, Vec<String>)> = Vec::new();
+	let mut block: Vec<String> = Vec::new();
+	let mut kind = String::new();
+	let mut depth = 0;
+	let mut uid = String::new();
+	let mut tzid = String::new();
+	for line in unfold(text) {
+		let p = parse_line(&line);
+		let (name, value) = p.as_ref().map_or(("", ""), |p| (p.name.as_str(), p.value.as_str()));
+		if depth == 0 {
+			if name == "BEGIN" && !value.eq_ignore_ascii_case("VCALENDAR") {
+				kind = value.to_ascii_uppercase();
+				depth = 1;
+				block = vec![line];
+				uid.clear();
+				tzid.clear();
+			} else if !matches!(name, "BEGIN" | "END" | "METHOD") && !name.is_empty() {
+				header.push(line);
+			}
+			continue;
+		}
+		match name {
+			"BEGIN" => depth += 1,
+			"END" => depth -= 1,
+			"UID" if depth == 1 && uid.is_empty() => uid = value.trim().to_string(),
+			"TZID" if depth == 1 && tzid.is_empty() => tzid = value.trim().to_string(),
+			_ => {}
+		}
+		block.push(line);
+		if depth > 0 {
+			continue;
+		}
+		match kind.as_str() {
+			"VTIMEZONE" => zones.push((tzid.clone(), std::mem::take(&mut block))),
+			"VEVENT" => {
+				let id = if uid.is_empty() {
+					format!("{}@octoweb", crate::mail::hex(&crate::workspace::random_bytes16()))
+				} else {
+					uid.clone()
+				};
+				match events.iter_mut().find(|(u, _)| *u == id) {
+					Some((_, lines)) => lines.append(&mut block),
+					None => events.push((id, std::mem::take(&mut block))),
+				}
+			}
+			_ => block.clear(),
+		}
+	}
+	if !header.iter().any(|l| l.to_ascii_uppercase().starts_with("VERSION")) {
+		header.insert(0, "VERSION:2.0".into());
+	}
+	if !header.iter().any(|l| l.to_ascii_uppercase().starts_with("PRODID")) {
+		header.push("PRODID:-//Octoweb//Calendar//EN".into());
+	}
+	events
+		.into_iter()
+		.map(|(uid, lines)| {
+			let used: Vec<String> = lines
+				.iter()
+				.filter_map(|l| parse_line(l))
+				.filter_map(|p| p.param("TZID").map(|z| z.trim_matches('"').to_string()))
+				.collect();
+			let mut out = vec!["BEGIN:VCALENDAR".to_string()];
+			out.extend(header.iter().cloned());
+			for (id, zone) in &zones {
+				if used.iter().any(|u| u == id) {
+					out.extend(zone.iter().cloned());
+				}
+			}
+			out.extend(lines);
+			out.push("END:VCALENDAR".into());
+			(uid, out.iter().map(|l| fold(l)).collect())
+		})
+		.collect()
+}
+
+/// The iTIP method of a calendar message (`REQUEST`, `CANCEL`, …), upper case.
+pub fn method(text: &str) -> String {
+	unfold(text)
+		.iter()
+		.filter_map(|l| parse_line(l))
+		.find(|p| p.name == "METHOD")
+		.map(|p| p.value.trim().to_ascii_uppercase())
+		.unwrap_or_default()
+}
+
+/// A feed's own name (`X-WR-CALNAME`), if it gives one.
+pub fn calendar_name(text: &str) -> Option<String> {
+	unfold(text)
+		.iter()
+		.filter_map(|l| parse_line(l))
+		.find(|p| p.name == "X-WR-CALNAME")
+		.map(|p| unescape_text(&p.value).trim().to_string())
+		.filter(|n| !n.is_empty())
+}
+
+/// The occurrences of a whole feed in `[from, to)`, keyed by feed and UID.
+pub fn feed_occurrences(text: &str, feed: &str, cal: &Calendar, from: i64, to: i64) -> Vec<CalEvent> {
+	split_objects(text)
+		.into_iter()
+		.flat_map(|(uid, object)| occurrences(&object, &format!("{feed}#{uid}"), "", cal, "", from, to))
+		.collect()
 }
 
 // ── Writing ───────────────────────────────────────────────────────────────────
@@ -1214,7 +1328,7 @@ pub async fn calendars(account: &str, start: &str, ctx: &Ctx) -> Result<Vec<Cale
 		"{start}\u{0}{}",
 		match ctx {
 			Ctx::Basic(u, _) => u.as_str(),
-			Ctx::Bearer(_) => "",
+			Ctx::Bearer(_) | Ctx::None => "",
 		}
 	);
 	let cached = homes().lock().unwrap().get(&cache_key).cloned();
@@ -1368,6 +1482,38 @@ pub async fn save(
 		}
 	}
 	Ok(())
+}
+
+/// Store one calendar object from a file under its UID. `false` when the
+/// calendar already holds that UID.
+pub async fn import(cal: &Calendar, ctx: &Ctx, uid: &str, object: &str) -> Result<bool, ApiError> {
+	let name: String = uid
+		.chars()
+		.map(|c| {
+			if c.is_ascii_alphanumeric() || "-_.@".contains(c) {
+				c
+			} else {
+				'-'
+			}
+		})
+		.take(120)
+		.collect();
+	let resp = put(ctx, &format!("{}{name}.ics", cal.url), object.to_string(), None).await?;
+	if resp.status == 412 {
+		return Ok(false);
+	}
+	check(resp).map(|_| true)
+}
+
+/// A start or end in wall-clock form, `2026-10-22T10:00:00`.
+pub fn wall(t: &Time) -> String {
+	format!(
+		"{}T{:02}:{:02}:{:02}",
+		t.date.iso(),
+		t.secs / 3600,
+		t.secs % 3600 / 60,
+		t.secs % 60
+	)
 }
 
 pub async fn delete(ctx: &Ctx, event: &CalEvent, all: bool) -> Result<(), ApiError> {
@@ -1626,6 +1772,27 @@ END:VCALENDAR\r\n";
 		assert_eq!(left.len(), series.len() - 1);
 		assert!(!left.contains(&second.start));
 
+		// Import a file: new UIDs are added, a second import adds nothing.
+		for (uid, object) in split_objects(&FEED.replace("2026", &today.y.to_string())) {
+			import(&cal, &ctx, &uid, &object).await.expect("import");
+			assert!(
+				!import(&cal, &ctx, &uid, &object).await.expect("import again"),
+				"already there"
+			);
+		}
+		let imported = events("me@x.com", &cal, &ctx, from, t::local_midnight(today.add_days(400)))
+			.await
+			.expect("query imported");
+		assert!(imported.iter().any(|e| e.title == "Christmas" && e.uid == "a"));
+		for e in imported.iter().filter(|e| e.uid == "a" || e.uid == "b") {
+			delete(&ctx, e, true).await.expect("delete imported");
+		}
+		// The collection itself, read as a feed.
+		let feed = http::send(ctx.apply(Request::new("GET", &cal.url)))
+			.await
+			.expect("GET collection");
+		assert!(feed.ok() && feed.body.contains("BEGIN:VCALENDAR"));
+
 		// Clean up.
 		let edited = list.iter().find(|e| e.title == "E2E edited").unwrap().clone();
 		delete(&ctx, &edited, false).await.expect("delete single");
@@ -1634,6 +1801,47 @@ END:VCALENDAR\r\n";
 			.expect("delete series");
 		let list = events("me@x.com", &cal, &ctx, from, to).await.expect("final query");
 		assert!(!list.iter().any(|e| e.title.starts_with("E2E")));
+	}
+
+	const FEED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Gov//Holidays//EN\r\nMETHOD:PUBLISH\r\nX-WR-CALNAME:Public holidays\r\n\
+BEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nBEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:19700329T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\nUID:a\r\nDTSTART;VALUE=DATE:20261225\r\nDTEND;VALUE=DATE:20261226\r\nSUMMARY:Christmas\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:b\r\nDTSTART;TZID=Europe/Berlin:20261019T100000\r\nDURATION:PT1H\r\nRRULE:FREQ=WEEKLY;COUNT=3\r\nSUMMARY:Weekly\r\nEND:VEVENT\r\n\
+BEGIN:VEVENT\r\nUID:b\r\nRECURRENCE-ID;TZID=Europe/Berlin:20261026T100000\r\nDTSTART;TZID=Europe/Berlin:20261026T120000\r\nDURATION:PT1H\r\nSUMMARY:Weekly (moved)\r\nEND:VEVENT\r\n\
+END:VCALENDAR\r\n";
+
+	#[test]
+	fn files_split_per_uid_with_their_zones() {
+		let objects = split_objects(FEED);
+		assert_eq!(objects.iter().map(|(u, _)| u.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+		let b = &objects[1].1;
+		assert!(
+			b.contains("BEGIN:VTIMEZONE")
+				&& b.contains("TZOFFSETTO:+0200")
+				&& b.contains("Weekly (moved)")
+				&& !b.contains("METHOD")
+		);
+		assert!(!b.contains("Christmas"));
+		assert!(!objects[0].1.contains("VTIMEZONE"), "only the zones an event uses");
+		assert_eq!(parse_ics(b, "").len(), 2);
+		assert_eq!(calendar_name(FEED).as_deref(), Some("Public holidays"));
+		assert_eq!(method("BEGIN:VCALENDAR\nMETHOD:request\nEND:VCALENDAR"), "REQUEST");
+	}
+
+	#[test]
+	fn feeds_expand_into_read_only_occurrences() {
+		let mut feed = cal();
+		feed.writable = false;
+		let from = Date::new(2026, 10, 1).days() * 86_400;
+		let to = Date::new(2027, 1, 1).days() * 86_400;
+		let occ = feed_occurrences(FEED, "https://x/h.ics", &feed, from, to);
+		let titles: Vec<&str> = occ.iter().map(|e| e.title.as_str()).collect();
+		assert_eq!(titles, ["Christmas", "Weekly", "Weekly", "Weekly (moved)"]);
+		assert!(occ.iter().all(|e| !e.editable));
+		assert_eq!(occ[0].uid, "a");
+		assert!(occ[0].key.contains("https://x/h.ics#a"));
 	}
 
 	#[test]

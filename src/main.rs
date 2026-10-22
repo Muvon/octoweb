@@ -282,6 +282,7 @@ enum AppEvent {
 	CalendarEngine(calendar::Event),  // from the calendar engine
 	JoinMeeting,                      // ⌘J — open the current or next meeting's video call
 	CalendarConnect(String),          // Settings → Mail "Connect calendar" for this account key
+	CalendarSubscribeLink(String),    // a webcal:// link was followed: offer to subscribe
 	Extension(extensions::Event),     // extension UI command, download result, or WebKit request
 	Quit,
 }
@@ -972,6 +973,7 @@ fn main() {
 			let p5 = proxy.clone();
 			let p6 = proxy.clone();
 			let p7 = proxy.clone();
+			let p8 = proxy.clone();
 			let sz = browser_win.inner_size();
 			let scale = browser_win.scale_factor();
 			let bar_h = (ADDRESS_BAR_H_LOGICAL * scale) as u32;
@@ -1003,7 +1005,12 @@ fn main() {
                 .with_initialization_script_for_main_only(webview_utils::SUBFRAME_MEDIA_SCRIPT, false)
                 // Intercept navigation to external URL schemes (tg://, figma://, mailto:, etc.)
                 // and hand them off to macOS instead of loading them in the WebView.
-                .with_navigation_handler(|nav_url: String| {
+                .with_navigation_handler(move |nav_url: String| {
+                    // A calendar feed link: offer to subscribe here (spec 002 SUB-3).
+                    if is_webcal(&nav_url) {
+                        let _ = p8.send_event(AppEvent::CalendarSubscribeLink(nav_url));
+                        return false;
+                    }
                     if url::is_external_scheme(&nav_url) {
                         macos::open_external_url(&nav_url);
                         return false; // prevent WebView from navigating
@@ -3015,9 +3022,7 @@ fn main() {
 		}
 	};
 	if let Some(engine) = &calendar_engine {
-		engine.send(calendar::Command::SetSources(
-			cfg.mail_accounts.iter().filter_map(calendar::source).collect(),
-		));
+		engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
 	}
 	// Each account's calendar state, for the pane and Settings.
 	let mut calendar_status: HashMap<String, (&'static str, String)> = HashMap::new();
@@ -3028,6 +3033,12 @@ fn main() {
 	let mut meeting_alerted: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
 	// The meeting alert on screen: a click joins it, or opens it.
 	let mut meeting_toast: Option<calendar::CalEvent> = None;
+	// An `.ics` file read for import, waiting for the user to pick a calendar.
+	let mut calendar_import: Option<(String, String)> = None;
+	// Mail invitations shown in the mail page: message id → the `text/calendar`.
+	let mut mail_invites: HashMap<i64, String> = HashMap::new();
+	// Calendar writes the app starts itself (from mail), apart from the page's.
+	let mut calendar_op: u64 = 1 << 40;
 	// Whether ⌘J has a meeting to join; otherwise the key reaches the page.
 	let meeting_joinable = Arc::new(AtomicBool::new(false));
 	// The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
@@ -3960,10 +3971,8 @@ fn main() {
 			}
 			push_mail_unread!();
 			if let Some(engine) = &calendar_engine {
-				calendar_status.retain(|k, _| keys.contains(k));
-				engine.send(calendar::Command::SetSources(
-					cfg.mail_accounts.iter().filter_map(calendar::source).collect(),
-				));
+				calendar_status.retain(|k, _| keys.contains(k) || k.starts_with("feed"));
+				engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
 			}
 			if calendar_visible {
 				mount_calendar!();
@@ -3971,35 +3980,39 @@ fn main() {
 		}};
 	}
 
-	/// Keys of the active workspace's accounts that show their calendars.
+	/// Keys of the active workspace's calendars: its accounts' and feeds.
 	macro_rules! calendar_keys {
 		() => {{
-			let ws = &workspace_manager.active().id;
-			cfg.mail_accounts
-				.iter()
-				.filter(|a| a.calendar && a.scope.includes(ws))
-				.map(|a| mail::hex(&a.id))
-				.collect::<Vec<String>>()
+			calendar::keys_in(&cfg, &workspace_manager.active().id)
 		}};
 	}
 
 	/// Tell the calendar page which workspace is on screen, its accounts and
-	/// their calendars.
+	/// feeds, and their calendars.
 	macro_rules! mount_calendar {
 		() => {{
 			let ws = workspace_manager.active();
-			let accounts: Vec<serde_json::Value> = cfg
+			let state_of = |key: &str| calendar_status.get(key).cloned().unwrap_or(("connecting", String::new()));
+			let mut accounts: Vec<serde_json::Value> = cfg
 				.mail_accounts
 				.iter()
 				.filter(|a| a.calendar && a.scope.includes(&ws.id))
 				.map(|a| {
 					let key = mail::hex(&a.id);
-					let (state, message) = calendar_status.get(&key).cloned().unwrap_or(("connecting", String::new()));
+					let (state, message) = state_of(&key);
 					serde_json::json!({
 						"key": key, "address": a.address, "kind": calendar::kind(a), "state": state, "message": message,
 					})
 				})
 				.collect();
+			accounts.extend(cfg.calendar_feeds.iter().filter(|f| f.scope.includes(&ws.id)).map(|f| {
+				let key = calendar::feed_key(f);
+				let (state, message) = state_of(&key);
+				let label = if f.name.trim().is_empty() { f.url.clone() } else { f.name.trim().to_string() };
+				serde_json::json!({
+					"key": key, "address": label, "kind": "feed", "state": state, "message": message,
+				})
+			}));
 			let keys = calendar_keys!();
 			let calendars = calendar_engine.as_ref().map(|e| e.store().calendars(&keys)).unwrap_or_default();
 			let setup = serde_json::json!({
@@ -4007,6 +4020,25 @@ fn main() {
 				"prefs": { "default_calendar": cfg.calendar_default, "alert_min": cfg.calendar_alert_min },
 			});
 			let _ = calendar_wv.evaluate_script(&calendar::script("setup", &[setup]));
+		}};
+	}
+
+	/// Hand the mail page the card for the invitation in message `$message`:
+	/// what it is, and the user's copy of it in this workspace's calendars.
+	macro_rules! push_invite {
+		($message:expr) => {{
+			let message: i64 = $message;
+			if let Some(text) = mail_invites.get(&message) {
+				let keys = calendar_keys!();
+				let card = calendar_engine
+					.as_ref()
+					.and_then(|e| calendar::invitation(text, &e.store(), &keys));
+				let data = match card {
+					Some(card) => serde_json::json!({ "message": message, "card": card }),
+					None => serde_json::json!({ "message": message, "error": "This invitation could not be read." }),
+				};
+				let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.invite && window.__mail.invite({data})"));
+			}
 		}};
 	}
 
@@ -6614,12 +6646,7 @@ fn main() {
                     McpCommand::Calendar { request, response } => {
                         tracing::info!(request = request.kind(), "calendar MCP request");
                         let ws = workspace_manager.at(ws_idx).id.clone();
-                        let keys: Vec<String> = cfg
-                            .mail_accounts
-                            .iter()
-                            .filter(|a| a.calendar && a.scope.includes(&ws))
-                            .map(|a| mail::hex(&a.id))
-                            .collect();
+                        let keys = calendar::keys_in(&cfg, &ws);
                         let result = match (&calendar_engine, request) {
                             (None, _) => Err("The calendar is unavailable.".to_string()),
                             (Some(engine), calendar::McpRequest::Draft { text, draft, start, end }) => {
@@ -8161,6 +8188,18 @@ fn main() {
                     "mail_ai_summaries" => cfg.mail_ai_summaries = val == "true",
                     "sounds" => cfg.sounds = val == "true",
                     "mail_brief_morning" => cfg.mail_brief_morning = val == "true",
+                    "calendar_feeds" => match serde_json::from_str::<Vec<config::CalendarFeed>>(&val) {
+                        Ok(feeds) => {
+                            cfg.calendar_feeds = feeds;
+                            if let Some(engine) = &calendar_engine {
+                                engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                            }
+                            if calendar_visible {
+                                mount_calendar!();
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "ignoring malformed calendar feeds from settings"),
+                    },
                     "calendar_alert_min" => {
                         if let Ok(n) = val.parse::<i32>() {
                             cfg.calendar_alert_min = n.clamp(-1, 60);
@@ -8376,6 +8415,10 @@ fn main() {
             Event::UserEvent(AppEvent::NavigateTo(raw, isolated)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                if is_webcal(&raw) {
+                    let _ = proxy.send_event(AppEvent::CalendarSubscribeLink(raw));
+                    return;
+                }
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&raw) {
                     macos::open_external_url(&raw);
@@ -8441,6 +8484,10 @@ fn main() {
                 // agent is driving must not switch the user's view or steal focus.
                 let foreground = foreground_page_open(source, active_wv_id, pending_swap);
 
+                if is_webcal(&url) {
+                    let _ = proxy.send_event(AppEvent::CalendarSubscribeLink(url));
+                    return;
+                }
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&url) {
                     macos::open_external_url(&url);
@@ -10377,6 +10424,10 @@ fn main() {
                 }
             }
             Event::UserEvent(AppEvent::ShowCalendar) => show_calendar!(),
+            Event::UserEvent(AppEvent::CalendarSubscribeLink(url)) => {
+                show_calendar!();
+                let _ = calendar_wv.evaluate_script(&calendar::script("subscribe", &[url.into()]));
+            }
             Event::UserEvent(AppEvent::JoinMeeting) => {
                 let next = calendar_engine.as_ref().and_then(|engine| {
                     let now = calendar_time::now();
@@ -10484,9 +10535,98 @@ fn main() {
                         engine.send(calendar::Command::Delete { op, key, all });
                     }
                 }
-                calendar::Request::Rsvp { op, key, response } => {
+                calendar::Request::Rsvp { op, key, response, series } => {
                     if let Some(engine) = &calendar_engine {
-                        engine.send(calendar::Command::Rsvp { op, key, response });
+                        engine.send(calendar::Command::Rsvp { op, key, response, series });
+                    }
+                }
+                calendar::Request::ImportPick => {
+                    let Some(path) = macos::pick_files().into_iter().next() else {
+                        return;
+                    };
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            let _ = proxy.send_event(AppEvent::Calendar(calendar::Request::ImportText {
+                                name,
+                                text: String::from_utf8_lossy(&bytes).into_owned(),
+                            }));
+                        }
+                        Err(e) => toast!(format!("Could not read {}: {e}", path.display()), "\u{26A0}\u{FE0F}", "Calendar"),
+                    }
+                }
+                calendar::Request::ImportText { name, text } => {
+                    let preview = calendar::import_preview(&text);
+                    match preview {
+                        Some(preview) => {
+                            calendar_import = Some((name.clone(), text));
+                            show_calendar!();
+                            let data = serde_json::json!({ "name": name, "count": preview.0, "sample": preview.1 });
+                            let _ = calendar_wv.evaluate_script(&calendar::script("importPreview", &[data]));
+                        }
+                        None => toast!(format!("{name} has no events to import"), "\u{26A0}\u{FE0F}", "Calendar"),
+                    }
+                }
+                calendar::Request::Import { op, calendar: target } => {
+                    match (calendar_import.take(), &calendar_engine) {
+                        (Some((_, text)), Some(engine)) => {
+                            if cfg.calendar_default != target {
+                                cfg.calendar_default = target.clone();
+                                cfg.save();
+                            }
+                            engine.send(calendar::Command::Import { op, calendar: target, text });
+                        }
+                        _ => {
+                            let _ = calendar_wv.evaluate_script(&calendar::script(
+                                "done",
+                                &[op.into(), false.into(), "Choose the file again.".into()],
+                            ));
+                        }
+                    }
+                }
+                calendar::Request::Subscribe { url, name } => {
+                    let Some(fetch) = calendar::feed_url(&url) else {
+                        toast!("Use an https:// or webcal:// address", "\u{26A0}\u{FE0F}", "Calendar");
+                        return;
+                    };
+                    let known = cfg.calendar_feeds.iter().any(|f| calendar::feed_url(&f.url).as_deref() == Some(fetch.as_str()));
+                    if known {
+                        toast!("Already subscribed to that calendar", "\u{1F4C5}", "Calendar");
+                        return;
+                    }
+                    cfg.calendar_feeds.push(config::CalendarFeed {
+                        id: workspace::random_bytes16(),
+                        url: url.trim().to_string(),
+                        name: name.trim().to_string(),
+                        color: String::new(),
+                        scope: extension_store::Scope::Only(vec![workspace_manager.active().id.clone()]),
+                    });
+                    cfg.save();
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                    }
+                    mount_calendar!();
+                    let _ = settings_wv.evaluate_script(&format!(
+                        "window.__setConfig && window.__setConfig({})",
+                        serde_json::to_string(&cfg).unwrap_or_default()
+                    ));
+                    toast!("Subscribed. Loading the calendar…", "\u{1F4C5}", "Calendar");
+                }
+                calendar::Request::Unsubscribe { account } => {
+                    let before = cfg.calendar_feeds.len();
+                    cfg.calendar_feeds.retain(|f| calendar::feed_key(f) != account);
+                    if cfg.calendar_feeds.len() != before {
+                        cfg.save();
+                        calendar_status.remove(&account);
+                        if let Some(engine) = &calendar_engine {
+                            engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                        }
+                        mount_calendar!();
+                        let _ = settings_wv.evaluate_script(&format!(
+                            "window.__setConfig && window.__setConfig({})",
+                            serde_json::to_string(&cfg).unwrap_or_default()
+                        ));
+                        toast!("Unsubscribed", "\u{1F4C5}", "Calendar");
                     }
                 }
                 calendar::Request::Join { url } => {
@@ -10581,6 +10721,13 @@ fn main() {
                     if calendar_visible {
                         mount_calendar!();
                     }
+                    // An answer or an import changes what invitation cards show.
+                    if mail_visible {
+                        let shown: Vec<i64> = mail_invites.keys().copied().collect();
+                        for message in shown {
+                            push_invite!(message);
+                        }
+                    }
                     meeting_shown = None;
                     meeting_check_at = std::time::Instant::now();
                 }
@@ -10611,7 +10758,7 @@ fn main() {
                         Ok(()) => {
                             calendar_status.insert(account, ("connecting", String::new()));
                             if let Some(engine) = &calendar_engine {
-                                engine.send(calendar::Command::SetSources(cfg.mail_accounts.iter().filter_map(calendar::source).collect()));
+                                engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
                             }
                             if calendar_visible {
                                 mount_calendar!();
@@ -10763,6 +10910,46 @@ fn main() {
                             ));
                         }
                     }
+                    mail::Pane::InviteRsvp { key, response, series } => {
+                        if let Some(engine) = &calendar_engine {
+                            calendar_op += 1;
+                            engine.send(calendar::Command::Rsvp { op: calendar_op, key, response, series });
+                        }
+                    }
+                    mail::Pane::InviteAdd { message } => {
+                        let Some(text) = mail_invites.get(&message).cloned() else {
+                            return;
+                        };
+                        let keys = calendar_keys!();
+                        let target = calendar_engine.as_ref().and_then(|e| {
+                            let writable: Vec<calendar::Calendar> = e
+                                .store()
+                                .calendars(&keys)
+                                .into_iter()
+                                .filter(|c| c.writable && !cfg.calendar_hidden.contains(&c.key))
+                                .collect();
+                            writable
+                                .iter()
+                                .find(|c| c.key == cfg.calendar_default)
+                                .or_else(|| writable.iter().find(|c| c.primary))
+                                .or(writable.first())
+                                .map(|c| c.key.clone())
+                        });
+                        match (target, &calendar_engine) {
+                            (Some(calendar), Some(engine)) => {
+                                calendar_op += 1;
+                                engine.send(calendar::Command::Import { op: calendar_op, calendar, text });
+                            }
+                            _ => toast!("No calendar here can take it: connect one in the Calendar tab", "\u{1F4C5}", "Calendar"),
+                        }
+                    }
+                    mail::Pane::InviteOpen { key } => {
+                        if let Some(event) = calendar_engine.as_ref().and_then(|e| e.store().event(&key)) {
+                            show_calendar!();
+                            let _ = calendar_wv.evaluate_script(&calendar::script("open", &[serde_json::to_value(&event).unwrap_or_default()]));
+                        }
+                    }
+                    mail::Pane::InviteJoin { url } => open_meeting_link(&url, &proxy),
                     mail::Pane::Settings => {
                         if !settings_visible {
                             let _ = proxy.send_event(AppEvent::ToggleSettings);
@@ -11013,6 +11200,21 @@ fn main() {
                     toast!(name, "\u{1F4CE}", "Saved to Downloads");
                 }
                 mail::Event::Toast { title, text } => toast!(text, "\u{2709}\u{FE0F}", title),
+                mail::Event::Invite { ws, message, text } => {
+                    if ws != workspace_manager.active().id {
+                        return;
+                    }
+                    match text {
+                        Ok(text) => {
+                            mail_invites.insert(message, text);
+                            push_invite!(message);
+                        }
+                        Err(e) => {
+                            let data = serde_json::json!({ "message": message, "error": e });
+                            let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.invite && window.__mail.invite({data})"));
+                        }
+                    }
+                }
                 mail::Event::PaletteResults(json) => {
                     let _ = overlay_wv.evaluate_script(&format!(
                         "window.__setMailResults && window.__setMailResults({json})"
@@ -13200,13 +13402,16 @@ fn calendar_status_script(status: &HashMap<String, (&'static str, String)>) -> S
 	)
 }
 
-/// Accounts whose meetings alert and join: calendar on, in some workspace.
+/// A calendar feed link (`webcal://`, `webcals://`).
+fn is_webcal(url: &str) -> bool {
+	let lower = url.trim_start().to_ascii_lowercase();
+	lower.starts_with("webcal://") || lower.starts_with("webcals://")
+}
+
+/// Calendars whose meetings alert and join: in at least one workspace.
 fn calendar_alert_keys(cfg: &Config, workspaces: &WorkspaceManager) -> Vec<String> {
-	cfg.mail_accounts
-		.iter()
-		.filter(|a| a.calendar && workspaces.list().iter().any(|w| a.scope.includes(&w.id)))
-		.map(|a| mail::hex(&a.id))
-		.collect()
+	let ids: Vec<String> = workspaces.list().iter().map(|w| w.id.clone()).collect();
+	calendar::alert_keys(cfg, &ids)
 }
 
 /// Open a video call: web links in a new tab, where Zoom and Teams offer

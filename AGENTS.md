@@ -17,7 +17,7 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── calendar.rs           ← Calendar engine (specs/002-calendar): store, sync thread, next meeting, availability
    ├── calendar_google.rs    ← Google Calendar API v3 (Gmail accounts)
    ├── calendar_graph.rs     ← Microsoft Graph calendars (Outlook / 365)
-   ├── calendar_dav.rs       ← CalDAV + iCalendar + RRULE expansion (iCloud, Private Email, any server)
+   ├── calendar_dav.rs       ← CalDAV + iCalendar + RRULE expansion, .ics split/import, ICS feeds
    ├── calendar_quick.rs     ← Quick add: plain English → event draft
    ├── calendar_time.rs      ← Civil dates, local time, IANA zones via NSTimeZone
    ├── calendar_html.rs      ← Calendar pane tab (⌘⇧D): next meeting, list/day/week, details, form
@@ -210,6 +210,12 @@ History stored per-context: `prompt_history.json` (editor), `ai_prompt_history.j
 | `calendar_day_start` / `calendar_day_end` | `u32` | `540` / `1080` | Working hours (minutes) for shared availability |
 
 Per mail account: `calendar` (bool, default true) and `caldav_url` (CalDAV server override).
+`calendar_feeds`: subscribed ICS feeds (`id`, `url`, `name`, `color`, `scope`), run as read-only sources keyed `feed<hex id>`.
+
+Calendar interchange: `.ics` import (`calendar::import`, Google `events.import`, Graph POST with mapped recurrence,
+CalDAV PUT per UID), `webcal://` links intercepted in tab navigation (`is_webcal` → `AppEvent::CalendarSubscribeLink`),
+and mail invitations (`mail::PageRequest::Invite` → `mail::Event::Invite` → `calendar::invitation()` matched by UID →
+`window.__mail.invite`).
 
 All fields use `#[serde(default)]` for backward compatibility — new fields are automatically filled with defaults when loading old config files.
 

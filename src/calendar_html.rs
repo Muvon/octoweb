@@ -207,6 +207,13 @@ pub fn html(keybindings_json: &str) -> String {
   #pop input[type=checkbox] { accent-color: var(--accent); margin: 0; }
   #pop .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
   #pop .foot { border-top: 0.5px solid var(--hairline); margin-top: 6px; padding: 8px 6px 2px; display: flex; gap: 6px; flex-wrap: wrap; }
+  #pop .foot.sub input { flex: 1 1 auto; min-width: 0; border: none; border-radius: var(--r-ctl); background: var(--fill); padding: 0 8px; height: 24px; outline: none; font-size: 12px; }
+  #pop .foot.sub input:focus { background: var(--card); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+  #pop .foot + .foot { border-top: none; margin-top: 0; }
+  body.dropping #panel::after { content: "Drop the .ics file to import its events"; position: fixed; inset: 40px 12px 12px; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: var(--r-card); background: color-mix(in srgb, var(--accent) 8%, var(--canvas)); color: var(--accent); font-weight: 600; z-index: 40; pointer-events: none; }
+  .imp-list { margin: 10px 0; padding: 0; list-style: none; }
+  .imp-list li { padding: 5px 0; border-bottom: 0.5px solid var(--hairline); font-size: 12.5px; display: flex; gap: 8px; }
+  .imp-list .w { color: var(--label-2); flex-shrink: 0; width: 120px; }
 
   .empty { padding: 40px 24px; text-align: center; color: var(--label-2); line-height: 1.5; }
   .empty h3 { color: var(--label); font-size: 15px; margin: 0 0 6px; }
@@ -742,10 +749,69 @@ pub fn html(keybindings_json: &str) -> String {
     renderSheet();
   }
 
+  // ── Subscribe and import ───────────────────────────────────────────────────
+  function subscribe() {
+    const input = $('sub-url');
+    const url = input ? input.value.trim() : '';
+    if (!/^(webcals?|https?):\/\//i.test(url)) { if (input) { input.focus(); input.select(); } return; }
+    ipc({ type: 'subscribe', url: url });
+    togglePop(false);
+  }
+  function renderImport() {
+    const d = S.sheet.data, cals = writable(), c = defaultCalendar();
+    const when = function(x) {
+      const dt = new Date(x.start * 1000);
+      return x.all_day ? longDate(dt) : longDate(dt) + ' ' + fmtTime(x.start);
+    };
+    let html = '<div class="sh-bar"><button class="btn" data-act="cancel">Cancel</button><span class="spacer"></span>' +
+      '<button class="btn primary" data-act="import-go"' + (S.sheet.saving || !cals.length ? ' disabled' : '') + '>' + (S.sheet.saving ? 'Importing…' : 'Import') + '</button></div>';
+    html += '<div class="sh-body form"><h2>Import ' + d.count + (d.count === 1 ? ' event' : ' events') + '</h2><div class="note">From ' + esc(d.name) + '. Events already in the calendar are skipped, and nobody is invited.</div>';
+    html += '<ul class="imp-list">' + d.sample.map(function(x) {
+      return '<li><span class="w">' + esc(when(x)) + '</span><span>' + esc(x.title) + (x.recurring ? ' ↻' : '') + '</span></li>';
+    }).join('') + (d.count > d.sample.length ? '<li><span class="w"></span><span style="color:var(--label-3)">and ' + (d.count - d.sample.length) + ' more</span></li>' : '') + '</ul>';
+    html += cals.length
+      ? '<div class="f"><label class="l">Into</label><select id="imp-cal">' + cals.map(function(k) {
+          const a = account(k.account) || {};
+          return '<option value="' + esc(k.key) + '"' + (c && k.key === c.key ? ' selected' : '') + '>' + esc(k.name + (k.name !== a.address ? ' — ' + a.address : '')) + '</option>';
+        }).join('') + '</select></div>'
+      : '<div class="err">No calendar here can take events: connect one first.</div>';
+    html += '<div class="err">' + esc(S.sheet.error || '') + '</div></div>';
+    return html;
+  }
+  function importGo() {
+    if (!S.sheet || S.sheet.kind !== 'import' || S.sheet.saving) return;
+    const sel = $('imp-cal');
+    if (!sel) return;
+    const op = ++S.op;
+    S.ops[op] = 'import';
+    S.sheet.saving = true;
+    ipc({ type: 'import', op: op, calendar: sel.value });
+    renderSheet();
+  }
+  let dragDepth = 0;
+  function hasFiles(e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0; }
+  document.addEventListener('dragenter', function(e) { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; document.body.classList.add('dropping'); });
+  document.addEventListener('dragover', function(e) { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('dragleave', function() { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove('dropping'); });
+  document.addEventListener('drop', function(e) {
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const file = Array.prototype.find.call(e.dataTransfer.files, function(f) { return /\.(ics|ical|ifb|icalendar)$/i.test(f.name) || /calendar/i.test(f.type); });
+    if (!file) { ipc({ type: 'notice', text: 'Drop an .ics calendar file to import it.' }); return; }
+    if (file.size > 8 * 1024 * 1024) { ipc({ type: 'notice', text: 'That file is too large to import.' }); return; }
+    const reader = new FileReader();
+    reader.onload = function() { ipc({ type: 'import_text', name: file.name, text: String(reader.result || '') }); };
+    reader.readAsText(file);
+  });
+
   function renderSheet() {
     const sheet = $('sheet');
     if (!S.sheet) { sheet.classList.remove('open'); sheet.innerHTML = ''; return; }
-    if (S.sheet.kind === 'detail') {
+    if (S.sheet.kind === 'import') {
+      sheet.innerHTML = renderImport();
+    } else if (S.sheet.kind === 'detail') {
       const e = find(S.sheet.key) || S.sheet.event;
       S.sheet.event = e;
       sheet.innerHTML = renderDetail(e);
@@ -830,12 +896,14 @@ pub fn html(keybindings_json: &str) -> String {
       const label = { online: 'synced', connect: 'not connected', auth: 'sign in again', error: 'sync failed', off: st.message || 'off', connecting: 'connecting…' }[st.state] || st.state || '';
       html += '<div class="acct"><span>' + esc(a.address) + '</span><span class="state" title="' + esc(st.message || '') + '">' + esc(label) + '</span></div>';
       if (st.state === 'connect' || st.state === 'auth') html += '<div style="padding:2px 6px 4px"><button class="btn primary" data-connect="' + esc(a.key) + '">Connect calendar</button></div>';
+      if (a.kind === 'feed') html += '<div style="padding:0 6px 2px"><button class="link" data-unsubscribe="' + esc(a.key) + '" style="border:none;background:none;padding:0;font-size:11.5px">Unsubscribe</button></div>';
       S.calendars.filter(function(c) { return c.account === a.key; }).forEach(function(c) {
         html += '<label><input type="checkbox" data-cal="' + esc(c.key) + '"' + (S.hidden.indexOf(c.key) < 0 ? ' checked' : '') + '><span class="sw" style="background:' + esc(c.color) + '"></span>' + esc(c.name) + (c.writable ? '' : ' <span style="color:var(--label-3);font-size:11px">read-only</span>') + '</label>';
       });
     });
     if (!S.accounts.length) html += '<div class="acct">No accounts in this workspace</div>';
-    html += '<div class="foot"><button class="btn" data-act="settings">Accounts & alerts…</button></div>';
+    html += '<div class="foot sub"><input type="text" id="sub-url" placeholder="Subscribe: webcal:// or https:// .ics link" spellcheck="false"><button class="btn" data-act="subscribe">Add</button></div>';
+    html += '<div class="foot"><button class="btn" data-act="import">Import .ics file…</button><button class="btn" data-act="settings">Accounts & alerts…</button></div>';
     pop.innerHTML = html;
   }
   function togglePop(open) {
@@ -911,8 +979,13 @@ pub fn html(keybindings_json: &str) -> String {
       else if (a === 'nodelete') { S.sheet.confirm = false; renderSheet(); }
       else if (a === 'notes' && ev) ipc({ type: 'notes', key: ev.key });
       else if (a === 'settings') { togglePop(false); ipc({ type: 'settings' }); }
+      else if (a === 'subscribe') subscribe();
+      else if (a === 'import') { togglePop(false); ipc({ type: 'import_pick' }); }
+      else if (a === 'import-go') importGo();
       return;
     }
+    const unsub = t.closest('[data-unsubscribe]');
+    if (unsub) { ipc({ type: 'unsubscribe', account: unsub.dataset.unsubscribe }); togglePop(false); return; }
     const del = t.closest('[data-del]');
     if (del && S.sheet && S.sheet.event) {
       const op = ++S.op;
@@ -973,6 +1046,11 @@ pub fn html(keybindings_json: &str) -> String {
   function typing(e) { const t = e.target; return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable); }
   document.addEventListener('keydown', function(e) {
     if (e.isComposing) return;
+    if (e.target && e.target.id === 'sub-url') {
+      if (e.key === 'Enter') { e.preventDefault(); subscribe(); }
+      if (e.key === 'Escape') { e.preventDefault(); togglePop(false); }
+      return;
+    }
     if (S.sheet && S.sheet.kind === 'form') {
       if (e.key === 'Escape') { e.preventDefault(); closeSheet(); return; }
       if (e.key === 'Enter' && (e.metaKey || (!e.shiftKey && e.target && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox'))) { e.preventDefault(); saveForm(); return; }
@@ -1095,10 +1173,19 @@ pub fn html(keybindings_json: &str) -> String {
         if (ok) closeSheet(); else { S.sheet.saving = false; S.sheet.error = text; renderSheet(); }
       }
       if (kind === 'quick') { preview.innerHTML = ok ? esc(text) : '<span style="color:var(--err)">' + esc(text) + '</span>'; preview.classList.add('show'); setTimeout(function() { if (!quick.value) preview.classList.remove('show'); }, ok ? 2500 : 6000); }
+      if (kind === 'import' && S.sheet && S.sheet.kind === 'import') {
+        if (ok) closeSheet(); else { S.sheet.saving = false; S.sheet.error = text; renderSheet(); }
+      }
       if (kind === 'rsvp' && S.sheet && S.sheet.kind === 'detail') { S.sheet.pending = false; if (!ok) { S.sheet.event.me = (find(S.sheet.key) || {}).me || S.sheet.event.me; } renderSheet(); }
     },
     open: function(e) { if (!e) return; S.day = midnight(new Date(e.start * 1000)); load(); render(); openDetail(e); },
     draft: function(d) { openForm(d); },
+    importPreview: function(d) { S.sheet = { kind: 'import', data: d }; renderSheet(); },
+    subscribe: function(url) {
+      togglePop(true);
+      const input = $('sub-url');
+      if (input) { input.value = url; input.focus(); }
+    },
     status: function(acct, state, message) {
       S.status[acct] = { state: state, message: message };
       renderBanner();

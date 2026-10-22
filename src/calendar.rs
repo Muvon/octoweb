@@ -21,6 +21,8 @@ use crate::config::{MailAccount, MailAuth, MailProvider};
 
 /// How often each account re-syncs while nothing wakes it.
 const SYNC_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How often a subscribed feed is fetched again.
+const FEED_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Days before and after today that every account keeps in sync.
 const WINDOW_BACK_DAYS: i64 = 14;
 const WINDOW_AHEAD_DAYS: i64 = 62;
@@ -107,6 +109,10 @@ pub struct CalEvent {
 	pub etag: String,
 	#[serde(default)]
 	pub recurrence_id: String,
+	/// The iCalendar UID, shared by every copy of an invitation: how a mail
+	/// invitation finds its event.
+	#[serde(default)]
+	pub uid: String,
 }
 
 impl CalEvent {
@@ -188,12 +194,20 @@ pub enum Backend {
 		url: String,
 		user: String,
 	},
+	/// A subscribed ICS feed: one read-only calendar.
+	Feed {
+		url: String,
+		name: String,
+		color: String,
+	},
 }
 
 #[derive(Clone, PartialEq)]
 pub enum Auth {
 	Grant(crate::mail_oauth::Client),
 	Password(String),
+	/// A public feed: no sign-in.
+	Public,
 	/// OAuth calendar access was never granted: the pane offers Connect.
 	Connect,
 	/// Can't work as set up; the reason.
@@ -325,6 +339,72 @@ pub fn source(a: &MailAccount) -> Option<Source> {
 			}
 		}
 	})
+}
+
+/// The key a feed's calendar runs under, in place of an account key.
+pub fn feed_key(f: &crate::config::CalendarFeed) -> String {
+	format!("feed{}", crate::mail::hex(&f.id))
+}
+
+/// `webcal://` and `webcals://` are HTTPS; anything else must already be HTTP(S).
+pub fn feed_url(url: &str) -> Option<String> {
+	let url = url.trim();
+	let lower = url.to_ascii_lowercase();
+	for scheme in ["webcals://", "webcal://"] {
+		if lower.starts_with(scheme) {
+			return Some(format!("https://{}", &url[scheme.len()..]));
+		}
+	}
+	(lower.starts_with("https://") || lower.starts_with("http://")).then(|| url.to_string())
+}
+
+/// Colours for feeds that have not picked one, in order.
+const FEED_COLORS: [&str; 6] = ["#8e8e93", "#30b0c7", "#a2845e", "#5856d6", "#34c759", "#ff2d55"];
+
+pub fn feed_color(f: &crate::config::CalendarFeed, index: usize) -> String {
+	if f.color.is_empty() {
+		FEED_COLORS[index % FEED_COLORS.len()].to_string()
+	} else {
+		f.color.clone()
+	}
+}
+
+/// Every calendar the engine runs: the mail accounts' and the feeds.
+pub fn sources(cfg: &crate::config::Config) -> Vec<Source> {
+	let mut out: Vec<Source> = cfg.mail_accounts.iter().filter_map(source).collect();
+	for (i, f) in cfg.calendar_feeds.iter().enumerate() {
+		if let Some(url) = feed_url(&f.url) {
+			out.push(Source {
+				key: feed_key(f),
+				address: String::new(),
+				backend: Backend::Feed {
+					url,
+					name: f.name.trim().to_string(),
+					color: feed_color(f, i),
+				},
+				auth: Auth::Public,
+			});
+		}
+	}
+	out
+}
+
+/// Keys of the calendars workspace `ws` shows: its accounts' and feeds.
+pub fn keys_in(cfg: &crate::config::Config, ws: &str) -> Vec<String> {
+	cfg.mail_accounts
+		.iter()
+		.filter(|a| a.calendar && a.scope.includes(ws))
+		.map(|a| crate::mail::hex(&a.id))
+		.chain(cfg.calendar_feeds.iter().filter(|f| f.scope.includes(ws)).map(feed_key))
+		.collect()
+}
+
+/// Keys whose meetings alert and join: in at least one of `workspaces`.
+pub fn alert_keys(cfg: &crate::config::Config, workspaces: &[String]) -> Vec<String> {
+	let mut keys: Vec<String> = workspaces.iter().flat_map(|w| keys_in(cfg, w)).collect();
+	keys.sort();
+	keys.dedup();
+	keys
 }
 
 // ── Video call links ──────────────────────────────────────────────────────────
@@ -699,6 +779,27 @@ impl Store {
 		self.calendars.iter().find(|c| c.key == key).cloned()
 	}
 
+	/// The user's copy of the event with iCalendar `uid` among `accounts`:
+	/// the occurrence starting at `near`, else the next to come, else any.
+	pub fn find_uid(&self, accounts: &[String], uid: &str, near: i64) -> Option<CalEvent> {
+		if uid.is_empty() {
+			return None;
+		}
+		let now = t::now();
+		let copies: Vec<&CalEvent> = accounts
+			.iter()
+			.filter_map(|a| self.events.get(a))
+			.flatten()
+			.filter(|e| e.uid == uid)
+			.collect();
+		copies
+			.iter()
+			.find(|e| e.start == near)
+			.or_else(|| copies.iter().filter(|e| e.end > now).min_by_key(|e| e.start))
+			.or(copies.first())
+			.map(|e| (*e).clone())
+	}
+
 	pub fn event(&self, key: &str) -> Option<CalEvent> {
 		self.events.values().flatten().find(|e| e.key == key).cloned()
 	}
@@ -775,6 +876,31 @@ pub enum Request {
 		op: u64,
 		key: String,
 		response: String,
+		/// The whole series, not this occurrence.
+		#[serde(default)]
+		series: bool,
+	},
+	/// Choose an `.ics` file to import.
+	ImportPick,
+	/// An `.ics` file dropped on the pane.
+	ImportText {
+		name: String,
+		text: String,
+	},
+	/// Import the file last read into `calendar`.
+	Import {
+		op: u64,
+		calendar: String,
+	},
+	/// Subscribe this workspace to an ICS feed.
+	Subscribe {
+		url: String,
+		#[serde(default)]
+		name: String,
+	},
+	/// Drop a subscribed feed (its key).
+	Unsubscribe {
+		account: String,
 	},
 	Join {
 		url: String,
@@ -854,6 +980,13 @@ pub enum Command {
 		op: u64,
 		key: String,
 		response: String,
+		series: bool,
+	},
+	/// Add the events of an `.ics` text to a calendar.
+	Import {
+		op: u64,
+		calendar: String,
+		text: String,
 	},
 }
 
@@ -903,6 +1036,8 @@ impl ApiError {
 pub enum Ctx {
 	Bearer(String),
 	Basic(String, String),
+	/// A public feed.
+	None,
 }
 
 impl Ctx {
@@ -910,6 +1045,7 @@ impl Ctx {
 		match self {
 			Ctx::Bearer(token) => req.bearer(token),
 			Ctx::Basic(user, pw) => req.basic(user, pw),
+			Ctx::None => req,
 		}
 	}
 }
@@ -921,17 +1057,21 @@ async fn ctx(src: &Source) -> Result<Ctx, ApiError> {
 			.map(Ctx::Bearer)
 			.map_err(ApiError::Auth),
 		(Auth::Password(pw), Backend::Dav { user, .. }) => Ok(Ctx::Basic(user.clone(), pw.clone())),
+		(Auth::Public, _) => Ok(Ctx::None),
 		(Auth::Connect, _) => Err(ApiError::Auth("Connect your calendar".into())),
 		(Auth::Unusable(m), _) => Err(ApiError::Other(m.clone())),
 		(Auth::Password(_), _) => Err(ApiError::Other("This account signs in with OAuth".into())),
 	}
 }
 
+const READ_ONLY: &str = "Subscribed calendars are read-only.";
+
 async fn list_calendars(src: &Source, ctx: &Ctx) -> Result<Vec<Calendar>, ApiError> {
 	match &src.backend {
 		Backend::Google => crate::calendar_google::calendars(&src.key, ctx).await,
 		Backend::Graph => crate::calendar_graph::calendars(&src.key, ctx).await,
 		Backend::Dav { url, .. } => crate::calendar_dav::calendars(&src.key, url, ctx).await,
+		Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
 	}
 }
 
@@ -940,6 +1080,7 @@ async fn list_events(src: &Source, ctx: &Ctx, cal: &Calendar, from: i64, to: i64
 		Backend::Google => crate::calendar_google::events(&src.address, cal, ctx, from, to).await,
 		Backend::Graph => crate::calendar_graph::events(&src.address, cal, ctx, from, to).await,
 		Backend::Dav { .. } => crate::calendar_dav::events(&src.address, cal, ctx, from, to).await,
+		Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
 	}
 }
 
@@ -1130,10 +1271,22 @@ async fn run(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Command>) {
 					shared.emit(Event::Done { op, result });
 				});
 			}
-			Command::Rsvp { op, key, response } => {
+			Command::Rsvp {
+				op,
+				key,
+				response,
+				series,
+			} => {
 				let shared = shared.clone();
 				tokio::spawn(async move {
-					let result = rsvp(&shared, &key, &response).await;
+					let result = rsvp(&shared, &key, &response, series).await;
+					shared.emit(Event::Done { op, result });
+				});
+			}
+			Command::Import { op, calendar, text } => {
+				let shared = shared.clone();
+				tokio::spawn(async move {
+					let result = import(&shared, &calendar, &text).await;
 					shared.emit(Event::Done { op, result });
 				});
 			}
@@ -1142,15 +1295,72 @@ async fn run(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Command>) {
 }
 
 async fn account_task(shared: Arc<Shared>, source: Source, wake: Arc<Notify>) {
+	// Public feeds change rarely and their hosts ask to be polled gently.
+	let every = if matches!(source.backend, Backend::Feed { .. }) {
+		FEED_EVERY
+	} else {
+		SYNC_EVERY
+	};
 	loop {
 		sync(&shared, &source).await;
-		let _ = tokio::time::timeout(SYNC_EVERY, wake.notified()).await;
+		let _ = tokio::time::timeout(every, wake.notified()).await;
 	}
+}
+
+/// Bring a subscribed feed's calendar up to date: one fetch, then the
+/// window and any browsed range from the same text.
+async fn sync_feed(shared: &Shared, src: &Source, url: &str, name: &str, color: &str) {
+	let key = &src.key;
+	let req = crate::http::Request::new("GET", url).header("Accept", "text/calendar, */*");
+	let text = match crate::http::send(req).await {
+		Ok(r) if r.ok() && r.body.contains("BEGIN:VCALENDAR") => r.body,
+		Ok(r) if r.ok() => return shared.status(key, "error", "That address is not a calendar feed."),
+		Ok(r) => return shared.status(key, "error", format!("The feed answered {}", r.status)),
+		Err(e) => return shared.status(key, "error", e),
+	};
+	let title = if name.is_empty() {
+		crate::calendar_dav::calendar_name(&text).unwrap_or_else(|| host(url))
+	} else {
+		name.to_string()
+	};
+	let cal = Calendar {
+		key: format!("{key}/feed"),
+		account: key.clone(),
+		id: "feed".into(),
+		name: title,
+		color: color.to_string(),
+		primary: false,
+		writable: false,
+		url: url.to_string(),
+	};
+	let mut changed = shared.store.lock().unwrap().set_calendars(key, vec![cal.clone()]);
+	let mut ranges = vec![window()];
+	if let Some(extra) = *shared.extra.lock().unwrap() {
+		ranges.push(extra);
+	}
+	for &(from, to) in &ranges {
+		let events = crate::calendar_dav::feed_occurrences(&text, url, &cal, from, to);
+		changed |= shared.store.lock().unwrap().set_range(key, &cal.key, from, to, events);
+	}
+	{
+		let mut store = shared.store.lock().unwrap();
+		store.prune(key, &ranges);
+		if changed {
+			store.save();
+		}
+	}
+	if changed {
+		shared.emit(Event::Changed);
+	}
+	shared.status(key, "online", String::new());
 }
 
 /// Bring one account's calendars and the window (and a browsed range) up to
 /// date. Failures keep what the store already has.
 async fn sync(shared: &Shared, src: &Source) {
+	if let Backend::Feed { url, name, color } = &src.backend {
+		return sync_feed(shared, src, url, name, color).await;
+	}
 	let key = &src.key;
 	let ctx = match ctx(src).await {
 		Ok(c) => c,
@@ -1247,6 +1457,7 @@ async fn save(shared: &Shared, draft: Draft) -> Result<String, String> {
 		Backend::Google => crate::calendar_google::save(&cal, &ctx, &draft, existing.as_ref()).await,
 		Backend::Graph => crate::calendar_graph::save(&cal, &ctx, &draft, existing.as_ref()).await,
 		Backend::Dav { .. } => crate::calendar_dav::save(&cal, &ctx, &draft, existing.as_ref(), &src.address).await,
+		Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
 	};
 	result.map_err(|e| e.message().to_string())?;
 	shared.wake(&src.key);
@@ -1266,6 +1477,7 @@ async fn delete(shared: &Shared, key: &str, all: bool) -> Result<String, String>
 		Backend::Google => crate::calendar_google::delete(&cal, &ctx, &event, all).await,
 		Backend::Graph => crate::calendar_graph::delete(&ctx, &event, all).await,
 		Backend::Dav { .. } => crate::calendar_dav::delete(&ctx, &event, all).await,
+		Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
 	};
 	result.map_err(|e| e.message().to_string())?;
 	// Gone from the view at once; the sync confirms it.
@@ -1291,25 +1503,39 @@ async fn delete(shared: &Shared, key: &str, all: bool) -> Result<String, String>
 	})
 }
 
-async fn rsvp(shared: &Shared, key: &str, response: &str) -> Result<String, String> {
+/// Answer an invitation: this occurrence, or with `series` the whole series.
+async fn rsvp(shared: &Shared, key: &str, response: &str, series: bool) -> Result<String, String> {
 	if !matches!(response, "accepted" | "declined" | "tentative") {
 		return Err("Unknown answer".into());
 	}
 	let event = shared.store.lock().unwrap().event(key).ok_or("That event is gone.")?;
+	let series = series && !event.series.is_empty();
+	let target = if series {
+		CalEvent {
+			id: event.series.clone(),
+			..event.clone()
+		}
+	} else {
+		event.clone()
+	};
 	let (src, cal) = locate(shared, &event.calendar)?;
 	let ctx = ctx(&src).await.map_err(|e| e.message().to_string())?;
 	let result = match &src.backend {
-		Backend::Google => crate::calendar_google::rsvp(&cal, &ctx, &event, response).await,
-		Backend::Graph => crate::calendar_graph::rsvp(&ctx, &event, response).await,
+		Backend::Google => crate::calendar_google::rsvp(&cal, &ctx, &target, response).await,
+		Backend::Graph => crate::calendar_graph::rsvp(&ctx, &target, response).await,
 		Backend::Dav { .. } => Err(ApiError::Other(
 			"Answer this invitation from your mail or calendar app.".into(),
 		)),
+		Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
 	};
 	result.map_err(|e| e.message().to_string())?;
 	{
 		let mut store = shared.store.lock().unwrap();
 		if let Some(events) = store.events.get_mut(&event.account) {
-			for e in events.iter_mut().filter(|e| e.key == event.key) {
+			for e in events
+				.iter_mut()
+				.filter(|e| e.key == event.key || (series && e.series == event.series))
+			{
 				e.me = response.to_string();
 				for a in e.attendees.iter_mut().filter(|a| a.me) {
 					a.status = response.to_string();
@@ -1325,6 +1551,67 @@ async fn rsvp(shared: &Shared, key: &str, response: &str) -> Result<String, Stri
 		"declined" => "Declined".into(),
 		_ => "Answered maybe".into(),
 	})
+}
+
+/// Add the events of an `.ics` file (or a mail invitation) to `calendar_key`.
+/// Events the account already has (same UID) are left alone, so importing
+/// twice adds nothing.
+async fn import(shared: &Shared, calendar_key: &str, text: &str) -> Result<String, String> {
+	let (src, cal) = locate(shared, calendar_key)?;
+	if !cal.writable {
+		return Err(format!("{} is read-only.", cal.name));
+	}
+	let objects = crate::calendar_dav::split_objects(text);
+	if objects.is_empty() {
+		return Err("There are no events in it.".into());
+	}
+	let known: HashSet<String> = shared
+		.store
+		.lock()
+		.unwrap()
+		.events
+		.get(&src.key)
+		.map(|events| events.iter().map(|e| e.uid.clone()).filter(|u| !u.is_empty()).collect())
+		.unwrap_or_default();
+	let ctx = ctx(&src).await.map_err(|e| e.message().to_string())?;
+	let (mut added, mut present, mut failed) = (0usize, 0usize, 0usize);
+	let mut first_error: Option<String> = None;
+	for (uid, object) in &objects {
+		if known.contains(uid) {
+			present += 1;
+			continue;
+		}
+		let result = match &src.backend {
+			Backend::Dav { .. } => crate::calendar_dav::import(&cal, &ctx, uid, object).await,
+			Backend::Google => crate::calendar_google::import(&cal, &ctx, object).await,
+			Backend::Graph => crate::calendar_graph::import(&cal, &ctx, object).await,
+			Backend::Feed { .. } => Err(ApiError::Other(READ_ONLY.into())),
+		};
+		match result {
+			Ok(true) => added += 1,
+			Ok(false) => present += 1,
+			Err(e) => {
+				failed += 1;
+				first_error.get_or_insert_with(|| e.message().to_string());
+			}
+		}
+	}
+	shared.wake(&src.key);
+	if added == 0 && failed > 0 {
+		return Err(first_error.unwrap_or_default());
+	}
+	let mut text = match added {
+		0 => "Nothing new to add".to_string(),
+		1 => format!("Added 1 event to {}", cal.name),
+		n => format!("Added {n} events to {}", cal.name),
+	};
+	if present > 0 {
+		text.push_str(&format!(", {present} already there"));
+	}
+	if failed > 0 {
+		text.push_str(&format!(", {failed} could not be added"));
+	}
+	Ok(text)
 }
 
 // ── For the page and agents ───────────────────────────────────────────────────
@@ -1402,6 +1689,70 @@ pub fn describe(e: &CalEvent, calendars: &[Calendar]) -> String {
 		out.push_str(&format!("\n  guests: {}", people.join(", ")));
 	}
 	out
+}
+
+/// What an `.ics` file holds, for the import sheet: how many events, and
+/// the first few (title and start). `None` when it holds none.
+pub fn import_preview(text: &str) -> Option<(usize, Vec<serde_json::Value>)> {
+	let objects = crate::calendar_dav::split_objects(text);
+	if objects.is_empty() {
+		return None;
+	}
+	let sample = objects
+		.iter()
+		.take(5)
+		.filter_map(|(_, object)| {
+			let events = crate::calendar_dav::parse_ics(object, "");
+			let ev = events.iter().find(|e| e.recurrence_id.is_none()).or(events.first())?;
+			let start = ev.start.as_ref()?;
+			Some(serde_json::json!({
+				"title": if ev.summary.trim().is_empty() { "(No title)" } else { ev.summary.trim() },
+				"start": start.ts(),
+				"all_day": start.kind == crate::calendar_dav::TimeKind::Date,
+				"recurring": ev.rrule.is_some(),
+			}))
+		})
+		.collect();
+	Some((objects.len(), sample))
+}
+
+/// A mail invitation (`text/calendar`) for the mail page's card: what it is,
+/// and the user's copy of it among `accounts` when the provider already put
+/// it in their calendar (Google and Outlook do), which can then be answered.
+pub fn invitation(text: &str, store: &Store, accounts: &[String]) -> Option<serde_json::Value> {
+	use crate::calendar_dav::TimeKind;
+	let events = crate::calendar_dav::parse_ics(text, "");
+	let ev = events.iter().find(|e| e.recurrence_id.is_none()).or(events.first())?;
+	let start = ev.start.as_ref()?;
+	let all_day = start.kind == TimeKind::Date;
+	let s = start.ts();
+	let e = match (&ev.end, ev.duration) {
+		(Some(end), _) => end.ts(),
+		(None, Some(d)) => s + d,
+		_ if all_day => s + 86_400,
+		_ => s + 3600,
+	};
+	let end_date = match &ev.end {
+		Some(end) if all_day => end.date,
+		_ => start.date.add_days(1),
+	};
+	let method = crate::calendar_dav::method(text);
+	Some(serde_json::json!({
+		"uid": ev.uid,
+		"title": if ev.summary.trim().is_empty() { "(No title)" } else { ev.summary.trim() },
+		"start": s,
+		"end": e.max(s),
+		"all_day": all_day,
+		"start_date": if all_day { start.date.iso() } else { String::new() },
+		"end_date": if all_day { end_date.iso() } else { String::new() },
+		"location": ev.location,
+		"organizer": ev.organizer,
+		"method": method,
+		"cancelled": method == "CANCEL" || ev.cancelled,
+		"recurring": ev.rrule.is_some(),
+		"join": find_join(&[&ev.conference, &ev.url, &ev.location, &ev.description]),
+		"event": store.find_uid(accounts, &ev.uid, s),
+	}))
 }
 
 /// What agents may ask over MCP. Nothing here creates, changes or answers an
@@ -1635,6 +1986,7 @@ mod tests {
 			kind: String::new(),
 			etag: String::new(),
 			recurrence_id: String::new(),
+			uid: String::new(),
 		}
 	}
 
@@ -1740,6 +2092,45 @@ mod tests {
 			text,
 			"I'm free at these times (Europe/Berlin):\n• Mon 1 Nov: 9:00–10:00, 11:00–17:00\n"
 		);
+	}
+
+	#[test]
+	fn invitations_find_the_users_copy_by_uid() {
+		let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:inv-1@google.com\r\nSUMMARY:Design review\r\n\
+DTSTART:20261023T080000Z\r\nDTEND:20261023T090000Z\r\nORGANIZER;CN=Anna:mailto:anna@x.com\r\nLOCATION:https://meet.google.com/abc-defg-hij\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+		let mut store = Store::in_memory();
+		let card = invitation(ics, &store, &["a".into()]).unwrap();
+		assert_eq!(card["title"], "Design review");
+		assert_eq!(card["method"], "REQUEST");
+		assert_eq!(card["join"], "https://meet.google.com/abc-defg-hij");
+		assert!(card["event"].is_null(), "not in the calendar yet: offer Add");
+
+		let mut copy = event("k", 1_792_742_400, 1_792_746_000);
+		copy.uid = "inv-1@google.com".into();
+		copy.me = "needs".into();
+		store.set_range("a", "a/c", 0, i64::MAX, vec![copy]);
+		let card = invitation(ics, &store, &["a".into()]).unwrap();
+		assert_eq!(card["event"]["key"], "k");
+		assert!(
+			invitation(ics, &store, &["other".into()]).unwrap()["event"].is_null(),
+			"only this workspace's calendars"
+		);
+
+		let cancel = ics.replace("METHOD:REQUEST", "METHOD:CANCEL");
+		assert_eq!(invitation(&cancel, &store, &[]).unwrap()["cancelled"], true);
+	}
+
+	#[test]
+	fn feeds_take_webcal_and_previews_count_events() {
+		assert_eq!(feed_url("webcal://x.com/h.ics").as_deref(), Some("https://x.com/h.ics"));
+		assert_eq!(feed_url(" WEBCALS://x.com/a ").as_deref(), Some("https://x.com/a"));
+		assert_eq!(feed_url("http://x.com/a.ics").as_deref(), Some("http://x.com/a.ics"));
+		assert_eq!(feed_url("ftp://x"), None);
+		let file = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:1\nDTSTART:20261023T080000Z\nSUMMARY:One\nEND:VEVENT\nBEGIN:VEVENT\nUID:2\nDTSTART;VALUE=DATE:20261024\nSUMMARY:Two\nEND:VEVENT\nEND:VCALENDAR";
+		let (n, sample) = import_preview(file).unwrap();
+		assert_eq!(n, 2);
+		assert_eq!(sample[1]["all_day"], true);
+		assert!(import_preview("BEGIN:VCALENDAR\nEND:VCALENDAR").is_none());
 	}
 
 	#[test]

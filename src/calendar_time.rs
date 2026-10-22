@@ -170,6 +170,11 @@ fn zone(tzid: &str) -> Option<objc2::rc::Retained<NSTimeZone>> {
 	}
 }
 
+/// The IANA name the system knows `tzid` by (prefixes dropped), if any.
+pub fn zone_name(tzid: &str) -> Option<String> {
+	zone(tzid).map(|z| z.name().to_string())
+}
+
 /// Seconds east of UTC in zone `tzid` at instant `ts`.
 fn zone_offset(tz: &NSTimeZone, ts: i64) -> i64 {
 	let date = NSDate::dateWithTimeIntervalSince1970(ts as f64);

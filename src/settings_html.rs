@@ -757,6 +757,13 @@ pub fn html() -> String {
           </div>
           <span class="proxy-inline" role="group" aria-labelledby="cal-hours-label"><input type="time" id="cal-day-start" aria-label="From"><input type="time" id="cal-day-end" aria-label="To"></span>
         </div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <span class="row-label">Subscribed calendars</span>
+            <span class="row-hint">Read-only feeds: holidays, sports, a team's public calendar. Add one from the Calendar tab's menu, or follow a webcal:// link.</span>
+          </div>
+        </div>
+        <div id="feed-list"></div>
       </div>
     </div>
   </div>
@@ -877,11 +884,54 @@ pub fn html() -> String {
     document.getElementById('cal-alert').value = String(cfg.calendar_alert_min);
     document.getElementById('cal-day-start').value = hm(cfg.calendar_day_start);
     document.getElementById('cal-day-end').value = hm(cfg.calendar_day_end);
+    calFeeds = cfg.calendar_feeds || [];
+    renderFeeds();
     syncSearchEngine();
     showAppearance('appearance-seg', cfg.appearance);
     showAppearance('terminal-appearance-seg', cfg.terminal_appearance);
     requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
+
+  // ── Subscribed calendars ──
+  var calFeeds = [];
+  var feedList = document.getElementById('feed-list');
+  function saveFeeds() { ipc({ type: 'settings_update', key: 'calendar_feeds', value: JSON.stringify(calFeeds) }); }
+  function renderFeeds() {
+    if (!calFeeds.length) { feedList.innerHTML = '<div class="row"><span class="kb-note">None yet.</span></div>'; return; }
+    feedList.innerHTML = calFeeds.map(function(f, i) {
+      var all = f.scope === 'all';
+      var chips = '<button data-feed-all="' + i + '" aria-pressed="' + all + '">All workspaces</button>' + extWorkspaces.map(function(w) {
+        var on = all || ((f.scope && f.scope.only) || []).indexOf(w.id) >= 0;
+        return '<button data-feed-ws="' + i + ':' + esc(w.id) + '" aria-pressed="' + on + '"><span class="ws-dot" style="background:' + esc(w.color) + '"></span>' + esc(w.name) + '</button>';
+      }).join('');
+      return '<div class="section proxy"><div class="proxy-body">' +
+        proxyRow('Name', 'feed-' + i + '-name', '<input type="text" id="feed-' + i + '-name" data-feed-name="' + i + '" placeholder="The feed’s own name" value="' + esc(f.name || '') + '">', esc(f.url)) +
+        '<div class="row ext-scope"><span class="row-label">Workspaces</span><span class="seg" role="group">' + chips + '</span></div>' +
+        '<div class="row"><span class="kb-note"></span><button class="proxy-remove" data-feed-remove="' + i + '">Unsubscribe</button></div></div></div>';
+    }).join('');
+  }
+  feedList.addEventListener('click', function(e) {
+    var t = e.target.closest('button');
+    if (!t) return;
+    if (t.dataset.feedRemove != null) { calFeeds.splice(Number(t.dataset.feedRemove), 1); saveFeeds(); renderFeeds(); return; }
+    if (t.dataset.feedAll != null) { calFeeds[Number(t.dataset.feedAll)].scope = 'all'; saveFeeds(); renderFeeds(); return; }
+    if (t.dataset.feedWs) {
+      var parts = t.dataset.feedWs.split(':'), f = calFeeds[Number(parts[0])], id = parts.slice(1).join(':');
+      var current = f.scope === 'all' ? extWorkspaces.map(function(w) { return w.id; }) : ((f.scope && f.scope.only) || []).slice();
+      var at = current.indexOf(id);
+      if (at >= 0) current.splice(at, 1); else current.push(id);
+      if (!current.length) return;
+      f.scope = { only: current };
+      saveFeeds();
+      renderFeeds();
+    }
+  });
+  feedList.addEventListener('change', function(e) {
+    var i = e.target.dataset.feedName;
+    if (i == null) return;
+    calFeeds[Number(i)].name = e.target.value.trim();
+    saveFeeds();
+  });
 
   document.getElementById('cal-alert').addEventListener('change', function(e) {
     ipc({ type: 'settings_update', key: 'calendar_alert_min', value: e.target.value });

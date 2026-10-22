@@ -637,6 +637,10 @@ pub struct Config {
 	pub calendar_day_start: u32,
 	#[serde(default = "default_calendar_day_end")]
 	pub calendar_day_end: u32,
+	/// Subscribed calendars (ICS feeds, `webcal://`). A TOML array of tables:
+	/// after every plain value.
+	#[serde(default)]
+	pub calendar_feeds: Vec<CalendarFeed>,
 	/// Mail accounts (Settings → Mail). Before `proxies`: both are TOML
 	/// arrays of tables, which must follow every plain value.
 	#[serde(default)]
@@ -675,6 +679,23 @@ pub struct ProxyRule {
 	pub password: Option<String>,
 	/// Domains or pasted URLs; each also covers its subdomains.
 	pub sites: Vec<String>,
+}
+
+/// A subscribed calendar: an ICS feed, read-only, refreshed in the
+/// background (spec 002-calendar SUB-*).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CalendarFeed {
+	/// Random, assigned once; keys its cache.
+	pub id: [u8; 16],
+	/// `https://…`; `webcal://` is stored as given and fetched over HTTPS.
+	pub url: String,
+	/// Shown name; empty takes the feed's own.
+	#[serde(default)]
+	pub name: String,
+	#[serde(default)]
+	pub color: String,
+	#[serde(default)]
+	pub scope: crate::extension_store::Scope,
 }
 
 /// One mail account. Servers come from `provider`'s preset unless it is
@@ -911,6 +932,7 @@ impl Default for Config {
 			calendar_default: String::new(),
 			calendar_day_start: default_calendar_day_start(),
 			calendar_day_end: default_calendar_day_end(),
+			calendar_feeds: Vec::new(),
 			mail_accounts: Vec::new(),
 			proxies: Vec::new(),
 		}
