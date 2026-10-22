@@ -151,6 +151,7 @@ pub fn html(keybindings_json: &str) -> String {
     <div class="seg" role="tablist">
       <button class="tab active" id="tab-notes" type="button" role="tab" aria-selected="true">Notes</button>
       <button class="tab" id="tab-mail" type="button" role="tab">Mail <span class="badge" id="unread"></span></button>
+      <button class="tab" id="tab-cal" type="button" role="tab">Calendar</button>
     </div>
     <span id="space"></span>
     <button id="reveal-btn" type="button" title="Show file in Finder" aria-label="Show notes file in Finder">
@@ -331,11 +332,11 @@ pub fn html(keybindings_json: &str) -> String {
       ipc({ type: 'hide' });
       return;
     }
-    // Tab and ⇧Tab switch to Mail, as Tab cycles the assistant's sessions:
-    // the pane is two tabs, not a form.
+    // Tab and ⇧Tab move through the pane's tabs, as Tab cycles the
+    // assistant's sessions: the pane is tabs, not a form.
     if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
-      ipc({ type: 'tab', tab: 'mail' });
+      ipc({ type: 'tab', tab: e.shiftKey ? 'calendar' : 'mail' });
       return;
     }
     if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey) return;
@@ -475,11 +476,12 @@ pub fn html(keybindings_json: &str) -> String {
   window.__notesFlush = save;
 
   document.getElementById('tab-mail').addEventListener('click', function() { ipc({ type: 'tab', tab: 'mail' }); });
+  document.getElementById('tab-cal').addEventListener('click', function() { ipc({ type: 'tab', tab: 'calendar' }); });
   // Tab from anywhere else in the pane too (the text's own handler runs first).
   document.addEventListener('keydown', function(e) {
     if (e.key !== 'Tab' || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
     e.preventDefault();
-    ipc({ type: 'tab', tab: 'mail' });
+    ipc({ type: 'tab', tab: e.shiftKey ? 'calendar' : 'mail' });
   });
 
   window.__paneUnread = function(n) {

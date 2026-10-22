@@ -447,6 +447,19 @@ pub fn html() -> String {
                 transform var(--t-fast) var(--ease);
   }
   #perm-chip.hidden { display: none; }
+  /* The next meeting, from half an hour before it starts: one click joins. */
+  #meet-chip {
+    display: flex; align-items: center; gap: 5px; min-height: var(--ctl-min); padding: 0 9px; margin-left: 8px;
+    border: none; border-radius: var(--r-capsule); font: inherit; cursor: pointer; flex-shrink: 1; min-width: 0; max-width: 280px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+  }
+  #meet-chip.hidden { display: none; }
+  #meet-chip:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  #meet-chip:active { transform: scale(0.97); }
+  #meet-chip.now { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+  #meet-chip .mt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #meet-chip .mw { white-space: nowrap; opacity: 0.85; font-variant-numeric: tabular-nums; }
   #perm-chip:hover  { background: var(--fill-hover); color: var(--label); }
   #perm-chip:active { transform: scale(0.95); }
   #perm-chip[aria-expanded="true"] { background: var(--fill-press); color: var(--label); }
@@ -724,6 +737,7 @@ pub fn html() -> String {
     <span class="stat hidden" id="cpu-chip" title="CPU usage of this tab's web process"><span class="sys-icon">@@ICON_ACTIVITY@@</span><span class="stat-val" id="cpu-stat"></span></span>
     <span class="stat hidden" id="mem-chip" title="Memory used by this tab's web process"><span class="sys-icon">@@ICON_CPU@@</span><span class="stat-val" id="mem-stat"></span></span>
   </div>
+  <button id="meet-chip" class="hidden" type="button"><span class="mt"></span><span class="mw"></span></button>
   <div id="ext-bar" role="toolbar" aria-label="Extensions"></div>
   <button id="workspace-btn" class="bar-btn" type="button" title="Workspaces">
     <span class="ws-icon">@@ICON_LAYERS@@</span>
@@ -1750,6 +1764,28 @@ pub fn html() -> String {
     if (dot) dot.style.background = color;
   };
 
+  // The next meeting (spec 002-calendar NXT-3): its countdown, and Join.
+  var meetChip = document.getElementById('meet-chip');
+  var meeting = null;
+  function renderMeeting() {
+    if (!meeting) { meetChip.classList.add('hidden'); return; }
+    var now = Date.now() / 1000;
+    if (now >= meeting.end) { meeting = null; meetChip.classList.add('hidden'); return; }
+    var mins = Math.ceil((meeting.start - now) / 60);
+    var started = now >= meeting.start;
+    var when = started ? 'now' : mins <= 1 ? 'in 1 min' : mins < 60 ? 'in ' + mins + ' min' : 'in ' + Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min';
+    meetChip.querySelector('.mt').textContent = meeting.title;
+    meetChip.querySelector('.mw').textContent = (meeting.join ? (started ? '· Join now' : '· ' + when + ' · Join') : '· ' + when);
+    meetChip.classList.toggle('now', started);
+    meetChip.title = meeting.join ? 'Join ' + meeting.title + ' (' + meeting.join + ')' : meeting.title;
+    meetChip.classList.remove('hidden');
+  }
+  window.__setMeeting = function(m) { meeting = m; renderMeeting(); };
+  setInterval(renderMeeting, 15000);
+  meetChip.addEventListener('click', function() {
+    window.ipc.postMessage(JSON.stringify({ type: meeting && meeting.join ? 'join_meeting' : 'show_calendar' }));
+  });
+
   // Unread Important mail in this workspace, on the dot.
   window.__setMailUnread = function(n) {
     var dot = document.getElementById('ws-dot');
@@ -1836,7 +1872,7 @@ pub fn html() -> String {
   // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
-    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest, #perm-chip, #perm-pop')) return;
+    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest, #perm-chip, #perm-pop, #meet-chip')) return;
     if (editing) return;
     window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });

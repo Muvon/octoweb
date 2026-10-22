@@ -42,6 +42,8 @@ fn account(address: &str, gatekeeper: bool) -> Account {
 		password: None,
 
 		auth: Default::default(),
+		calendar: true,
+		caldav_url: String::new(),
 
 		oauth_client_id: String::new(),
 

@@ -55,8 +55,9 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
 - **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. **Off by default** — it reads your tabs, history and page text, so you turn it on deliberately in Settings (`⌘,`).
-- **MCP server** — 38 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content, read and search mail.
+- **MCP server** — 42 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content, read and search mail, read the calendar and draft events.
 - **Mail** (`⌘⇧I`) — Gmail, iCloud, Outlook, Private Email, or any IMAP account in a pane beside the page: Important and Other, single-key triage, snooze, undo send, send later, search, attachment previews. Accounts are scoped per workspace.
+- **Calendar** (`⌘⇧D`) — The calendars of those same accounts (Google Calendar, Outlook, iCloud, CalDAV) in the pane: the next meeting with a Join button, an alert before it starts, `⌘J` to join from anywhere, list/day/week views, RSVP, quick add in plain English ("Lunch with anna@x.com tomorrow 1pm"), and your free times copied as text.
 - **Notes** (`⌘⇧J`) — One markdown file per workspace. `⌥⌘J` captures the page as a task, or the selection as a quote.
 - **Terminal** (`` ⌘` ``) — A real shell under the page, with tabs and splits, per workspace; layout, directories, and output come back after a restart.
 - **Extensions** — Chrome Web Store extensions, or a `.crx`, `.zip`, `.xpi`, or unpacked folder, scoped per workspace (macOS 15.4+).
@@ -212,6 +213,10 @@ Claude Desktop / octomind / any MCP client
 | `mail_show` | Show a list of conversations in the mail pane |
 | `mail_set_summaries` | Attach one-line summaries to inbox rows |
 | `mail_add_tasks` | Add tasks linked to a conversation to the workspace notes |
+| `calendar_list_events` | The workspace's calendar events, local time |
+| `calendar_get_event` | One event in full: guests and answers, video link, notes (fenced as untrusted) |
+| `calendar_find_free_time` | Free working-hours slots over the next working days, as pasteable text |
+| `calendar_draft_event` | Open a filled-in event in the calendar pane for the user to add — never creates or invites |
 | `render_ui` | Draw an interactive A2UI surface (forms, approval cards, live views) in the AI sidebar and block until the user clicks |
 
 **Workspace routing:** one server serves every workspace. A request's `X-Octoweb-Workspace` token says which workspace it acts on; callers that send no token fall through to the first workspace. The sidebar's agent sessions carry their token automatically, so an agent driving tabs in a background workspace never disturbs the one you're looking at.
@@ -269,6 +274,8 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌥⌘I` | Toggle DevTools |
 | `⌘⇧J` | Toggle notes |
 | `⌥⌘J` | Capture page as task, or selection as quote, to notes |
+| `⌘⇧D` | Toggle calendar |
+| `⌘J` | Join the current or next meeting (only when there is one to join) |
 | `` ⌘` `` | Toggle terminal |
 | `⌘↵` | Fullscreen window |
 | `⌘⇧↵` | Fullscreen AI sidebar / terminal |

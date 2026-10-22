@@ -11,8 +11,17 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── config.rs             ← Config, session persistence, favicon cache, prompt history
    ├── agent.rs              ← Assistant sessions over the octomind WebSocket (sidebar, learning, editor, mail)
    ├── octomind_server.rs    ← The single `octomind server` process: lazy start, token, restart, shutdown
-   ├── mcp.rs                ← MCP server — 38 browser and mail control tools over HTTP JSON-RPC
+   ├── mcp.rs                ← MCP server — 42 browser, mail and calendar tools over HTTP JSON-RPC
    ├── agent_tabs.rs         ← MCP-driven tabs: kept rendering off-screen, exempt from hibernation
+   │
+   ├── calendar.rs           ← Calendar engine (specs/002-calendar): store, sync thread, next meeting, availability
+   ├── calendar_google.rs    ← Google Calendar API v3 (Gmail accounts)
+   ├── calendar_graph.rs     ← Microsoft Graph calendars (Outlook / 365)
+   ├── calendar_dav.rs       ← CalDAV + iCalendar + RRULE expansion (iCloud, Private Email, any server)
+   ├── calendar_quick.rs     ← Quick add: plain English → event draft
+   ├── calendar_time.rs      ← Civil dates, local time, IANA zones via NSTimeZone
+   ├── calendar_html.rs      ← Calendar pane tab (⌘⇧D): next meeting, list/day/week, details, form
+   ├── http.rs               ← HTTPS via /usr/bin/curl with the request on stdin (no secrets in argv)
    │
    ├── url.rs                ← URL resolution (user input → navigable URL)
    ├── webview_utils.rs      ← Injected JS scripts, favicon cache lookup, overlay data
@@ -82,7 +91,7 @@ Every assistant runs as a session on ONE `octomind server` process, reached over
 
 ### MCP — Browser Control Server (`mcp.rs`)
 
-HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 38 tools:
+HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 42 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -94,6 +103,7 @@ HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CO
 | Diagnostics | `browser_console_messages`, `browser_network_requests` |
 | History & media | `browser_get_history`, `browser_search_history_content`, `browser_get_later`, `browser_get_playing_tabs` |
 | Mail (workspace's accounts; never sends, archives or deletes) | `mail_list_inbox`, `mail_search`, `mail_read_thread`, `mail_create_draft`, `mail_show`, `mail_set_summaries`, `mail_add_tasks` |
+| Calendar (workspace's accounts; never creates, edits or answers) | `calendar_list_events`, `calendar_get_event`, `calendar_find_free_time`, `calendar_draft_event` (opens a filled form for the user) |
 | Sidebar UI | `render_ui` (A2UI surface; blocks until the user answers) |
 
 Interactions run through an actionability harness (`dom_actions.rs`): resolve with retry, bounding-box stability, occlusion detection, pointer+mouse event sequences. Async scripts evaluate via `callAsyncJavaScript` (`async_eval.rs`) so Promises are actually awaited. End-to-end suite: `test_mcp.py` + `tests/fixtures/` (28 tests against a live instance).
@@ -162,6 +172,9 @@ History stored per-context: `prompt_history.json` (editor), `ai_prompt_history.j
 | Assistant sessions | `agent.rs` → `AgentHandle`, `AgentSpec`, `AgentEvent` |
 | octomind server process | `octomind_server.rs` → `endpoint()`, `shutdown()` |
 | MCP (AI tool server) | `mcp.rs` → `McpServer`, `McpCommand`, `send_command()` |
+| Calendar sync & store | `calendar.rs` → `Engine`, `source()`, `next_meeting()`, `free_slots()`; providers in `calendar_{google,graph,dav}.rs` |
+| Calendar pane | `calendar_html.rs` (`window.__cal`), `main.rs` → `mount_calendar!`, `AppEvent::Calendar`, meeting clock (`meeting_check_at`) |
+| Quick add parsing | `calendar_quick.rs` → `parse()` |
 | URL resolution | `url.rs` → `resolve_url()`, `is_external_scheme()` |
 | Injected JS scripts | `webview_utils.rs` → `FAVICON_FETCH_SCRIPT`, `MEDIA_TRACK_SCRIPT` |
 | Overlay data builder | `webview_utils.rs` → `build_items_json()` |
@@ -191,6 +204,12 @@ History stored per-context: `prompt_history.json` (editor), `ai_prompt_history.j
 | `max_ai_prompt_history` | `usize` | `50` | Sidebar prompt history size |
 | `proactive_learning` | `bool` | `true` | Enable background browsing pattern learning |
 | `learning_interval_min` | `u64` | `30` | Minutes between learning runs |
+| `calendar_alert_min` | `i32` | `1` | Minutes before a meeting its alert shows; `-1` off |
+| `calendar_hidden` | `Vec<String>` | `[]` | Calendar keys left out of the pane and alerts |
+| `calendar_default` | `String` | `""` | Calendar key new events go to |
+| `calendar_day_start` / `calendar_day_end` | `u32` | `540` / `1080` | Working hours (minutes) for shared availability |
+
+Per mail account: `calendar` (bool, default true) and `caldav_url` (CalDAV server override).
 
 All fields use `#[serde(default)]` for backward compatibility — new fields are automatically filled with defaults when loading old config files.
 
@@ -289,6 +308,8 @@ Run with `RUST_LOG=debug cargo run` to see all debug-level tracing output.
 | History not saving | `browser.rs` → `update_url()`, `config.rs` → `save_session()` |
 | Favicon not showing | `webview_utils.rs` → `FAVICON_FETCH_SCRIPT`, `cached_favicon()` |
 | Assistant not connecting | `octomind_server.rs` → `start()` (startup stderr is in the error), `agent.rs` → `run()` / `bind()` |
+| Calendar not syncing | Pane → Calendars menu shows each account's state; `RUST_LOG=octoweb::calendar=debug`; CalDAV e2e: `OCTOWEB_DAV_TEST=<url> cargo test --bin octoweb dav_round_trip -- --ignored` |
+| Meeting alert / ⌘J not firing | `main.rs` → meeting clock (`meeting_check_at`), `calendar::next_meeting()`, `meeting_joinable` atomic |
 | Assistant turn never ends | `agent.rs` → `on_cost()` / `on_error()` routing; `RUST_LOG=octoweb=debug` |
 | Tool call acts on wrong workspace | `mcp.rs` → `call_tool()` agent-server token + `_meta` session routing (`route_agent_session`) |
 | MCP tools not working | `mcp.rs` → tool methods, `main.rs` → `McpCommand` drain loop |
@@ -323,3 +344,5 @@ Run with `RUST_LOG=debug cargo run` to see all debug-level tracing output.
 | `nav_error_patch.rs` | ObjC runtime patching | Error page rendering |
 | `quickslots.rs` | Slot storage, persistence | UI rendering |
 | `content_rules.rs` | WKContentRuleList JSON | Rule application |
+| `calendar.rs` | Calendar store, sync thread, provider dispatch, availability | Pane UI, alerts (in main.rs) |
+| `http.rs` | curl-backed HTTPS with secrets on stdin | Provider semantics |

@@ -622,6 +622,21 @@ pub struct Config {
 	/// Local date (`YYYY-MM-DD`) of the last morning brief. Internal.
 	#[serde(default)]
 	pub mail_brief_last: String,
+	/// Minutes before a meeting its alert shows, with Join; 0 alerts at the
+	/// start. `None` in Settings turns alerts off (stored as -1).
+	#[serde(default = "default_calendar_alert_min")]
+	pub calendar_alert_min: i32,
+	/// Calendars (keys) the pane and alerts leave out.
+	#[serde(default)]
+	pub calendar_hidden: Vec<String>,
+	/// Calendar (key) new events go to, the last one picked.
+	#[serde(default)]
+	pub calendar_default: String,
+	/// Working hours shared availability is offered in, as minutes of the day.
+	#[serde(default = "default_calendar_day_start")]
+	pub calendar_day_start: u32,
+	#[serde(default = "default_calendar_day_end")]
+	pub calendar_day_end: u32,
 	/// Mail accounts (Settings → Mail). Before `proxies`: both are TOML
 	/// arrays of tables, which must follow every plain value.
 	#[serde(default)]
@@ -702,6 +717,12 @@ pub struct MailAccount {
 	pub archive_folder: String,
 	#[serde(default)]
 	pub auth: MailAuth,
+	/// Show this account's calendars in the Calendar tab.
+	#[serde(default = "default_true")]
+	pub calendar: bool,
+	/// CalDAV server when the provider's own can't be found.
+	#[serde(default)]
+	pub caldav_url: String,
 	/// The user's own OAuth client (Gmail, Outlook).
 	#[serde(default)]
 	pub oauth_client_id: String,
@@ -805,6 +826,22 @@ fn default_notes_width() -> u32 {
 	360
 }
 
+fn default_true() -> bool {
+	true
+}
+
+fn default_calendar_alert_min() -> i32 {
+	1
+}
+
+fn default_calendar_day_start() -> u32 {
+	9 * 60
+}
+
+fn default_calendar_day_end() -> u32 {
+	18 * 60
+}
+
 fn default_terminal_height() -> u32 {
 	320
 }
@@ -869,6 +906,11 @@ impl Default for Config {
 			sounds: true,
 			mail_brief_morning: false,
 			mail_brief_last: String::new(),
+			calendar_alert_min: default_calendar_alert_min(),
+			calendar_hidden: Vec::new(),
+			calendar_default: String::new(),
+			calendar_day_start: default_calendar_day_start(),
+			calendar_day_end: default_calendar_day_end(),
 			mail_accounts: Vec::new(),
 			proxies: Vec::new(),
 		}

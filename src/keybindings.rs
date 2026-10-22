@@ -75,6 +75,8 @@ pub enum Action {
 	Notes,
 	NoteCapture,
 	Inbox,
+	Calendar,
+	JoinMeeting,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -295,6 +297,20 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 		"Toggle inbox (mail)",
 		"AI & Panels",
 		"cmd+shift+i",
+	),
+	(
+		Action::Calendar,
+		"calendar",
+		"Toggle calendar",
+		"AI & Panels",
+		"cmd+shift+d",
+	),
+	(
+		Action::JoinMeeting,
+		"join_meeting",
+		"Join the current or next meeting (when there is one)",
+		"AI & Panels",
+		"cmd+j",
 	),
 ];
 

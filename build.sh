@@ -114,7 +114,7 @@ fi
 
 # ── Sparkle (release only: a --dev build never updates itself) ────────────────
 if ! $DEV_BUILD && [ ! -d "$SPARKLE_DIR/Sparkle.framework" ]; then
-  echo "▶ Downloading Sparkle $SPARKLE_VERSION…"
+  echo "▶ Downloading Sparkle ${SPARKLE_VERSION}…"
   # Beside its final place, so the move below is a rename on the same volume.
   mkdir -p "$(dirname "$SPARKLE_DIR")"
   SPARKLE_TMP=$(mktemp -d "$(dirname "$SPARKLE_DIR")/.download.XXXXXX")

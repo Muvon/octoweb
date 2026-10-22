@@ -3721,6 +3721,8 @@ mod tests {
 			login: String::new(),
 			archive_folder: String::new(),
 			auth: Default::default(),
+			calendar: true,
+			caldav_url: String::new(),
 			oauth_client_id: String::new(),
 			has_client_secret: false,
 			client_secret: None,
@@ -3867,6 +3869,8 @@ mod tests {
 			password: None,
 
 			auth: Default::default(),
+			calendar: true,
+			caldav_url: String::new(),
 
 			oauth_client_id: String::new(),
 
@@ -3915,6 +3919,8 @@ mod tests {
 				password: None,
 
 				auth: Default::default(),
+				calendar: true,
+				caldav_url: String::new(),
 
 				oauth_client_id: String::new(),
 
@@ -4212,6 +4218,8 @@ mod tests {
 				has_password: true,
 				password: None,
 				auth: Default::default(),
+				calendar: true,
+				caldav_url: String::new(),
 				oauth_client_id: String::new(),
 				has_client_secret: false,
 				client_secret: None,

@@ -418,6 +418,7 @@ pub fn html(keybindings_json: &str) -> String {
     <div class="seg" role="tablist">
       <button class="tab" id="tab-notes" type="button" role="tab">Notes</button>
       <button class="tab active" id="tab-mail" type="button" role="tab" aria-selected="true">Mail <span class="badge" id="unread"></span></button>
+      <button class="tab" id="tab-cal" type="button" role="tab">Calendar</button>
     </div>
     <span class="spacer"></span>
     <button class="icon-btn" id="brief-btn" type="button" title="Daily brief (AI)" aria-label="Daily brief" hidden>
@@ -2038,12 +2039,12 @@ pub fn html(keybindings_json: &str) -> String {
       return;
     }
     if (help.classList.contains('open') && (e.key === 'Escape' || e.key === '?')) { e.preventDefault(); help.classList.remove('open'); return; }
-    // Tab and ⇧Tab switch to Notes, as Tab cycles the assistant's sessions:
-    // the pane is two tabs. Only the composer, a form, keeps Tab for its fields.
+    // Tab and ⇧Tab move through the pane's tabs, as Tab cycles the
+    // assistant's sessions. Only the composer, a form, keeps Tab for its fields.
     if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.target && e.target.closest && e.target.closest('#composer')) return;
       e.preventDefault();
-      ipc({ type: 'tab', tab: 'notes' });
+      ipc({ type: 'tab', tab: e.shiftKey ? 'notes' : 'calendar' });
       return;
     }
     // ⌘↩ sends, and ⇧⌘D as in Apple Mail.
@@ -2198,6 +2199,7 @@ pub fn html(keybindings_json: &str) -> String {
 
   // ── Bar, pane and resize ────────────────────────────────────────────────────
   $('tab-notes').addEventListener('click', function() { ipc({ type: 'tab', tab: 'notes' }); });
+  $('tab-cal').addEventListener('click', function() { ipc({ type: 'tab', tab: 'calendar' }); });
   $('close-btn').addEventListener('click', function() { ipc({ type: 'hide' }); });
   $('fullscreen-btn').addEventListener('click', function() { ipc({ type: 'fullscreen' }); });
   $('compose-btn').addEventListener('click', function() { compose(); });

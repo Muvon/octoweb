@@ -734,6 +734,30 @@ pub fn html() -> String {
           <button class="toggle" id="mail_brief_morning" data-key="mail_brief_morning" role="switch" aria-checked="false" aria-labelledby="mail_brief_morning_label"></button>
         </div>
       </div>
+      <div class="section">
+        <div class="section-title">Calendar</div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <label class="row-label" for="cal-alert">Meeting alerts</label>
+            <span class="row-hint">A reminder with a Join button before each meeting, and a macOS notification when Octoweb is in the background.</span>
+          </div>
+          <select id="cal-alert">
+            <option value="-1">Off</option>
+            <option value="0">When it starts</option>
+            <option value="1">1 minute before</option>
+            <option value="2">2 minutes before</option>
+            <option value="5">5 minutes before</option>
+            <option value="10">10 minutes before</option>
+          </select>
+        </div>
+        <div class="row with-hint">
+          <div class="row-label-stack">
+            <span class="row-label" id="cal-hours-label">Working hours</span>
+            <span class="row-hint">The free times "Copy my free times" offers, on weekdays.</span>
+          </div>
+          <span class="proxy-inline" role="group" aria-labelledby="cal-hours-label"><input type="time" id="cal-day-start" aria-label="From"><input type="time" id="cal-day-end" aria-label="To"></span>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -849,11 +873,24 @@ pub fn html() -> String {
     renderProxies();
     mailAccounts = cfg.mail_accounts || [];
     renderMail();
+    var hm = function(m) { return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
+    document.getElementById('cal-alert').value = String(cfg.calendar_alert_min);
+    document.getElementById('cal-day-start').value = hm(cfg.calendar_day_start);
+    document.getElementById('cal-day-end').value = hm(cfg.calendar_day_end);
     syncSearchEngine();
     showAppearance('appearance-seg', cfg.appearance);
     showAppearance('terminal-appearance-seg', cfg.terminal_appearance);
     requestAnimationFrame(function() { document.getElementById('close-btn').focus(); });
   };
+
+  document.getElementById('cal-alert').addEventListener('change', function(e) {
+    ipc({ type: 'settings_update', key: 'calendar_alert_min', value: e.target.value });
+  });
+  ['cal-day-start', 'cal-day-end'].forEach(function(id) {
+    document.getElementById(id).addEventListener('change', function(e) {
+      if (e.target.value) ipc({ type: 'settings_update', key: id === 'cal-day-start' ? 'calendar_day_start' : 'calendar_day_end', value: e.target.value });
+    });
+  });
 
   // ── Updates ───────────────────────────────────────────────────────────
   // Sparkle keeps these in its own user defaults, so Rust sends them apart
@@ -1348,8 +1385,8 @@ pub fn html() -> String {
   var MAIL_COLORS = ['#0a84ff', '#ff9f0a', '#30d158', '#bf5af2', '#ff375f', '#64d2ff'];
   // Own-client OAuth (spec: Gmail OAuth). How to make the client, per provider.
   var OAUTH_HELP = {
-    gmail: 'In <a class="mail-link" data-url="https://console.cloud.google.com/apis/credentials">Google Cloud Console</a>, create an OAuth client of type <b>Desktop app</b>, and set the OAuth consent screen to <b>In production</b> \u2014 in Testing, Google ends the sign-in after 7 days. Paste its client ID and secret, then sign in.',
-    outlook: 'In <a class="mail-link" data-url="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra \u2192 App registrations</a>, register an app, add the <b>Mobile and desktop</b> platform with redirect URI <code>http://127.0.0.1</code>, and the delegated permissions IMAP.AccessAsUser.All, SMTP.Send and offline_access. Paste its client ID; no secret is needed.'
+    gmail: 'In <a class="mail-link" data-url="https://console.cloud.google.com/apis/credentials">Google Cloud Console</a>, create an OAuth client of type <b>Desktop app</b>, and set the OAuth consent screen to <b>In production</b> \u2014 in Testing, Google ends the sign-in after 7 days. Paste its client ID and secret, then sign in. For the calendar, also turn on the <a class="mail-link" data-url="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com">Google Calendar API</a> in the same project.',
+    outlook: 'In <a class="mail-link" data-url="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade">Microsoft Entra \u2192 App registrations</a>, register an app, add the <b>Mobile and desktop</b> platform with redirect URI <code>http://127.0.0.1</code>, and the delegated permissions IMAP.AccessAsUser.All, SMTP.Send and offline_access, and Calendars.ReadWrite on Microsoft Graph for the calendar. Paste its client ID; no secret is needed.'
   };
   function oauthCapable(a) { return a.provider === 'gmail' || a.provider === 'outlook'; }
   // This build carries a Google client (build.sh), so Gmail needs no setup.
@@ -1447,12 +1484,43 @@ pub fn html() -> String {
       proxyRow('Color', id + '-color', '<input type="color" id="' + id + '-color" data-mail="color" value="' + esc(a.color || MAIL_COLORS[i % MAIL_COLORS.length]) + '">') +
       proxyRow('Archive folder', id + '-archive', '<input type="text" id="' + id + '-archive" data-mail="archive_folder" placeholder="Found on the server" value="' + esc(a.archive_folder) + '" spellcheck="false">',
         'Where Done moves mail. Leave empty unless your server needs a specific folder.') +
+      calendarRows(a, i) +
       mailScope(a, i) +
       '<div class="row"><span class="proxy-status"><span class="proxy-dot ' + st.state + '"></span><span class="proxy-status-text">' + esc(st.text) + '</span></span>' +
         '<button class="proxy-link" data-mail-check>Check connection</button>' +
         '<button class="proxy-remove" data-mail-remove>Remove</button></div>';
     return '<div class="proxy-body" id="' + id + '-body">' + html + '</div>';
   }
+  // ── Calendar of a mail account (spec 002-calendar ACC-*) ──
+  var calendarStatus = {};
+  window.__setCalendarStatus = function(status) { calendarStatus = status; renderMailKeepFocus(); };
+  var CAL_HINTS = {
+    gmail: 'Google Calendar, connected separately from mail.',
+    outlook: 'Outlook calendar, through Microsoft Graph.',
+    icloud: 'iCloud Calendar over CalDAV, with the same app-specific password.',
+    privateemail: 'CalDAV, with the mailbox password.',
+    other: 'CalDAV, with the account’s password.'
+  };
+  function calendarRows(a, i) {
+    var id = 'mail-' + i;
+    var on = a.calendar !== false;
+    var st = calendarStatus[mailHex(a)] || {};
+    var html = '<div class="row with-hint"><div class="row-label-stack"><span class="row-label" id="' + id + '-cal">Calendar</span>' +
+      '<span class="row-hint">' + CAL_HINTS[a.provider] + ' It shows in the pane’s Calendar tab.</span></div>' +
+      '<button class="toggle' + (on ? ' on' : '') + '" data-mail-cal role="switch" aria-checked="' + on + '" aria-labelledby="' + id + '-cal"></button></div>';
+    if (!on) return html;
+    var text = { online: 'Synced', connecting: 'Connecting…', connect: 'Not connected', auth: 'Sign-in expired', error: st.message || 'Sync failed', off: st.message || 'Off' }[st.state] || 'Waiting';
+    if (a.provider === 'gmail' || a.provider === 'outlook') {
+      var connected = st.state && st.state !== 'connect';
+      html += '<div class="row"><span class="row-label">Calendar access</span><span class="proxy-inline"><span class="kb-note">' + esc(text) + '</span>' +
+        '<button class="proxy-link" data-cal-connect>' + (connected ? 'Connect again' : 'Connect calendar') + '</button></span></div>';
+    } else {
+      html += proxyRow('CalDAV server', id + '-caldav', '<input type="text" id="' + id + '-caldav" data-mail="caldav_url" placeholder="Found automatically" value="' + esc(a.caldav_url || '') + '" spellcheck="false">',
+        'Only if it is not found: the server’s CalDAV address. ' + esc(text));
+    }
+    return html;
+  }
+
   function mailCard(a, i) {
     var st = mailState(a);
     var open = i === openMail;
@@ -1538,6 +1606,8 @@ pub fn html() -> String {
     }
     var sec = e.target.closest('[data-security]');
     if (sec) { a.smtp_security = sec.dataset.security; saveMail(); renderMail(); return; }
+    if (e.target.closest('[data-mail-cal]')) { a.calendar = a.calendar === false; saveMail(); renderMail('[data-mail-i="' + i + '"] [data-mail-cal]'); return; }
+    if (e.target.closest('[data-cal-connect]')) { ipc({ type: 'calendar_connect', id: mailHex(a) }); return; }
     if (e.target.closest('[data-mail-gk]')) { a.gatekeeper = !a.gatekeeper; saveMail(); renderMail('[data-mail-i="' + i + '"] [data-mail-gk]'); return; }
     if (e.target.closest('[data-mail-forget]')) { a.password = ''; a.has_password = false; saveMail(); renderMail(); return; }
     if (e.target.closest('[data-mail-check]')) { checkMail(a); renderMail(); return; }
@@ -1604,7 +1674,8 @@ pub fn html() -> String {
       scope: extActive ? { only: [extActive] } : 'all',
       imap_host: '', imap_port: 993, smtp_host: '', smtp_port: 465, smtp_security: 'tls',
       login: '', archive_folder: '', has_password: false,
-      auth: 'password', oauth_client_id: '', has_client_secret: false
+      auth: 'password', oauth_client_id: '', has_client_secret: false,
+      calendar: true, caldav_url: ''
     });
     openMail = mailAccounts.length - 1;
     renderMail('[data-mail-i="' + openMail + '"] [data-mail="address"]');
