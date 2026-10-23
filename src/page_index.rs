@@ -39,8 +39,8 @@ pub struct Hit {
 pub struct PageIndex {
 	/// Insertion order; oldest first so eviction is a front pop.
 	docs: Vec<(u64, Doc)>,
-	/// term → doc ids, ascending. Ids of removed docs linger until the next
-	/// load rebuilds the map — search drops them.
+	/// term → doc ids, ascending. Ids of removed docs are pruned on a
+	/// reindex or eviction, and terms with no ids left are dropped.
 	terms: BTreeMap<String, Vec<u64>>,
 	next_id: u64,
 }
@@ -84,9 +84,17 @@ impl PageIndex {
 			return;
 		}
 		let key = url.trim_end_matches('/');
-		self.docs.retain(|(_, d)| d.url.trim_end_matches('/') != key);
+		let removed: Vec<_> = self
+			.docs
+			.extract_if(.., |(_, d)| d.url.trim_end_matches('/') == key)
+			.collect();
+		for (id, doc) in removed {
+			self.unindex(id, &doc);
+		}
+
 		while self.docs.len() >= max_docs {
-			self.docs.remove(0);
+			let (id, doc) = self.docs.remove(0);
+			self.unindex(id, &doc);
 		}
 		let mut text = text;
 		text.truncate(floor_char_boundary(&text, MAX_TEXT));
@@ -105,6 +113,19 @@ impl PageIndex {
 			self.terms.entry(term).or_default().push(id);
 		}
 		self.docs.push((id, doc));
+	}
+
+	/// Undo `push` for a removed doc: drop `id` from every term tokenized from
+	/// its title and text, and drop terms left with no ids.
+	fn unindex(&mut self, id: u64, doc: &Doc) {
+		for term in tokenize(&format!("{} {}", doc.title, doc.text)) {
+			if let Some(ids) = self.terms.get_mut(&term) {
+				ids.retain(|&x| x != id);
+				if ids.is_empty() {
+					self.terms.remove(&term);
+				}
+			}
+		}
 	}
 
 	/// AND over every query word, each matched as a prefix. Most recent first.
