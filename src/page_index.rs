@@ -256,4 +256,33 @@ mod tests {
 		i.index("https://c.example", "C", "   ");
 		assert_eq!(i.search("third", 10).len(), 1);
 	}
+
+	#[test]
+	fn reindex_or_cap_prunes_old_terms() {
+		let mut i = idx();
+		i.index("https://a.example/pricing/", "Acme pricing", "Now free for everyone");
+		assert!(!i.terms.contains_key("dollars"), "old keys pruned from terms");
+
+		i.index_capped("https://c.example", "C", "third page", 2);
+		assert!(!i.terms.contains_key("lifetimes"), "old keys evicted from terms");
+	}
+
+	#[test]
+	fn shared_terms_preserved_for_live_page_after_reindex_and_cap() {
+		let mut i = idx();
+		i.index("https://d.example/notes/", "Travel notes", "train schedule for Kyoto");
+		assert_eq!(i.terms["notes"], vec![1, 2]);
+		assert_eq!(i.search("notes", 10).len(), 2);
+		i.index(
+			"https://b.example/blog/",
+			"Rust essays",
+			"Borrow checker essay about lifetimes and seats",
+		);
+		assert_eq!(i.terms["notes"], vec![2]);
+		assert_eq!(i.search("notes", 10).len(), 1);
+
+		i.index_capped("https://c.example", "C", "third page", 2);
+		assert_eq!(i.terms.get("notes"), None);
+		assert_eq!(i.search("notes", 10).len(), 0);
+	}
 }
