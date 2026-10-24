@@ -278,7 +278,10 @@ pub fn outcome(p: Progress) -> Outcome {
 				action: Some(Action::EventLine { ws, line, people }),
 				..Default::default()
 			},
-			None => failed(&Job::Event { ws, item, people }, "No date for an event in this conversation.".into()),
+			None => failed(
+				&Job::Event { ws, item, people },
+				"No date for an event in this conversation.".into(),
+			),
 		},
 		(
 			Job::MeetingTasks {
@@ -449,11 +452,19 @@ mod tests {
 			item: item(),
 			people: vec!["anna@x.com".into()],
 		};
-		let o = run(event(), "<text>\nReview 2026-10-29 15:00-16:00 anna@x.com\n</text>", Some(Ok(())));
+		let o = run(
+			event(),
+			"<text>\nReview 2026-10-29 15:00-16:00 anna@x.com\n</text>",
+			Some(Ok(())),
+		);
 		assert!(matches!(o.action, Some(Action::EventLine { line, people, .. })
 			if line == "Review 2026-10-29 15:00-16:00 anna@x.com" && people == ["anna@x.com"]));
 		// No event: the user hears why, and no form opens.
-		for none in ["<text>\n</text>", "<text>\nNo event found.\n</text>", "<text>\n-\n</text>"] {
+		for none in [
+			"<text>\n</text>",
+			"<text>\nNo event found.\n</text>",
+			"<text>\n-\n</text>",
+		] {
 			let o = run(event(), none, Some(Ok(())));
 			assert!(o.action.is_none(), "{none}");
 			assert_eq!(o.toast.as_deref(), Some("No date for an event in this conversation."));
@@ -481,7 +492,9 @@ mod tests {
 			day: "2026-10-22".into(),
 		};
 		let o = run(tasks(), "<text>\n- Send deck >2026-10-30\n</text>", Some(Ok(())));
-		assert!(matches!(o.action, Some(Action::MeetingTasks { tasks, start: 3, .. }) if tasks == ["Send deck >2026-10-30"]));
+		assert!(
+			matches!(o.action, Some(Action::MeetingTasks { tasks, start: 3, .. }) if tasks == ["Send deck >2026-10-30"])
+		);
 		let o = run(tasks(), "<text>\n</text>", Some(Ok(())));
 		assert!(matches!(o.action, Some(Action::MeetingTasks { tasks, .. }) if tasks.is_empty()));
 		let o = run(tasks(), "", Some(Err("gone".into())));

@@ -285,7 +285,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 		"cmd+backquote",
 	),
 	(Action::Notes, "notes", "Toggle notes", "Tools", "cmd+shift+j"),
-	(Action::Tasks, "tasks", "Toggle tasks (notes' open tasks)", "Tools", "cmd+opt+t"),
+	(
+		Action::Tasks,
+		"tasks",
+		"Add a task (notes' task list)",
+		"Tools",
+		"cmd+opt+t",
+	),
 	(
 		Action::NoteCapture,
 		"note_capture",

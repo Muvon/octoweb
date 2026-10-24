@@ -3278,10 +3278,17 @@ pub fn parse_event_line(response: &str) -> Option<String> {
 /// the guests an event drafted from it may have (calendar AI-1), so a
 /// message cannot slip its own addresses into the invitation.
 fn thread_people(shared: &Shared, item: &Item) -> Vec<String> {
-	let me = shared.account(&item.account).map(|a| a.address.to_lowercase()).unwrap_or_default();
+	let me = shared
+		.account(&item.account)
+		.map(|a| a.address.to_lowercase())
+		.unwrap_or_default();
 	let mut people: Vec<String> = Vec::new();
 	for m in shared.store().thread(&item.account, &item.thread) {
-		for a in std::iter::once(&m.from).chain(m.reply_to.iter()).chain(&m.to).chain(&m.cc) {
+		for a in std::iter::once(&m.from)
+			.chain(m.reply_to.iter())
+			.chain(&m.to)
+			.chain(&m.cc)
+		{
 			let addr = a.addr.to_lowercase();
 			if !addr.is_empty() && addr != me && !people.contains(&addr) {
 				people.push(addr);
@@ -4450,7 +4457,8 @@ mod tests {
 	fn event_lines_read_as_quick_add() {
 		use crate::calendar_time::Date;
 		let line =
-			parse_event_line("<text>\n- Design review 2026-10-29 15:00-16:00 anna@example.com +meet @Room 4\n</text>").unwrap();
+			parse_event_line("<text>\n- Design review 2026-10-29 15:00-16:00 anna@example.com +meet @Room 4\n</text>")
+				.unwrap();
 		let q = crate::calendar_quick::parse(&line, Date::new(2026, 10, 22), 10 * 60);
 		assert_eq!(q.title, "Design review");
 		assert_eq!((q.date, q.start, q.end), (Date::new(2026, 10, 29), 15 * 60, 16 * 60));

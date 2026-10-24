@@ -2045,7 +2045,9 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Tasks { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![Content::text(crate::mail::untrusted(&text))])),
+			Ok(text) => Ok(CallToolResult::success(vec![Content::text(crate::mail::untrusted(
+				&text,
+			))])),
 			Err(msg) => Ok(err_result(msg)),
 		}
 	}

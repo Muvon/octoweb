@@ -59,7 +59,7 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **Mail** (`⌘⇧I`) — Gmail, iCloud, Outlook, Private Email, or any IMAP account in a pane beside the page: Important and Other, single-key triage, snooze, undo send, send later, search, attachment previews. Accounts are scoped per workspace.
 - **Calendar** (`⌘⇧D`) — The calendars of those same accounts (Google Calendar, Outlook, iCloud, CalDAV) in the pane: the next meeting with a Join button, an alert before it starts, `⌘J` to join from anywhere, list/day/week views, RSVP, quick add in plain English ("Lunch with anna@x.com tomorrow 1pm"), and your free times copied as text. Subscribe to `webcal://` / ICS feeds, import `.ics` files (drop them on the pane), and answer invitations right in the mail message. With mail AI on: an event drafted from an email, free times offered in a reply, meeting prep from the guests' mail and last notes, and tasks or a follow-up from the meeting's notes.
 - **Notes** (`⌘⇧J`) — One markdown file per workspace. `⌥⌘J` captures the page as a task, or the selection as a quote.
-- **Tasks** (`⌥⌘T`) — The `- [ ]` lines of the notes in one list: Overdue, Today, Upcoming, No date. Type `>fri` after a task and it becomes an Obsidian Tasks date (`📅 2026-10-30`); due tasks show in the calendar and as a count on the Notes tab.
+- **Tasks** (`⌥⌘T`) — The open `- [ ]` lines of the notes, above the text in a block you can fold: an add field, then Overdue, Today, Upcoming and the ones without a date. `>fri` in a task becomes an Obsidian Tasks date (`📅 2026-10-30`); due tasks show in the calendar and as a count on the Notes tab.
 - **Terminal** (`` ⌘` ``) — A real shell under the page, with tabs and splits, per workspace; layout, directories, and output come back after a restart.
 - **Extensions** — Chrome Web Store extensions, or a `.crx`, `.zip`, `.xpi`, or unpacked folder, scoped per workspace (macOS 15.4+).
 - **Find-in-page** (`⌘F`) — Full-text search with highlighting.
@@ -276,7 +276,7 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘⇧I` | Toggle inbox (mail) |
 | `⌥⌘I` | Toggle DevTools |
 | `⌘⇧J` | Toggle notes |
-| `⌥⌘T` | Toggle tasks (the notes' open tasks) |
+| `⌥⌘T` | Add a task (notes' task list) |
 | `⌥⌘J` | Capture page as task, or selection as quote, to notes |
 | `⌘⇧D` | Toggle calendar |
 | `⌘J` | Join the current or next meeting (only when there is one to join) |

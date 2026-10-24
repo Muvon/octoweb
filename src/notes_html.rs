@@ -148,30 +148,35 @@ pub fn html(keybindings_json: &str) -> String {
   .link { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
   .done .link { color: inherit; }
 
-  #views { flex: 0 0 auto; display: flex; align-items: center; height: 32px; padding: 0 10px; box-shadow: 0 0.5px 0 var(--hairline); font-family: var(--font-text); -webkit-user-select: none; user-select: none; }
-
-  /* The Tasks view replaces #scroll while shown. */
-  #tasks { display: none; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 0 28px; font-family: var(--font-text); font-size: 13px; color: var(--label); }
-  #panel.tasks #scroll { display: none; }
-  #panel.tasks #tasks { display: block; }
-  #add { display: block; box-sizing: border-box; width: calc(100% - 32px); height: 28px; margin: 0 16px 6px; padding: 0 10px; border: 0; border-radius: var(--r-ctl); background: var(--fill); color: var(--label); font: inherit; outline: none; }
+  /* Open tasks above the text, in the same scroll (spec 003-tasks): due ones
+     by date, the rest behind one line; the head line folds the block. */
+  #tasks { padding: 6px 0; box-shadow: 0 0.5px 0 var(--hairline); font-family: var(--font-text); font-size: 13px; color: var(--label); }
+  #tasks[hidden] { display: none; }
+  #tasks-head { display: flex; align-items: baseline; gap: 6px; width: 100%; padding: 4px 16px; border: 0; background: transparent; color: var(--label-2); font: inherit; font-size: var(--fs-caption); font-weight: 600; text-align: left; cursor: pointer; -webkit-user-select: none; user-select: none; }
+  #tasks-head:hover { color: var(--label); }
+  #tasks-head .chev { display: inline-block; width: 10px; transition: transform var(--t-fast); }
+  #tasks.collapsed #tasks-head .chev { transform: rotate(-90deg); }
+  #tasks-sum { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--label-3); }
+  #tasks-sum .over { color: var(--err); }
+  #tasks.collapsed #tasks-body { display: none; }
+  #add { display: block; box-sizing: border-box; width: calc(100% - 32px); height: 28px; margin: 4px 16px; padding: 0 10px; border: 0; border-radius: var(--r-ctl); background: var(--fill); color: var(--label); font: inherit; outline: none; transition: box-shadow var(--t-fast); }
   #add::placeholder { color: var(--label-3); }
-  .grp { padding: 10px 16px 4px; font-size: var(--fs-caption); font-weight: 600; color: var(--label-2); -webkit-user-select: none; user-select: none; }
+  #add.bad { box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 60%, transparent); }
+  #list { outline: none; }
+  .grp { padding: 8px 16px 2px; font-size: var(--fs-caption); font-weight: 600; color: var(--label-2); -webkit-user-select: none; user-select: none; }
   .grp.over { color: var(--err); }
   .row { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 16px; cursor: default; }
-  .row.focus { background: var(--fill-hover); }
+  #list:focus .row.focus { background: var(--fill-hover); }
   .rbox { flex: none; padding: 4px; margin: -4px; cursor: pointer; }
   .rbox i { display: block; position: relative; box-sizing: border-box; width: 14px; height: 14px; border: 1.5px solid var(--label-3); border-radius: 4px; }
   .row.isdone .rbox i { background: var(--accent); border-color: var(--accent); }
   .row.isdone .rbox i::after { content: ''; position: absolute; left: 3.5px; top: 0.5px; width: 3px; height: 6px; border: solid var(--on-accent); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
-  .rtext { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .rtext { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
   .row.isdone .rtext { color: var(--label-3); text-decoration: line-through; }
   .row.isdone .link { color: inherit; }
   .due { flex: none; font-size: var(--fs-caption); color: var(--label-2); }
   .due.over { color: var(--err); }
-  .note { padding: 10px 16px; color: var(--label-2); line-height: 1.5; }
-  .note.err { color: var(--err); }
-  .more { display: block; margin: 10px 16px 0; padding: 0; border: 0; background: transparent; color: var(--label-2); font: inherit; font-size: var(--fs-caption); cursor: pointer; }
+  .more { display: block; margin: 4px 16px 2px; padding: 0; border: 0; background: transparent; color: var(--label-2); font: inherit; font-size: var(--fs-caption); cursor: pointer; }
   .more:hover { color: var(--label); }
 </style>
 </head>
@@ -207,21 +212,18 @@ pub fn html(keybindings_json: &str) -> String {
       </svg>
     </button>
   </div>
-  <div id="views">
-    <div class="seg" role="tablist">
-      <button class="tab active" id="view-notes" type="button" role="tab" aria-selected="true">Notes</button>
-      <button class="tab" id="view-tasks" type="button" role="tab" aria-selected="false">Tasks</button>
-    </div>
-  </div>
   <div id="scroll">
+    <div id="tasks">
+      <button id="tasks-head" type="button" aria-expanded="true"><span class="chev">▾</span><span>Tasks</span><span id="tasks-sum"></span></button>
+      <div id="tasks-body">
+        <input id="add" type="text" spellcheck="false" autocomplete="off" placeholder="Add a task — Pay rent >fri" aria-label="Add a task">
+        <div id="list" tabindex="0" aria-label="Open tasks"></div>
+      </div>
+    </div>
     <div id="wrap">
       <pre id="hl" aria-hidden="true"></pre>
       <textarea id="text" spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="Notes"></textarea>
     </div>
-  </div>
-  <div id="tasks">
-    <input id="add" type="text" spellcheck="false" autocomplete="off" placeholder="Add a task — Pay rent >fri" aria-label="Add a task">
-    <div id="list"></div>
   </div>
 </div>
 <script>
@@ -496,7 +498,7 @@ pub fn html(keybindings_json: &str) -> String {
     }
     saved = value;
     render();
-    if (view === 'tasks') renderTasks();
+    renderTasks();
     if (reveal) {
       text.setSelectionRange(value.length, value.length);
       scroll.scrollTop = scroll.scrollHeight;
@@ -514,10 +516,15 @@ pub fn html(keybindings_json: &str) -> String {
     text.classList.add('error');
     text.placeholder = message;
     render();
-    if (view === 'tasks') renderTasks();
+    renderTasks();
   };
 
-  window.__notesFlush = save;
+  // The pane is hiding: save, and drop the ticked tasks kept on show.
+  window.__notesFlush = function() {
+    save();
+    keep = new Set();
+    renderTasks();
+  };
 
   document.getElementById('tab-mail').addEventListener('click', function() { ipc({ type: 'tab', tab: 'mail' }); });
   document.getElementById('tab-cal').addEventListener('click', function() { ipc({ type: 'tab', tab: 'calendar' }); });
@@ -536,32 +543,43 @@ pub fn html(keybindings_json: &str) -> String {
   window.__notesMailAccounts = function(colors) {
     mailColors = colors || {};
     render();
-    if (view === 'tasks') renderTasks();
+    renderTasks();
   };
 
   window.__notesFocus = function() {
-    if (view === 'tasks') addEl.focus();
-    else text.focus();
+    if (area !== 'tasks') {
+      text.focus();
+    } else if (!tasksEl.contains(document.activeElement)) {
+      expand();
+      addEl.focus();
+    }
   };
 
-  // ---- Tasks view: the open `- [ ]` lines of the buffer, grouped by due date.
-  const viewNotesBtn = document.getElementById('view-notes');
-  const viewTasksBtn = document.getElementById('view-tasks');
+  // ---- Open tasks above the text (spec 003-tasks): the `- [ ]` lines of the
+  // buffer, due ones grouped by date, the rest behind one line; the head line
+  // folds the block and says what is in it.
+  const tasksEl = document.getElementById('tasks');
+  const headEl = document.getElementById('tasks-head');
+  const sumEl = document.getElementById('tasks-sum');
   const addEl = document.getElementById('add');
   const listEl = document.getElementById('list');
-  // The due field, and a trailing `>words` the page asks Rust to turn into a date.
+  // The due field, and the `>words` the page asks Rust to turn into a date.
   const DUE = /📅\s*(\d{4}-\d{2}-\d{2})/;
   const TRAIL_DUE = /(^|\s)>([^>\n]+)$/;
-  let view = 'notes';
-  let showDone = false;
-  let keep = new Set();   // line indexes ticked here, kept listed until the view reopens
+  const FOLD_KEY = 'octoweb.tasks.collapsed';
+  let area = 'notes';     // where the keyboard is: the text, or the tasks
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(FOLD_KEY) === '1'; } catch (e) { /* no storage here */ }
+  let showUndated = false;
+  let keep = new Set();   // line indexes ticked here, kept listed until the pane hides
   let shown = [];         // tasks in the order the list shows them
   let focusLine = -1;
   let captureChord = '';
   let dueSeq = 0;
   const dueWait = {};
   let adding = false;
-  let curLine = null;     // the Notes caret's line: start offset and text
+  let curLine = null;     // the caret's line in the text: start offset and text
+  let queued = false;
 
   function p2(n) { return (n < 10 ? '0' : '') + n; }
 
@@ -634,45 +652,89 @@ pub fn html(keybindings_json: &str) -> String {
   }
 
   function renderTasks() {
-    addEl.readOnly = ws === null;
+    tasksEl.hidden = ws === null;   // an unreadable file shows its error in the text
     if (ws === null) {
       shown = [];
-      listEl.innerHTML = '<div class="note err">' + esc(text.placeholder) + '</div>';
+      listEl.innerHTML = '';
       return;
     }
     const today = isoToday();
-    const all = parseTasks(text.value);
-    if (!all.length) {
-      shown = [];
-      listEl.innerHTML = '<div class="note">No tasks yet. Type - [ ] in Notes, add one in the field above, or press t on a conversation in Mail' +
-        (captureChord ? ', or press ' + esc(captureChord) + ' on a page' : '') + '.</div>';
-      return;
-    }
-    const open = all.filter(function(t) { return !t.done || keep.has(t.idx); });
+    const open = parseTasks(text.value).filter(function(t) { return !t.done || keep.has(t.idx); });
     const byDue = function(a, b) { return a.due < b.due ? -1 : a.due > b.due ? 1 : a.idx - b.idx; };
-    const groups = [
-      ['Overdue', open.filter(function(t) { return t.due && t.due < today; }).sort(byDue), true],
-      ['Today', open.filter(function(t) { return t.due === today; }).sort(byDue), false],
-      ['Upcoming', open.filter(function(t) { return t.due && t.due > today; }).sort(byDue), false],
-      ['No date', open.filter(function(t) { return !t.due; }), false]
-    ];
-    if (showDone) groups.push(['Done', all.filter(function(t) { return t.done && !keep.has(t.idx); }), false]);
+    const over = open.filter(function(t) { return t.due && t.due < today; }).sort(byDue);
+    const now = open.filter(function(t) { return t.due === today; }).sort(byDue);
+    const later = open.filter(function(t) { return t.due && t.due > today; }).sort(byDue);
+    const undated = open.filter(function(t) { return !t.due; });
+    const sum = [];
+    if (over.length) sum.push('<span class="over">' + over.length + ' overdue</span>');
+    if (now.length) sum.push(now.length + ' today');
+    if (later.length) sum.push(later.length + ' upcoming');
+    if (undated.length) sum.push(undated.length + ' without a date');
+    sumEl.innerHTML = sum.length ? '· ' + sum.join(' · ') : '';
+    const groups = [['Overdue', over, true], ['Today', now, false], ['Upcoming', later, false]];
+    if (showUndated) groups.push(['No date', undated, false]);
     shown = [];
     groups.forEach(function(g) { shown = shown.concat(g[1]); });
     if (!shown.some(function(t) { return t.idx === focusLine; })) focusLine = shown.length ? shown[0].idx : -1;
-    let h = shown.length ? '' : '<div class="note">Nothing open.</div>';
+    let h = '';
     groups.forEach(function(g) {
       if (!g[1].length) return;
       h += '<div class="grp' + (g[2] ? ' over' : '') + '">' + g[0] + '</div>';
       g[1].forEach(function(t) { h += rowHtml(t, today, g[2] && !t.done); });
     });
-    h += '<button class="more" type="button" data-act="done">' + (showDone ? 'Hide done' : 'Show done') + '</button>';
+    if (undated.length) {
+      h += '<button class="more" type="button" data-act="undated">' + (showUndated ? 'Hide tasks without a date' :
+        undated.length + (undated.length === 1 ? ' task' : ' tasks') + ' without a date') + '</button>';
+    }
     listEl.innerHTML = h;
   }
+
+  // Typing re-reads the tasks once per frame, not once per key.
+  function queueTasks() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(function() {
+      queued = false;
+      renderTasks();
+    });
+  }
+  text.addEventListener('input', queueTasks);
+
+  function setCollapsed(on) {
+    collapsed = on;
+    tasksEl.classList.toggle('collapsed', on);
+    headEl.setAttribute('aria-expanded', on ? 'false' : 'true');
+    try { localStorage.setItem(FOLD_KEY, on ? '1' : '0'); } catch (e) { /* kept for the session */ }
+  }
+  function expand() { if (collapsed) setCollapsed(false); }
+  headEl.addEventListener('click', function() { setCollapsed(!collapsed); });
+  setCollapsed(collapsed);
+
+  // Rust's ⌥⌘T and ⌘⇧J toggle by where the keyboard is.
+  function setArea(a) {
+    if (a === area) return;
+    area = a;
+    ipc({ type: 'view', view: a });
+  }
+  addEl.addEventListener('focus', function() { setArea('tasks'); });
+  listEl.addEventListener('focus', function() { setArea('tasks'); });
+  text.addEventListener('focus', function() { setArea('notes'); });
 
   function revealFocus() {
     const row = listEl.querySelector('.row.focus');
     if (row) row.scrollIntoView({ block: 'nearest' });
+  }
+
+  // The buffer with `entry` under today's heading, the caret where it was.
+  function appendLine(date, entry, reveal) {
+    const a = text.selectionStart;
+    const b = text.selectionEnd;
+    text.value = appendEntry(text.value, date, entry);
+    if (reveal) text.setSelectionRange(text.value.length, text.value.length);
+    else text.setSelectionRange(a, b);
+    render();
+    save();
+    renderTasks();
   }
 
   // Flip the box in the buffer line; saved at once, not after the typing pause.
@@ -703,7 +765,6 @@ pub fn html(keybindings_json: &str) -> String {
     for (let i = 0; i < idx; i++) at += lines[i].length + 1;
     const t = TASK.exec(lines[idx]);
     const pos = at + (t ? t[0].length : 0);
-    setView('notes');
     text.focus();
     text.setSelectionRange(pos, pos);
     const walker = document.createTreeWalker(hl, NodeFilter.SHOW_TEXT);
@@ -727,71 +788,53 @@ pub fn html(keybindings_json: &str) -> String {
     }
   }
 
-  function setView(v) {
-    if (v !== 'tasks') v = 'notes';
-    if (v === view) return;
-    if (view === 'notes') leaveLine();
-    view = v;
-    panel.classList.toggle('tasks', v === 'tasks');
-    viewNotesBtn.classList.toggle('active', v === 'notes');
-    viewNotesBtn.setAttribute('aria-selected', v === 'notes' ? 'true' : 'false');
-    viewTasksBtn.classList.toggle('active', v === 'tasks');
-    viewTasksBtn.setAttribute('aria-selected', v === 'tasks' ? 'true' : 'false');
-    if (v === 'tasks') {
-      keep = new Set();
-      text.blur();
-      renderTasks();
-    }
-    ipc({ type: 'view', view: v });
-  }
-
+  // Rust: `tasks` puts the keyboard in the task block (on `focus`, a task
+  // line, when given), `notes` in the text.
   window.__notesView = function(v, focus) {
-    setView(v);
-    if (view !== 'tasks') {
+    if (v !== 'tasks') {
       text.focus();
       return;
     }
-    if (typeof focus === 'string') {
-      const hit = parseTasks(text.value).find(function(t) { return t.line === focus; });
-      if (hit) focusLine = hit.idx;
+    expand();
+    const hit = typeof focus === 'string' && parseTasks(text.value).find(function(t) { return t.line === focus; });
+    if (hit) {
+      focusLine = hit.idx;
+      if (!hit.due) showUndated = true;
+      renderTasks();
+      listEl.focus();
+      revealFocus();
+      return;
     }
     renderTasks();
-    revealFocus();
+    scroll.scrollTop = 0;
+    addEl.focus();
   };
 
-  window.__notesDay = function() {
-    if (view === 'tasks') renderTasks();
-  };
+  window.__notesDay = renderTasks;
 
   window.__paneDue = function(n) {
     document.getElementById('due').textContent = n ? String(n) : '';
   };
 
-  viewNotesBtn.addEventListener('click', function() {
-    setView('notes');
-    text.focus();
-  });
-  viewTasksBtn.addEventListener('click', function() { setView('tasks'); });
-
-  // ---- Dates: ask Rust what a phrase like `fri` names.
+  // ---- Dates: ask Rust what the words after `>` start with; the rest stays text.
   function askDue(phrase, done) {
     const id = ++dueSeq;
     const timer = setTimeout(function() {
       delete dueWait[id];
-      done(null);
+      done(null, '');
     }, 5000);
-    dueWait[id] = function(iso) {
+    dueWait[id] = function(iso, rest) {
       clearTimeout(timer);
-      done(iso);
+      done(iso, rest);
     };
     ipc({ type: 'due', id: id, phrase: phrase });
   }
 
-  window.__notesDue = function(id, iso) {
+  window.__notesDue = function(id, iso, rest) {
     const cb = dueWait[id];
     if (!cb) return;
     delete dueWait[id];
-    cb(iso || null);
+    cb(iso || null, rest || '');
   };
 
   // Port of `notes::append`: the entry goes under the day's heading.
@@ -817,43 +860,39 @@ pub fn html(keybindings_json: &str) -> String {
   // typing, rather than into the file under it.
   window.__notesAppend = function(date, entry, reveal) {
     if (ws === null) return;
-    const a = text.selectionStart;
-    const b = text.selectionEnd;
-    text.value = appendEntry(text.value, date, entry);
-    if (reveal) {
-      text.setSelectionRange(text.value.length, text.value.length);
-    } else {
-      text.setSelectionRange(a, b);
-    }
-    render();
-    save();
-    if (view === 'tasks') renderTasks();
-    if (reveal && view === 'notes') scroll.scrollTop = scroll.scrollHeight;
+    appendLine(date, entry, reveal);
+    if (reveal && area === 'notes') scroll.scrollTop = scroll.scrollHeight;
   };
 
+  function flashAdd() {
+    addEl.classList.add('bad');
+    setTimeout(function() { addEl.classList.remove('bad'); }, 1200);
+  }
+
+  // `Pay rent >fri`, `>fri pay rent` and `Pay >fri rent` all date the task;
+  // words after `>` that are not a date stay as typed.
   function addTask() {
     if (adding || ws === null) return;
-    const raw = addEl.value.trim();
+    const raw = addEl.value.replace(/[\[\]]/g, '').trim();
     if (!raw) return;
     const m = TRAIL_DUE.exec(raw);
-    const phrase = m && m[2].trim() ? m[2].trim() : null;
-    const body = (phrase ? raw.slice(0, m.index) : raw).replace(/[\[\]]/g, '').trim();
-    if (!body) return;
-    const finish = function(iso) {
+    const lead = m ? raw.slice(0, m.index).trim() : raw;
+    const finish = function(iso, rest) {
       adding = false;
-      const entry = '- [ ] ' + body + (iso ? ' 📅 ' + iso : '');
-      text.value = appendEntry(text.value, isoToday(), entry);
-      render();
-      save();
+      const body = iso ? (lead + ' ' + rest).trim() : raw;
+      if (!body) {
+        flashAdd();
+        return;
+      }
+      appendLine(isoToday(), '- [ ] ' + body + (iso ? ' 📅 ' + iso : ''), false);
       addEl.value = '';
-      renderTasks();
       addEl.focus();
     };
-    if (phrase) {
+    if (m) {
       adding = true;
-      askDue(phrase, finish);
+      askDue(m[2].trim(), finish);
     } else {
-      finish(null);
+      finish(null, '');
     }
   }
 
@@ -866,24 +905,32 @@ pub fn html(keybindings_json: &str) -> String {
       e.preventDefault();
       if (addEl.value) addEl.value = '';
       else ipc({ type: 'hide' });
-    } else if (e.key === 'ArrowDown' && shown.length) {
+    } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      addEl.blur();
-      revealFocus();
+      if (shown.length) {
+        listEl.focus();
+        revealFocus();
+      } else {
+        text.focus();
+      }
     }
   });
 
   function move(d) {
-    if (!shown.length) return;
     let i = shown.findIndex(function(t) { return t.idx === focusLine; });
+    if (d < 0 && i <= 0) {
+      addEl.focus();
+      return;
+    }
+    if (!shown.length) return;
     i = Math.max(0, Math.min(shown.length - 1, i + d));
     focusLine = shown[i].idx;
     renderTasks();
     revealFocus();
   }
 
-  document.addEventListener('keydown', function(e) {
-    if (view !== 'tasks' || e.target === addEl || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+  listEl.addEventListener('keydown', function(e) {
+    if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key;
     if (k === 'ArrowDown' || k === 'j') move(1);
     else if (k === 'ArrowUp' || k === 'k') move(-1);
@@ -897,8 +944,8 @@ pub fn html(keybindings_json: &str) -> String {
 
   listEl.addEventListener('click', function(e) {
     const t = e.target;
-    if (t.closest('[data-act="done"]')) {
-      showDone = !showDone;
+    if (t.closest('[data-act="undated"]')) {
+      showUndated = !showUndated;
       renderTasks();
       return;
     }
@@ -918,9 +965,9 @@ pub fn html(keybindings_json: &str) -> String {
     openLine(idx);
   });
 
-  // ---- `>words` at the end of a task line becomes a 📅 date once the caret leaves it.
+  // ---- `>words` at the end of a task line become a 📅 date once the caret leaves it.
   function trackCaret() {
-    if (view !== 'notes' || document.activeElement !== text) return;
+    if (document.activeElement !== text) return;
     const l = caretLine();
     if (curLine && curLine.start !== l.start) leaveLine();
     curLine = { start: l.start, text: l.text };
@@ -941,12 +988,13 @@ pub fn html(keybindings_json: &str) -> String {
     const m = TRAIL_DUE.exec(l);
     const words = m ? m[2].trim() : '';
     if (!words) return;
-    askDue(words, function(iso) {
-      if (iso) applyDue(start, l, m.index, iso);
+    askDue(words, function(iso, rest) {
+      if (iso) applyDue(start, l, m.index, (rest ? ' ' + rest : '') + ' 📅 ' + iso);
     });
   }
 
-  function applyDue(start, l, tailAt, iso) {
+  // Replace the line's `>words` (from `tailAt`) with `s`, if the line is unchanged.
+  function applyDue(start, l, tailAt, s) {
     const v = text.value;
     let end = v.indexOf('\n', start);
     if (end < 0) end = v.length;
@@ -964,7 +1012,6 @@ pub fn html(keybindings_json: &str) -> String {
     if (at < 0) return;
     const from = at + l.slice(0, tailAt).trimEnd().length;
     const to = at + l.length;
-    const s = ' 📅 ' + iso;
     const focused = document.activeElement === text;
     if (focused && caretLine().start === at) return;
     const shift = s.length - (to - from);
@@ -980,7 +1027,7 @@ pub fn html(keybindings_json: &str) -> String {
       saveTimer = setTimeout(save, SAVE_DELAY_MS);
     }
     text.setSelectionRange(map(a), map(b));
-    if (view === 'tasks') renderTasks();
+    renderTasks();
   }
 
   document.addEventListener('selectionchange', trackCaret);
@@ -1003,7 +1050,8 @@ pub fn html(keybindings_json: &str) -> String {
     setFullscreen(panel.classList.contains('fullscreen'));
     const capture = chordFor('note_capture');
     captureChord = capture;
-    viewTasksBtn.title = 'Tasks' + (chordFor('tasks') ? ' (' + chordFor('tasks') + ')' : '');
+    const tasksChord = chordFor('tasks');
+    addEl.title = 'Add a task' + (tasksChord ? ' (' + tasksChord + ')' : '');
     placeholder = 'Notes and - [ ] tasks for this workspace, kept until you delete them.\n' +
       'Click [ ] or ⌘↩ to tick a task, ⌘-click to open a link.\n' +
       'End a task with >fri and it becomes a 📅 date.' +

@@ -515,14 +515,21 @@ fn meeting_notes(
 	key: &str,
 	ws: &str,
 ) -> Result<(calendar::CalEvent, notes::Section, String), &'static str> {
-	let event = engine.and_then(|e| e.store().event(key)).ok_or("This event is no longer in the calendar.")?;
+	let event = engine
+		.and_then(|e| e.store().event(key))
+		.ok_or("This event is no longer in the calendar.")?;
 	let text = notes::load(ws).map_err(|_| "Could not read this workspace's notes.")?;
 	let day = calendar_time::local_date(event.start).iso();
 	let sections = notes::sections(&text);
 	let section = notes::meeting_section(&sections, &event.title, &day)
 		.cloned()
 		.ok_or("This meeting has no notes yet: start them with Meeting notes.")?;
-	let heading = text.split('\n').nth(section.start).unwrap_or_default().trim_end_matches('\r').to_string();
+	let heading = text
+		.split('\n')
+		.nth(section.start)
+		.unwrap_or_default()
+		.trim_end_matches('\r')
+		.to_string();
 	Ok((event, section, heading))
 }
 
@@ -10733,12 +10740,17 @@ fn main() {
                         engine.send(mail::Command::TaskToggled { item, done });
                     }
                 }
+                // TSK-3: the date the words after `>` start with, and the words left.
                 notes::Request::Due { id, phrase } => {
                     let today = calendar_time::local_date(calendar_time::now());
-                    let due = notes::due_date(&phrase, today).map(calendar_time::Date::iso);
+                    let (due, rest) = match notes::due_split(&phrase, today) {
+                        Some((date, rest)) => (Some(date.iso()), rest),
+                        None => (None, String::new()),
+                    };
                     let _ = notes_wv.evaluate_script(&format!(
-                        "window.__notesDue && window.__notesDue({id}, {})",
-                        serde_json::to_string(&due).unwrap()
+                        "window.__notesDue && window.__notesDue({id}, {}, {})",
+                        serde_json::to_string(&due).unwrap(),
+                        serde_json::to_string(&rest).unwrap()
                     ));
                 }
                 notes::Request::View { view } => notes_mode = view,

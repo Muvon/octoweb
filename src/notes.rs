@@ -255,7 +255,11 @@ fn due_field(line: &str) -> Option<(Date, std::ops::Range<usize>)> {
 /// `YYYY-MM-DD` of a `## YYYY-MM-DD` day heading.
 fn day_heading(line: &str) -> Option<Option<String>> {
 	let rest = line.strip_prefix("## ")?;
-	Some(Date::parse(rest.trim()).filter(|_| rest.trim().len() == 10).map(Date::iso))
+	Some(
+		Date::parse(rest.trim())
+			.filter(|_| rest.trim().len() == 10)
+			.map(Date::iso),
+	)
 }
 
 /// Every task line of `text`, in file order.
@@ -323,6 +327,16 @@ pub fn due_date(phrase: &str, today: Date) -> Option<Date> {
 		.then_some(q.date)
 }
 
+/// The date the first words of `phrase` name, and the words after it:
+/// `today call bank` is today and `call bank` (TSK-3), so the date can come
+/// first or last. `None` when no leading words are a date.
+pub fn due_split(phrase: &str, today: Date) -> Option<(Date, String)> {
+	let words: Vec<&str> = phrase.split_whitespace().collect();
+	(1..=words.len().min(4))
+		.rev()
+		.find_map(|n| due_date(&words[..n].join(" "), today).map(|d| (d, words[n..].join(" "))))
+}
+
 /// A new open task line for `text`, due on `due` if given. Newlines become
 /// spaces and brackets go (AGT-2), so a task cannot turn into a link that
 /// hides where it goes.
@@ -342,7 +356,10 @@ pub fn task_line(text: &str, due: Option<Date>) -> String {
 /// A task line from one task in an AI answer: a trailing ` >YYYY-MM-DD`
 /// (or any `>` date) becomes its `📅` date (calendar AI-4).
 pub fn answer_task(answer: &str, today: Date) -> String {
-	match answer.rsplit_once(" >").and_then(|(text, phrase)| Some((text, due_date(phrase, today)?))) {
+	match answer
+		.rsplit_once(" >")
+		.and_then(|(text, phrase)| Some((text, due_date(phrase, today)?)))
+	{
 		Some((text, due)) => task_line(text, Some(due)),
 		None => task_line(answer, None),
 	}
@@ -355,7 +372,9 @@ pub fn answer_task(answer: &str, today: Date) -> String {
 pub fn set_done(text: &str, line: usize, raw: &str, done: bool) -> Option<String> {
 	let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
 	let same = |l: &String| l.strip_suffix('\r').unwrap_or(l) == raw;
-	let at = (0..lines.len()).filter(|&i| same(&lines[i])).min_by_key(|i| i.abs_diff(line))?;
+	let at = (0..lines.len())
+		.filter(|&i| same(&lines[i]))
+		.min_by_key(|i| i.abs_diff(line))?;
 	let (mark, _) = task_box(&lines[at])?;
 	lines[at].replace_range(mark..mark + 1, if done { "x" } else { " " });
 	Some(lines.join("\n"))
@@ -409,7 +428,9 @@ pub fn sections(text: &str) -> Vec<Section> {
 			Some((first, rest)) if is_clock(first) => rest.trim(),
 			_ => heading,
 		};
-		let end = (i + 1..lines.len()).find(|&j| ends_section(lines[j])).unwrap_or(lines.len());
+		let end = (i + 1..lines.len())
+			.find(|&j| ends_section(lines[j]))
+			.unwrap_or(lines.len());
 		out.push(Section {
 			day: day.clone(),
 			title: title.to_string(),
@@ -453,7 +474,10 @@ pub fn add_to_section(text: &str, start: usize, heading: &str, day: &str, entrie
 		.or_else(|| all.iter().filter(reads).rfind(|s| s.day.as_deref() == Some(day)))?
 		.clone();
 	let start = section.start;
-	let last = (start + 1..section.end).rev().find(|&i| !lines[i].trim().is_empty()).unwrap_or(start);
+	let last = (start + 1..section.end)
+		.rev()
+		.find(|&i| !lines[i].trim().is_empty())
+		.unwrap_or(start);
 	let mut at = last + 1;
 	if last > start && lines[last].trim() == "-" {
 		lines.remove(last);
@@ -518,9 +542,15 @@ mod tests {
 		            ## Ideas\n- [X] later\n";
 		let t = tasks(text);
 		assert_eq!(t.len(), 5);
-		assert_eq!((t[0].line, t[0].text.as_str(), t[0].day.as_deref(), t[0].due.as_deref()), (1, "loose", None, None));
+		assert_eq!(
+			(t[0].line, t[0].text.as_str(), t[0].day.as_deref(), t[0].due.as_deref()),
+			(1, "loose", None, None)
+		);
 		assert_eq!(t[1].text, "Pay rent now");
-		assert_eq!((t[1].due.as_deref(), t[1].day.as_deref()), (Some("2026-10-23"), Some("2026-10-21")));
+		assert_eq!(
+			(t[1].due.as_deref(), t[1].day.as_deref()),
+			(Some("2026-10-23"), Some("2026-10-21"))
+		);
 		assert!(t[2].done && t[2].text == "done");
 		assert_eq!(t[3].mail.as_deref(), Some("octoweb-mail://ab/t%40x"));
 		assert_eq!(t[3].due.as_deref(), Some("2026-10-22"));
@@ -542,27 +572,50 @@ mod tests {
 		for no in ["", "call bob", "3pm", "fri 3pm", "every fri", "fri @home", "oct 24-26"] {
 			assert_eq!(d(no), None, "{no}");
 		}
+		let s = |p: &str| due_split(p, THU).map(|(d, rest)| (d.iso(), rest));
+		assert_eq!(s("today hell"), Some(("2026-10-22".into(), "hell".into())));
+		assert_eq!(
+			s("next mon call bank"),
+			Some((due_date("next mon", THU).unwrap().iso(), "call bank".into()))
+		);
+		assert_eq!(s("oct 28"), Some(("2026-10-28".into(), String::new())));
+		assert_eq!(s("hello there"), None);
 	}
 
 	#[test]
 	fn new_task_lines_are_plain_and_dated() {
 		assert_eq!(task_line("Pay [rent]\nnow", None), "- [ ] Pay rent now");
 		assert_eq!(task_line("Pay", Some(THU)), "- [ ] Pay \u{1F4C5} 2026-10-22");
-		assert_eq!(answer_task("Send deck >2026-10-30", THU), "- [ ] Send deck \u{1F4C5} 2026-10-30");
+		assert_eq!(
+			answer_task("Send deck >2026-10-30", THU),
+			"- [ ] Send deck \u{1F4C5} 2026-10-30"
+		);
 		assert_eq!(answer_task("Compare a >b", THU), "- [ ] Compare a >b");
-		assert_eq!(task_line("Pay \u{1F4C5} 2026-01-01", Some(THU)), "- [ ] Pay \u{1F4C5} 2026-10-22");
+		assert_eq!(
+			task_line("Pay \u{1F4C5} 2026-01-01", Some(THU)),
+			"- [ ] Pay \u{1F4C5} 2026-10-22"
+		);
 	}
 
 	#[test]
 	fn ticking_finds_the_task_even_when_it_moved() {
 		let text = "a\n- [ ] one\n- [ ] two\n";
-		assert_eq!(set_done(text, 2, "- [ ] two", true).unwrap(), "a\n- [ ] one\n- [x] two\n");
-		assert_eq!(set_done(text, 0, "- [ ] two", true).unwrap(), "a\n- [ ] one\n- [x] two\n");
+		assert_eq!(
+			set_done(text, 2, "- [ ] two", true).unwrap(),
+			"a\n- [ ] one\n- [x] two\n"
+		);
+		assert_eq!(
+			set_done(text, 0, "- [ ] two", true).unwrap(),
+			"a\n- [ ] one\n- [x] two\n"
+		);
 		assert_eq!(set_done("  * [x] z", 0, "  * [x] z", false).unwrap(), "  * [ ] z");
 		assert_eq!(set_done(text, 1, "- [ ] gone", true), None);
 		// The same task on two days: the one nearest where it was.
 		let twice = "- [ ] call\nx\ny\n- [ ] call\n";
-		assert_eq!(set_done(twice, 4, "- [ ] call", true).unwrap(), "- [ ] call\nx\ny\n- [x] call\n");
+		assert_eq!(
+			set_done(twice, 4, "- [ ] call", true).unwrap(),
+			"- [ ] call\nx\ny\n- [x] call\n"
+		);
 	}
 
 	#[test]
@@ -571,7 +624,10 @@ mod tests {
 		            ## 2026-10-22\n\n### 9:30 Weekly sync\n\nWith Anna\n\n- \n\n### Other\nx\n";
 		let s = sections(text);
 		assert_eq!(s.len(), 3);
-		assert_eq!((s[0].title.as_str(), s[0].day.as_deref()), ("Weekly sync", Some("2026-10-15")));
+		assert_eq!(
+			(s[0].title.as_str(), s[0].day.as_deref()),
+			("Weekly sync", Some("2026-10-15"))
+		);
 		assert_eq!(s[0].body, "With Anna\n\n- ship it");
 		let now = meeting_section(&s, "weekly sync", "2026-10-22").unwrap();
 		assert_eq!(now.start, 10);
@@ -584,9 +640,15 @@ mod tests {
 		// Lines moved: the heading is found again under its day, not last week's.
 		let moved = format!("new line\n{text}");
 		let again = add_to_section(&moved, 10, "### 10:00 Weekly sync", "2026-10-15", &tasks).unwrap();
-		assert!(again.contains("- ship it\n- [ ] a\n- [ ] b\n\n## 2026-10-22"), "{again}");
+		assert!(
+			again.contains("- ship it\n- [ ] a\n- [ ] b\n\n## 2026-10-22"),
+			"{again}"
+		);
 		// Under a bare heading they start after a blank line.
-		assert_eq!(add_to_section("### X", 0, "### X", "", &["- [ ] a".into()]).unwrap(), "### X\n\n- [ ] a");
+		assert_eq!(
+			add_to_section("### X", 0, "### X", "", &["- [ ] a".into()]).unwrap(),
+			"### X\n\n- [ ] a"
+		);
 		assert_eq!(add_to_section(text, 10, "### gone", "2026-10-22", &tasks), None);
 	}
 }
