@@ -73,8 +73,11 @@ pub enum Action {
 	SaveLater,
 	Terminal,
 	Notes,
+	Tasks,
 	NoteCapture,
 	Inbox,
+	Calendar,
+	JoinMeeting,
 }
 
 /// `(action, stable id, human label, group, default chord)`.
@@ -263,7 +266,7 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 	(
 		Action::ReopenTab,
 		"reopen_tab",
-		"Reopen closed tab",
+		"Reopen closed tab / session",
 		"Tabs & Navigation",
 		"cmd+shift+t",
 	),
@@ -283,6 +286,13 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 	),
 	(Action::Notes, "notes", "Toggle notes", "Tools", "cmd+shift+j"),
 	(
+		Action::Tasks,
+		"tasks",
+		"Add a task (notes' task list)",
+		"Tools",
+		"cmd+opt+t",
+	),
+	(
 		Action::NoteCapture,
 		"note_capture",
 		"Capture page as task, or selection as quote, to notes",
@@ -295,6 +305,20 @@ const ACTION_TABLE: &[(Action, &str, &str, &str, &str)] = &[
 		"Toggle inbox (mail)",
 		"AI & Panels",
 		"cmd+shift+i",
+	),
+	(
+		Action::Calendar,
+		"calendar",
+		"Toggle calendar",
+		"AI & Panels",
+		"cmd+shift+d",
+	),
+	(
+		Action::JoinMeeting,
+		"join_meeting",
+		"Join the current or next meeting (when there is one)",
+		"AI & Panels",
+		"cmd+j",
 	),
 ];
 

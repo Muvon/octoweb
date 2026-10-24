@@ -474,6 +474,22 @@ Anna\r\n";
 	}
 
 	#[test]
+	fn invitations_show_their_calendar_part() {
+		let raw = "From: a@b\r\nSubject: Invitation\r\nContent-Type: multipart/mixed; boundary=M\r\n\r\n\
+--M\r\nContent-Type: multipart/alternative; boundary=A\r\n\r\n\
+--A\r\nContent-Type: text/plain\r\n\r\nYou are invited\r\n\
+--A\r\nContent-Type: text/calendar; charset=UTF-8; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n\
+--A--\r\n\
+--M\r\nContent-Type: application/ics; name=invite.ics\r\nContent-Disposition: attachment; filename=invite.ics\r\n\r\nBEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n\
+--M--\r\n";
+		let p = parse(raw.as_bytes(), "f").unwrap();
+		// The mail page finds invitations among the attachments: the inline
+		// `text/calendar` alternative and an attached `.ics` both list.
+		let mimes: Vec<&str> = p.attachments.iter().map(|a| a.mime.as_str()).collect();
+		assert_eq!(mimes, ["text/calendar", "application/ics"]);
+	}
+
+	#[test]
 	fn attachments_come_with_their_type_and_contents() {
 		let raw = "From: a@b\r\nSubject: x\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n\
 --B\r\nContent-Type: text/plain\r\n\r\nSee attached.\r\n\

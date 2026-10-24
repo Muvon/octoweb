@@ -6,6 +6,13 @@ mod agent_tabs;
 mod agent_workspace;
 mod async_eval;
 mod browser;
+mod calendar;
+mod calendar_dav;
+mod calendar_google;
+mod calendar_graph;
+mod calendar_html;
+mod calendar_quick;
+mod calendar_time;
 mod cold_open;
 mod config;
 mod content_rules;
@@ -21,6 +28,7 @@ mod find_bar_html;
 mod geolocation;
 mod hibernation;
 mod hold_reorder_js;
+mod http;
 mod icons;
 mod inline_edit_html;
 mod keybindings;
@@ -134,6 +142,7 @@ enum AppEvent {
 	AcpSessionCreatePanel,                          // ⌘T in sidebar — open the new-session input panel
 	AcpSessionClose(u64),                           // (session_id) — close session (refused if last one)
 	AcpSessionCloseActive,                          // ⌘W in sidebar — close currently active session
+	AcpSessionReopen,                               // ⌘⇧T in sidebar — reopen the last session closed in this workspace
 	AcpSessionSwitch(u64),                          // (session_id) — switch active session
 	AcpSessionRename(u64, String),                  // (session_id, title) — rename session
 	SidebarReady,                                   // sidebar JS finished initializing — push restore
@@ -258,6 +267,8 @@ enum AppEvent {
 	Terminal(terminal::Request),      // message from the terminal panel page
 	TerminalOutput(u32),              // (terminal_id) — shell output or exit: answer the panel's read
 	ToggleNotes,                      // ⌘⇧J — show/hide the notes column
+	ToggleTasks,                      // ⌥⌘T — show/hide the notes column on its Tasks view
+	ShowTasks(Option<String>),        // the notes column on its Tasks view, focusing the task line given
 	TogglePaneFullscreen,             // ⌘⇧Return in the notes / header icon — fill the window
 	NoteCaptureRequest,               // ⌥⌘J — add the page, or quote the selection, to notes
 	Notes(notes::Request),            // message from the notes panel page
@@ -268,6 +279,13 @@ enum AppEvent {
 	OpenMailThread(mail::Item, bool), // open a conversation in the mail tab; true when from notes
 	MailVerify(String),               // Settings → Mail "Check connection" for this account key
 	MailSignIn(String),               // Settings → Mail "Sign in with Google/Microsoft" for this account key
+	ToggleCalendar,                   // ⌘⇧D — show/hide the pane on Calendar
+	ShowCalendar,                     // the pane on Calendar, if not already
+	Calendar(calendar::Request),      // message from the calendar page
+	CalendarEngine(calendar::Event),  // from the calendar engine
+	JoinMeeting,                      // ⌘J — open the current or next meeting's video call
+	CalendarConnect(String),          // Settings → Mail "Connect calendar" for this account key
+	CalendarSubscribeLink(String),    // a webcal:// link was followed: offer to subscribe
 	Extension(extensions::Event),     // extension UI command, download result, or WebKit request
 	Quit,
 }
@@ -291,6 +309,7 @@ enum PanelFocusTarget {
 	Terminal,
 	Notes,
 	Mail,
+	Calendar,
 	ActiveTab,
 }
 
@@ -316,11 +335,10 @@ fn wants_browser_context(text: &str) -> bool {
 	!text.trim_start().starts_with('/')
 }
 
-/// Remember a closed tab's URL for ⌘⇧T: newest last, oldest evicted at
-/// `CLOSED_TAB_HISTORY`.
-fn push_closed_tab(stack: &mut Vec<String>, url: String) {
-	stack.push(url);
-	if stack.len() > CLOSED_TAB_HISTORY {
+/// Remember something closed for ⌘⇧T: newest last, oldest evicted at `cap`.
+fn push_closed<T>(stack: &mut Vec<T>, item: T, cap: usize) {
+	stack.push(item);
+	if stack.len() > cap {
 		stack.remove(0);
 	}
 }
@@ -395,6 +413,7 @@ fn keybind_to_event(
 		A::Back if !overlay && !inline && !sidebar && !address_edit => AppEvent::Back,
 		A::Forward if !overlay && !inline && !sidebar && !address_edit => AppEvent::Forward,
 		A::NewTab if !overlay && !inline => AppEvent::NewTab,
+		A::ReopenTab if sidebar && !overlay && !inline => AppEvent::AcpSessionReopen,
 		A::ReopenTab if !overlay && !inline => AppEvent::ReopenTab,
 		A::FollowLink if !overlay && !inline && !sidebar && !address_edit && !workspaces => AppEvent::FollowLink,
 		A::StopLoad if !overlay && !inline => AppEvent::StopLoad,
@@ -416,7 +435,11 @@ fn keybind_to_event(
 		A::TogglePin if !overlay => AppEvent::TogglePin,
 		A::Terminal if !overlay => AppEvent::ToggleTerminal,
 		A::Notes if !overlay => AppEvent::ToggleNotes,
+		A::Tasks if !overlay => AppEvent::ToggleTasks,
 		A::Inbox if !overlay => AppEvent::ToggleInbox,
+		A::Calendar if !overlay => AppEvent::ToggleCalendar,
+		// The event tap passes ⌘J through when there is nothing to join.
+		A::JoinMeeting if !overlay && !inline => AppEvent::JoinMeeting,
 		A::NoteCapture if !overlay && !inline && !address_edit => AppEvent::NoteCaptureRequest,
 		_ => return None,
 	})
@@ -431,7 +454,9 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
 	Some(match action {
 		A::Terminal => AppEvent::ToggleTerminal,
 		A::Notes => AppEvent::ToggleNotes,
+		A::Tasks => AppEvent::ToggleTasks,
 		A::Inbox => AppEvent::ToggleInbox,
+		A::Calendar => AppEvent::ToggleCalendar,
 		A::SidebarFullscreen => AppEvent::ToggleTerminalFullscreen,
 		A::NewSession => AppEvent::TerminalScript("window.__termNew()"),
 		A::CloseTab => AppEvent::TerminalScript("window.__termClose()"),
@@ -453,18 +478,23 @@ fn terminal_keybind_to_event(action: keybindings::Action) -> Option<AppEvent> {
 enum PaneTab {
 	Notes,
 	Mail,
+	Calendar,
 }
 
 /// Map a keybinding while the right-hand pane has the keyboard. `None` hands
 /// the key to the page: ⌃ keys move the caret in notes, single letters
-/// triage mail, ⌘↩ toggles a task or sends.
+/// triage mail, ⌘↩ toggles a task or sends, ⌘J writes with AI in mail.
 fn pane_keybind_to_event(action: keybindings::Action, tab: PaneTab) -> Option<AppEvent> {
 	use keybindings::Action as A;
 	Some(match action {
-		A::CloseTab if tab == PaneTab::Notes => AppEvent::ToggleNotes,
+		A::CloseTab if tab == PaneTab::Notes => AppEvent::Notes(notes::Request::Hide),
+		A::CloseTab if tab == PaneTab::Calendar => AppEvent::ToggleCalendar,
 		A::CloseTab => AppEvent::ToggleInbox,
 		A::Notes => AppEvent::ToggleNotes,
+		A::Tasks => AppEvent::ToggleTasks,
 		A::Inbox => AppEvent::ToggleInbox,
+		A::Calendar => AppEvent::ToggleCalendar,
+		A::JoinMeeting if tab == PaneTab::Calendar => AppEvent::JoinMeeting,
 		A::SidebarFullscreen => AppEvent::TogglePaneFullscreen,
 		A::Terminal => AppEvent::ToggleTerminal,
 		A::Quit => AppEvent::Quit,
@@ -475,6 +505,32 @@ fn pane_keybind_to_event(action: keybindings::Action, tab: PaneTab) -> Option<Ap
 		A::ToggleWorkspaces => AppEvent::ToggleWorkspaces,
 		_ => return None,
 	})
+}
+
+/// Meeting `key`, its notes section in workspace `ws`'s notes and that
+/// section's heading line (spec 002-calendar AI-4), or what the user should
+/// hear instead.
+fn meeting_notes(
+	engine: Option<&calendar::Engine>,
+	key: &str,
+	ws: &str,
+) -> Result<(calendar::CalEvent, notes::Section, String), &'static str> {
+	let event = engine
+		.and_then(|e| e.store().event(key))
+		.ok_or("This event is no longer in the calendar.")?;
+	let text = notes::load(ws).map_err(|_| "Could not read this workspace's notes.")?;
+	let day = calendar_time::local_date(event.start).iso();
+	let sections = notes::sections(&text);
+	let section = notes::meeting_section(&sections, &event.title, &day)
+		.cloned()
+		.ok_or("This meeting has no notes yet: start them with Meeting notes.")?;
+	let heading = text
+		.split('\n')
+		.nth(section.start)
+		.unwrap_or_default()
+		.trim_end_matches('\r')
+		.to_string();
+	Ok((event, section, heading))
 }
 
 /// A `render_ui` call parked until the user clicks one of its buttons. The
@@ -561,6 +617,44 @@ pub(crate) struct AcpSession {
 	account_json: Option<String>,
 }
 
+impl AcpSession {
+	/// A persisted chat back in the strip: its saved log and octomind session,
+	/// unconnected unless `handle` is given (see `AcpSessionSwitch`).
+	fn from_snapshot(id: u64, snap: config::AcpSessionSnapshot, handle: Option<agent::AgentHandle>) -> Self {
+		Self {
+			id,
+			title: snap.title,
+			tag: snap.tag,
+			handle,
+			retry_count: 0,
+			reconnect_gen: 0,
+			last_cancel_at: None,
+			prompt_in_flight: false,
+			acp_session_id: snap.acp_session_id,
+			messages: snap.messages,
+			agent_buf: String::new(),
+			specialist_runs: specialist::Cache::default(),
+			tool_buf: Vec::new(),
+			tool_starts: HashMap::new(),
+			tool_since_text: false,
+			turn_started: None,
+			available_commands_json: None,
+			account_json: None,
+		}
+	}
+
+	/// What `acp_history.json` keeps of this session.
+	fn snapshot(&self, max_msgs: usize) -> config::AcpSessionSnapshot {
+		config::AcpSessionSnapshot {
+			id: self.id,
+			title: self.title.clone(),
+			tag: self.tag.clone(),
+			acp_session_id: self.acp_session_id.clone(),
+			messages: acp_messages_snapshot(self, max_msgs),
+		}
+	}
+}
+
 /// Hard cap on parallel assistant sessions per workspace.
 pub const MAX_SESSIONS: usize = 10;
 
@@ -576,6 +670,9 @@ const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
 
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
+/// How many closed assistant chats per workspace ⌘⇧T in the sidebar can bring
+/// back. Each keeps its message log on disk, so this stays small.
+const CLOSED_SESSION_HISTORY: usize = 10;
 /// Quiet time after mail changes before the summarizer runs (AI-1).
 const MAIL_SUMMARY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Local hour from which the morning brief may run (AI-4).
@@ -949,6 +1046,7 @@ fn main() {
 			let p5 = proxy.clone();
 			let p6 = proxy.clone();
 			let p7 = proxy.clone();
+			let p8 = proxy.clone();
 			let sz = browser_win.inner_size();
 			let scale = browser_win.scale_factor();
 			let bar_h = (ADDRESS_BAR_H_LOGICAL * scale) as u32;
@@ -980,7 +1078,12 @@ fn main() {
                 .with_initialization_script_for_main_only(webview_utils::SUBFRAME_MEDIA_SCRIPT, false)
                 // Intercept navigation to external URL schemes (tg://, figma://, mailto:, etc.)
                 // and hand them off to macOS instead of loading them in the WebView.
-                .with_navigation_handler(|nav_url: String| {
+                .with_navigation_handler(move |nav_url: String| {
+                    // A calendar feed link: offer to subscribe here (spec 002 SUB-3).
+                    if is_webcal(&nav_url) {
+                        let _ = p8.send_event(AppEvent::CalendarSubscribeLink(nav_url));
+                        return false;
+                    }
                     if url::is_external_scheme(&nav_url) {
                         macos::open_external_url(&nav_url);
                         return false; // prevent WebView from navigating
@@ -1785,6 +1888,11 @@ fn main() {
 								let _ = p.send_event(AppEvent::MailSignIn(id.to_string()));
 							}
 						}
+						Some("calendar_connect") => {
+							if let Some(id) = v["id"].as_str() {
+								let _ = p.send_event(AppEvent::CalendarConnect(id.to_string()));
+							}
+						}
 						Some("mail_verify") => {
 							if let Some(id) = v["id"].as_str() {
 								let _ = p.send_event(AppEvent::MailVerify(id.to_string()));
@@ -2165,6 +2273,12 @@ fn main() {
 						}
 						Some("toggle_workspaces") => {
 							let _ = p.send_event(AppEvent::ToggleWorkspaces);
+						}
+						Some("join_meeting") => {
+							let _ = p.send_event(AppEvent::JoinMeeting);
+						}
+						Some("show_calendar") => {
+							let _ = p.send_event(AppEvent::ShowCalendar);
 						}
 						Some("toggle_shortcuts") => {
 							let _ = p.send_event(AppEvent::ToggleShortcuts);
@@ -2631,7 +2745,10 @@ fn main() {
 		// straight into the live session. Cloning first copied every message
 		// (and its tool payloads) before the cap was applied two lines later,
 		// on the main thread ahead of first paint.
-		let persisted = persisted_acp.as_mut().and_then(|h| h.workspaces.remove(&ws.id));
+		let mut persisted = persisted_acp.as_mut().and_then(|h| h.workspaces.remove(&ws.id));
+		if let Some(h) = persisted.as_mut() {
+			ws.closed_acp_sessions = std::mem::take(&mut h.closed);
+		}
 		let (built_sessions, active_id) = match persisted {
 			Some(h) if !h.sessions.is_empty() => {
 				let cap = cfg.max_acp_session_messages;
@@ -2660,26 +2777,7 @@ fn main() {
 					} else {
 						None // lazy: connect on AcpSessionSwitch / workspace switch
 					};
-					built.push(AcpSession {
-						id: snap.id,
-						title: snap.title,
-						tag: snap.tag,
-						handle,
-						retry_count: 0,
-						reconnect_gen: 0,
-						last_cancel_at: None,
-						acp_session_id: snap.acp_session_id,
-						messages: snap.messages,
-						agent_buf: String::new(),
-						specialist_runs: specialist::Cache::default(),
-						tool_buf: Vec::new(),
-						tool_starts: HashMap::new(),
-						tool_since_text: false,
-						turn_started: None,
-						prompt_in_flight: false,
-						available_commands_json: None,
-						account_json: None,
-					});
+					built.push(AcpSession::from_snapshot(snap.id, snap, handle));
 				}
 				let active = if built.iter().any(|s| s.id == persisted_active_id) {
 					persisted_active_id
@@ -2870,6 +2968,10 @@ fn main() {
 	let _ = notes_wv.set_visible(false);
 	let notes_view = objc2::rc::Retained::as_ptr(&notes_wv.webview()) as usize;
 	let mut notes_visible = false;
+	// Which view the notes panel shows: `notes` (the text) or `tasks` (spec 003-tasks VIEW-1).
+	let mut notes_mode = String::from("notes");
+	// The local day the task count was last pushed for (003-tasks CNT-2).
+	let mut tasks_day = notes::today();
 	let mut pane_focus_target = PanelFocusTarget::ActiveTab;
 	// The active workspace's notes as the panel and the file last agreed, to
 	// spot edits made in another editor.
@@ -2944,6 +3046,62 @@ fn main() {
 	}
 	// The new-mail toast on screen: a click opens its mail in its workspace.
 	let mut mail_toast: Option<mail::Burst> = None;
+	// Calendar: the pane's third tab (spec 002-calendar), and the engine that
+	// keeps every account's calendars in sync on its own thread.
+	let calendar_wv = WebViewBuilder::new()
+		.with_html(calendar_html::html(&keymap.read().unwrap().ui_json().to_string()))
+		.with_transparent(true)
+		// Built hidden: it must not take the keyboard until it is shown.
+		.with_focused(false)
+		.with_accept_first_mouse(true)
+		.with_navigation_handler(webview_utils::pane_navigation_policy())
+		.with_ipc_handler({
+			let p = proxy.clone();
+			move |msg| match serde_json::from_str::<calendar::Request>(msg.body()) {
+				Ok(request) => {
+					let _ = p.send_event(AppEvent::Calendar(request));
+				}
+				Err(e) => tracing::warn!(error = %e, "malformed calendar page message"),
+			}
+		})
+		.build_as_child(&*chrome_win)
+		.expect("Failed to create calendar WebView");
+	let _ = calendar_wv.set_visible(false);
+	let calendar_view = objc2::rc::Retained::as_ptr(&calendar_wv.webview()) as usize;
+	let mut calendar_visible = false;
+	let calendar_engine = {
+		let p = proxy.clone();
+		calendar::Engine::start(config::base_dir().join("octoweb").join("calendar.json"), move |event| {
+			let _ = p.send_event(AppEvent::CalendarEngine(event));
+		})
+	};
+	let calendar_engine = match calendar_engine {
+		Ok(engine) => Some(engine),
+		Err(e) => {
+			tracing::error!(error = %e, "calendar engine did not start");
+			None
+		}
+	};
+	if let Some(engine) = &calendar_engine {
+		engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+	}
+	// Each account's calendar state, for the pane and Settings.
+	let mut calendar_status: HashMap<String, (&'static str, String)> = HashMap::new();
+	// What the meeting clock last pushed, so it only speaks on change.
+	let mut meeting_shown: Option<(String, i64)> = None;
+	let mut meeting_check_at = std::time::Instant::now();
+	// Occurrences already alerted, by key and start.
+	let mut meeting_alerted: std::collections::HashSet<(String, i64)> = std::collections::HashSet::new();
+	// The meeting alert on screen: a click joins it, or opens it.
+	let mut meeting_toast: Option<calendar::CalEvent> = None;
+	// An `.ics` file read for import, waiting for the user to pick a calendar.
+	let mut calendar_import: Option<(String, String)> = None;
+	// Mail invitations shown in the mail page: message id → the `text/calendar`.
+	let mut mail_invites: HashMap<i64, String> = HashMap::new();
+	// Calendar writes the app starts itself (from mail), apart from the page's.
+	let mut calendar_op: u64 = 1 << 40;
+	// Whether ⌘J has a meeting to join; otherwise the key reaches the page.
+	let meeting_joinable = Arc::new(AtomicBool::new(false));
 	// The panel holding the keyboard in chrome_win and its own title (see `panel_focus!`).
 	let mut chrome_title_panel: Option<&'static str> = None;
 	let mut chrome_panel_title = String::new();
@@ -2977,6 +3135,7 @@ fn main() {
 		let inline_edit_state = Arc::clone(&inline_edit_hotkey_visible);
 		let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
 		let workspaces_state = Arc::clone(&workspace_switcher_visible);
+		let joinable = Arc::clone(&meeting_joinable);
 
 		let handler = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
 			if event.is_null() {
@@ -3018,6 +3177,9 @@ fn main() {
 			// command palette is open) falls through so the key still reaches
 			// the focused WebView — mirroring the previous hardcoded behavior.
 			let action = km.read().ok().and_then(|k| k.lookup(mods, keycode));
+			// ⌘J joins only while there is a meeting to join; otherwise it is
+			// the page's key, as it was.
+			let action = action.filter(|a| *a != keybindings::Action::JoinMeeting || joinable.load(Ordering::Relaxed));
 			if key_focus_in(terminal_view) {
 				return match action.and_then(terminal_keybind_to_event) {
 					Some(ev) => {
@@ -3031,6 +3193,8 @@ fn main() {
 				Some(PaneTab::Notes)
 			} else if key_focus_in_shown(mail_view) {
 				Some(PaneTab::Mail)
+			} else if key_focus_in_shown(calendar_view) {
+				Some(PaneTab::Calendar)
 			} else {
 				None
 			};
@@ -3195,6 +3359,19 @@ fn main() {
 			let _ = mail_wv.evaluate_script("window.__mail && window.__mail.focus()");
 		}};
 	}
+	/// Hand the keyboard to the calendar tab.
+	macro_rules! focus_calendar {
+		() => {{
+			unsafe {
+				use objc2::msg_send;
+				use objc2::runtime::AnyObject;
+				let ns_win: *mut AnyObject = chrome_win.ns_window() as *mut AnyObject;
+				let _: () = msg_send![ns_win, makeKeyWindow];
+			}
+			let _ = calendar_wv.focus();
+			let _ = calendar_wv.evaluate_script("window.__cal && window.__cal.focus()");
+		}};
+	}
 	macro_rules! capture_panel_focus {
 		() => {{
 			let chrome_is_key = unsafe {
@@ -3210,6 +3387,8 @@ fn main() {
 				PanelFocusTarget::Notes
 			} else if key_focus_in_shown(mail_view) {
 				PanelFocusTarget::Mail
+			} else if key_focus_in_shown(calendar_view) {
+				PanelFocusTarget::Calendar
 			} else if chrome_is_key && sidebar_owns_key.load(Ordering::Relaxed) {
 				PanelFocusTarget::Sidebar
 			} else if address_bar_editing {
@@ -3250,6 +3429,7 @@ fn main() {
 					PanelFocusTarget::Terminal if terminal_visible => focus_terminal!(),
 					PanelFocusTarget::Notes if notes_visible => focus_notes!(),
 					PanelFocusTarget::Mail if mail_visible => focus_mail!(),
+					PanelFocusTarget::Calendar if calendar_visible => focus_calendar!(),
 					_ => {
 						unsafe {
 							use objc2::msg_send;
@@ -3288,6 +3468,8 @@ fn main() {
 					terminal_wv.evaluate_script(&format!("window.__setShortcuts && window.__setShortcuts({})", json));
 				let _ = notes_wv.evaluate_script(&format!("window.__setShortcuts && window.__setShortcuts({})", json));
 				let _ = mail_wv.evaluate_script(&format!("window.__setShortcuts && window.__setShortcuts({})", json));
+				let _ =
+					calendar_wv.evaluate_script(&format!("window.__setShortcuts && window.__setShortcuts({})", json));
 				for ws in workspace_manager.list() {
 					let new_tab_ids: std::collections::HashSet<usize> = ws
 						.tabs
@@ -3683,7 +3865,7 @@ fn main() {
 			} else {
 				0
 			};
-			let notes_w = if (notes_visible || mail_visible) && !pane_fullscreen {
+			let notes_w = if (notes_visible || mail_visible || calendar_visible) && !pane_fullscreen {
 				docked_pane_w!()
 			} else {
 				0
@@ -3707,6 +3889,9 @@ fn main() {
 			}
 			if mail_visible {
 				let _ = mail_wv.set_bounds(pane_bounds!());
+			}
+			if calendar_visible {
+				let _ = calendar_wv.set_bounds(pane_bounds!());
 			}
 		}};
 	}
@@ -3737,6 +3922,13 @@ fn main() {
 		}};
 	}
 
+	macro_rules! park_calendar {
+		() => {{
+			let _ = calendar_wv.set_visible(false);
+			calendar_visible = false;
+		}};
+	}
+
 	/// Hide the right-hand pane, whichever tab it shows.
 	macro_rules! hide_pane {
 		() => {{
@@ -3745,6 +3937,9 @@ fn main() {
 			}
 			if mail_visible {
 				park_mail!();
+			}
+			if calendar_visible {
+				park_calendar!();
 			}
 			// Reset on hide so the next open is docked, as the sidebar does.
 			pane_fullscreen = false;
@@ -3761,7 +3956,20 @@ fn main() {
 			let n: usize = keys.iter().filter_map(|k| mail_unread.get(k)).sum();
 			let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.unread({n})"));
 			let _ = notes_wv.evaluate_script(&format!("window.__paneUnread && window.__paneUnread({n})"));
+			let _ = calendar_wv.evaluate_script(&format!("window.__cal && window.__cal.unread({n})"));
 			let _ = address_bar_wv.evaluate_script(&format!("window.__setMailUnread && window.__setMailUnread({n})"));
+		}};
+	}
+
+	/// Open tasks due today or overdue in the workspace on screen, on the
+	/// Notes tab of each pane page (spec 003-tasks CNT-1).
+	macro_rules! push_tasks_due {
+		() => {{
+			let today = calendar_time::local_date(calendar_time::now());
+			let n = notes::load(&workspace_manager.active().id).map_or(0, |text| notes::due_count(&text, today));
+			let _ = notes_wv.evaluate_script(&format!("window.__paneDue && window.__paneDue({n})"));
+			let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.due && window.__mail.due({n})"));
+			let _ = calendar_wv.evaluate_script(&format!("window.__cal && window.__cal.due && window.__cal.due({n})"));
 		}};
 	}
 
@@ -3789,6 +3997,7 @@ fn main() {
             });
             let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.setup({setup})"));
             push_mail_unread!();
+            push_tasks_due!();
         }};
     }
 
@@ -3798,6 +4007,8 @@ fn main() {
 			if !mail_visible {
 				if notes_visible {
 					park_notes!();
+				} else if calendar_visible {
+					park_calendar!();
 				} else {
 					pane_focus_target = capture_panel_focus!();
 				}
@@ -3825,7 +4036,7 @@ fn main() {
 				}
 				engine.send(mail::Command::SetAccounts {
 					ready,
-					configured: keys,
+					configured: keys.clone(),
 				});
 			}
 			let _ = settings_wv.evaluate_script(&mail_status_script(&mail_status));
@@ -3833,6 +4044,102 @@ fn main() {
 				mount_mail!();
 			}
 			push_mail_unread!();
+			if let Some(engine) = &calendar_engine {
+				calendar_status.retain(|k, _| keys.contains(k) || k.starts_with("feed"));
+				engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+			}
+			if calendar_visible {
+				mount_calendar!();
+			}
+		}};
+	}
+
+	/// Keys of the active workspace's calendars: its accounts' and feeds.
+	macro_rules! calendar_keys {
+		() => {{
+			calendar::keys_in(&cfg, &workspace_manager.active().id)
+		}};
+	}
+
+	/// Tell the calendar page which workspace is on screen, its accounts and
+	/// feeds, and their calendars.
+	macro_rules! mount_calendar {
+		() => {{
+			let ws = workspace_manager.active();
+			let state_of = |key: &str| calendar_status.get(key).cloned().unwrap_or(("connecting", String::new()));
+			let mut accounts: Vec<serde_json::Value> = cfg
+				.mail_accounts
+				.iter()
+				.filter(|a| a.calendar && a.scope.includes(&ws.id))
+				.map(|a| {
+					let key = mail::hex(&a.id);
+					let (state, message) = state_of(&key);
+					serde_json::json!({
+						"key": key, "address": a.address, "kind": calendar::kind(a), "state": state, "message": message,
+					})
+				})
+				.collect();
+			accounts.extend(cfg.calendar_feeds.iter().filter(|f| f.scope.includes(&ws.id)).map(|f| {
+				let key = calendar::feed_key(f);
+				let (state, message) = state_of(&key);
+				let label = if f.name.trim().is_empty() { f.url.clone() } else { f.name.trim().to_string() };
+				serde_json::json!({
+					"key": key, "address": label, "kind": "feed", "state": state, "message": message,
+				})
+			}));
+			let keys = calendar_keys!();
+			let calendars = calendar_engine.as_ref().map(|e| e.store().calendars(&keys)).unwrap_or_default();
+			let setup = serde_json::json!({
+				"ws": ws.id, "accounts": accounts, "calendars": calendars, "hidden": cfg.calendar_hidden,
+				"prefs": { "default_calendar": cfg.calendar_default, "alert_min": cfg.calendar_alert_min, "ai": cfg.mail_ai },
+			});
+			let _ = calendar_wv.evaluate_script(&calendar::script("setup", &[setup]));
+			push_tasks_due!();
+		}};
+	}
+
+	/// Hand the mail page the card for the invitation in message `$message`:
+	/// what it is, and the user's copy of it in this workspace's calendars.
+	macro_rules! push_invite {
+		($message:expr) => {{
+			let message: i64 = $message;
+			if let Some(text) = mail_invites.get(&message) {
+				let keys = calendar_keys!();
+				let card = calendar_engine
+					.as_ref()
+					.and_then(|e| calendar::invitation(text, &e.store(), &keys));
+				let data = match card {
+					Some(card) => serde_json::json!({ "message": message, "card": card }),
+					None => serde_json::json!({ "message": message, "error": "This invitation could not be read." }),
+				};
+				let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.invite && window.__mail.invite({data})"));
+			}
+		}};
+	}
+
+	/// Show the pane on its Calendar tab, switching from another tab.
+	macro_rules! show_calendar {
+		() => {{
+			if !calendar_visible {
+				if notes_visible {
+					park_notes!();
+				} else if mail_visible {
+					park_mail!();
+				} else {
+					pane_focus_target = capture_panel_focus!();
+				}
+				calendar_visible = true;
+				layout_terminal!();
+				let _ = calendar_wv.evaluate_script(&calendar::script("fullscreen", &[pane_fullscreen.into()]));
+				let _ = calendar_wv.set_visible(true);
+				mount_calendar!();
+				meeting_shown = None;
+				meeting_check_at = std::time::Instant::now();
+				if let Some(engine) = &calendar_engine {
+					engine.send(calendar::Command::Refresh(None));
+				}
+			}
+			focus_calendar!();
 		}};
 	}
 
@@ -3875,8 +4182,77 @@ fn main() {
                 "window.__notesMailAccounts && window.__notesMailAccounts({})",
                 serde_json::Value::Object(colors)
             ));
+            push_tasks_due!();
         }};
     }
+
+	/// After a write to workspace `$ws`'s notes from outside the panel: show it
+	/// in the panel (`$reveal` puts the caret at the end) and refresh the task
+	/// count and the calendar's tasks (spec 003-tasks CNT-2, CAL-1).
+	macro_rules! notes_written {
+		($ws:expr, $reveal:expr) => {{
+			if workspace_manager.active().id == $ws {
+				if notes_visible {
+					mount_notes!($reveal);
+				}
+				if calendar_visible {
+					let _ = calendar_wv.evaluate_script(&calendar::script("changed", &[]));
+				}
+				push_tasks_due!();
+			}
+		}};
+	}
+
+	/// Add `$entry` under today's heading in workspace `$ws`'s notes. While the
+	/// panel shows them it holds the newest text, perhaps unsaved, so it adds
+	/// the entry and saves; otherwise the file takes it. `Err` is why not.
+	macro_rules! append_notes {
+		($ws:expr, $entry:expr, $reveal:expr) => {{
+			let ws: &str = $ws;
+			let entry: &str = $entry;
+			let current = notes::load(ws).map_err(|e| e.to_string());
+			match current {
+				Ok(_) if notes_visible && workspace_manager.active().id == ws => {
+					let _ = notes_wv.evaluate_script(&format!(
+						"window.__notesAppend && window.__notesAppend({}, {}, {})",
+						serde_json::to_string(&notes::today()).unwrap(),
+						serde_json::to_string(entry).unwrap(),
+						$reveal
+					));
+					Ok(())
+				}
+				Ok(text) => match notes::save(ws, &notes::append(&text, &notes::today(), entry)) {
+					Ok(()) => {
+						notes_written!(ws, $reveal);
+						Ok(())
+					}
+					Err(e) => Err(e.to_string()),
+				},
+				Err(e) => Err(e),
+			}
+		}};
+	}
+
+	/// Show the pane on its Notes tab, switching from Mail or Calendar; the
+	/// caller picks the view and gives it the keyboard.
+	macro_rules! show_notes {
+		() => {{
+			if !notes_visible {
+				if mail_visible {
+					park_mail!();
+				} else if calendar_visible {
+					park_calendar!();
+				} else {
+					pane_focus_target = capture_panel_focus!();
+				}
+				mount_notes!(false);
+				notes_visible = true;
+				layout_terminal!();
+				let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
+				let _ = notes_wv.set_visible(true);
+			}
+		}};
+	}
 
 	/// Put the active workspace's terminal tabs in the panel, built at once
 	/// while it is on screen, else when it next shows.
@@ -4624,6 +5000,7 @@ fn main() {
 			let escaped = webview_utils::escape_js_template(&$text);
 			notif_origin = None;
 			mail_toast = None;
+			meeting_toast = None;
 			if !notification_visible {
 				let _ = notification_wv.set_visible(true);
 				notification_visible = true;
@@ -4632,6 +5009,43 @@ fn main() {
 				"window.__show && window.__show(`{escaped}`, `{}`, `{}`, 2500)",
 				$icon, $title
 			));
+		}};
+	}
+
+	/// Show a one-shot AI job's outcome where it is wanted: the mail page, the
+	/// calendar page, a toast (`mail_jobs.rs`).
+	macro_rules! show_job_outcome {
+		($o:expr) => {{
+			let o: &mail_jobs::Outcome = &$o;
+			if let Some(script) = &o.script {
+				let _ = mail_wv.evaluate_script(script);
+			}
+			if let Some(script) = &o.calendar_script {
+				let _ = calendar_wv.evaluate_script(script);
+			}
+			if let Some(text) = &o.toast {
+				toast!(text, "\u{2709}\u{FE0F}", "Mail");
+			}
+		}};
+	}
+
+	/// Start a one-shot AI job — text in, text out: these agents get no
+	/// browser or mail tools, so nothing in a message can make them act — or
+	/// show why it could not start.
+	macro_rules! start_job {
+		($job:expr, $prompt:expr) => {{
+			let job: mail::Job = $job;
+			let started = if cfg.mail_ai {
+				let wake = proxy.clone();
+				mail_jobs.start(job.clone(), $prompt, move || {
+					let _ = wake.send_event(AppEvent::LearningWake);
+				})
+			} else {
+				Err("Mail AI is off in Settings → Mail.".to_string())
+			};
+			if let Err(message) = started {
+				show_job_outcome!(mail_jobs::failed(&job, message));
+			}
 		}};
 	}
 	sync_later_ui!();
@@ -5677,20 +6091,95 @@ fn main() {
             }
         }
 
-        // ── Mail AI: one-shot jobs (AI-1 to AI-6) ──
+        // ── Mail AI: one-shot jobs (AI-1 to AI-6; calendar AI-1 to AI-4) ──
         for progress in mail_jobs.poll() {
             let o = mail_jobs::outcome(progress);
-            if let Some(script) = o.script {
-                let _ = mail_wv.evaluate_script(&script);
-            }
+            show_job_outcome!(o);
             if o.ready {
                 play_sound(&cfg, macos::Sound::DraftReady);
             }
             if let (Some(command), Some(engine)) = (o.command, &mail_engine) {
                 engine.send(command);
             }
-            if let Some(text) = o.toast {
-                toast!(text, "\u{2709}\u{FE0F}", "Mail");
+            match o.action {
+                // AI-1: the reader's quick-add line opens the filled-in form.
+                Some(mail_jobs::Action::EventLine { ws, line, people }) => {
+                    let keys = calendar::keys_in(&cfg, &ws);
+                    let target = calendar_engine.as_ref().and_then(|e| {
+                        calendar::new_event_calendar(&e.store().calendars(&keys), &cfg.calendar_default, &cfg.calendar_hidden)
+                    });
+                    match target {
+                        _ if ws != workspace_manager.active().id => {
+                            toast!("The event is from another workspace's mail: switch to it and try again.", "\u{1F4C5}", "Calendar");
+                        }
+                        None => toast!("No calendar here can take new events.", "\u{1F4C5}", "Calendar"),
+                        Some(cal) => {
+                            let (today, minute) = calendar_time::local(calendar_time::now());
+                            let mut draft = calendar_quick::parse(&line, today, minute).draft(&cal);
+                            if draft.title.trim().is_empty() {
+                                draft.title = "Meeting".into();
+                            }
+                            // Only people the conversation already includes are invited.
+                            draft.attendees.retain(|a| people.iter().any(|p| p.eq_ignore_ascii_case(a)));
+                            show_calendar!();
+                            let _ = calendar_wv.evaluate_script(&calendar::script(
+                                "draft",
+                                &[serde_json::to_value(&draft).unwrap_or_default()],
+                            ));
+                        }
+                    }
+                }
+                // AI-4: the tasks go under the meeting's heading in the notes.
+                Some(mail_jobs::Action::MeetingTasks { ws, key, start, heading, day, tasks }) => {
+                    let today = calendar_time::local_date(calendar_time::now());
+                    let entries: Vec<String> = tasks.iter().map(|t| notes::answer_task(t, today)).collect();
+                    let message = if entries.is_empty() {
+                        "No tasks in these notes.".to_string()
+                    } else {
+                        let saved = notes::load(&ws).map_err(|e| e.to_string()).and_then(|text| {
+                            let next = notes::add_to_section(&text, start, &heading, &day, &entries)
+                                .ok_or_else(|| "the meeting's heading is gone".to_string())?;
+                            notes::save(&ws, &next).map_err(|e| e.to_string())
+                        });
+                        match saved {
+                            Ok(()) => {
+                                notes_written!(ws.as_str(), false);
+                                match entries.len() {
+                                    1 => "Added a task to the meeting's notes.".to_string(),
+                                    n => format!("Added {n} tasks to the meeting's notes."),
+                                }
+                            }
+                            Err(e) => format!("Could not update notes: {e}"),
+                        }
+                    };
+                    let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "tasks", false, &message));
+                }
+                // AI-4: the follow-up is stored like an agent's draft (mail_create_draft):
+                // it opens here, or waits among another workspace's drafts.
+                Some(mail_jobs::Action::FollowUp { ws, key, account, to, subject, body }) => {
+                    let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "followup", false, ""));
+                    let draft = mail::Draft {
+                        account,
+                        mode: "new".into(),
+                        to,
+                        subject,
+                        body,
+                        ..Default::default()
+                    };
+                    match &mail_engine {
+                        Some(engine) => {
+                            let (reply, _) = tokio::sync::oneshot::channel();
+                            engine.send(mail::Command::Mcp {
+                                accounts: mail::accounts_in(&cfg.mail_accounts, &ws),
+                                ws,
+                                req: mail::McpRequest::CreateDraft { draft },
+                                reply,
+                            });
+                        }
+                        None => toast!("Mail is unavailable: its store could not be opened.", "\u{2709}\u{FE0F}", "Mail"),
+                    }
+                }
+                None => {}
             }
         }
         if mail_ai_due.is_some_and(|due| std::time::Instant::now() >= due)
@@ -5701,6 +6190,77 @@ fn main() {
                 let accounts = mail::accounts_in(&cfg.mail_accounts, &workspace_manager.active().id);
                 if !accounts.is_empty() {
                     engine.send(mail::Command::SummaryPrompt { accounts });
+                }
+            }
+        }
+        // ── Meetings: the next one for the pane, the address bar and ⌘J, and
+        //    alerts before each starts (spec 002-calendar, ALR-*) ──
+        if std::time::Instant::now() >= meeting_check_at {
+            meeting_check_at = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            // A new day: tasks due today join the count and move groups (003-tasks CNT-2).
+            let today = notes::today();
+            if today != tasks_day {
+                tasks_day = today;
+                push_tasks_due!();
+                let _ = notes_wv.evaluate_script("window.__notesDay && window.__notesDay()");
+                if calendar_visible {
+                    let _ = calendar_wv.evaluate_script(&calendar::script("changed", &[]));
+                }
+            }
+            if let Some(engine) = &calendar_engine {
+                let now = calendar_time::now();
+                let keys = calendar_alert_keys(&cfg, &workspace_manager);
+                let events = engine.store().events(&keys, now - 6 * 3600, now + 13 * 3600, &cfg.calendar_hidden);
+                let next = calendar::next_meeting(&events, now).cloned();
+                meeting_joinable.store(
+                    next.as_ref().is_some_and(|e| !e.join.is_empty() && e.start - now <= 15 * 60),
+                    Ordering::Relaxed,
+                );
+                // The address bar shows it from half an hour before.
+                let chip = next.as_ref().filter(|e| e.start - now <= 30 * 60);
+                let shown = next.as_ref().map(|e| (e.key.clone(), e.start + i64::from(chip.is_some())));
+                if shown != meeting_shown {
+                    meeting_shown = shown;
+                    let value = next.as_ref().map_or(serde_json::Value::Null, |e| serde_json::to_value(e).unwrap_or_default());
+                    let _ = calendar_wv.evaluate_script(&calendar::script("next", &[value]));
+                    let chip = chip.map_or(serde_json::Value::Null, |e| {
+                        serde_json::json!({ "title": e.title, "start": e.start, "end": e.end, "join": e.join })
+                    });
+                    let _ = address_bar_wv.evaluate_script(&format!("window.__setMeeting && window.__setMeeting({chip})"));
+                }
+                if cfg.calendar_alert_min >= 0 {
+                    let lead = i64::from(cfg.calendar_alert_min) * 60;
+                    let due: Vec<calendar::CalEvent> = events
+                        .iter()
+                        .filter(|e| e.is_meeting() && e.start - lead <= now && now < e.start + 120)
+                        .filter(|e| meeting_alerted.insert((e.key.clone(), e.start)))
+                        .cloned()
+                        .collect();
+                    if let Some(e) = due.into_iter().max_by_key(|e| e.start) {
+                        let minutes = (e.start - now + 59) / 60;
+                        let when = if minutes <= 0 { "Starting now".to_string() } else { format!("In {minutes} min") };
+                        let place = if e.join.is_empty() { e.location.clone() } else { String::new() };
+                        let text = if place.is_empty() { when } else { format!("{when} · {place}") };
+                        notif_origin = None;
+                        mail_toast = None;
+                        if !notification_visible {
+                            let _ = notification_wv.set_visible(true);
+                            notification_visible = true;
+                        }
+                        let action = if e.join.is_empty() { "Open" } else { "Join" };
+                        let _ = notification_wv.evaluate_script(&format!(
+                            "window.__show && window.__show(`{}`, `\u{1F4C5}`, `{}`, 60000, {{ open: '{action}' }})",
+                            webview_utils::escape_js_template(&text),
+                            webview_utils::escape_js_template(&e.title),
+                        ));
+                        play_sound(&cfg, macos::Sound::NewMail);
+                        if !is_app_active() {
+                            macos::request_attention();
+                            macos::notify(&e.key, &e.title, &text);
+                        }
+                        meeting_toast = Some(e);
+                    }
+                    meeting_alerted.retain(|(_, start)| *start > now - 86_400);
                 }
             }
         }
@@ -5718,7 +6278,13 @@ fn main() {
                 if let (Some(engine), false) = (&mail_engine, accounts.is_empty()) {
                     cfg.mail_brief_last = today;
                     cfg.save();
-                    let req = mail::PageRequest::Ai { kind: "brief".into(), item: None, text: String::new(), body: String::new() };
+                    let req = mail::PageRequest::Ai {
+                        kind: "brief".into(),
+                        item: None,
+                        text: String::new(),
+                        body: String::new(),
+                        times: false,
+                    };
                     engine.send(mail::Command::Page { ws, accounts, req });
                 }
             }
@@ -6349,6 +6915,124 @@ fn main() {
                             let _ = response.send(Err("Mail is unavailable: its store could not be opened.".into()));
                         }
                     },
+                    McpCommand::Calendar { request, response } => {
+                        tracing::info!(request = request.kind(), "calendar MCP request");
+                        let ws = workspace_manager.at(ws_idx).id.clone();
+                        let keys = calendar::keys_in(&cfg, &ws);
+                        let result = match (&calendar_engine, request) {
+                            (None, _) => Err("The calendar is unavailable.".to_string()),
+                            (Some(engine), calendar::McpRequest::Draft { text, draft, start, end }) => {
+                                let (today, minute) = calendar_time::local(calendar_time::now());
+                                let calendars: Vec<calendar::Calendar> = engine
+                                    .store()
+                                    .calendars(&keys)
+                                    .into_iter()
+                                    .filter(|c| c.writable && !cfg.calendar_hidden.contains(&c.key))
+                                    .collect();
+                                let target = calendars
+                                    .iter()
+                                    .find(|c| c.key == cfg.calendar_default)
+                                    .or_else(|| calendars.iter().find(|c| c.primary))
+                                    .or(calendars.first())
+                                    .map(|c| c.key.clone());
+                                let mut d = match text.as_deref().filter(|t| !t.trim().is_empty()) {
+                                    Some(t) => calendar_quick::parse(t, today, minute).draft(""),
+                                    None => calendar::Draft { all_day: draft.all_day, ..Default::default() },
+                                };
+                                if !draft.title.trim().is_empty() {
+                                    d.title = draft.title.clone();
+                                }
+                                if !draft.location.is_empty() {
+                                    d.location = draft.location.clone();
+                                }
+                                if !draft.description.is_empty() {
+                                    d.description = draft.description.clone();
+                                }
+                                if !draft.attendees.is_empty() {
+                                    d.attendees = draft.attendees.clone();
+                                }
+                                d.video |= draft.video;
+                                if let Some(s) = start.as_deref().and_then(calendar::parse_when) {
+                                    let len = if d.end > d.start { d.end - d.start } else { 3600 };
+                                    d.start = s;
+                                    d.end = end.as_deref().and_then(calendar::parse_when).unwrap_or(s + len);
+                                    d.all_day = draft.all_day;
+                                    let first = calendar_time::local_date(d.start);
+                                    let last = calendar_time::local_date(d.end - 1).max(first);
+                                    d.start_date = first.iso();
+                                    d.end_date = last.add_days(1).iso();
+                                }
+                                match target {
+                                    None => Err("No calendar in this workspace can take new events.".into()),
+                                    Some(_) if ws != workspace_manager.active().id => {
+                                        Err("The user is in another workspace; draft it when theirs is on screen.".into())
+                                    }
+                                    Some(cal) => {
+                                        d.calendar = cal;
+                                        show_calendar!();
+                                        let _ = calendar_wv.evaluate_script(&calendar::script(
+                                            "draft",
+                                            &[serde_json::to_value(&d).unwrap_or_default()],
+                                        ));
+                                        Ok(format!(
+                                            "The event \"{}\" is open in the calendar pane for the user to review and add. Nothing is created and no invitation is sent until they save it.",
+                                            d.title
+                                        ))
+                                    }
+                                }
+                            }
+                            (Some(engine), request) => calendar::answer(
+                                &engine.store(),
+                                &keys,
+                                &cfg.calendar_hidden,
+                                (cfg.calendar_day_start, cfg.calendar_day_end),
+                                &request,
+                            ),
+                        };
+                        let _ = response.send(result);
+                    }
+                    // 003-tasks AGT-1: list and add; nothing ticks or deletes (AGT-3).
+                    McpCommand::Tasks { request, response } => {
+                        let ws = workspace_manager.at(ws_idx).id.clone();
+                        let result = match request {
+                            mcp::TasksRequest::List { done } => notes::load(&ws)
+                                .map_err(|e| format!("Could not read the notes: {e}"))
+                                .map(|text| {
+                                    let tasks: Vec<serde_json::Value> = notes::tasks(&text)
+                                        .into_iter()
+                                        .filter(|t| done || !t.done)
+                                        .map(|t| {
+                                            serde_json::json!({
+                                                "text": t.text, "done": t.done, "due": t.due, "day": t.day,
+                                                "from_mail": t.mail.is_some(),
+                                            })
+                                        })
+                                        .collect();
+                                    serde_json::to_string_pretty(&tasks).unwrap_or_default()
+                                }),
+                            mcp::TasksRequest::Add { text, due } => {
+                                let today = calendar_time::local_date(calendar_time::now());
+                                let due = match due.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                                    None => Ok(None),
+                                    Some(d) => notes::due_date(d, today)
+                                        .map(Some)
+                                        .ok_or_else(|| format!("\"{d}\" is not a date: give it as YYYY-MM-DD.")),
+                                };
+                                match due {
+                                    Err(e) => Err(e),
+                                    Ok(_) if text.trim().is_empty() => Err("The task has no text.".to_string()),
+                                    Ok(due) => {
+                                        let line = notes::task_line(&text, due);
+                                        match append_notes!(ws.as_str(), &line, false) {
+                                            Ok(()) => Ok(format!("Added to the workspace notes: {line}")),
+                                            Err(e) => Err(format!("Could not update the notes: {e}")),
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        let _ = response.send(result);
+                    }
                     McpCommand::GetLater { response } => {
                         let _ = response.send(Ok(workspace_manager.at(ws_idx).later.clone()));
                     }
@@ -7321,6 +8005,9 @@ fn main() {
                 if notes_visible {
                     mount_notes!(false);
                 }
+                if calendar_visible {
+                    mount_calendar!();
+                }
                 if mail_visible {
                     mount_mail!();
                 } else {
@@ -7397,6 +8084,9 @@ fn main() {
                 mount_terminal_space!();
                 if notes_visible {
                     mount_notes!(false);
+                }
+                if calendar_visible {
+                    mount_calendar!();
                 }
                 if mail_visible {
                     mount_mail!();
@@ -7508,6 +8198,9 @@ fn main() {
                     mount_terminal_space!();
                     if notes_visible {
                         mount_notes!(false);
+                    }
+                    if calendar_visible {
+                        mount_calendar!();
                     }
                     if mail_visible {
                         mount_mail!();
@@ -7788,6 +8481,7 @@ fn main() {
                                 if !accounts.iter().any(|a| a.id == old.id) {
                                     mail::forget_password(&old.id);
                                     mail::forget_client_secret(&old.id);
+                                    calendar::forget_token(&old.id);
                                 }
                             }
                             cfg.mail_accounts = accounts;
@@ -7804,10 +8498,45 @@ fn main() {
                         if mail_visible {
                             mount_mail!();
                         }
+                        // The calendar's ✦ buttons follow the same switch (calendar AI-5).
+                        if calendar_visible {
+                            mount_calendar!();
+                        }
                     }
                     "mail_ai_summaries" => cfg.mail_ai_summaries = val == "true",
                     "sounds" => cfg.sounds = val == "true",
                     "mail_brief_morning" => cfg.mail_brief_morning = val == "true",
+                    "calendar_feeds" => match serde_json::from_str::<Vec<config::CalendarFeed>>(&val) {
+                        Ok(feeds) => {
+                            cfg.calendar_feeds = feeds;
+                            if let Some(engine) = &calendar_engine {
+                                engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                            }
+                            if calendar_visible {
+                                mount_calendar!();
+                            }
+                        }
+                        Err(e) => tracing::warn!(error = %e, "ignoring malformed calendar feeds from settings"),
+                    },
+                    "calendar_alert_min" => {
+                        if let Ok(n) = val.parse::<i32>() {
+                            cfg.calendar_alert_min = n.clamp(-1, 60);
+                        }
+                    }
+                    "calendar_day_start" | "calendar_day_end" => {
+                        // `HH:MM` from a time field.
+                        let minutes = val
+                            .split_once(':')
+                            .and_then(|(h, m)| Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?))
+                            .filter(|m| *m < 24 * 60);
+                        if let Some(m) = minutes {
+                            if key == "calendar_day_start" {
+                                cfg.calendar_day_start = m;
+                            } else {
+                                cfg.calendar_day_end = m;
+                            }
+                        }
+                    }
                     // Sparkle's own settings, kept in its user defaults.
                     "update_checks" => updates::set_automatic_checks(val == "true"),
                     "update_downloads" => updates::set_automatic_downloads(val == "true"),
@@ -8004,6 +8733,10 @@ fn main() {
             Event::UserEvent(AppEvent::NavigateTo(raw, isolated)) => {
                 overlay_visible = false;
                 overlay_hotkey_visible.store(false, Ordering::Relaxed);
+                if is_webcal(&raw) {
+                    let _ = proxy.send_event(AppEvent::CalendarSubscribeLink(raw));
+                    return;
+                }
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&raw) {
                     macos::open_external_url(&raw);
@@ -8069,6 +8802,10 @@ fn main() {
                 // agent is driving must not switch the user's view or steal focus.
                 let foreground = foreground_page_open(source, active_wv_id, pending_swap);
 
+                if is_webcal(&url) {
+                    let _ = proxy.send_event(AppEvent::CalendarSubscribeLink(url));
+                    return;
+                }
                 // External scheme (tg://, figma://, mailto:, etc.) → hand off to macOS
                 if url::is_external_scheme(&url) {
                     macos::open_external_url(&url);
@@ -8251,7 +8988,7 @@ fn main() {
                             .filter(|u| !u.is_empty() && u != "about:blank")
                     };
                     if let Some(url) = closed_url {
-                        push_closed_tab(&mut workspace_manager.active_mut().closed_tabs, url);
+                        push_closed(&mut workspace_manager.active_mut().closed_tabs, url, CLOSED_TAB_HISTORY);
                     }
                     workspace_manager.active().tabs.lock().unwrap().close(id);
                     tab_nav::forget(id);
@@ -8372,6 +9109,17 @@ fn main() {
             // Queued in order, so the session switch runs once the workspace
             // it lives in is active.
             Event::UserEvent(AppEvent::OpenNotifiedSession) => {
+                // A meeting alert joins its call, or shows the meeting.
+                if let Some(e) = meeting_toast.take() {
+                    if e.join.is_empty() {
+                        show_calendar!();
+                        let _ = calendar_wv.evaluate_script(&calendar::script("open", &[serde_json::to_value(&e).unwrap_or_default()]));
+                    } else {
+                        open_meeting_link(&e.join, &proxy);
+                    }
+                    let _ = notification_wv.evaluate_script("window.__hide && window.__hide()");
+                    return;
+                }
                 // A mail toast opens its conversation in its workspace (NTF-1),
                 // or the inbox when it gathered several (NTF-4).
                 if let Some(burst) = mail_toast.take() {
@@ -8952,6 +9700,13 @@ fn main() {
                     tracing::debug!(session_id = sid, "session close ignored — last session");
                 } else if let Some(pos) = workspace_manager.active().acp_sessions.iter().position(|s| s.id == sid) {
                     let removed = workspace_manager.active_mut().acp_sessions.remove(pos);
+                    // Kept for ⌘⇧T. A chat that never reached octomind and has
+                    // no messages has nothing to bring back.
+                    if removed.acp_session_id.is_some() || !removed.messages.is_empty() {
+                        let snap = removed.snapshot(cfg.max_acp_session_messages);
+                        push_closed(&mut workspace_manager.active_mut().closed_acp_sessions, snap, CLOSED_SESSION_HISTORY);
+                        persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                    }
                     if let Some(handle) = removed.handle {
                         handle.close();
                     }
@@ -8973,6 +9728,36 @@ fn main() {
                         "window.__removeSession && window.__removeSession({sid})"
                     ));
                     persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
+                }
+            }
+
+            // ── ⌘⇧T in sidebar — reopen the last session closed here ──────────────
+            Event::UserEvent(AppEvent::AcpSessionReopen) => {
+                if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
+                    tracing::warn!(max = MAX_SESSIONS, "session reopen rejected — cap reached");
+                } else if let Some(snap) = workspace_manager.active_mut().closed_acp_sessions.pop() {
+                    let sid = next_acp_session_id();
+                    tracing::debug!(session_id = sid, acp_session_id = ?snap.acp_session_id, "reopening closed session");
+                    let etitle = webview_utils::escape_js_template(&snap.title);
+                    let etag = webview_utils::escape_js_template(&snap.tag);
+                    let msgs_json = if snap.messages.is_empty() {
+                        None
+                    } else {
+                        serde_json::to_string(&snap.messages).ok()
+                    };
+                    workspace_manager.active_mut().acp_sessions.push(AcpSession::from_snapshot(sid, snap, None));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'ready')"
+                    ));
+                    if let Some(msgs_json) = msgs_json {
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
+                        ));
+                    }
+                    persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                    // Connects it the way any persisted chat connects, brings it
+                    // to the front, and persists the strip.
+                    let _ = proxy.send_event(AppEvent::AcpSessionSwitch(sid));
                 }
             }
 
@@ -9153,14 +9938,8 @@ fn main() {
                             |i| workspace_manager.at(i).id.clone(),
                         );
                         let entry = notes::capture_entry(&title, &url, &text);
-                        let saved = notes::load(&ws).and_then(|current| {
-                            notes::save(&ws, &notes::append(&current, &notes::today(), &entry))
-                        });
-                        match saved {
+                        match append_notes!(ws.as_str(), &entry, true) {
                             Ok(()) => {
-                                if notes_visible && ws == workspace_manager.active().id {
-                                    mount_notes!(true);
-                                }
                                 let what = if text.is_empty() {
                                     "Task added to notes"
                                 } else {
@@ -9822,22 +10601,32 @@ fn main() {
 
             // ── Right-hand pane: Notes (⌘⇧J) and Mail (⌘⇧I) tabs, left of a docked
             //     sidebar. Each chord opens its tab, switches to it, or hides it.
+            //     ⌘⇧J opens the notes' text, ⌥⌘T their Tasks view (003-tasks VIEW-1).
             Event::UserEvent(AppEvent::ToggleNotes) => {
-                if notes_visible {
+                if notes_visible && notes_mode != "tasks" {
                     hide_pane!();
                 } else {
-                    if mail_visible {
-                        park_mail!();
-                    } else {
-                        pane_focus_target = capture_panel_focus!();
-                    }
-                    mount_notes!(false);
-                    notes_visible = true;
-                    layout_terminal!();
-                    let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
-                    let _ = notes_wv.set_visible(true);
+                    show_notes!();
+                    notes_mode = "notes".into();
+                    let _ = notes_wv.evaluate_script("window.__notesView && window.__notesView('notes', null)");
                     focus_notes!();
                 }
+            }
+            Event::UserEvent(AppEvent::ToggleTasks) => {
+                if notes_visible && notes_mode == "tasks" {
+                    hide_pane!();
+                } else {
+                    let _ = proxy.send_event(AppEvent::ShowTasks(None));
+                }
+            }
+            Event::UserEvent(AppEvent::ShowTasks(focus)) => {
+                show_notes!();
+                notes_mode = "tasks".into();
+                let _ = notes_wv.evaluate_script(&format!(
+                    "window.__notesView && window.__notesView('tasks', {})",
+                    serde_json::to_string(&focus).unwrap()
+                ));
+                focus_notes!();
             }
             Event::UserEvent(AppEvent::ToggleInbox) => {
                 if mail_visible {
@@ -9862,12 +10651,15 @@ fn main() {
             // ── Pane fullscreen — fills the window left of a docked sidebar (⌘⇧Return
             //     while it has focus, or the icon in its header)
             Event::UserEvent(AppEvent::TogglePaneFullscreen) => {
-                if notes_visible || mail_visible {
+                if notes_visible || mail_visible || calendar_visible {
                     pane_fullscreen = !pane_fullscreen;
                     layout_terminal!();
                     if notes_visible {
                         let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
                         focus_notes!();
+                    } else if calendar_visible {
+                        let _ = calendar_wv.evaluate_script(&calendar::script("fullscreen", &[pane_fullscreen.into()]));
+                        focus_calendar!();
                     } else {
                         let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.fullscreen({pane_fullscreen})"));
                         focus_mail!();
@@ -9885,7 +10677,10 @@ fn main() {
                         return;
                     }
                     match notes::save(&ws, &text.0) {
-                        Ok(()) if ws == workspace_manager.active().id => notes_known = text.0,
+                        Ok(()) if ws == workspace_manager.active().id => {
+                            notes_known = text.0;
+                            push_tasks_due!();
+                        }
                         Ok(()) => {}
                         Err(e) => {
                             tracing::error!(error = %e, ws = %ws, "Failed to save notes");
@@ -9931,16 +10726,34 @@ fn main() {
                         hide_pane!();
                     }
                 }
-                notes::Request::Tab { tab } => {
-                    if tab == "mail" {
+                notes::Request::Tab { tab } => match tab.as_str() {
+                    "mail" => {
                         let _ = proxy.send_event(AppEvent::ToggleInbox);
                     }
-                }
+                    "calendar" => {
+                        let _ = proxy.send_event(AppEvent::ShowCalendar);
+                    }
+                    _ => {}
+                },
                 notes::Request::Task { url, done } => {
                     if let (Some(item), Some(engine)) = (mail::parse_thread_url(&url), &mail_engine) {
                         engine.send(mail::Command::TaskToggled { item, done });
                     }
                 }
+                // TSK-3: the date the words after `>` start with, and the words left.
+                notes::Request::Due { id, phrase } => {
+                    let today = calendar_time::local_date(calendar_time::now());
+                    let (due, rest) = match notes::due_split(&phrase, today) {
+                        Some((date, rest)) => (Some(date.iso()), rest),
+                        None => (None, String::new()),
+                    };
+                    let _ = notes_wv.evaluate_script(&format!(
+                        "window.__notesDue && window.__notesDue({id}, {}, {})",
+                        serde_json::to_string(&due).unwrap(),
+                        serde_json::to_string(&rest).unwrap()
+                    ));
+                }
+                notes::Request::View { view } => notes_mode = view,
                 // A hidden page can get focus events; only a pane on screen counts.
                 notes::Request::Focus if !notes_visible => {}
                 notes::Request::Focus => {
@@ -9973,6 +10786,528 @@ fn main() {
                     layout_terminal!();
                     cfg.notes_width = PANE_W_LOGICAL;
                     cfg.save();
+                }
+            },
+
+            // ── Calendar (⌘⇧D): the pane's third tab ───────────────────────────
+            Event::UserEvent(AppEvent::ToggleCalendar) => {
+                if calendar_visible {
+                    hide_pane!();
+                } else {
+                    show_calendar!();
+                }
+            }
+            Event::UserEvent(AppEvent::ShowCalendar) => show_calendar!(),
+            Event::UserEvent(AppEvent::CalendarSubscribeLink(url)) => {
+                show_calendar!();
+                let _ = calendar_wv.evaluate_script(&calendar::script("subscribe", &[url.into()]));
+            }
+            Event::UserEvent(AppEvent::JoinMeeting) => {
+                let next = calendar_engine.as_ref().and_then(|engine| {
+                    let now = calendar_time::now();
+                    let keys = calendar_alert_keys(&cfg, &workspace_manager);
+                    let events = engine.store().events(&keys, now - 6 * 3600, now + 13 * 3600, &cfg.calendar_hidden);
+                    calendar::next_meeting(&events, now).cloned()
+                });
+                match next {
+                    Some(e) if !e.join.is_empty() => {
+                        meeting_toast = None;
+                        open_meeting_link(&e.join, &proxy);
+                    }
+                    Some(e) => {
+                        show_calendar!();
+                        let _ = calendar_wv.evaluate_script(&calendar::script("open", &[serde_json::to_value(&e).unwrap_or_default()]));
+                        toast!(format!("{} has no video link", e.title), "\u{1F4C5}", "Calendar");
+                    }
+                    None => toast!("No meeting to join in the next hours", "\u{1F4C5}", "Calendar"),
+                }
+            }
+            Event::UserEvent(AppEvent::CalendarConnect(key)) => {
+                let Some(a) = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == key) else {
+                    return;
+                };
+                match (calendar::endpoints(a.provider), mail::oauth_client(a), &calendar_engine) {
+                    (Some(_), Some((client_id, client_secret)), Some(engine)) => {
+                        toast!("Allow calendar access in the page that opens", "\u{1F4C5}", "Calendar");
+                        engine.send(calendar::Command::Connect {
+                            key,
+                            provider: a.provider,
+                            client_id,
+                            client_secret,
+                            hint: a.address.clone(),
+                        });
+                    }
+                    (Some(_), None, _) => toast!("Set the account's OAuth client in Settings → Mail first", "\u{26A0}\u{FE0F}", "Calendar"),
+                    _ => toast!("This account's calendar connects with its password", "\u{1F4C5}", "Calendar"),
+                }
+            }
+            Event::UserEvent(AppEvent::Calendar(request)) => match request {
+                calendar::Request::Ready => {
+                    tracing::info!("calendar pane ready");
+                    mount_calendar!();
+                }
+                calendar::Request::Hide => {
+                    if calendar_visible {
+                        hide_pane!();
+                    }
+                }
+                calendar::Request::Fullscreen => {
+                    let _ = proxy.send_event(AppEvent::TogglePaneFullscreen);
+                }
+                calendar::Request::Tab { tab } => match tab.as_str() {
+                    "notes" => {
+                        let _ = proxy.send_event(AppEvent::ToggleNotes);
+                    }
+                    "mail" => {
+                        let _ = proxy.send_event(AppEvent::ShowInbox);
+                    }
+                    _ => {}
+                },
+                calendar::Request::Focus if calendar_visible => panel_focus!("Calendar", Some(String::new())),
+                calendar::Request::Focus => {}
+                calendar::Request::Blur => panel_focus!("Calendar", None),
+                // One column whichever tab shows: the notes handler owns its width.
+                calendar::Request::Resize { width } => {
+                    let _ = proxy.send_event(AppEvent::Notes(notes::Request::Resize { width }));
+                }
+                calendar::Request::ResizeEnd { width } => {
+                    let _ = proxy.send_event(AppEvent::Notes(notes::Request::ResizeEnd { width }));
+                }
+                calendar::Request::ResizeReset => {
+                    let _ = proxy.send_event(AppEvent::Notes(notes::Request::ResizeReset));
+                }
+                calendar::Request::Range { from, to } => {
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::Ensure { from, to });
+                        let keys = calendar_keys!();
+                        let events = engine.store().events(&keys, from, to, &[]);
+                        tracing::debug!(from, to, n = events.len(), "calendar range to the pane");
+                        // Due tasks of the notes (003-tasks CAL-1), and the meetings
+                        // whose notes are there for AI-4.
+                        let text = notes::load(&workspace_manager.active().id).unwrap_or_default();
+                        let tasks: Vec<notes::Task> =
+                            notes::tasks(&text).into_iter().filter(|t| !t.done && t.due.is_some()).collect();
+                        let sections = notes::sections(&text);
+                        let noted: Vec<&str> = events
+                            .iter()
+                            .filter(|e| {
+                                let day = calendar_time::local_date(e.start).iso();
+                                notes::meeting_section(&sections, &e.title, &day).is_some()
+                            })
+                            .map(|e| e.key.as_str())
+                            .collect();
+                        let data = serde_json::json!({
+                            "from": from, "to": to, "events": events, "tasks": tasks, "noted": noted,
+                        });
+                        let _ = calendar_wv.evaluate_script(&calendar::script("events", &[data]));
+                    }
+                }
+                calendar::Request::Refresh => {
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::Refresh(None));
+                    }
+                }
+                calendar::Request::Quick { id, text, calendar: cal } => {
+                    let (today, minute) = calendar_time::local(calendar_time::now());
+                    let draft = calendar_quick::parse(&text, today, minute).draft(&cal);
+                    let _ = calendar_wv.evaluate_script(&calendar::script(
+                        "parsed",
+                        &[id.into(), serde_json::to_value(&draft).unwrap_or_default()],
+                    ));
+                }
+                calendar::Request::Save { op, draft } => {
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::Save { op, draft });
+                    }
+                }
+                calendar::Request::Delete { op, key, all } => {
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::Delete { op, key, all });
+                    }
+                }
+                calendar::Request::Rsvp { op, key, response, series } => {
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::Rsvp { op, key, response, series });
+                    }
+                }
+                calendar::Request::ImportPick => {
+                    let Some(path) = macos::pick_files().into_iter().next() else {
+                        return;
+                    };
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                            let _ = proxy.send_event(AppEvent::Calendar(calendar::Request::ImportText {
+                                name,
+                                text: String::from_utf8_lossy(&bytes).into_owned(),
+                            }));
+                        }
+                        Err(e) => toast!(format!("Could not read {}: {e}", path.display()), "\u{26A0}\u{FE0F}", "Calendar"),
+                    }
+                }
+                calendar::Request::ImportText { name, text } => {
+                    let preview = calendar::import_preview(&text);
+                    match preview {
+                        Some(preview) => {
+                            calendar_import = Some((name.clone(), text));
+                            show_calendar!();
+                            let data = serde_json::json!({ "name": name, "count": preview.0, "sample": preview.1 });
+                            let _ = calendar_wv.evaluate_script(&calendar::script("importPreview", &[data]));
+                        }
+                        None => toast!(format!("{name} has no events to import"), "\u{26A0}\u{FE0F}", "Calendar"),
+                    }
+                }
+                calendar::Request::Import { op, calendar: target } => {
+                    match (calendar_import.take(), &calendar_engine) {
+                        (Some((_, text)), Some(engine)) => {
+                            if cfg.calendar_default != target {
+                                cfg.calendar_default = target.clone();
+                                cfg.save();
+                            }
+                            engine.send(calendar::Command::Import { op, calendar: target, text });
+                        }
+                        _ => {
+                            let _ = calendar_wv.evaluate_script(&calendar::script(
+                                "done",
+                                &[op.into(), false.into(), "Choose the file again.".into()],
+                            ));
+                        }
+                    }
+                }
+                calendar::Request::Subscribe { url, name } => {
+                    let Some(fetch) = calendar::feed_url(&url) else {
+                        toast!("Use an https:// or webcal:// address", "\u{26A0}\u{FE0F}", "Calendar");
+                        return;
+                    };
+                    let known = cfg.calendar_feeds.iter().any(|f| calendar::feed_url(&f.url).as_deref() == Some(fetch.as_str()));
+                    if known {
+                        toast!("Already subscribed to that calendar", "\u{1F4C5}", "Calendar");
+                        return;
+                    }
+                    cfg.calendar_feeds.push(config::CalendarFeed {
+                        id: workspace::random_bytes16(),
+                        url: url.trim().to_string(),
+                        name: name.trim().to_string(),
+                        color: String::new(),
+                        scope: extension_store::Scope::Only(vec![workspace_manager.active().id.clone()]),
+                    });
+                    cfg.save();
+                    if let Some(engine) = &calendar_engine {
+                        engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                    }
+                    mount_calendar!();
+                    let _ = settings_wv.evaluate_script(&format!(
+                        "window.__setConfig && window.__setConfig({})",
+                        serde_json::to_string(&cfg).unwrap_or_default()
+                    ));
+                    toast!("Subscribed. Loading the calendar…", "\u{1F4C5}", "Calendar");
+                }
+                calendar::Request::Unsubscribe { account } => {
+                    let before = cfg.calendar_feeds.len();
+                    cfg.calendar_feeds.retain(|f| calendar::feed_key(f) != account);
+                    if cfg.calendar_feeds.len() != before {
+                        cfg.save();
+                        calendar_status.remove(&account);
+                        if let Some(engine) = &calendar_engine {
+                            engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                        }
+                        mount_calendar!();
+                        let _ = settings_wv.evaluate_script(&format!(
+                            "window.__setConfig && window.__setConfig({})",
+                            serde_json::to_string(&cfg).unwrap_or_default()
+                        ));
+                        toast!("Unsubscribed", "\u{1F4C5}", "Calendar");
+                    }
+                }
+                calendar::Request::Join { url } => {
+                    meeting_toast = None;
+                    open_meeting_link(&url, &proxy);
+                }
+                calendar::Request::OpenUrl { url } => {
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                    }
+                }
+                calendar::Request::Connect { account } => {
+                    let _ = proxy.send_event(AppEvent::CalendarConnect(account));
+                }
+                calendar::Request::Hidden { calendars } => {
+                    cfg.calendar_hidden = calendars;
+                    cfg.save();
+                    meeting_shown = None;
+                    meeting_check_at = std::time::Instant::now();
+                }
+                calendar::Request::DefaultCalendar { key } => {
+                    if cfg.calendar_default != key {
+                        cfg.calendar_default = key;
+                        cfg.save();
+                    }
+                }
+                calendar::Request::Notes { key } => {
+                    let Some(event) = calendar_engine.as_ref().and_then(|e| e.store().event(&key)) else {
+                        return;
+                    };
+                    let ws = workspace_manager.active().id.clone();
+                    let date = calendar_time::local_date(event.start).iso();
+                    let saved = notes::load(&ws).and_then(|text| notes::save(&ws, &notes::append(&text, &date, &calendar::notes_entry(&event))));
+                    match saved {
+                        Ok(()) => {
+                            if calendar_visible {
+                                park_calendar!();
+                            }
+                            mount_notes!(true);
+                            notes_visible = true;
+                            layout_terminal!();
+                            let _ = notes_wv.evaluate_script(&format!("window.__notesFullscreen({pane_fullscreen})"));
+                            let _ = notes_wv.set_visible(true);
+                            notes_mode = "notes".into();
+                            let _ = notes_wv.evaluate_script("window.__notesView && window.__notesView('notes', null)");
+                            focus_notes!();
+                        }
+                        Err(e) => toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes"),
+                    }
+                }
+                calendar::Request::Share { days } => {
+                    let Some(engine) = &calendar_engine else {
+                        return;
+                    };
+                    let keys = calendar_keys!();
+                    let text = calendar::free_times(
+                        &engine.store(),
+                        &keys,
+                        &cfg.calendar_hidden,
+                        cfg.calendar_day_start,
+                        cfg.calendar_day_end,
+                        days,
+                    );
+                    if text.is_empty() {
+                        toast!("No free time in working hours over the next days", "\u{1F4C5}", "Calendar");
+                    } else {
+                        webview_utils::copy_text_to_pasteboard(&text);
+                        toast!("Free times copied: paste them into a message", "\u{1F4CB}", "Calendar");
+                    }
+                }
+                // 003-tasks CAL-1: a due task ticked in the calendar is ticked in
+                // the notes; one made from an email closes it too (mail TRI-10).
+                calendar::Request::TaskToggle { line, raw, done } => {
+                    let ws = workspace_manager.active().id.clone();
+                    let saved = notes::load(&ws).map_err(|e| e.to_string()).and_then(|text| {
+                        let next = notes::set_done(&text, line, &raw, done)
+                            .ok_or_else(|| "that task changed in the notes".to_string())?;
+                        notes::save(&ws, &next).map_err(|e| e.to_string())
+                    });
+                    match saved {
+                        Ok(()) => {
+                            let mail_item = notes::tasks(&raw).into_iter().next().and_then(|t| t.mail).and_then(|u| mail::parse_thread_url(&u));
+                            if let (Some(item), Some(engine)) = (mail_item, &mail_engine) {
+                                engine.send(mail::Command::TaskToggled { item, done });
+                            }
+                            notes_written!(ws.as_str(), false);
+                        }
+                        Err(e) => {
+                            toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes");
+                            let _ = calendar_wv.evaluate_script(&calendar::script("changed", &[]));
+                        }
+                    }
+                }
+                calendar::Request::TaskOpen { raw, .. } => {
+                    let _ = proxy.send_event(AppEvent::ShowTasks(Some(raw)));
+                }
+                // Calendar AI-3: the meeting and its last notes from here, its
+                // guests' mail from the mail engine, then the reader.
+                calendar::Request::Prep { key } => {
+                    let prep_failed = |key: &str, message: &str| {
+                        calendar::script("prepFailed", &[serde_json::json!({ "key": key, "message": message })])
+                    };
+                    match calendar_engine.as_ref().and_then(|e| e.store().event(&key)) {
+                        None => {
+                            let _ = calendar_wv.evaluate_script(&prep_failed(&key, "This event is no longer in the calendar."));
+                        }
+                        Some(_) if !cfg.mail_ai => {
+                            let _ = calendar_wv.evaluate_script(&prep_failed(&key, "Turn on mail AI in Settings → Mail first."));
+                        }
+                        Some(event) => {
+                            let ws = workspace_manager.active().id.clone();
+                            let day = calendar_time::local_date(event.start).iso();
+                            let text = notes::load(&ws).unwrap_or_default();
+                            let sections = notes::sections(&text);
+                            let mut context = calendar::prompt_text(&event);
+                            if let Some(s) = notes::previous_meeting(&sections, &event.title, &day) {
+                                context.push_str(&format!(
+                                    "\nMy notes from its last time, {}:\n{}\n",
+                                    s.day.as_deref().unwrap_or_default(),
+                                    s.body
+                                ));
+                            }
+                            let context = mail::untrusted(&context);
+                            let guests: Vec<String> = event
+                                .attendees
+                                .iter()
+                                .filter(|a| !a.me && !a.email.is_empty())
+                                .map(|a| a.email.clone())
+                                .collect();
+                            match &mail_engine {
+                                Some(engine) => engine.send(mail::Command::Prep {
+                                    accounts: mail::accounts_in(&cfg.mail_accounts, &ws),
+                                    key,
+                                    context,
+                                    guests,
+                                }),
+                                None => start_job!(mail::Job::Prep { key }, mail::prep_prompt(&context, "")),
+                            }
+                        }
+                    }
+                }
+                // Calendar AI-4: tasks from the meeting's notes, into its section.
+                calendar::Request::MeetingTasks { key } => {
+                    let ws = workspace_manager.active().id.clone();
+                    match meeting_notes(calendar_engine.as_ref(), &key, &ws) {
+                        Err(message) => {
+                            let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "tasks", false, message));
+                        }
+                        Ok((event, section, heading)) => {
+                            let context = mail::untrusted(&format!(
+                                "{}\nMy notes from the meeting:\n{}",
+                                calendar::prompt_text(&event),
+                                section.body
+                            ));
+                            let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "tasks", true, ""));
+                            start_job!(
+                                mail::Job::MeetingTasks {
+                                    ws,
+                                    key,
+                                    start: section.start,
+                                    heading,
+                                    day: section.day.unwrap_or_default(),
+                                },
+                                mail::meeting_tasks_prompt(&context)
+                            );
+                        }
+                    }
+                }
+                // Calendar AI-4: a follow-up to the guests, written from the notes.
+                calendar::Request::FollowUp { key } => {
+                    let ws = workspace_manager.active().id.clone();
+                    let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
+                    match meeting_notes(calendar_engine.as_ref(), &key, &ws) {
+                        Err(message) => {
+                            let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "followup", false, message));
+                        }
+                        Ok((event, section, _)) => {
+                            // From the account whose calendar holds the meeting, else the workspace's first.
+                            let account = accounts.iter().find(|a| **a == event.account).or(accounts.first()).cloned();
+                            let me = account.as_ref().and_then(|k| cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == *k));
+                            match (account, me) {
+                                (Some(account), Some(me)) => {
+                                    let me_line = if me.name.is_empty() {
+                                        me.address.clone()
+                                    } else {
+                                        format!("{} <{}>", me.name, me.address)
+                                    };
+                                    let prompt = mail::follow_up_prompt(
+                                        &mail::untrusted(&calendar::prompt_text(&event)),
+                                        &me_line,
+                                        !me.signature.trim().is_empty(),
+                                        &section.body,
+                                    );
+                                    let to = event
+                                        .attendees
+                                        .iter()
+                                        .filter(|a| !a.me && !a.email.is_empty())
+                                        .map(|a| a.email.clone())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(&key, "followup", true, ""));
+                                    start_job!(
+                                        mail::Job::FollowUp { ws, key, account, to, subject: event.title.clone() },
+                                        prompt
+                                    );
+                                }
+                                _ => {
+                                    let _ = calendar_wv.evaluate_script(&mail_jobs::ai_state(
+                                        &key,
+                                        "followup",
+                                        false,
+                                        "Add a mail account to this workspace to write the follow-up.",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                calendar::Request::Settings => {
+                    if !settings_visible {
+                        let _ = proxy.send_event(AppEvent::ToggleSettings);
+                    }
+                    let _ = settings_wv.evaluate_script("window.__showTab && window.__showTab('tab-mail')");
+                }
+                calendar::Request::Notice { text } => toast!(text, "\u{1F4C5}", "Calendar"),
+            },
+
+            // ── Calendar engine events ─────────────────────────────────────────
+            Event::UserEvent(AppEvent::CalendarEngine(event)) => match event {
+                calendar::Event::Changed => {
+                    if calendar_visible {
+                        mount_calendar!();
+                    }
+                    // An answer or an import changes what invitation cards show.
+                    if mail_visible {
+                        let shown: Vec<i64> = mail_invites.keys().copied().collect();
+                        for message in shown {
+                            push_invite!(message);
+                        }
+                    }
+                    meeting_shown = None;
+                    meeting_check_at = std::time::Instant::now();
+                }
+                calendar::Event::Status { account, state, message } => {
+                    let _ = calendar_wv.evaluate_script(&calendar::script(
+                        "status",
+                        &[account.clone().into(), state.into(), message.clone().into()],
+                    ));
+                    let changed = calendar_status.get(&account).map(|(s, _)| *s) != Some(state);
+                    calendar_status.insert(account, (state, message));
+                    let _ = settings_wv.evaluate_script(&calendar_status_script(&calendar_status));
+                    if changed && calendar_visible {
+                        mount_calendar!();
+                    }
+                }
+                calendar::Event::OpenUrl(url) => {
+                    if settings_visible {
+                        let _ = proxy.send_event(AppEvent::ToggleSettings);
+                    }
+                    let _ = proxy.send_event(AppEvent::OpenInNewTab(url, None));
+                }
+                calendar::Event::Connected { account, result } => {
+                    let outcome = result.and_then(|refresh| {
+                        let a = cfg.mail_accounts.iter().find(|a| mail::hex(&a.id) == account).ok_or("The account was removed")?;
+                        calendar::save_token(&a.id, &refresh)
+                    });
+                    match outcome {
+                        Ok(()) => {
+                            calendar_status.insert(account, ("connecting", String::new()));
+                            if let Some(engine) = &calendar_engine {
+                                engine.send(calendar::Command::SetSources(calendar::sources(&cfg)));
+                            }
+                            if calendar_visible {
+                                mount_calendar!();
+                            }
+                            toast!("Calendar connected. Syncing…", "\u{1F4C5}", "Calendar");
+                        }
+                        Err(e) => toast!(format!("Calendar sign-in failed: {e}"), "\u{26A0}\u{FE0F}", "Calendar"),
+                    }
+                }
+                calendar::Event::Done { op, result } => {
+                    let (ok, text) = match &result {
+                        Ok(t) => (true, t.clone()),
+                        Err(e) => (false, e.clone()),
+                    };
+                    let _ = calendar_wv.evaluate_script(&calendar::script("done", &[op.into(), ok.into(), text.clone().into()]));
+                    if ok {
+                        toast!(text, "\u{1F4C5}", "Calendar");
+                    } else {
+                        toast!(text, "\u{26A0}\u{FE0F}", "Calendar");
+                    }
                 }
             },
 
@@ -10046,11 +11381,15 @@ fn main() {
                     mail::Pane::Fullscreen => {
                         let _ = proxy.send_event(AppEvent::TogglePaneFullscreen);
                     }
-                    mail::Pane::Tab { tab } => {
-                        if tab == "notes" {
+                    mail::Pane::Tab { tab } => match tab.as_str() {
+                        "notes" => {
                             let _ = proxy.send_event(AppEvent::ToggleNotes);
                         }
-                    }
+                        "calendar" => {
+                            let _ = proxy.send_event(AppEvent::ShowCalendar);
+                        }
+                        _ => {}
+                    },
                     mail::Pane::BackToNotes => {
                         if mail_visible {
                             let _ = proxy.send_event(AppEvent::ToggleNotes);
@@ -10100,6 +11439,46 @@ fn main() {
                             ));
                         }
                     }
+                    mail::Pane::InviteRsvp { key, response, series } => {
+                        if let Some(engine) = &calendar_engine {
+                            calendar_op += 1;
+                            engine.send(calendar::Command::Rsvp { op: calendar_op, key, response, series });
+                        }
+                    }
+                    mail::Pane::InviteAdd { message } => {
+                        let Some(text) = mail_invites.get(&message).cloned() else {
+                            return;
+                        };
+                        let keys = calendar_keys!();
+                        let target = calendar_engine.as_ref().and_then(|e| {
+                            let writable: Vec<calendar::Calendar> = e
+                                .store()
+                                .calendars(&keys)
+                                .into_iter()
+                                .filter(|c| c.writable && !cfg.calendar_hidden.contains(&c.key))
+                                .collect();
+                            writable
+                                .iter()
+                                .find(|c| c.key == cfg.calendar_default)
+                                .or_else(|| writable.iter().find(|c| c.primary))
+                                .or(writable.first())
+                                .map(|c| c.key.clone())
+                        });
+                        match (target, &calendar_engine) {
+                            (Some(calendar), Some(engine)) => {
+                                calendar_op += 1;
+                                engine.send(calendar::Command::Import { op: calendar_op, calendar, text });
+                            }
+                            _ => toast!("No calendar here can take it: connect one in the Calendar tab", "\u{1F4C5}", "Calendar"),
+                        }
+                    }
+                    mail::Pane::InviteOpen { key } => {
+                        if let Some(event) = calendar_engine.as_ref().and_then(|e| e.store().event(&key)) {
+                            show_calendar!();
+                            let _ = calendar_wv.evaluate_script(&calendar::script("open", &[serde_json::to_value(&event).unwrap_or_default()]));
+                        }
+                    }
+                    mail::Pane::InviteJoin { url } => open_meeting_link(&url, &proxy),
                     mail::Pane::Settings => {
                         if !settings_visible {
                             let _ = proxy.send_event(AppEvent::ToggleSettings);
@@ -10108,7 +11487,7 @@ fn main() {
                     }
                 },
                 mail::Message::Engine(req) => {
-                    let req = *req;
+                    let mut req = *req;
                     let Some(engine) = &mail_engine else {
                         return;
                     };
@@ -10132,6 +11511,30 @@ fn main() {
                         mail::PageRequest::Send { send_at: None, .. } => play_sound(&cfg, macos::Sound::Sent),
                         mail::PageRequest::Act { verb: mail::Verb::Done, .. } => play_sound(&cfg, macos::Sound::Done),
                         _ => {}
+                    }
+                    // Calendar AI-2: the writer may offer only my free times.
+                    if let mail::PageRequest::Ai { kind, text, times: true, .. } = &mut req {
+                        if kind == "draft" {
+                            let keys = calendar_keys!();
+                            let free = calendar_engine
+                                .as_ref()
+                                .map(|e| {
+                                    calendar::free_times(
+                                        &e.store(),
+                                        &keys,
+                                        &cfg.calendar_hidden,
+                                        cfg.calendar_day_start,
+                                        cfg.calendar_day_end,
+                                        5,
+                                    )
+                                })
+                                .unwrap_or_default();
+                            text.push_str(&if free.is_empty() {
+                                "\n\nI have no free time in working hours over the next days: say so, and offer no times.".to_string()
+                            } else {
+                                format!("\n\nOffer only times from my free times below, written as the reply needs them.\n{free}")
+                            });
+                        }
                     }
                     let ws = workspace_manager.active().id.clone();
                     let accounts = mail::accounts_in(&cfg.mail_accounts, &ws);
@@ -10159,27 +11562,7 @@ fn main() {
                 // Background summaries skip a turn while off or still running.
                 mail::Event::Job { job: mail::Job::Summaries { .. }, .. }
                     if !cfg.mail_ai_summaries || mail_jobs.running(|j| matches!(j, mail::Job::Summaries { .. })) => {}
-                mail::Event::Job { job, prompt } => {
-                    // Text in, text out: these agents get no browser or mail
-                    // tools, so nothing in a message can make them act.
-                    let started = if cfg.mail_ai {
-                        let wake = proxy.clone();
-                        mail_jobs.start(job.clone(), prompt, move || {
-                            let _ = wake.send_event(AppEvent::LearningWake);
-                        })
-                    } else {
-                        Err("Mail AI is off in Settings → Mail.".to_string())
-                    };
-                    if let Err(message) = started {
-                        let o = mail_jobs::failed(&job, message);
-                        if let Some(script) = o.script {
-                            let _ = mail_wv.evaluate_script(&script);
-                        }
-                        if let Some(text) = o.toast {
-                            toast!(text, "\u{2709}\u{FE0F}", "Mail");
-                        }
-                    }
-                }
+                mail::Event::Job { job, prompt } => start_job!(job, prompt),
                 mail::Event::Status { account, state, message } => {
                     let _ = mail_wv.evaluate_script(&format!(
                         "window.__mail && window.__mail.status({}, {}, {})",
@@ -10268,6 +11651,7 @@ fn main() {
                         _ => mail::Burst::new(target, item, from, subject),
                     };
                     notif_origin = None;
+                    meeting_toast = None;
                     if !notification_visible {
                         let _ = notification_wv.set_visible(true);
                         notification_visible = true;
@@ -10286,14 +11670,8 @@ fn main() {
                 }
                 mail::Event::ToNotes { ws, entry } => {
                     let ws = if ws.is_empty() { workspace_manager.active().id.clone() } else { ws };
-                    let saved = notes::load(&ws).and_then(|text| notes::save(&ws, &notes::append(&text, &notes::today(), &entry)));
-                    match saved {
-                        Ok(()) => {
-                            if notes_visible && ws == workspace_manager.active().id {
-                                mount_notes!(false);
-                            }
-                        }
-                        Err(e) => toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes"),
+                    if let Err(e) = append_notes!(ws.as_str(), &entry, false) {
+                        toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes");
                     }
                 }
                 mail::Event::RemoveNote { ws, entry } => {
@@ -10302,9 +11680,7 @@ fn main() {
                         if let Some(rest) = notes::remove_entry(&text, &entry) {
                             match notes::save(&ws, &rest) {
                                 Ok(()) => {
-                                    if notes_visible && ws == workspace_manager.active().id {
-                                        mount_notes!(false);
-                                    }
+                                    notes_written!(ws.as_str(), false);
                                 }
                                 Err(e) => toast!(format!("Could not update notes: {e}"), "\u{26A0}\u{FE0F}", "Notes"),
                             }
@@ -10349,6 +11725,21 @@ fn main() {
                     toast!(name, "\u{1F4CE}", "Saved to Downloads");
                 }
                 mail::Event::Toast { title, text } => toast!(text, "\u{2709}\u{FE0F}", title),
+                mail::Event::Invite { ws, message, text } => {
+                    if ws != workspace_manager.active().id {
+                        return;
+                    }
+                    match text {
+                        Ok(text) => {
+                            mail_invites.insert(message, text);
+                            push_invite!(message);
+                        }
+                        Err(e) => {
+                            let data = serde_json::json!({ "message": message, "error": e });
+                            let _ = mail_wv.evaluate_script(&format!("window.__mail && window.__mail.invite && window.__mail.invite({data})"));
+                        }
+                    }
+                }
                 mail::Event::PaletteResults(json) => {
                     let _ = overlay_wv.evaluate_script(&format!(
                         "window.__setMailResults && window.__setMailResults({json})"
@@ -12265,16 +13656,7 @@ static ACP_HISTORY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// message log at `max_msgs` (oldest dropped first).
 fn persist_acp_history(workspace_id: &str, sessions: &[AcpSession], active_id: u64, max_msgs: usize) {
 	let workspace_id = workspace_id.to_string();
-	let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions
-		.iter()
-		.map(|s| config::AcpSessionSnapshot {
-			id: s.id,
-			title: s.title.clone(),
-			tag: s.tag.clone(),
-			acp_session_id: s.acp_session_id.clone(),
-			messages: acp_messages_snapshot(s, max_msgs),
-		})
-		.collect();
+	let snap_sessions: Vec<config::AcpSessionSnapshot> = sessions.iter().map(|s| s.snapshot(max_msgs)).collect();
 	// Read-modify-write: other workspaces' slots must survive this save,
 	// not just the one that changed. Locked so two concurrent calls (e.g.
 	// outgoing and incoming workspace both persisting right after a switch)
@@ -12282,13 +13664,33 @@ fn persist_acp_history(workspace_id: &str, sessions: &[AcpSession], active_id: u
 	std::thread::spawn(move || {
 		let _guard = ACP_HISTORY_WRITE_LOCK.lock().unwrap();
 		let mut history = config::load_acp_history().unwrap_or_default();
+		// The closed stack has its own writer (`persist_acp_closed`); carry it over.
+		let closed = history
+			.workspaces
+			.remove(&workspace_id)
+			.map(|w| w.closed)
+			.unwrap_or_default();
 		history.workspaces.insert(
 			workspace_id,
 			config::WorkspaceAcpHistory {
 				sessions: snap_sessions,
 				active_id,
+				closed,
 			},
 		);
+		config::save_acp_history(&history);
+	});
+}
+
+/// Write one workspace's closed-chat stack (⌘⇧T), leaving its live sessions as
+/// they are on disk. Same lock and read-modify-write as `persist_acp_history`.
+fn persist_acp_closed(workspace_id: &str, closed: &[config::AcpSessionSnapshot]) {
+	let workspace_id = workspace_id.to_string();
+	let closed = closed.to_vec();
+	std::thread::spawn(move || {
+		let _guard = ACP_HISTORY_WRITE_LOCK.lock().unwrap();
+		let mut history = config::load_acp_history().unwrap_or_default();
+		history.workspaces.entry(workspace_id).or_default().closed = closed;
 		config::save_acp_history(&history);
 	});
 }
@@ -12336,15 +13738,10 @@ fn save_and_exit(
 				sessions: ws
 					.acp_sessions
 					.iter()
-					.map(|s| config::AcpSessionSnapshot {
-						id: s.id,
-						title: s.title.clone(),
-						tag: s.tag.clone(),
-						acp_session_id: s.acp_session_id.clone(),
-						messages: acp_messages_snapshot(s, max_acp_session_messages),
-					})
+					.map(|s| s.snapshot(max_acp_session_messages))
 					.collect(),
 				active_id: ws.acp_active_session_id,
+				closed: ws.closed_acp_sessions.clone(),
 			};
 			(ws.id.clone(), snapshot)
 		})
@@ -12522,6 +13919,40 @@ fn mail_status_script(status: &HashMap<String, (&'static str, String)>) -> Strin
 		"window.__setMailStatus && window.__setMailStatus({})",
 		serde_json::Value::Object(json)
 	)
+}
+
+/// Script pushing each account's calendar `{state, message}` into Settings → Mail.
+fn calendar_status_script(status: &HashMap<String, (&'static str, String)>) -> String {
+	let json: serde_json::Map<String, serde_json::Value> = status
+		.iter()
+		.map(|(k, (state, message))| (k.clone(), serde_json::json!({ "state": state, "message": message })))
+		.collect();
+	format!(
+		"window.__setCalendarStatus && window.__setCalendarStatus({})",
+		serde_json::Value::Object(json)
+	)
+}
+
+/// A calendar feed link (`webcal://`, `webcals://`).
+fn is_webcal(url: &str) -> bool {
+	let lower = url.trim_start().to_ascii_lowercase();
+	lower.starts_with("webcal://") || lower.starts_with("webcals://")
+}
+
+/// Calendars whose meetings alert and join: in at least one workspace.
+fn calendar_alert_keys(cfg: &Config, workspaces: &WorkspaceManager) -> Vec<String> {
+	let ids: Vec<String> = workspaces.list().iter().map(|w| w.id.clone()).collect();
+	calendar::alert_keys(cfg, &ids)
+}
+
+/// Open a video call: web links in a new tab, where Zoom and Teams offer
+/// their apps; app links (`zoommtg:`) straight to the app.
+fn open_meeting_link(url: &str, proxy: &tao::event_loop::EventLoopProxy<AppEvent>) {
+	if url.starts_with("https://") || url.starts_with("http://") {
+		let _ = proxy.send_event(AppEvent::OpenInNewTab(url.to_string(), None));
+	} else if !macos::open_external_url(url) {
+		tracing::warn!(%url, "meeting link did not open");
+	}
 }
 
 /// Script pushing `{hex id: {state, message}}` into Settings → Proxies.
@@ -13202,7 +14633,7 @@ mod persistence_and_paging_tests {
 #[cfg(test)]
 mod keybinding_dispatch_tests {
 	use super::{
-		keybind_to_event, pane_keybind_to_event, push_closed_tab, terminal_keybind_to_event, wants_browser_context,
+		keybind_to_event, pane_keybind_to_event, push_closed, terminal_keybind_to_event, wants_browser_context,
 		AppEvent, PaneTab,
 	};
 	use crate::keybindings::Action as A;
@@ -13305,6 +14736,13 @@ mod keybinding_dispatch_tests {
 	}
 
 	#[test]
+	fn the_sidebar_reopen_key_targets_the_session_not_the_tab() {
+		let sidebar = keybind_to_event(A::ReopenTab, false, false, false, true, false, false);
+		assert!(matches!(sidebar, Some(AppEvent::AcpSessionReopen)));
+		assert!(matches!(idle(A::ReopenTab), Some(AppEvent::ReopenTab)));
+	}
+
+	#[test]
 	fn a_focused_terminal_keeps_shell_keys_and_takes_its_tab_keys() {
 		// ⌃D ⌃U ⌃P ⌃N ⌃T ⌃B are shell keys: bound to browser actions, they
 		// must still reach the terminal.
@@ -13357,12 +14795,19 @@ mod keybinding_dispatch_tests {
 				action.id()
 			);
 		}
-		for action in [A::Notes, A::CloseTab] {
-			assert!(matches!(
-				pane_keybind_to_event(action, PaneTab::Notes),
-				Some(AppEvent::ToggleNotes)
-			));
-		}
+		assert!(matches!(
+			pane_keybind_to_event(A::Notes, PaneTab::Notes),
+			Some(AppEvent::ToggleNotes)
+		));
+		// ⌘W hides the pane on either view; ⌘⇧J would switch the Tasks view to the text.
+		assert!(matches!(
+			pane_keybind_to_event(A::CloseTab, PaneTab::Notes),
+			Some(AppEvent::Notes(crate::notes::Request::Hide))
+		));
+		assert!(matches!(
+			pane_keybind_to_event(A::Tasks, PaneTab::Notes),
+			Some(AppEvent::ToggleTasks)
+		));
 		assert!(matches!(
 			pane_keybind_to_event(A::SidebarFullscreen, PaneTab::Notes),
 			Some(AppEvent::TogglePaneFullscreen)
@@ -13428,7 +14873,11 @@ mod keybinding_dispatch_tests {
 	fn the_closed_tab_stack_pops_newest_first_and_evicts_oldest() {
 		let mut stack = Vec::new();
 		for i in 0..super::CLOSED_TAB_HISTORY + 5 {
-			push_closed_tab(&mut stack, format!("https://example.com/{i}"));
+			push_closed(
+				&mut stack,
+				format!("https://example.com/{i}"),
+				super::CLOSED_TAB_HISTORY,
+			);
 		}
 		assert_eq!(stack.len(), super::CLOSED_TAB_HISTORY, "cap not applied");
 		let newest = format!("https://example.com/{}", super::CLOSED_TAB_HISTORY + 4);
@@ -13527,6 +14976,7 @@ mod chrome_js_syntax_tests {
 			("newtab", crate::newtab_html::html("[]", "[]")),
 			("notes", crate::notes_html::html("null")),
 			("mail", crate::mail_html::html("null")),
+			("calendar", crate::calendar_html::html("null")),
 			("notification", crate::notification_html::html()),
 			("overlay", crate::overlay_html::html()),
 			("progress_bar", crate::progress_bar_html::html()),

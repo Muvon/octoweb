@@ -354,6 +354,9 @@ EXPECTED_TOOLS = {
     "browser_get_later", "browser_get_playing_tabs", "render_ui",
     "mail_list_inbox", "mail_search", "mail_read_thread", "mail_create_draft",
     "mail_show", "mail_set_summaries", "mail_add_tasks",
+    "calendar_list_events", "calendar_get_event", "calendar_find_free_time",
+    "calendar_draft_event",
+    "tasks_list", "tasks_add",
 }
 
 # Tools a host must be able to auto-approve. If any of these loses
@@ -366,6 +369,7 @@ READ_ONLY_TOOLS = {
     "browser_get_playing_tabs", "browser_screenshot", "browser_console_messages",
     "browser_network_requests", "browser_wait",
     "mail_list_inbox", "mail_search", "mail_read_thread",
+    "tasks_list",
 }
 
 
@@ -406,6 +410,21 @@ def initialize_negotiates_a_spec_that_defines_annotations():
     version = result.get("protocolVersion", "")
     expect(version >= "2025-03-26",
            f"server negotiated {version!r}; annotations need 2025-03-26 or later")
+
+
+@test
+def tasks_add_and_list_round_trip():
+    """tasks_add writes a dated task into the workspace notes; tasks_list reads it back (003-tasks AGT-1)."""
+    marker = f"E2E task {int(time.time() * 1000)}"
+    text = tool_text("tasks_add", {"text": f"{marker} [x]", "due": "2026-12-01"})
+    expect("\U0001F4C5 2026-12-01" in text, f"tasks_add should write the due date: {text}")
+    expect("[x]" not in text, f"brackets must be stripped (AGT-2): {text}")
+    tasks = parse_json_text(tool_text("tasks_list"), "tasks_list")
+    hit = [t for t in tasks if t.get("text", "").startswith(marker)]
+    expect(hit and hit[0].get("due") == "2026-12-01" and hit[0].get("done") is False,
+           f"tasks_list should list the new task: {tasks}")
+    is_err, _, text = call_tool("tasks_add", {"text": "x", "due": "someday soon"})
+    expect(is_err, f"a due that is not a date must be refused: {text}")
 
 
 # ──────────────────────────────────────────────────────────────────────

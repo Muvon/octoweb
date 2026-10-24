@@ -380,6 +380,87 @@ pub fn open_external_url(url: &str) -> bool {
 	ok
 }
 
+/// Bounce the Dock icon until the app is activated (a meeting is starting).
+pub fn request_attention() {
+	use objc2::runtime::AnyObject;
+	use objc2::{class, msg_send};
+	// SAFETY: NSApplication is set up before the event loop runs.
+	unsafe {
+		let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+		// NSCriticalRequest
+		let _: isize = msg_send![app, requestUserAttention: 0usize];
+	}
+}
+
+#[link(name = "UserNotifications", kind = "framework")]
+extern "C" {}
+
+/// Whether this process runs from an app bundle: the notification center
+/// throws for a bare binary (`cargo run`).
+fn bundled() -> bool {
+	use objc2::runtime::AnyObject;
+	use objc2::{class, msg_send};
+	// SAFETY: NSBundle mainBundle and its accessors have no preconditions.
+	unsafe {
+		let bundle: *mut AnyObject = msg_send![class!(NSBundle), mainBundle];
+		if bundle.is_null() {
+			return false;
+		}
+		let id: *mut objc2_foundation::NSString = msg_send![bundle, bundleIdentifier];
+		let path: *mut objc2_foundation::NSString = msg_send![bundle, bundlePath];
+		!id.is_null() && !path.is_null() && (*path).to_string().ends_with(".app")
+	}
+}
+
+/// A macOS notification, for when the app is not in front. Asks for
+/// permission the first time. Clicking it brings octoweb forward, where the
+/// in-app alert with its Join button is waiting.
+pub fn notify(id: &str, title: &str, body: &str) {
+	use block2::RcBlock;
+	use objc2::runtime::{AnyObject, Bool};
+	use objc2::{class, msg_send};
+	use objc2_foundation::NSString;
+
+	static ASKED: std::sync::Once = std::sync::Once::new();
+	if !bundled() {
+		return;
+	}
+	// SAFETY: plain UserNotifications calls with retained arguments; the
+	// content created with `new` is released after the request holds it.
+	unsafe {
+		let center: *mut AnyObject = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+		if center.is_null() {
+			return;
+		}
+		ASKED.call_once(|| {
+			let done = RcBlock::new(|_granted: Bool, _error: *mut AnyObject| {});
+			// UNAuthorizationOptionSound | UNAuthorizationOptionAlert
+			let _: () = msg_send![center, requestAuthorizationWithOptions: 6usize, completionHandler: &*done];
+		});
+		let content: *mut AnyObject = msg_send![class!(UNMutableNotificationContent), new];
+		let title = NSString::from_str(title);
+		let body = NSString::from_str(body);
+		let _: () = msg_send![content, setTitle: &*title];
+		let _: () = msg_send![content, setBody: &*body];
+		let sound: *mut AnyObject = msg_send![class!(UNNotificationSound), defaultSound];
+		let _: () = msg_send![content, setSound: sound];
+		let ident = NSString::from_str(id);
+		let request: *mut AnyObject = msg_send![
+			class!(UNNotificationRequest),
+			requestWithIdentifier: &*ident,
+			content: content,
+			trigger: std::ptr::null_mut::<AnyObject>()
+		];
+		let added = RcBlock::new(|error: *mut AnyObject| {
+			if !error.is_null() {
+				tracing::debug!("meeting notification not shown");
+			}
+		});
+		let _: () = msg_send![center, addNotificationRequest: request, withCompletionHandler: &*added];
+		let _: () = msg_send![content, release];
+	}
+}
+
 /// Ghostty's command-line binary, located through Launch Services so an install
 /// outside /Applications is found too. `None` when Ghostty isn't installed.
 pub fn ghostty_cli() -> Option<std::path::PathBuf> {

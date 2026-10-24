@@ -333,6 +333,10 @@ pub struct WorkspaceAcpHistory {
 	/// Last-active session id. Restored as the foreground session.
 	#[serde(default)]
 	pub active_id: u64,
+	/// Chats closed in this workspace, most recent last — ⌘⇧T in the sidebar
+	/// reopens them. Persisted so an accidental close survives a restart.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub closed: Vec<AcpSessionSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -387,6 +391,7 @@ pub fn load_acp_history() -> Option<AcpHistory> {
 		WorkspaceAcpHistory {
 			sessions: legacy.sessions,
 			active_id: legacy.active_id,
+			closed: Vec::new(),
 		},
 	);
 	Some(AcpHistory { workspaces })
@@ -622,6 +627,25 @@ pub struct Config {
 	/// Local date (`YYYY-MM-DD`) of the last morning brief. Internal.
 	#[serde(default)]
 	pub mail_brief_last: String,
+	/// Minutes before a meeting its alert shows, with Join; 0 alerts at the
+	/// start. `None` in Settings turns alerts off (stored as -1).
+	#[serde(default = "default_calendar_alert_min")]
+	pub calendar_alert_min: i32,
+	/// Calendars (keys) the pane and alerts leave out.
+	#[serde(default)]
+	pub calendar_hidden: Vec<String>,
+	/// Calendar (key) new events go to, the last one picked.
+	#[serde(default)]
+	pub calendar_default: String,
+	/// Working hours shared availability is offered in, as minutes of the day.
+	#[serde(default = "default_calendar_day_start")]
+	pub calendar_day_start: u32,
+	#[serde(default = "default_calendar_day_end")]
+	pub calendar_day_end: u32,
+	/// Subscribed calendars (ICS feeds, `webcal://`). A TOML array of tables:
+	/// after every plain value.
+	#[serde(default)]
+	pub calendar_feeds: Vec<CalendarFeed>,
 	/// Mail accounts (Settings → Mail). Before `proxies`: both are TOML
 	/// arrays of tables, which must follow every plain value.
 	#[serde(default)]
@@ -660,6 +684,23 @@ pub struct ProxyRule {
 	pub password: Option<String>,
 	/// Domains or pasted URLs; each also covers its subdomains.
 	pub sites: Vec<String>,
+}
+
+/// A subscribed calendar: an ICS feed, read-only, refreshed in the
+/// background (spec 002-calendar SUB-*).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CalendarFeed {
+	/// Random, assigned once; keys its cache.
+	pub id: [u8; 16],
+	/// `https://…`; `webcal://` is stored as given and fetched over HTTPS.
+	pub url: String,
+	/// Shown name; empty takes the feed's own.
+	#[serde(default)]
+	pub name: String,
+	#[serde(default)]
+	pub color: String,
+	#[serde(default)]
+	pub scope: crate::extension_store::Scope,
 }
 
 /// One mail account. Servers come from `provider`'s preset unless it is
@@ -702,6 +743,12 @@ pub struct MailAccount {
 	pub archive_folder: String,
 	#[serde(default)]
 	pub auth: MailAuth,
+	/// Show this account's calendars in the Calendar tab.
+	#[serde(default = "default_true")]
+	pub calendar: bool,
+	/// CalDAV server when the provider's own can't be found.
+	#[serde(default)]
+	pub caldav_url: String,
 	/// The user's own OAuth client (Gmail, Outlook).
 	#[serde(default)]
 	pub oauth_client_id: String,
@@ -805,6 +852,22 @@ fn default_notes_width() -> u32 {
 	360
 }
 
+fn default_true() -> bool {
+	true
+}
+
+fn default_calendar_alert_min() -> i32 {
+	1
+}
+
+fn default_calendar_day_start() -> u32 {
+	9 * 60
+}
+
+fn default_calendar_day_end() -> u32 {
+	18 * 60
+}
+
 fn default_terminal_height() -> u32 {
 	320
 }
@@ -869,6 +932,12 @@ impl Default for Config {
 			sounds: true,
 			mail_brief_morning: false,
 			mail_brief_last: String::new(),
+			calendar_alert_min: default_calendar_alert_min(),
+			calendar_hidden: Vec::new(),
+			calendar_default: String::new(),
+			calendar_day_start: default_calendar_day_start(),
+			calendar_day_end: default_calendar_day_end(),
+			calendar_feeds: Vec::new(),
 			mail_accounts: Vec::new(),
 			proxies: Vec::new(),
 		}

@@ -448,4 +448,5 @@ What that means for octoweb:
    be synced for offline search?
 3. **A Today view (later).** A third tab merging open tasks, Important mail,
    returning snoozes and due reminders into one "what needs me" list. Worth it
-   once Notes and Mail are in daily use; not before.
+   once Notes and Mail are in daily use; not before. Planned as phase 3 of
+   `specs/003-tasks`.

@@ -15,7 +15,7 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSAlert", "NSApplication", "NSBitmapImageRep", "NSButton", "NSControl", "NSCursor", "NSEvent", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPopover", "NSResponder", "NSSavePanel", "NSText", "NSTextField", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-core-foundation = "0.3"
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSProcessInfo", "NSSet", "NSString", "NSURL", "NSUUID"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSProcessInfo", "NSSet", "NSString", "NSTimeZone", "NSURL", "NSUUID"] }
 objc2-web-kit = { version = "0.3", features = ["WKContentRuleList", "WKContentRuleListStore", "WKSnapshotConfiguration", "WKUserContentController", "WKWebExtension", "WKWebExtensionAction", "WKWebExtensionCommand", "WKWebExtensionContext", "WKWebExtensionController", "WKWebExtensionControllerConfiguration", "WKWebExtensionControllerDelegate", "WKWebExtensionDataRecord", "WKWebExtensionDataType", "WKWebExtensionMatchPattern", "WKWebExtensionPermission", "WKWebExtensionTab", "WKWebExtensionTabConfiguration", "WKWebExtensionWindow", "WKWebExtensionWindowConfiguration", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "block2", "objc2-app-kit", "objc2-core-foundation"] }
 
 # Image processing for screenshots (CGImage, CGContext, PNG encode)
