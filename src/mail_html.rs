@@ -14,7 +14,7 @@
 //!   inbox / search / thread / acted / queued / cancelled / sendError / images
 //!   changed()                      — mail changed: refresh what is shown
 //!   open(account, thread, fromNotes), openDraft(draft), show({title, items})
-//!   files(key, files), unread(n), fullscreen(on), focus()
+//!   files(key, files), unread(n), due(n), fullscreen(on), focus()
 //!   key({key, shift}), swipe(phase, …), mailto(href) — native input (mail_patch.rs)
 //!   draftStream({key, text, done}), draftFailed({key, message}) — the reply writer (AI-3)
 //!   summaryStream({item, text, done}), summaryFailed({item, message}) — Summarise (AI-2)
@@ -428,7 +428,7 @@ pub fn html(keybindings_json: &str) -> String {
   <div id="resize-handle" role="separator" aria-label="Resize pane" aria-orientation="vertical" tabindex="0"></div>
   <div id="bar">
     <div class="seg" role="tablist">
-      <button class="tab" id="tab-notes" type="button" role="tab">Notes</button>
+      <button class="tab" id="tab-notes" type="button" role="tab">Notes <span class="badge" id="due"></span></button>
       <button class="tab active" id="tab-mail" type="button" role="tab" aria-selected="true">Mail <span class="badge" id="unread"></span></button>
       <button class="tab" id="tab-cal" type="button" role="tab">Calendar</button>
     </div>
@@ -1210,6 +1210,7 @@ pub fn html(keybindings_json: &str) -> String {
     forward: '<svg viewBox="0 0 14 14" fill="none"><path d="M8.5 4l3 3-3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 7H6a3.5 3.5 0 00-3.5 3.5V11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
     spark: '<svg viewBox="0 0 14 14" fill="none"><path d="M7 1.5l1.3 3.2 3.2 1.3-3.2 1.3L7 10.5 5.7 7.3 2.5 6l3.2-1.3z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>',
     tasks: '<svg viewBox="0 0 14 14" fill="none"><path d="M2.5 4l1 1 2-2M2.5 9l1 1 2-2M7.5 4.5h4M7.5 9.5h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    event: '<svg viewBox="0 0 14 14" fill="none"><rect x="2" y="3" width="10" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.1"/><path d="M2 5.8h10M4.8 1.8v2M9.2 1.8v2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M7 6.8l.6 1.5 1.5.6-1.5.6L7 11 6.4 9.5 4.9 8.9l1.5-.6z" fill="currentColor"/></svg>',
     clip: '<svg viewBox="0 0 14 14" fill="none"><path d="M11.2 6.6L7 10.8a2.6 2.6 0 01-3.7-3.7l4.6-4.6a1.7 1.7 0 012.4 2.4L5.8 9.4a.8.8 0 01-1.2-1.2l4-4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     trash: '<svg viewBox="0 0 14 14" fill="none"><path d="M2.5 4h9M5.5 4V2.8a.8.8 0 01.8-.8h1.4a.8.8 0 01.8.8V4M3.7 4l.6 7.3a1 1 0 001 .9h3.4a1 1 0 001-.9L10.3 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     read: '<svg viewBox="0 0 14 14" fill="none"><path d="M2 6.2L7 3l5 3.2V11a.8.8 0 01-.8.8H2.8A.8.8 0 012 11z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M2.4 6.5L7 9.3l4.6-2.8" stroke="currentColor" stroke-width="1.1"/></svg>',
@@ -1219,7 +1220,11 @@ pub fn html(keybindings_json: &str) -> String {
     return '<button class="icon-btn" type="button" ' + attr + '="' + id + '" title="' + esc(label + (keyHint ? ' (' + keyHint + ')' : '')) + '" aria-label="' + esc(label) + '">' + svg + '</button>';
   }
 
-  function threadHead(subject, row) {
+  // An invitation card already adds itself to the calendar (INV-1).
+  function hasInvite(t) {
+    return !!(t && (t.messages || []).some(function(m) { return (m.attachments || []).some(isInvite); }));
+  }
+  function threadHead(subject, row, t) {
     const btn = function(id, label, keyHint, svg) { return iconBtn('data-act', id, label, keyHint, svg); };
     const group = function(inner) { return '<div class="tgroup">' + inner + '</div>'; };
     return '<div class="thread-head"><div class="thread-title">' + btn('back', 'Back', 'Esc', I.back) +
@@ -1229,7 +1234,8 @@ pub fn html(keybindings_json: &str) -> String {
         btn(row.pinned ? 'unpin' : 'pin', row.pinned ? 'Unpin' : 'Pin', 'p', I.pin) + btn('to_notes', 'To notes', 't', I.notes)) +
       group(btn('mute', 'Mute', 'm', I.mute) + btn('block', 'Block sender', 'b', I.block) + btn('spam', 'Report spam', '!', I.spam) + btn('mark_unread', 'Mark unread', 'u', I.unread)) +
       group(btn('reply', 'Reply', 'r', I.reply) + btn('all', 'Reply all', 'a', I.all) + btn('forward', 'Forward', 'f', I.forward)) +
-      (S.ai ? group(btn('summarise', 'Summarise with AI', 's', I.spark) + btn('extract', 'Extract tasks with AI', '', I.tasks)) : '') +
+      (S.ai ? group(btn('summarise', 'Summarise with AI', 's', I.spark) + btn('extract', 'Extract tasks with AI', '', I.tasks) +
+        (hasInvite(t) ? '' : btn('event', 'Add to calendar with AI', '', I.event))) : '') +
       (row.class === 'other' ? '<button class="pill" type="button" data-act="important">Move sender to Important</button>' : '') +
       (row.class === 'important' ? '<button class="pill" type="button" data-act="other" title="Later mail from this sender goes to Other">Move sender to Other</button>' : '') +
       '</div></div>';
@@ -1370,7 +1376,7 @@ pub fn html(keybindings_json: &str) -> String {
     detail.dataset.enter = same ? (detail._pending ? 'fill' : '') : S.enter;
     S.enter = '';
     const row = t.row || {};
-    let html = threadHead(t.messages[0].subject || '(no subject)', row) +
+    let html = threadHead(t.messages[0].subject || '(no subject)', row, t) +
       '<div class="summary" id="t-line"' + (row.summary ? '' : ' hidden') + '><span style="color:var(--accent)">✦</span> <span class="tl-text">' + esc(row.summary || '') + '</span></div>' +
       '<div id="t-summary" hidden></div>';
     t.messages.forEach(function(m, i) { html += messageHtml(t, m, i); });
@@ -1393,7 +1399,7 @@ pub fn html(keybindings_json: &str) -> String {
     if (!t || !t.messages || !head) return;
     const row = t.row || {};
     detail.dataset.enter = '';
-    head.outerHTML = threadHead(t.messages[0].subject || '(no subject)', row);
+    head.outerHTML = threadHead(t.messages[0].subject || '(no subject)', row, t);
     const line = $('t-line');
     if (line) line.querySelector('.tl-text').textContent = row.summary || '';
     t.headSig = headSig(t);
@@ -1781,6 +1787,7 @@ pub fn html(keybindings_json: &str) -> String {
         renderSummary();
         break;
       case 'extract': ipc({ type: 'ai', kind: 'extract', item: item[0], text: '' }); showUndo('Finding tasks…', null, 2500); break;
+      case 'event': ipc({ type: 'ai', kind: 'event', item: item[0] }); showUndo('Reading the dates…', null, 2500); break;
       default: act(id, item);
     }
   }
@@ -1993,6 +2000,9 @@ pub fn html(keybindings_json: &str) -> String {
   // (or nothing) into the reply, streamed in place. Keep puts it in the body
   // as one native edit, so ⌘Z brings the notes back.
   const WRITER_TUNES = [['Shorter', 'Make it shorter'], ['Friendlier', 'Make it friendlier'], ['More formal', 'Make it more formal']];
+  // AI-2: the app adds the free stretches; the flag is all the page sends.
+  const TIMES_ASK = 'Propose two or three times that suit us both';
+  const TIMES_PILL = '<button class="pill" type="button" data-w="times">Propose times</button>';
   function canWrite(d) { return S.ai && d.thread && d.mode !== 'forward'; }
   // With words in the body the writer refines them; with none it drafts.
   function writeLabel(d) { return d.body.trim() ? 'Refine with AI' : 'Write with AI'; }
@@ -2002,12 +2012,12 @@ pub fn html(keybindings_json: &str) -> String {
     const open = '<div class="writer" id="writer">';
     if (w.phase === 'ask' && d.body.trim()) {
       return open + '<button class="btn primary" type="button" data-w="improve">Improve' + kbd('↩') + '</button>' +
-        WRITER_TUNES.map(function(t) { return '<button class="pill" type="button" data-tune="' + esc(t[1]) + '">' + esc(t[0]) + '</button>'; }).join('') +
+        WRITER_TUNES.map(function(t) { return '<button class="pill" type="button" data-tune="' + esc(t[1]) + '">' + esc(t[0]) + '</button>'; }).join('') + TIMES_PILL +
         '<label class="ask"><input id="w-input" autocomplete="off" placeholder="Or say how to change it…"></label>' + close('Cancel') + '</div>';
     }
     if (w.phase === 'ask') {
       return open + '<label class="ask"><span class="spark">✦</span><input id="w-input" autocomplete="off" placeholder="What should it say? Or just ↩"></label>' +
-        close('Cancel') + '</div>';
+        TIMES_PILL + close('Cancel') + '</div>';
     }
     if (w.phase === 'writing') {
       return open + '<span class="spark">✦</span><span class="status">Writing…</span>' + close('Stop') + '</div>';
@@ -2017,7 +2027,7 @@ pub fn html(keybindings_json: &str) -> String {
         '<button class="pill" type="button" data-w="retry">Try again</button>' + close('Close') + '</div>';
     }
     return open + '<button class="btn primary" type="button" data-w="keep">Keep' + kbd('↩') + '</button>' +
-      WRITER_TUNES.map(function(t) { return '<button class="pill" type="button" data-tune="' + esc(t[1]) + '">' + esc(t[0]) + '</button>'; }).join('') +
+      WRITER_TUNES.map(function(t) { return '<button class="pill" type="button" data-tune="' + esc(t[1]) + '">' + esc(t[0]) + '</button>'; }).join('') + TIMES_PILL +
       '<button class="pill" type="button" data-w="retry" title="Write it again" aria-label="Write it again">↻</button>' +
       '<label class="ask"><input id="w-input" autocomplete="off" placeholder="Change something…"></label>' + close('Discard') + '</div>';
   }
@@ -2044,7 +2054,8 @@ pub fn html(keybindings_json: &str) -> String {
       if (b.dataset.tune) write(d, b.dataset.tune, w.phase === 'ask' ? d.body : w.text);
       else if (b.dataset.w === 'improve') write(d, '', d.body);
       else if (b.dataset.w === 'keep') keepWriting(d);
-      else if (b.dataset.w === 'retry') write(d, w.request.instruction, w.request.text);
+      else if (b.dataset.w === 'retry') write(d, w.request.instruction, w.request.text, w.request.times);
+      else if (b.dataset.w === 'times') write(d, TIMES_ASK, w.phase === 'ask' ? d.body : w.text, true);
       else closeWriter(d);
     });
     const input = $('w-input');
@@ -2071,12 +2082,14 @@ pub fn html(keybindings_json: &str) -> String {
     S.writers.set(d.key, { key: d.key, phase: 'ask' });
     renderComposer();
   }
-  function write(d, instruction, text) {
+  function write(d, instruction, text, times) {
     stopWriter(d.key);
     // The conversation's account, not From: the reply belongs to the thread.
     const item = { account: S.thread.account, thread: d.thread };
-    S.writers.set(d.key, { key: d.key, item: item, phase: 'writing', text: '', request: { instruction: instruction, text: text } });
-    ipc({ type: 'ai', kind: 'draft', item: item, text: instruction, body: text });
+    S.writers.set(d.key, { key: d.key, item: item, phase: 'writing', text: '', request: { instruction: instruction, text: text, times: !!times } });
+    const req = { type: 'ai', kind: 'draft', item: item, text: instruction, body: text };
+    if (times) req.times = true;
+    ipc(req);
     renderComposer();
   }
   function closeWriter(d) {
@@ -2523,6 +2536,7 @@ pub fn html(keybindings_json: &str) -> String {
       renderComposer();
     },
     unread: function(n) { $('unread').textContent = n ? String(n) : ''; },
+    due: function(n) { $('due').textContent = n ? String(n) : ''; },
     fullscreen: function(on) {
       S.fullscreen = !!on;
       panel.classList.toggle('fullscreen', S.fullscreen);

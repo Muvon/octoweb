@@ -16,6 +16,10 @@
 //!   window.__cal.draft(draft)         — open the form with a draft (agents)
 //!   window.__cal.status(acct, state, message)
 //!   window.__cal.unread(n)            — unread Important mail, on the Mail tab
+//!   window.__cal.due(n)               — open tasks due today or overdue, on the Notes tab
+//!   window.__cal.prep(data)           — meeting prep for an event streaming in
+//!   window.__cal.prepFailed(data)
+//!   window.__cal.aiState(data)        — a Tasks from notes / Follow-up run started or ended
 //!   window.__cal.fullscreen(on)
 //!   window.__cal.focus()
 //!   window.__setShortcuts(data)
@@ -132,6 +136,11 @@ pub fn html(keybindings_json: &str) -> String {
   .tag.maybe { background: var(--fill); color: var(--label-2); }
   .allday { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 14px 4px; }
   .chip { font-size: 12px; padding: 2px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box; }
+  .chip.task { display: flex; gap: 5px; align-items: baseline; background: var(--fill); color: var(--label); }
+  .chip.task .bx { flex-shrink: 0; cursor: pointer; }
+  .chip.task .tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .chip.task.over { color: var(--err); }
+  .chip.task.done { text-decoration: line-through; opacity: 0.55; }
   .chip.sel { outline: 2px solid var(--accent); }
   .nowline { display: flex; align-items: center; gap: 6px; margin: 1px 14px; color: var(--err); font-size: 10.5px; font-weight: 600; }
   .nowline::after { content: ""; flex: 1; height: 1.5px; background: var(--err); border-radius: 1px; }
@@ -184,6 +193,8 @@ pub fn html(keybindings_json: &str) -> String {
   .guests .role { color: var(--label-3); font-size: 11px; }
   .desc { white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; color: var(--label); margin-top: 14px; padding-top: 12px; border-top: 0.5px solid var(--hairline); overflow-wrap: anywhere; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+  .prep { white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; margin: 8px 0 4px; padding: 8px 10px; border-radius: var(--r-ctl); background: var(--fill); overflow-wrap: anywhere; }
+  .prep .rerun { display: block; margin: 4px 0 0 auto; padding: 0; border: none; background: none; font-size: 13px; }
   .confirm { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--label-2); }
 
   .form .f { margin: 0 0 10px; }
@@ -224,7 +235,7 @@ pub fn html(keybindings_json: &str) -> String {
   <div id="resize-handle" role="separator" aria-label="Resize pane" aria-orientation="vertical" tabindex="0"></div>
   <div id="bar">
     <div class="seg" role="tablist">
-      <button class="tab" id="tab-notes" type="button" role="tab">Notes</button>
+      <button class="tab" id="tab-notes" type="button" role="tab">Notes <span class="badge" id="due"></span></button>
       <button class="tab" id="tab-mail" type="button" role="tab">Mail <span class="badge" id="unread"></span></button>
       <button class="tab active" id="tab-cal" type="button" role="tab" aria-selected="true">Calendar</button>
     </div>
@@ -284,7 +295,8 @@ pub fn html(keybindings_json: &str) -> String {
     ws: null, accounts: [], calendars: [], hidden: [], prefs: {}, status: {},
     view: 'agenda', day: midnight(new Date()), events: [], range: null, loaded: false,
     sel: null, sheet: null, next: null, fullscreen: false, chords: {}, op: 0, ops: {},
-    quickId: 0, quick: null, syncing: false, pickedView: false
+    quickId: 0, quick: null, syncing: false, pickedView: false,
+    tasks: [], noted: [], preps: {}, ai: {}, aiMsg: {}
   };
 
   // ── Dates ──────────────────────────────────────────────────────────────────
@@ -343,6 +355,12 @@ pub fn html(keybindings_json: &str) -> String {
       if (e.all_day) return fromIso(e.start_date) <= d && fromIso(e.end_date) > d;
       return e.end > from && e.start < to || (e.start === e.end && e.start >= from && e.start < to);
     }).sort(function(a, b) { return (b.all_day - a.all_day) || (a.start - b.start) || (a.end - b.end); });
+  }
+  function dueTasks(d, overdue) { const k = iso(d); return S.tasks.filter(function(t) { return t.due === k || (overdue && t.due < k); }); }
+  function taskChip(t) {
+    const over = t.due < iso(midnight(new Date()));
+    const label = String(t.text || '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    return '<div class="chip task' + (over ? ' over' : '') + '" data-task="' + S.tasks.indexOf(t) + '" title="' + esc(label) + '"><span class="bx">☐</span><span class="tx">' + esc(label) + '</span></div>';
   }
   function service(url) {
     if (!url) return '';
@@ -470,18 +488,19 @@ pub fn html(keybindings_json: &str) -> String {
       const d = addDays(S.day, i);
       const all = onDay(d);
       const isToday = sameDay(d, today);
-      if (!all.length && !isToday && i !== 0) continue;
+      const due = dueTasks(d, isToday);
+      if (!all.length && !due.length && !isToday && i !== 0) continue;
       shown++;
       html += '<div class="day-h' + (isToday ? ' today' : '') + '">' + esc(dayName(d)) + (dayName(d).length < 10 ? ' <span class="d">' + WD[d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()] + '</span>' : '') + '</div>';
       const allDay = all.filter(function(e) { return e.all_day; });
       const timed = all.filter(function(e) { return !e.all_day; });
-      if (allDay.length) {
+      if (allDay.length || due.length) {
         html += '<div class="allday">' + allDay.map(function(e) {
           const c = color(e);
           return '<div class="chip' + (S.sel === e.key ? ' sel' : '') + '" data-open="' + esc(e.key) + '" style="background:color-mix(in srgb,' + esc(c) + ' 18%,transparent);color:var(--label)" title="' + esc(e.title) + '">' + esc(e.title) + '</div>';
-        }).join('') + '</div>';
+        }).join('') + due.map(taskChip).join('') + '</div>';
       }
-      if (!timed.length && !allDay.length) html += '<div class="empty-day">Nothing scheduled</div>';
+      if (!timed.length && !allDay.length && !due.length) html += '<div class="empty-day">Nothing scheduled</div>';
       let nowDrawn = !isToday;
       timed.forEach(function(e) {
         if (!nowDrawn && e.start > now) { html += '<div class="nowline">' + esc(fmtTime(now)) + '</div>'; nowDrawn = true; }
@@ -545,10 +564,11 @@ pub fn html(keybindings_json: &str) -> String {
       const all = onDay(d);
       if (n > 1) head += '<div class="c' + (sameDay(d, today) ? ' today' : '') + '" data-day="' + iso(d) + '">' + WD[d.getDay()] + ' ' + d.getDate() + '</div>';
       const ad = all.filter(function(e) { return e.all_day; });
-      if (ad.length) hasAll = true;
+      const due = dueTasks(d, false);
+      if (ad.length || due.length) hasAll = true;
       allRow += '<div class="g-all">' + ad.map(function(e) {
         return '<div class="chip' + (S.sel === e.key ? ' sel' : '') + '" data-open="' + esc(e.key) + '" style="background:color-mix(in srgb,' + esc(color(e)) + ' 20%,transparent)">' + esc(e.title) + '</div>';
-      }).join('') + '</div>';
+      }).join('') + due.map(taskChip).join('') + '</div>';
       body += '<div class="g-col" data-col="' + iso(d) + '">';
       for (let h = 0; h < 24; h++) body += '<div class="line" style="top:' + (h * H) + 'px"></div><div class="line half" style="top:' + (h * H + H / 2) + 'px"></div>';
       const dayStart = d.getTime() / 1000, dayEnd = addDays(d, 1).getTime() / 1000;
@@ -588,6 +608,25 @@ pub fn html(keybindings_json: &str) -> String {
 
   // ── Details ────────────────────────────────────────────────────────────────
   function find(key) { return S.events.find(function(e) { return e.key === key; }); }
+  function refreshDetail(key) { if (S.sheet && S.sheet.kind === 'detail' && S.sheet.key === key) renderSheet(); }
+  function prepBlock(e) {
+    const p = S.preps[e.key];
+    if (!p) return '';
+    const body = p.error ? '<span style="color:var(--err)">' + esc(p.error) + '</span>' : p.text ? linkify(p.text) : '<span style="color:var(--label-2)">Preparing…</span>';
+    return '<div class="prep">' + body + (p.done ? '<button class="link rerun" data-act="prep" title="Run again" aria-label="Run again">↻</button>' : '') + '</div>';
+  }
+  function aiActions(e, guests) {
+    if (!S.prefs.ai) return '';
+    const k = e.key, p = S.preps[k];
+    let out = '';
+    if (guests.some(function(g) { return !g.me; })) out += '<button class="btn" data-act="prep"' + (p && !p.done ? ' disabled' : '') + ' title="Brief me on the guests and the topic">✦ Prep</button>';
+    if (e.start <= nowSec() && S.noted.indexOf(k) >= 0) {
+      const bt = S.ai[k + ':tasks'], bf = S.ai[k + ':followup'];
+      out += '<button class="btn" data-act="ai-tasks"' + (bt ? ' disabled' : '') + '>' + (bt ? 'Finding tasks…' : '✦ Tasks from notes') + '</button>' +
+        '<button class="btn" data-act="ai-followup"' + (bf ? ' disabled' : '') + '>' + (bf ? 'Writing…' : '✦ Follow-up') + '</button>';
+    }
+    return out;
+  }
 
   function whenText(e) {
     if (e.all_day) {
@@ -617,7 +656,7 @@ pub fn html(keybindings_json: &str) -> String {
     let html = '<div class="sh-bar"><button class="btn" data-act="back">‹ Back</button><span class="spacer"></span>' +
       (e.editable ? '<button class="btn" data-act="edit" title="Edit (e)">Edit</button>' : '') +
       (e.editable || (e.recurring && backendOf(e) === 'dav') ? '<button class="btn danger" data-act="delete" title="Delete">Delete</button>' : '') + '</div>';
-    html += '<div class="sh-body"><h2>' + esc(e.title) + '</h2>';
+    html += '<div class="sh-body"><h2>' + esc(e.title) + '</h2>' + prepBlock(e);
     html += '<div class="meta"><span class="ic">◷</span><div class="v">' + esc(whenText(e)) +
       (!e.all_day ? ' <span class="sub">(' + esc(duration(e.end - e.start)) + ')</span>' : '') + (e.recurring ? '<div class="sub">Repeats</div>' : '') + '</div></div>';
     html += '<div class="meta"><span class="ic"><span class="dot" style="background:' + esc(c.color || '#888') + ';margin:0"></span></span><div class="v">' + esc(c.name || '') + ' <span class="sub">· ' + esc(a.address || '') + '</span></div></div>';
@@ -637,8 +676,9 @@ pub fn html(keybindings_json: &str) -> String {
             (g.organizer ? '<span class="role">organizer</span>' : g.optional ? '<span class="role">optional</span>' : '') + '</li>';
         }).join('') + '</ul></div></div>';
     }
-    html += '<div class="actions"><button class="btn" data-act="notes" title="Add a meeting note to this workspace\'s notes">Meeting notes</button>' +
+    html += '<div class="actions"><button class="btn" data-act="notes" title="Add a meeting note to this workspace\'s notes">Meeting notes</button>' + aiActions(e, guests) +
       (e.link ? '<button class="btn" data-url="' + esc(e.link) + '">Open in ' + (backendOf(e) === 'graph' ? 'Outlook' : backendOf(e) === 'google' ? 'Google Calendar' : 'browser') + '</button>' : '') + '</div>';
+    if (S.aiMsg[e.key]) html += '<div class="confirm" role="status">' + esc(S.aiMsg[e.key]) + '</div>';
     if (S.sheet.confirm) {
       html += '<div class="confirm">' + (e.recurring ? 'Delete this repeating event:' : 'Delete this event' + (guests.length > 1 ? ' and notify guests?' : '?')) +
         (e.recurring ? '<button class="btn danger" data-del="one">Only this one</button><button class="btn danger" data-del="all">All events</button>' : '<button class="btn danger" data-del="one">Delete</button>') +
@@ -814,7 +854,11 @@ pub fn html(keybindings_json: &str) -> String {
     } else if (S.sheet.kind === 'detail') {
       const e = find(S.sheet.key) || S.sheet.event;
       S.sheet.event = e;
+      const keep = sheet.querySelector('.sh-body');
+      const top = keep ? keep.scrollTop : 0;
       sheet.innerHTML = renderDetail(e);
+      const body = sheet.querySelector('.sh-body');
+      if (body) body.scrollTop = top;
     } else {
       sheet.innerHTML = renderForm();
       const allday = $('f-allday');
@@ -978,6 +1022,13 @@ pub fn html(keybindings_json: &str) -> String {
       else if (a === 'delete') { S.sheet.confirm = true; renderSheet(); }
       else if (a === 'nodelete') { S.sheet.confirm = false; renderSheet(); }
       else if (a === 'notes' && ev) ipc({ type: 'notes', key: ev.key });
+      else if (a === 'prep' && ev) { S.preps[ev.key] = { text: '', done: false }; ipc({ type: 'prep', key: ev.key }); renderSheet(); }
+      else if ((a === 'ai-tasks' || a === 'ai-followup') && ev) {
+        const kind = a === 'ai-tasks' ? 'tasks' : 'followup';
+        S.ai[ev.key + ':' + kind] = true; delete S.aiMsg[ev.key];
+        ipc({ type: kind === 'tasks' ? 'meeting_tasks' : 'follow_up', key: ev.key });
+        renderSheet();
+      }
       else if (a === 'settings') { togglePop(false); ipc({ type: 'settings' }); }
       else if (a === 'subscribe') subscribe();
       else if (a === 'import') { togglePop(false); ipc({ type: 'import_pick' }); }
@@ -1002,6 +1053,15 @@ pub fn html(keybindings_json: &str) -> String {
       S.sheet.event.me = rsvp.dataset.rsvp;
       ipc({ type: 'rsvp', op: op, key: S.sheet.event.key, response: rsvp.dataset.rsvp });
       renderSheet();
+      return;
+    }
+    const tk = t.closest('[data-task]');
+    if (tk) {
+      const task = S.tasks[+tk.dataset.task];
+      if (task) {
+        if (t.closest('.bx')) { tk.classList.add('done'); ipc({ type: 'task_toggle', line: task.line, raw: task.raw, done: true }); }
+        else ipc({ type: 'task_open', line: task.line, raw: task.raw });
+      }
       return;
     }
     const open = t.closest('[data-open]');
@@ -1150,6 +1210,8 @@ pub fn html(keybindings_json: &str) -> String {
     events: function(d) {
       if (!S.range || d.from !== S.range.from || d.to !== S.range.to) return;
       S.events = d.events || [];
+      S.tasks = d.tasks || [];
+      S.noted = d.noted || [];
       S.loaded = true;
       S.keepScroll = true;
       render();
@@ -1192,6 +1254,14 @@ pub fn html(keybindings_json: &str) -> String {
       if ($('pop').classList.contains('open')) renderPop();
     },
     unread: function(n) { $('unread').textContent = n ? String(n) : ''; },
+    due: function(n) { $('due').textContent = n ? String(n) : ''; },
+    prep: function(d) { S.preps[d.key] = { text: d.text || '', done: !!d.done }; refreshDetail(d.key); },
+    prepFailed: function(d) { const p = S.preps[d.key] || { text: '' }; S.preps[d.key] = { text: p.text, done: true, error: d.message || 'Could not prepare.' }; refreshDetail(d.key); },
+    aiState: function(d) {
+      S.ai[d.key + ':' + d.kind] = !!d.busy;
+      if (d.message) S.aiMsg[d.key] = d.message;
+      refreshDetail(d.key);
+    },
     fullscreen: function(on) {
       S.fullscreen = on;
       $('panel').classList.toggle('fullscreen', on);

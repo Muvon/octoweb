@@ -93,12 +93,56 @@ impl Jobs {
 pub struct Outcome {
 	/// For the mail page.
 	pub script: Option<String>,
+	/// For the calendar page (spec 002-calendar AI-3, AI-4).
+	pub calendar_script: Option<String>,
 	/// For the engine.
 	pub command: Option<mail::Command>,
+	/// For main.rs: what a calendar job's answer asks the app to do.
+	pub action: Option<Action>,
 	/// For the user, as a toast.
 	pub toast: Option<String>,
 	/// A reply finished writing: the draft-ready sound.
 	pub ready: bool,
+}
+
+/// A calendar job's answer, for main.rs to act on: these touch the calendar
+/// pane, the notes and the composer, which only the main thread owns.
+#[derive(Debug)]
+pub enum Action {
+	/// AI-1: the quick-add line for the event a conversation of workspace
+	/// `ws` arranges; `people` are the only guests it may invite.
+	EventLine {
+		ws: String,
+		line: String,
+		people: Vec<String>,
+	},
+	/// AI-4: tasks for the notes section of meeting `key`, as the reader
+	/// wrote them (a deadline as ` >YYYY-MM-DD`).
+	MeetingTasks {
+		ws: String,
+		key: String,
+		start: usize,
+		heading: String,
+		day: String,
+		tasks: Vec<String>,
+	},
+	/// AI-4: the follow-up mail for meeting `key`.
+	FollowUp {
+		ws: String,
+		key: String,
+		account: String,
+		to: String,
+		subject: String,
+		body: String,
+	},
+}
+
+/// The calendar page's busy state for an after-meeting button (AI-4).
+pub fn ai_state(key: &str, kind: &str, busy: bool, message: &str) -> String {
+	crate::calendar::script(
+		"aiState",
+		&[serde_json::json!({ "key": key, "kind": kind, "busy": busy, "message": message })],
+	)
 }
 
 /// How a job that did not finish shows: `message` where the user asked for it.
@@ -118,8 +162,23 @@ pub fn failed(job: &Job, message: String) -> Outcome {
 			tracing::warn!(error = %message, "mail brief run failed");
 			script("briefFailed", serde_json::json!({ "ws": ws, "message": message }))
 		}
-		Job::Tasks { .. } => Outcome {
+		Job::Tasks { .. } | Job::Event { .. } => Outcome {
 			toast: Some(message),
+			..Default::default()
+		},
+		Job::Prep { key } => Outcome {
+			calendar_script: Some(crate::calendar::script(
+				"prepFailed",
+				&[serde_json::json!({ "key": key, "message": message })],
+			)),
+			..Default::default()
+		},
+		Job::MeetingTasks { key, .. } => Outcome {
+			calendar_script: Some(ai_state(key, "tasks", false, &message)),
+			..Default::default()
+		},
+		Job::FollowUp { key, .. } => Outcome {
+			calendar_script: Some(ai_state(key, "followup", false, &message)),
 			..Default::default()
 		},
 		// In the background: nobody is waiting for it.
@@ -139,7 +198,13 @@ pub fn outcome(p: Progress) -> Outcome {
 	};
 	// Finished without its block: whatever it said instead (a question, a
 	// refusal) is the message.
-	if ended && block.is_none_or(|(t, _)| t.trim().is_empty() && !matches!(p.job, Job::Tasks { .. })) {
+	// An empty answer means "none" for tasks; for an event, that there is no
+	// date to add.
+	let empty_ok = matches!(p.job, Job::Tasks { .. } | Job::MeetingTasks { .. });
+	if ended && block.is_none_or(|(t, _)| t.trim().is_empty() && !empty_ok) {
+		if block.is_some() && matches!(p.job, Job::Event { .. }) {
+			return failed(&p.job, "No date for an event in this conversation.".into());
+		}
 		let said: String = p.response.trim().chars().take(300).collect();
 		return failed(
 			&p.job,
@@ -201,6 +266,60 @@ pub fn outcome(p: Progress) -> Outcome {
 				..Default::default()
 			}
 		}
+		(Job::Prep { key }, Some((text, _))) => Outcome {
+			calendar_script: Some(crate::calendar::script(
+				"prep",
+				&[serde_json::json!({ "key": key, "text": text, "done": ended })],
+			)),
+			..Default::default()
+		},
+		(Job::Event { ws, item, people }, _) if ended => match mail::parse_event_line(&p.response) {
+			Some(line) => Outcome {
+				action: Some(Action::EventLine { ws, line, people }),
+				..Default::default()
+			},
+			None => failed(&Job::Event { ws, item, people }, "No date for an event in this conversation.".into()),
+		},
+		(
+			Job::MeetingTasks {
+				ws,
+				key,
+				start,
+				heading,
+				day,
+			},
+			_,
+		) if ended => Outcome {
+			action: Some(Action::MeetingTasks {
+				ws,
+				key,
+				start,
+				heading,
+				day,
+				tasks: mail::parse_tasks(&p.response),
+			}),
+			..Default::default()
+		},
+		(
+			Job::FollowUp {
+				ws,
+				key,
+				account,
+				to,
+				subject,
+			},
+			Some((text, _)),
+		) if ended => Outcome {
+			action: Some(Action::FollowUp {
+				ws,
+				key,
+				account,
+				to,
+				subject,
+				body: text.to_string(),
+			}),
+			..Default::default()
+		},
 		_ => Outcome::default(),
 	}
 }
@@ -321,5 +440,61 @@ mod tests {
 		let o = run(tasks(), "Sorry.", Some(Ok(())));
 		assert_eq!(o.toast.as_deref(), Some("Sorry."));
 		assert!(o.command.is_none());
+	}
+
+	#[test]
+	fn calendar_jobs_hand_their_answers_to_the_app() {
+		let event = || Job::Event {
+			ws: "w".into(),
+			item: item(),
+			people: vec!["anna@x.com".into()],
+		};
+		let o = run(event(), "<text>\nReview 2026-10-29 15:00-16:00 anna@x.com\n</text>", Some(Ok(())));
+		assert!(matches!(o.action, Some(Action::EventLine { line, people, .. })
+			if line == "Review 2026-10-29 15:00-16:00 anna@x.com" && people == ["anna@x.com"]));
+		// No event: the user hears why, and no form opens.
+		for none in ["<text>\n</text>", "<text>\nNo event found.\n</text>", "<text>\n-\n</text>"] {
+			let o = run(event(), none, Some(Ok(())));
+			assert!(o.action.is_none(), "{none}");
+			assert_eq!(o.toast.as_deref(), Some("No date for an event in this conversation."));
+		}
+		// One run per conversation: another one's does not stop it.
+		let other = Job::Event {
+			ws: "w".into(),
+			item: Item {
+				account: "acc".into(),
+				thread: "u".into(),
+			},
+			people: vec![],
+		};
+		assert!(event().same_slot(&event()) && !event().same_slot(&other));
+		let prep = || Job::Prep { key: "k".into() };
+		let o = run(prep(), "<text>\nAnna wants", None);
+		assert!(o.calendar_script.unwrap().contains("__cal.prep("));
+		let o = run(prep(), "", Some(Err("gone".into())));
+		assert!(o.calendar_script.unwrap().contains("prepFailed"));
+		let tasks = || Job::MeetingTasks {
+			ws: "w".into(),
+			key: "k".into(),
+			start: 3,
+			heading: "### X".into(),
+			day: "2026-10-22".into(),
+		};
+		let o = run(tasks(), "<text>\n- Send deck >2026-10-30\n</text>", Some(Ok(())));
+		assert!(matches!(o.action, Some(Action::MeetingTasks { tasks, start: 3, .. }) if tasks == ["Send deck >2026-10-30"]));
+		let o = run(tasks(), "<text>\n</text>", Some(Ok(())));
+		assert!(matches!(o.action, Some(Action::MeetingTasks { tasks, .. }) if tasks.is_empty()));
+		let o = run(tasks(), "", Some(Err("gone".into())));
+		assert!(o.calendar_script.unwrap().contains("aiState"));
+		let follow = Job::FollowUp {
+			ws: "w".into(),
+			key: "k".into(),
+			account: "a".into(),
+			to: "b@x".into(),
+			subject: "S".into(),
+		};
+		assert_eq!(follow.agent(), "octoweb:mail-writer");
+		let o = run(follow, "<text>\nHi all,\n</text>", Some(Ok(())));
+		assert!(matches!(o.action, Some(Action::FollowUp { body, .. }) if body == "Hi all,"));
 	}
 }

@@ -55,10 +55,11 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
 - **Proactive learning** — Background agent periodically analyzes your browsing and memorizes patterns. **Off by default** — it reads your tabs, history and page text, so you turn it on deliberately in Settings (`⌘,`).
-- **MCP server** — 42 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content, read and search mail, read the calendar and draft events.
+- **MCP server** — 44 tools for AI clients to control the browser. Navigate, click, type, screenshot, extract content, read and search mail, read the calendar and draft events, list and add tasks.
 - **Mail** (`⌘⇧I`) — Gmail, iCloud, Outlook, Private Email, or any IMAP account in a pane beside the page: Important and Other, single-key triage, snooze, undo send, send later, search, attachment previews. Accounts are scoped per workspace.
-- **Calendar** (`⌘⇧D`) — The calendars of those same accounts (Google Calendar, Outlook, iCloud, CalDAV) in the pane: the next meeting with a Join button, an alert before it starts, `⌘J` to join from anywhere, list/day/week views, RSVP, quick add in plain English ("Lunch with anna@x.com tomorrow 1pm"), and your free times copied as text. Subscribe to `webcal://` / ICS feeds, import `.ics` files (drop them on the pane), and answer invitations right in the mail message.
+- **Calendar** (`⌘⇧D`) — The calendars of those same accounts (Google Calendar, Outlook, iCloud, CalDAV) in the pane: the next meeting with a Join button, an alert before it starts, `⌘J` to join from anywhere, list/day/week views, RSVP, quick add in plain English ("Lunch with anna@x.com tomorrow 1pm"), and your free times copied as text. Subscribe to `webcal://` / ICS feeds, import `.ics` files (drop them on the pane), and answer invitations right in the mail message. With mail AI on: an event drafted from an email, free times offered in a reply, meeting prep from the guests' mail and last notes, and tasks or a follow-up from the meeting's notes.
 - **Notes** (`⌘⇧J`) — One markdown file per workspace. `⌥⌘J` captures the page as a task, or the selection as a quote.
+- **Tasks** (`⌥⌘T`) — The `- [ ]` lines of the notes in one list: Overdue, Today, Upcoming, No date. Type `>fri` after a task and it becomes an Obsidian Tasks date (`📅 2026-10-30`); due tasks show in the calendar and as a count on the Notes tab.
 - **Terminal** (`` ⌘` ``) — A real shell under the page, with tabs and splits, per workspace; layout, directories, and output come back after a restart.
 - **Extensions** — Chrome Web Store extensions, or a `.crx`, `.zip`, `.xpi`, or unpacked folder, scoped per workspace (macOS 15.4+).
 - **Find-in-page** (`⌘F`) — Full-text search with highlighting.
@@ -213,6 +214,8 @@ Claude Desktop / octomind / any MCP client
 | `mail_show` | Show a list of conversations in the mail pane |
 | `mail_set_summaries` | Attach one-line summaries to inbox rows |
 | `mail_add_tasks` | Add tasks linked to a conversation to the workspace notes |
+| `tasks_list` | The workspace's tasks with their due dates |
+| `tasks_add` | Add a task to the workspace notes, with an optional due date |
 | `calendar_list_events` | The workspace's calendar events, local time |
 | `calendar_get_event` | One event in full: guests and answers, video link, notes (fenced as untrusted) |
 | `calendar_find_free_time` | Free working-hours slots over the next working days, as pasteable text |
@@ -273,6 +276,7 @@ Every shortcut is configurable in Settings (`⌘,`) — remaps persist to `~/.co
 | `⌘⇧I` | Toggle inbox (mail) |
 | `⌥⌘I` | Toggle DevTools |
 | `⌘⇧J` | Toggle notes |
+| `⌥⌘T` | Toggle tasks (the notes' open tasks) |
 | `⌥⌘J` | Capture page as task, or selection as quote, to notes |
 | `⌘⇧D` | Toggle calendar |
 | `⌘J` | Join the current or next meeting (only when there is one to join) |

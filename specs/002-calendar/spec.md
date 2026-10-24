@@ -1,6 +1,6 @@
 # 002 — Calendar
 
-Status: draft · 2026-10-22
+Status: draft · 2026-10-24
 
 ## Why
 
@@ -44,7 +44,9 @@ workspace · next-meeting card, address-bar chip and ⌘J join · meeting alerts
 · list, day and week views · event details with guests and RSVP · create,
 edit and delete, with guests, video link and simple repeats · quick add in
 plain English · copy free times · meeting notes into Notes · MCP tools ·
-ICS subscriptions (`webcal://`) · `.ics` import · invitations in mail.
+ICS subscriptions (`webcal://`) · `.ics` import · invitations in mail · AI:
+event from mail, proposed times in replies, meeting prep, tasks and a
+follow-up after the meeting · due tasks from Notes (tasks spec CAL-1).
 
 **Out:** month and year grids, drag to move or resize, booking pages, room
 booking, task time-blocking, AI auto-scheduling, secondary time zones (v2),
@@ -188,6 +190,47 @@ The interchange every calendar app supports: iCalendar (`.ics`) files,
   Mail → Calendar, default 9:00–18:00), on the clipboard as text with the
   time zone, ready to paste into a message.
 
+## AI
+
+The mail rule holds (mail spec, *AI*): jobs that read event notes or mail are
+one-shot runs of the tool-less `octoweb:mail-reader` and `octoweb:mail-writer`
+specialists — text in, text out — and the app acts on their answer. Nothing
+they read reaches an agent that can browse, read tabs or act; event notes and
+mail go inside the untrusted wrapper. The ✦ buttons are the ones Mail already
+has, where people already look for them: the AI drafts, the user saves, keeps
+or sends.
+
+- **AI-1** **Event from mail.** A conversation shall offer **✦ To calendar**
+  beside Summarise and Extract tasks, except when it shows an invitation card
+  (INV-1). The reader turns it into one quick-add line with absolute dates,
+  read against the message's date — "Design review 2026-10-29 15:00-16:00
+  anna@x.com +meet @Room 4" — and the app reads that line with quick add
+  (QCK-1) and opens the filled-in form in the Calendar tab. Its notes stay
+  empty: guests receive them, and a link to the user's mail means nothing to
+  them. Nothing is created until the user saves; with no date in the
+  conversation the app says so.
+- **AI-2** **Propose times.** The reply writer (mail AI-3) shall offer
+  **Propose times** beside Shorter, Friendlier and More formal, and on the
+  empty composer. The writer gets the free stretches Copy my free times uses
+  (AVL-1), with the time zone, and writes two or three that suit the
+  conversation into the reply; it offers no time outside that list.
+- **AI-3** **Meeting prep.** An event with guests shall offer **✦ Prep** in its
+  details: a few lines streamed in under the title — what the meeting is
+  about, what each side asked or promised, what is still open — from the
+  event, the latest conversations with its guests in the workspace's mail (up
+  to five, from the last 60 days) and the notes section of the last meeting
+  with the same title (EVT-4). It stays with its occurrence while the app
+  runs.
+- **AI-4** **After the meeting.** Once a meeting has started and the workspace
+  notes hold its section (EVT-4), its details shall offer **✦ Tasks from
+  notes** and **✦ Follow-up**. Tasks from notes adds the tasks the reader
+  finds in the section as `- [ ]` lines under its heading, as mail AI-5 does
+  for a conversation. Follow-up has the writer draft a short recap for the
+  guests from the section and opens it in Mail as a new message to them,
+  titled with the meeting, for the user to send.
+- **AI-5** These shall follow the Mail AI switch (Settings → Mail, mail AI-8):
+  off, no ✦ button shows and nothing goes to an agent.
+
 ## Agents
 
 - **AGT-1** MCP shall expose `calendar_list_events`, `calendar_get_event`,
@@ -223,6 +266,12 @@ The interchange every calendar app supports: iCalendar (`.ics`) files,
 - **Why not EventKit.** It cannot add guests or answer invitations, does not
   expose Meet/Teams conference data, depends on macOS account sync, and
   Exchange through it is being retired with EWS (2026–27).
+- **AI jobs.** Calendar jobs are new kinds of `mail::Job`, run by
+  `mail_jobs::Jobs` like the mail ones. Conversations with guests come from
+  the mail store's search by `from:` and `to:`; a meeting's notes section from
+  the workspace notes by its EVT-4 heading. Event from mail feeds the reader's
+  line to `calendar_quick::parse`, so there is no JSON to trust and the form
+  shows exactly what was read.
 - **Verified.** Unit tests for each provider's parsing and writing, the
   RRULE engine, quick add and link detection; the CalDAV path end to end
   against Radicale (`dav_round_trip_against_a_server`). Real Google,

@@ -9,9 +9,10 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    │
    ├── browser.rs            ← TabManager (tabs, history, active state, visit counts)
    ├── config.rs             ← Config, session persistence, favicon cache, prompt history
+   ├── notes.rs              ← Per-workspace notes file and its tasks (specs/003-tasks): task lines, 📅 dates, meeting sections
    ├── agent.rs              ← Assistant sessions over the octomind WebSocket (sidebar, learning, editor, mail)
    ├── octomind_server.rs    ← The single `octomind server` process: lazy start, token, restart, shutdown
-   ├── mcp.rs                ← MCP server — 42 browser, mail and calendar tools over HTTP JSON-RPC
+   ├── mcp.rs                ← MCP server — 44 browser, mail, calendar and tasks tools over HTTP JSON-RPC
    ├── agent_tabs.rs         ← MCP-driven tabs: kept rendering off-screen, exempt from hibernation
    │
    ├── calendar.rs           ← Calendar engine (specs/002-calendar): store, sync thread, next meeting, availability
@@ -91,7 +92,7 @@ Every assistant runs as a session on ONE `octomind server` process, reached over
 
 ### MCP — Browser Control Server (`mcp.rs`)
 
-HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 42 tools:
+HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CONFIG_DIR` isolates the profile for side-by-side instances). External AI agents control the browser via 44 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -104,6 +105,7 @@ HTTP JSON-RPC on `localhost:3434/mcp` (`OCTOWEB_MCP_PORT` overrides; `OCTOWEB_CO
 | History & media | `browser_get_history`, `browser_search_history_content`, `browser_get_later`, `browser_get_playing_tabs` |
 | Mail (workspace's accounts; never sends, archives or deletes) | `mail_list_inbox`, `mail_search`, `mail_read_thread`, `mail_create_draft`, `mail_show`, `mail_set_summaries`, `mail_add_tasks` |
 | Calendar (workspace's accounts; never creates, edits or answers) | `calendar_list_events`, `calendar_get_event`, `calendar_find_free_time`, `calendar_draft_event` (opens a filled form for the user) |
+| Tasks (workspace notes; never ticks or deletes) | `tasks_list`, `tasks_add` |
 | Sidebar UI | `render_ui` (A2UI surface; blocks until the user answers) |
 
 Interactions run through an actionability harness (`dom_actions.rs`): resolve with retry, bounding-box stability, occlusion detection, pointer+mouse event sequences. Async scripts evaluate via `callAsyncJavaScript` (`async_eval.rs`) so Promises are actually awaited. End-to-end suite: `test_mcp.py` + `tests/fixtures/` (28 tests against a live instance).

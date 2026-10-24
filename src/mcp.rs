@@ -162,6 +162,12 @@ pub enum McpCommand {
 		request: crate::calendar::McpRequest,
 		response: oneshot::Sender<Result<String, String>>,
 	},
+	/// Tasks of the caller's workspace notes (spec 003-tasks AGT-*): list and
+	/// add; nothing ticks or deletes.
+	Tasks {
+		request: TasksRequest,
+		response: oneshot::Sender<Result<String, String>>,
+	},
 	/// Get tabs currently playing audio
 	GetPlayingTabs {
 		response: oneshot::Sender<Result<Vec<TabInfo>, String>>,
@@ -531,6 +537,7 @@ impl McpCommand {
 			Self::GetPlayingTabs { .. } => "GetPlayingTabs",
 			Self::Mail { .. } => "Mail",
 			Self::Calendar { .. } => "Calendar",
+			Self::Tasks { .. } => "Tasks",
 			Self::Reload { .. } => "Reload",
 			Self::GetPageContent { .. } => "GetPageContent",
 			Self::Screenshot { .. } => "Screenshot",
@@ -1130,6 +1137,31 @@ pub struct MailAddTasksRequest {
 	pub tasks: Vec<String>,
 }
 
+/// What agents may do with the workspace's tasks (spec 003-tasks AGT-1).
+#[derive(Debug)]
+pub enum TasksRequest {
+	/// Open tasks, or every task with `done`.
+	List { done: bool },
+	/// A new task under today's heading, due on `due` if given.
+	Add { text: String, due: Option<String> },
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TasksListRequest {
+	#[schemars(description = "Also list done tasks; defaults to open ones only")]
+	#[serde(default)]
+	pub include_done: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TasksAddRequest {
+	#[schemars(description = "The task: a short imperative")]
+	pub text: String,
+	#[schemars(description = "Due date, YYYY-MM-DD (words like tomorrow or fri work too)")]
+	#[serde(default)]
+	pub due: Option<String>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CalendarListRequest {
 	#[schemars(description = "First day, YYYY-MM-DD; defaults to today")]
@@ -1216,6 +1248,17 @@ impl McpServer {
 	async fn calendar(&self, request: crate::calendar::McpRequest) -> Result<CallToolResult, McpError> {
 		match self
 			.send_command(|tx| McpCommand::Calendar { request, response: tx })
+			.await?
+		{
+			Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+			Err(msg) => Ok(err_result(msg)),
+		}
+	}
+
+	/// Run a tasks request and hand back its text, or the error as a tool error.
+	async fn tasks(&self, request: TasksRequest) -> Result<CallToolResult, McpError> {
+		match self
+			.send_command(|tx| McpCommand::Tasks { request, response: tx })
 			.await?
 		{
 			Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
@@ -1987,6 +2030,35 @@ impl McpServer {
 		};
 		self.mail(crate::mail::McpRequest::AddTasks { item, tasks: req.tasks })
 			.await
+	}
+
+	#[tool(
+		description = "The user's tasks in this workspace: the `- [ ]` lines of its notes, with each one's due date (YYYY-MM-DD) and the day it was added. Use for 'what's on my plate' and 'what is due'.",
+		annotations(read_only_hint = true)
+	)]
+	async fn tasks_list(&self, Parameters(req): Parameters<TasksListRequest>) -> Result<CallToolResult, McpError> {
+		let request = TasksRequest::List {
+			done: req.include_done.unwrap_or(false),
+		};
+		// Tasks come from mail and captured pages too: data, never instructions.
+		match self
+			.send_command(|tx| McpCommand::Tasks { request, response: tx })
+			.await?
+		{
+			Ok(text) => Ok(CallToolResult::success(vec![Content::text(crate::mail::untrusted(&text))])),
+			Err(msg) => Ok(err_result(msg)),
+		}
+	}
+
+	#[tool(
+		description = "Add a task to the user's notes in this workspace, under today's heading, with an optional due date. For tasks from an email use mail_add_tasks, which links the conversation."
+	)]
+	async fn tasks_add(&self, Parameters(req): Parameters<TasksAddRequest>) -> Result<CallToolResult, McpError> {
+		self.tasks(TasksRequest::Add {
+			text: req.text,
+			due: req.due,
+		})
+		.await
 	}
 
 	#[tool(
