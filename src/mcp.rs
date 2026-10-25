@@ -42,9 +42,13 @@ use crate::sanitize;
 
 use rmcp::{
 	handler::server::wrapper::Parameters,
-	model::{CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+	model::{
+		CallToolResponse, CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerConfig,
+	},
 	schemars, tool, tool_handler, tool_router,
-	transport::streamable_http_server::{session::local::LocalSessionManager, StreamableHttpService},
+	transport::streamable_http_server::{
+		session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+	},
 	ErrorData as McpError, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
@@ -1049,7 +1053,7 @@ pub struct McpServer {
 /// Domain failures (tab gone, element missing, occluded, …) are part of the
 /// browsing loop and the AI must be able to read and react to them.
 fn err_result(msg: String) -> CallToolResult {
-	CallToolResult::error(vec![Content::text(msg)])
+	CallToolResult::error(vec![ContentBlock::text(msg)])
 }
 
 /// Unwrap a browser-domain `Result` inside a tool body: `Ok(v)` yields `v`,
@@ -1239,7 +1243,7 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Mail { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
 			Err(msg) => Ok(err_result(msg)),
 		}
 	}
@@ -1250,7 +1254,7 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Calendar { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
 			Err(msg) => Ok(err_result(msg)),
 		}
 	}
@@ -1261,7 +1265,7 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Tasks { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
 			Err(msg) => Ok(err_result(msg)),
 		}
 	}
@@ -1392,7 +1396,7 @@ impl McpServer {
 				map.insert("readiness".into(), serde_json::Value::String(readiness.clone()));
 			}
 		}
-		Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(result.to_string())]))
 	}
 
 	#[tool(
@@ -1407,7 +1411,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(outcome)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(outcome)]))
 	}
 
 	#[tool(
@@ -1422,7 +1426,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(outcome)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(outcome)]))
 	}
 
 	#[tool(
@@ -1437,7 +1441,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(outcome)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(outcome)]))
 	}
 
 	#[tool(
@@ -1456,7 +1460,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(result)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
 	}
 
 	// ── Tab management ──────────────────────────────────────────────
@@ -1475,7 +1479,7 @@ impl McpServer {
 			.await?
 		);
 		let json = serde_json::to_string(&tabs).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -1488,7 +1492,7 @@ impl McpServer {
 				.await?
 		);
 		let json = serde_json::to_string(&tab).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -1506,7 +1510,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(format!(
+		Ok(CallToolResult::success(vec![ContentBlock::text(format!(
 			"Switched to tab {}",
 			req.tab_id
 		))]))
@@ -1526,7 +1530,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(format!(
+		Ok(CallToolResult::success(vec![ContentBlock::text(format!(
 			"Closed tab {}",
 			req.tab_id
 		))]))
@@ -1551,7 +1555,7 @@ impl McpServer {
 			.await?
 		);
 		let json = serde_json::to_string(&info).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -1576,7 +1580,7 @@ impl McpServer {
 		// offset, so it stays outside the fence — but it arrives as its own
 		// value, never parsed back out of page bytes.
 		let (note, body) = content;
-		Ok(CallToolResult::success(vec![Content::text(format!(
+		Ok(CallToolResult::success(vec![ContentBlock::text(format!(
 			"{}{}",
 			note.map(|n| format!("{n}\n")).unwrap_or_default(),
 			fence_untrusted(&body)
@@ -1600,7 +1604,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(fence_untrusted(&snapshot))]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(&snapshot))]))
 	}
 
 	#[tool(
@@ -1619,7 +1623,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(value)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(value)]))
 	}
 
 	#[tool(
@@ -1638,7 +1642,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::image(b64_png, "image/png")]))
+		Ok(CallToolResult::success(vec![ContentBlock::image(b64_png, "image/png")]))
 	}
 
 	// ── Interaction ─────────────────────────────────────────────────
@@ -1656,7 +1660,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	#[tool(
@@ -1673,7 +1677,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	#[tool(
@@ -1700,7 +1704,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	#[tool(
@@ -1796,7 +1800,7 @@ impl McpServer {
 			req.fields.len(),
 			lines.join("\n")
 		);
-		Ok(CallToolResult::success(vec![Content::text(body)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
 	}
 
 	#[tool(
@@ -1813,7 +1817,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	#[tool(
@@ -1834,7 +1838,7 @@ impl McpServer {
 		// Only the window path reports a position; the element-scoped path
 		// resolves bare through the actionability harness, and a dangling
 		// "Scrolled down — " reads like the readback was lost.
-		Ok(CallToolResult::success(vec![Content::text(if outcome.is_empty() {
+		Ok(CallToolResult::success(vec![ContentBlock::text(if outcome.is_empty() {
 			format!("Scrolled {}", req.direction)
 		} else {
 			format!("Scrolled {} — {outcome}", req.direction)
@@ -1859,7 +1863,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	#[tool(
@@ -1879,7 +1883,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(summary)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(summary)]))
 	}
 
 	// ── History & media ─────────────────────────────────────────────
@@ -1900,7 +1904,7 @@ impl McpServer {
 			.await?
 		);
 		let json = serde_json::to_string(&entries).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -1920,7 +1924,7 @@ impl McpServer {
 			.await?
 		);
 		let json = serde_json::to_string(&hits).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -1930,7 +1934,7 @@ impl McpServer {
 	async fn browser_get_later(&self) -> Result<CallToolResult, McpError> {
 		let items = browser_try!(self.send_command(|tx| McpCommand::GetLater { response: tx }).await?);
 		let json = serde_json::to_string(&items).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	#[tool(
@@ -2045,7 +2049,7 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Tasks { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![Content::text(crate::mail::untrusted(
+			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(crate::mail::untrusted(
 				&text,
 			))])),
 			Err(msg) => Ok(err_result(msg)),
@@ -2141,7 +2145,7 @@ impl McpServer {
 				.await?
 		);
 		let json = serde_json::to_string(&tabs).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-		Ok(CallToolResult::success(vec![Content::text(json)]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
 	}
 
 	// ── Observability ───────────────────────────────────────────────
@@ -2172,7 +2176,7 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![Content::text(fence_untrusted(
+		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(
 			&sanitize_json_entries(&value, "text", sanitize::sanitize_text),
 		))]))
 	}
@@ -2222,7 +2226,7 @@ impl McpServer {
 		} else {
 			scrubbed
 		};
-		Ok(CallToolResult::success(vec![Content::text(fence_untrusted(&scrubbed))]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(&scrubbed))]))
 	}
 
 	// ── Dialogs & uploads ───────────────────────────────────────────
@@ -2250,7 +2254,7 @@ impl McpServer {
 		};
 		let count = req.count.unwrap_or(1).clamp(1, 20);
 		crate::dialog_patch::arm_dialogs(accept, req.prompt_text, count);
-		Ok(CallToolResult::success(vec![Content::text(format!(
+		Ok(CallToolResult::success(vec![ContentBlock::text(format!(
 			"Armed: next {count} dialog(s) will be {}",
 			if accept { "accepted" } else { "dismissed" }
 		))]))
@@ -2273,7 +2277,7 @@ impl McpServer {
 		}
 		let count = req.paths.len();
 		crate::dialog_patch::arm_upload(req.paths);
-		Ok(CallToolResult::success(vec![Content::text(format!(
+		Ok(CallToolResult::success(vec![ContentBlock::text(format!(
 			"Armed: the next file chooser receives {count} file(s). Now click the file input (browser_click)."
 		))]))
 	}
@@ -2356,7 +2360,7 @@ impl McpServer {
 		} else {
 			browser_try!(self.send_command(build).await?)
 		};
-		Ok(CallToolResult::success(vec![Content::text(
+		Ok(CallToolResult::success(vec![ContentBlock::text(
 			serde_json::to_string(&outcome).unwrap_or_else(|_| "{\"ok\":true}".to_string()),
 		)]))
 	}
@@ -2393,7 +2397,7 @@ impl ServerHandler for McpServer {
 		&self,
 		request: rmcp::model::CallToolRequestParams,
 		context: rmcp::service::RequestContext<rmcp::RoleServer>,
-	) -> Result<CallToolResult, McpError> {
+	) -> Result<CallToolResponse, McpError> {
 		let header = context
 			.extensions
 			.get::<axum::http::request::Parts>()
@@ -2414,7 +2418,7 @@ impl ServerHandler for McpServer {
 							"Unknown assistant session — this agent session is not attached to a \
                              workspace any more. Start a new chat to pick up the current one."
 								.to_string(),
-						))
+						).into())
 					}
 				}
 			}
@@ -2428,7 +2432,7 @@ impl ServerHandler for McpServer {
 						"Unknown workspace token — this agent is pointed at a workspace that no \
                          longer exists. Restart the assistant to pick up the current one."
 							.to_string(),
-					))
+					).into())
 				}
 			},
 		};
@@ -2445,16 +2449,15 @@ impl ServerHandler for McpServer {
 		Self::tool_router().call(tcc).await
 	}
 
-	fn get_info(&self) -> ServerInfo {
+	fn get_info(&self) -> ServerConfig {
 		tracing::debug!("MCP get_info");
 
-		ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+		ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
 			.with_server_info(Implementation::from_build_env())
 			// Tool annotations (readOnlyHint et al) are only honoured by clients
-			// that negotiated a spec revision which defines them; advertising
-			// 2024-11-05 threw them away. Clients negotiate down, so older ones
-			// are unaffected.
-			.with_protocol_version(ProtocolVersion::V_2025_11_25)
+			// that negotiated a spec revision which defines them. Legacy
+			// `initialize` clients negotiate down to the version they ask for.
+			.with_protocol_version(ProtocolVersion::V_2026_07_28)
 			.with_instructions(
 				"Octoweb browser control over MCP. Quick reference:\n\
                 \n\
@@ -2601,7 +2604,7 @@ pub fn route_agent_workdir(workdir: &std::path::Path, workspace_id: &str) {
 }
 
 /// The calling session's `experimental.session` block from request `_meta`.
-fn meta_session(meta: &rmcp::model::Meta) -> Option<&serde_json::Value> {
+fn meta_session(meta: &rmcp::model::RequestMetaObject) -> Option<&serde_json::Value> {
 	meta.get("io.modelcontextprotocol/clientCapabilities")?
 		.get("experimental")?
 		.get("session")
@@ -2609,7 +2612,7 @@ fn meta_session(meta: &rmcp::model::Meta) -> Option<&serde_json::Value> {
 
 /// The octomind session a request comes from. Octomind names it in every
 /// request's `_meta`, in the client capabilities' `experimental.session`.
-fn calling_agent_session(meta: &rmcp::model::Meta) -> Option<String> {
+fn calling_agent_session(meta: &rmcp::model::RequestMetaObject) -> Option<String> {
 	meta_session(meta)?
 		.get("session_id")?
 		.as_str()
@@ -2620,7 +2623,7 @@ fn calling_agent_session(meta: &rmcp::model::Meta) -> Option<String> {
 /// The scope a call from the shared octomind server acts in: the calling
 /// session's own route when octoweb bound it (a chat names its workspace and
 /// itself), else the workspace whose agent directory the session works in.
-fn agent_session_scope(meta: &rmcp::model::Meta, tokens: &WorkspaceTokens) -> Option<TokenScope> {
+fn agent_session_scope(meta: &rmcp::model::RequestMetaObject, tokens: &WorkspaceTokens) -> Option<TokenScope> {
 	let tokens = tokens.read().ok()?;
 	let routed = calling_agent_session(meta)
 		.and_then(|session| AGENT_SESSIONS.read().ok()?.get(&session).cloned())
@@ -2714,10 +2717,9 @@ pub fn spawn_mcp_server(port: u16) -> McpHandle {
 
 			// Stateless JSON-RPC mode: no sessions, plain JSON responses.
 			// Per MCP Streamable HTTP spec — clients POST JSON-RPC, get JSON back.
-			use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
 			let mut config = StreamableHttpServerConfig::default();
 			config.json_response = true;
-			config.stateful_mode = false;
+			config.legacy_session_mode = false;
 			// DNS-rebinding / CSRF guard, mandated by the Streamable HTTP spec.
 			// Left empty, rmcp allows every origin, so any page the user visits
 			// could fetch() this endpoint and drive their logged-in browser.
@@ -2830,7 +2832,7 @@ mod tests {
 
 	#[test]
 	fn the_calling_octomind_session_is_read_from_request_meta() {
-		let meta: rmcp::model::Meta = serde_json::from_value(serde_json::json!({
+		let meta: rmcp::model::RequestMetaObject = serde_json::from_value(serde_json::json!({
 			"io.modelcontextprotocol/clientCapabilities": {
 				"experimental": {"session": {"session_id": "octoweb-abc", "role": "octoweb"}}
 			}
@@ -2843,12 +2845,12 @@ mod tests {
 			serde_json::json!({"io.modelcontextprotocol/clientCapabilities": {}}),
 			serde_json::json!({"io.modelcontextprotocol/clientCapabilities": {"experimental": {"session": {"session_id": ""}}}}),
 		] {
-			let meta: rmcp::model::Meta = serde_json::from_value(missing).unwrap();
+			let meta: rmcp::model::RequestMetaObject = serde_json::from_value(missing).unwrap();
 			assert_eq!(calling_agent_session(&meta), None);
 		}
 	}
 
-	fn meta(session_id: &str, workdir: &str) -> rmcp::model::Meta {
+	fn meta(session_id: &str, workdir: &str) -> rmcp::model::RequestMetaObject {
 		serde_json::from_value(serde_json::json!({
 			"io.modelcontextprotocol/clientCapabilities": {
 				"experimental": {"session": {"session_id": session_id, "workdir": workdir}}

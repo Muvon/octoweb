@@ -49,7 +49,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # MCP Server for AI assistant control (HTTP JSON-RPC)
-rmcp = { version = "1.6", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "3.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1.0"
 axum = "0.8"
 

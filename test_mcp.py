@@ -51,6 +51,11 @@ FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests",
 DEFAULT_TIMEOUT = 10.0   # seconds, per HTTP call
 NAVIGATE_TIMEOUT = 30.0  # navigation blocks until page load
 
+PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSION = "2025-11-25"
+META_PREFIX = "io.modelcontextprotocol/"
+CLIENT_INFO = {"name": "octoweb-e2e", "version": "1.0.0"}
+
 
 class MCPError(Exception):
     """Transport / protocol level failure (aborts the run)."""
@@ -138,7 +143,7 @@ def fixture_url(page):
 _next_id = 1
 
 
-def _http_post_json(payload, timeout):
+def _http_post_json(payload, timeout, extra_headers=None):
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         MCP_URL,
@@ -146,6 +151,7 @@ def _http_post_json(payload, timeout):
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            **(extra_headers or {}),
         },
         method="POST",
     )
@@ -170,15 +176,30 @@ def _http_post_json(payload, timeout):
     return json.loads(body)
 
 
-def rpc(method, params=None, notify=False, timeout=DEFAULT_TIMEOUT):
+def rpc(method, params=None, notify=False, timeout=DEFAULT_TIMEOUT, legacy=False):
+    """One JSON-RPC call. Default is the 2026-07-28 flow: no handshake, the
+    protocol version / client info / capabilities ride in every request's
+    `_meta`, mirrored by the Mcp-Method / Mcp-Name headers (SEP-2243).
+    legacy=True sends the params as given, for the pre-2026 `initialize` path."""
     global _next_id
     payload = {"jsonrpc": "2.0", "method": method}
+    headers = {}
+    if not legacy:
+        params = dict(params or {})
+        params["_meta"] = {
+            f"{META_PREFIX}protocolVersion": PROTOCOL_VERSION,
+            f"{META_PREFIX}clientInfo": CLIENT_INFO,
+            f"{META_PREFIX}clientCapabilities": {},
+        }
+        headers = {"MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": method}
+        if method == "tools/call":
+            headers["Mcp-Name"] = params["name"]
     if params is not None:
         payload["params"] = params
     if not notify:
         payload["id"] = _next_id
         _next_id += 1
-    resp = _http_post_json(payload, timeout)
+    resp = _http_post_json(payload, timeout, headers)
     if notify:
         return None
     if resp is None:
@@ -188,15 +209,19 @@ def rpc(method, params=None, notify=False, timeout=DEFAULT_TIMEOUT):
     return resp.get("result", {})
 
 
-def mcp_initialize():
-    # rmcp negotiates DOWN to whatever the client asks for, so a client stuck on
-    # 2024-11-05 never sees the spec revision that defines tool annotations.
+def mcp_discover():
+    return rpc("server/discover")
+
+
+def mcp_initialize_legacy():
+    # Pre-2026 clients still open with `initialize`; rmcp serves them statelessly
+    # and negotiates to the version they ask for.
     result = rpc("initialize", {
-        "protocolVersion": "2025-11-25",
+        "protocolVersion": LEGACY_PROTOCOL_VERSION,
         "capabilities": {},
-        "clientInfo": {"name": "octoweb-e2e", "version": "1.0.0"},
-    })
-    rpc("notifications/initialized", notify=True)
+        "clientInfo": CLIENT_INFO,
+    }, legacy=True)
+    rpc("notifications/initialized", notify=True, legacy=True)
     return result
 
 
@@ -404,12 +429,19 @@ def read_tools_are_annotated_read_only():
 
 
 @test
-def initialize_negotiates_a_spec_that_defines_annotations():
-    """2024-11-05 predates tool annotations — the server must offer newer."""
-    result = mcp_initialize()
-    version = result.get("protocolVersion", "")
-    expect(version >= "2025-03-26",
-           f"server negotiated {version!r}; annotations need 2025-03-26 or later")
+def discover_advertises_the_2026_07_28_revision():
+    """The revision that defines tool annotations and per-request `_meta`."""
+    versions = mcp_discover().get("supportedVersions", [])
+    expect(PROTOCOL_VERSION in versions,
+           f"server/discover supportedVersions {versions!r} lacks {PROTOCOL_VERSION}")
+
+
+@test
+def legacy_initialize_is_still_served():
+    """A pre-2026 client's `initialize` must keep working (rmcp's fallback)."""
+    version = mcp_initialize_legacy().get("protocolVersion", "")
+    expect(version == LEGACY_PROTOCOL_VERSION,
+           f"legacy initialize negotiated {version!r}, expected {LEGACY_PROTOCOL_VERSION!r}")
 
 
 @test
@@ -1778,11 +1810,11 @@ def main():
 
     try:
         try:
-            init = mcp_initialize()
-            server_info = init.get("serverInfo", {})
+            discovered = mcp_discover()
+            server_info = discovered.get("_meta", {}).get(f"{META_PREFIX}serverInfo", {})
             print(f"MCP server: {server_info.get('name', '?')} {server_info.get('version', '')} at {MCP_URL}")
         except MCPError as exc:
-            print(f"MCP initialize failed: {exc}")
+            print(f"MCP server/discover failed: {exc}")
             print("Is the octoweb browser running with the MCP server enabled?")
             return 1
 
