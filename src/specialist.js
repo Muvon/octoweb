@@ -1,36 +1,51 @@
-  // The report card's disclosure chevron: a run is a row like it, opened on click.
-  const REPORT_CHEVRON = '<span class="specialist-report-chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
+  // Tap-run logs by run id. A log belongs to the `tap` step that started the
+  // run: the step's row carries the run's role and status, its detail holds the
+  // log, so a run never adds a message of its own to the chat.
+  const tapRuns = new Map(); // run_id → { sid, run, view }
 
-  // What the run is doing now: its latest tool or line of text, else its id.
-  function runActivity(run) {
-    for (let i = run.events.length - 1; i >= 0; i--) {
-      const event = run.events[i];
-      if (event.kind === 'tool_use') return event.tool;
-      if (event.kind === 'assistant' || event.kind === 'thinking') {
-        const line = event.content.split(/\r?\n/).find(l => l.trim());
-        if (line) return line.trim();
-      }
-    }
-    return run.run_id;
+  function runFailed(run) {
+    return run.status === 'failed' || run.error !== null;
   }
 
-  function runHeader(view) {
-    const run = view.run;
-    view.details.classList.toggle('failed', run.status === 'failed' || run.error !== null);
-    const who = run.role === null ? 'Specialist' : run.role;
-    view.summary.innerHTML = REPORT_CHEVRON + '<span class="specialist-report-who">' + escapeHtml(who) + '</span>' +
-      '<span class="specialist-report-title">run · <span class="specialist-report-status">' + escapeHtml(run.status + (!run.complete && run.error === null ? ' · recovering' : '')) + '</span></span>' +
-      '<span class="specialist-report-preview">' + escapeHtml(runActivity(run)) + '</span>';
-    view.summary.title = run.run_id;
-    view.trimmed.textContent = run.truncated ? 'Earlier steps trimmed.' : '';
-    view.error.textContent = run.error === null ? '' : run.error;
+  function paintTapRow(row, run) {
+    if (run) {
+      const status = run.status + (!run.complete && run.error === null ? ' · recovering' : '');
+      row.dataset.run = (run.role === null ? 'specialist' : run.role) + ' · ' + status;
+    } else {
+      delete row.dataset.run;
+    }
+    row.classList.toggle('run-failed', !!run && runFailed(run));
+    row.classList.toggle('run-live', !!run && !runFailed(run) && run.status === 'running');
+  }
+
+  // Rows mount lazily (a steps group builds its list on first open), so each
+  // row badges itself here and run updates repaint the rows already mounted.
+  function bindTapRow(row, tool) {
+    const id = tapRunId(tool.toolName || tool.title, tool.rawInput, tool.rawOutput);
+    if (!id) return;
+    row.dataset.tapRun = id;
+    const entry = tapRuns.get(id);
+    paintTapRow(row, entry ? entry.run : null);
+  }
+
+  function paintRunLog(view) {
+    view.trimmed.textContent = view.run.truncated ? 'Earlier steps trimmed.' : '';
+    view.error.textContent = view.run.error === null ? '' : view.run.error;
+  }
+
+  function paintRun(s, id) {
+    const entry = tapRuns.get(id);
+    for (const row of s.container.querySelectorAll('[data-tap-run]')) {
+      if (row.dataset.tapRun === id) paintTapRow(row, entry ? entry.run : null);
+    }
+    if (entry && entry.view) paintRunLog(entry.view);
   }
 
   function runToolRow(view, entry) {
     const item = buildGroupItem(entry.tool, view.run.status === 'running');
     if (entry.node && entry.node.classList.contains('expanded')) {
       item.classList.add('expanded');
-      item.querySelector('.tool-detail').innerHTML = renderToolDetail(entry.tool);
+      fillToolDetail(item.querySelector('.tool-detail'), entry.tool);
     }
     if (entry.node) entry.node.replaceWith(item);
     else view.content.appendChild(item);
@@ -121,123 +136,95 @@
       if (view.tools.get(entry.event.tool_id) === entry) view.tools.delete(entry.event.tool_id);
       if (view.usage === entry) view.usage = null;
     }
-    view.run.events.splice(0, count);
   }
 
-  // Full construction is reserved for replay/remount; live deltas update only
-  // their own text segment or tool row, preserving other DOM and disclosure state.
-  function renderRun(s, run) {
-    const previous = s.runViews.get(run.run_id);
-    const wrap = document.createElement('div');
-    wrap.className = 'msg agent specialist specialist-report';
-    const details = document.createElement('details');
-    details.className = 'specialist-report-details';
-    // Collapsed like a report: the transcript is there on click, not in the feed.
-    details.open = previous ? previous.details.open : false;
-    const summary = document.createElement('summary');
-    summary.className = 'specialist-report-summary';
-    const body = document.createElement('div');
-    body.className = 'msg-bubble specialist-report-body';
+  // Full construction is reserved for opening the log or replaying a snapshot
+  // into an open one; live deltas update only their own text segment or tool
+  // row, preserving other DOM and disclosure state.
+  function fillRunLog(entry, trimmed, content, error) {
+    const view = { run: entry.run, trimmed, content, error, entries: [], tools: new Map(), usage: null };
+    entry.view = view;
+    entry.run.events.forEach(event => appendRunEntry(view, event));
+    paintRunLog(view);
+  }
+
+  function mountTapRun(detail, tool) {
+    const entry = tapRuns.get(tapRunId(tool.toolName || tool.title, tool.rawInput, tool.rawOutput));
+    if (!entry) return;
+    const title = document.createElement('div');
+    title.className = 'tool-detail-title';
+    title.textContent = 'Log';
     const trimmed = document.createElement('div');
     trimmed.className = 'tool-detail-title';
     const content = document.createElement('div');
+    content.className = 'tap-run-log';
     const error = document.createElement('div');
     error.className = 'tool-detail-title';
-    body.appendChild(trimmed); body.appendChild(content); body.appendChild(error);
-    details.appendChild(summary); details.appendChild(body); wrap.appendChild(details);
-    // A replayed run keeps its place in the conversation.
-    if (previous && previous.wrap.parentNode) {
-      wrap.dataset.logIndex = previous.wrap.dataset.logIndex;
-      previous.wrap.replaceWith(wrap);
-    } else {
-      if (previous) previous.wrap.remove();
-      mountMsg(s, wrap);
-    }
-    const view = { run, wrap, details, summary, content, trimmed, error, entries: [], tools: new Map(), usage: null };
-    s.runViews.set(run.run_id, view);
-    run.events.forEach(event => appendRunEntry(view, event));
-    runHeader(view);
-    return view;
+    detail.appendChild(title); detail.appendChild(trimmed); detail.appendChild(content); detail.appendChild(error);
+    fillRunLog(entry, trimmed, content, error);
   }
 
-  function recordRun(s, view) {
-    const at = s.log.findIndex(record => record.role === 'run' && record.run.run_id === view.run.run_id);
-    if (at >= 0) {
-      s.log[at].run = view.run;
-      view.wrap.dataset.logIndex = at;
-    } else logPush(s, { role: 'run', text: '', run: view.run });
+  function setRun(s, run) {
+    const previous = tapRuns.get(run.run_id);
+    const entry = { sid: s.sid, run, view: null };
+    tapRuns.set(run.run_id, entry);
+    if (previous && previous.view) {
+      const { trimmed, content, error } = previous.view;
+      content.replaceChildren();
+      fillRunLog(entry, trimmed, content, error);
+    }
+    paintRun(s, run.run_id);
   }
 
-  window.__setRun = function(sid, run) {
-    const s = sessions.get(sid);
-    if (!s) return;
-    recordRun(s, renderRun(s, run));
-    if (s.sid === activeSid) scrollToBottom();
-  };
-
-  function evictRun(s, id) {
-    const view = s.runViews.get(id);
-    if (view) { view.wrap.remove(); s.runViews.delete(id); }
-    const index = s.log.findIndex(record => record.role === 'run' && record.run.run_id === id);
-    if (index >= 0) {
-      s.log.splice(index, 1);
-      if (index < s.renderedFrom) s.renderedFrom--;
-      for (const node of s.container.querySelectorAll('[data-log-index]')) {
-        if (Number(node.dataset.logIndex) > index) node.dataset.logIndex = Number(node.dataset.logIndex) - 1;
-      }
-      syncMoreRow(s);
-    }
+  function forgetRuns(sid) {
+    for (const [id, entry] of tapRuns) if (entry.sid === sid) tapRuns.delete(id);
   }
 
   window.__replayRuns = function(sid, runs) {
     const s = sessions.get(sid);
     if (!s) return;
     const retained = new Set(runs.map(run => run.run_id));
-    const previous = new Set([...s.runViews.keys(), ...s.log.filter(record => record.role === 'run').map(record => record.run.run_id)]);
-    for (const id of previous) if (!retained.has(id)) evictRun(s, id);
-    runs.forEach(run => window.__setRun(sid, run));
+    for (const [id, entry] of tapRuns) {
+      if (entry.sid === sid && !retained.has(id)) { tapRuns.delete(id); paintRun(s, id); }
+    }
+    runs.forEach(run => setRun(s, run));
   };
 
   window.__updateRun = function(sid, update, evicted) {
     const s = sessions.get(sid);
     if (!s) return;
     if (update.kind === 'snapshot') {
-      window.__setRun(sid, update.run);
+      setRun(s, update.run);
     } else {
       const id = update.kind === 'delta' ? update.delta.run_id : update.run_id;
-      let view = s.runViews.get(id);
-      if (!view) {
-        const record = s.log.find(record => record.role === 'run' && record.run.run_id === id);
-        const run = record ? record.run : { run_id: id, role: null, status: 'unknown', seq: 0,
-          truncated: false, error: null, complete: false, events: [] };
-        view = renderRun(s, run);
-        recordRun(s, view);
+      if (!tapRuns.has(id)) {
+        setRun(s, { run_id: id, role: null, status: 'unknown', seq: 0,
+          truncated: false, error: null, complete: false, events: [] });
       }
+      const { run, view } = tapRuns.get(id);
       if (update.kind === 'delta') {
         const delta = update.delta;
-        const run = view.run;
         run.role = delta.role; run.status = delta.status; run.seq = delta.seq;
         run.truncated = delta.truncated; run.complete = true;
         if (delta.event !== null) {
           if (delta.merged) {
-            const entry = view.entries[view.entries.length - 1];
-            entry.event.content += delta.event.content;
-            runText(entry);
+            run.events[run.events.length - 1].content += delta.event.content;
+            if (view) runText(view.entries[view.entries.length - 1]);
           } else {
             run.events.push(delta.event);
-            appendRunEntry(view, delta.event);
+            if (view) appendRunEntry(view, delta.event);
           }
         }
-        trimRunEntries(view, delta.dropped);
+        if (view) trimRunEntries(view, delta.dropped);
+        run.events.splice(0, delta.dropped);
       } else if (update.kind === 'recovering') {
-        view.run.complete = false;
-        view.run.error = null;
+        run.complete = false;
+        run.error = null;
       } else if (update.kind === 'error') {
-        view.run.error = update.error;
-        view.run.complete = false;
+        run.error = update.error;
+        run.complete = false;
       } else throw new Error('Unknown specialist update: ' + update.kind);
-      runHeader(view);
+      paintRun(s, id);
     }
-    evicted.forEach(id => evictRun(s, id));
-    if (s.sid === activeSid) scrollToBottom();
+    for (const id of evicted) { tapRuns.delete(id); paintRun(s, id); }
   };

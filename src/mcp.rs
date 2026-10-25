@@ -43,7 +43,8 @@ use crate::sanitize;
 use rmcp::{
 	handler::server::wrapper::Parameters,
 	model::{
-		CallToolResponse, CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities, ServerConfig,
+		CallToolResponse, CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
+		ServerConfig,
 	},
 	schemars, tool, tool_handler, tool_router,
 	transport::streamable_http_server::{
@@ -1604,7 +1605,9 @@ impl McpServer {
 			})
 			.await?
 		);
-		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(&snapshot))]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(
+			&snapshot,
+		))]))
 	}
 
 	#[tool(
@@ -1838,11 +1841,13 @@ impl McpServer {
 		// Only the window path reports a position; the element-scoped path
 		// resolves bare through the actionability harness, and a dangling
 		// "Scrolled down — " reads like the readback was lost.
-		Ok(CallToolResult::success(vec![ContentBlock::text(if outcome.is_empty() {
-			format!("Scrolled {}", req.direction)
-		} else {
-			format!("Scrolled {} — {outcome}", req.direction)
-		})]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(
+			if outcome.is_empty() {
+				format!("Scrolled {}", req.direction)
+			} else {
+				format!("Scrolled {} — {outcome}", req.direction)
+			},
+		)]))
 	}
 
 	#[tool(
@@ -2049,9 +2054,9 @@ impl McpServer {
 			.send_command(|tx| McpCommand::Tasks { request, response: tx })
 			.await?
 		{
-			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(crate::mail::untrusted(
-				&text,
-			))])),
+			Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(
+				crate::mail::untrusted(&text),
+			)])),
 			Err(msg) => Ok(err_result(msg)),
 		}
 	}
@@ -2226,7 +2231,9 @@ impl McpServer {
 		} else {
 			scrubbed
 		};
-		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(&scrubbed))]))
+		Ok(CallToolResult::success(vec![ContentBlock::text(fence_untrusted(
+			&scrubbed,
+		))]))
 	}
 
 	// ── Dialogs & uploads ───────────────────────────────────────────
@@ -2418,7 +2425,8 @@ impl ServerHandler for McpServer {
 							"Unknown assistant session — this agent session is not attached to a \
                              workspace any more. Start a new chat to pick up the current one."
 								.to_string(),
-						).into())
+						)
+						.into())
 					}
 				}
 			}
@@ -2432,7 +2440,8 @@ impl ServerHandler for McpServer {
 						"Unknown workspace token — this agent is pointed at a workspace that no \
                          longer exists. Restart the assistant to pick up the current one."
 							.to_string(),
-					).into())
+					)
+					.into())
 				}
 			},
 		};

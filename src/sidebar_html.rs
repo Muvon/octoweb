@@ -1709,13 +1709,30 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   }
   .activity-feed.visible { display: flex; }
 
-  /* Tahoe-style header: 3-dot bounce + shimmer label + turn elapsed */
+  /* Tahoe-style header: 3-dot bounce + shimmer label + turn elapsed. It is
+     the whole feed by default, like a collapsed steps group; a click lists
+     the steps. */
   .activity-header {
     display: flex;
     align-items: center;
     gap: 7px;
     padding: 2px 4px 5px;
+    border-radius: 11px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.12s;
   }
+  .activity-header:hover { background: var(--hover-bg); }
+  .activity-steps {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+  .activity-feed.expanded .tool-group-chevron { transform: rotate(90deg); }
+  .activity-feed:not(.expanded) > .tool-item { display: none; }
   .activity-dots {
     display: flex;
     align-items: center;
@@ -1846,6 +1863,31 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .tool-check svg, .tool-fail svg { width: 100%; height: 100%; }
   .tool-check { color: var(--dot-ok); }
   .tool-fail  { color: var(--dot-err); }
+  /* A `tap` step carries its run's role and status (specialist.js); `order`
+     keeps the badge between the title and the time. */
+  .tool-row[data-run]::after {
+    content: attr(data-run);
+    flex-shrink: 0;
+    max-width: 55%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+  .tool-row[data-run] .tool-time,
+  .tool-row[data-run] .tool-check,
+  .tool-row[data-run] .tool-fail { order: 1; }
+  .tool-row.run-failed::after { color: var(--error-text); }
+  .tool-row.run-live::after { animation: kind-pulse 1.4s ease-in-out infinite; }
+  .tap-run-log {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text-primary);
+    word-break: break-word;
+  }
+  .tap-run-log p { margin: 0 0 6px; }
+  .tap-run-log p:last-child { margin-bottom: 0; }
 
   /* Inline expandable detail under a tool row — inset well, no hairline box */
   .tool-detail {
@@ -3309,7 +3351,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       toolDetails: [],
       toolRows: {},
       tapRunPrompts: new Map(),
-      runViews: new Map(),
       // count of tools still running — keeps the live feed visible when a
       // tool starts after text already began streaming.
       runningTools: 0,
@@ -3568,6 +3609,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (s.activityTimer) clearInterval(s.activityTimer);
     if (s.container.parentNode === messagesHost) messagesHost.removeChild(s.container);
     if (s.tab.parentNode === sessionStrip) sessionStrip.removeChild(s.tab);
+    forgetRuns(sid);
     sessions.delete(sid);
     refreshAddBtn();
   };
@@ -3972,7 +4014,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     active.thinking.innerHTML = '';
     active.currentAgentBubble = null;
     active.currentAgentRaw = '';
-    active.runViews.clear();
+    forgetRuns(active.sid);
     active.isThinking = false;
     active.runningTools = 0;
     // Clearing the session restarts the agent on Rust side — drop busy and any
@@ -4007,7 +4049,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     s.currentAgentRaw = '';
     s.availableCommands = [];
     s.log = [];
-    s.runViews.clear();
+    forgetRuns(s.sid);
     s.renderedFrom = 0;
     s.moreRow = null; // was just removed with the rest of the container
     if (csOpen) runChatSearch();
@@ -5301,7 +5343,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       const summary = document.createElement('summary');
       summary.className = 'specialist-report-summary';
       summary.innerHTML =
-        '<span class="specialist-report-chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+        '<span class="specialist-report-chevron">' + CHEVRON_SVG + '</span>' +
         '<span class="specialist-report-who">' + escapeHtml(who) + '</span>' +
         '<span class="specialist-report-title">report · <span class="specialist-report-status">' + report[3] + '</span></span>' +
         (preview ? '<span class="specialist-report-preview">' + escapeHtml(preview) + '</span>' : '') +
@@ -5388,8 +5430,37 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   function clearActivity(s) {
     if (s.activityTimer) { clearInterval(s.activityTimer); s.activityTimer = null; }
     s.thinking.innerHTML = '';
+    s.thinking.classList.remove('expanded');
     for (const k in s.toolRows) delete s.toolRows[k];
     s.runningTools = 0;
+  }
+
+  // Text streaming after tools splits the turn and clears the feed, so a tool
+  // starting later rebuilds the header here.
+  function ensureActivityHeader(s) {
+    if (s.thinking.querySelector('.activity-header')) return;
+    if (!s.activityStart) s.activityStart = Date.now();
+    const hdr = document.createElement('div');
+    hdr.className = 'activity-header';
+    hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span>' +
+      '<span class="activity-label">Working…</span>' +
+      '<span class="activity-elapsed">' + fmtElapsed(Date.now() - s.activityStart) + '</span>' +
+      '<span class="activity-steps"></span>';
+    hdr.addEventListener('click', () => s.thinking.classList.toggle('expanded'));
+    s.thinking.insertBefore(hdr, s.thinking.firstChild);
+    if (!s.activityTimer) s.activityTimer = setInterval(() => tickActivity(s), 1000);
+    syncActivitySteps(s);
+  }
+
+  function syncActivitySteps(s) {
+    const el = s.thinking.querySelector('.activity-steps');
+    if (!el) return;
+    const fails = s.toolDetails.filter(t => t.status === 'failed').length;
+    el.innerHTML = s.toolCount
+      ? '<span class="tool-group-count">' + s.toolCount + (s.toolCount === 1 ? ' step' : ' steps') + '</span>' +
+        (fails ? '<span class="tool-group-fail">' + fails + ' failed</span>' : '') +
+        '<span class="tool-group-chevron">' + CHEVRON_SVG + '</span>'
+      : '';
   }
 
   function toolDataObject(value) {
@@ -5403,16 +5474,21 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     }
   }
 
-  function registerTapRunPrompt(s, title, rawInput, rawOutput) {
-    if (!s || title !== 'tap') return;
+  // The run a `tap` step started: its explicit session, else the id it returned.
+  function tapRunId(title, rawInput, rawOutput) {
+    if (title !== 'tap') return '';
     const input = toolDataObject(rawInput);
-    if (!input || input.action !== 'run' || typeof input.prompt !== 'string') return;
-    let runId = typeof input.session === 'string' ? input.session.trim() : '';
-    if (!runId) {
-      const output = toolDataObject(rawOutput);
-      runId = output && typeof output.id === 'string' ? output.id.trim() : '';
-    }
-    if (runId) s.tapRunPrompts.set(runId, input.prompt);
+    if (!input || input.action !== 'run') return '';
+    const session = typeof input.session === 'string' ? input.session.trim() : '';
+    if (session) return session;
+    const output = toolDataObject(rawOutput);
+    return output && typeof output.id === 'string' ? output.id.trim() : '';
+  }
+
+  function registerTapRunPrompt(s, title, rawInput, rawOutput) {
+    const input = toolDataObject(rawInput);
+    const runId = tapRunId(title, rawInput, rawOutput);
+    if (s && runId && typeof input.prompt === 'string') s.tapRunPrompts.set(runId, input.prompt);
   }
 
   function formatJson(val) {
@@ -5433,12 +5509,19 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     return html || '<div class="tool-detail-title">No details</div>';
   }
 
+  function fillToolDetail(detail, t) {
+    detail.innerHTML = renderToolDetail(t);
+    mountTapRun(detail, t);
+  }
+
   // Toggle the inline detail under a tool row. Re-renders on every open so
   // late-arriving output on live rows is always current.
   function toggleToolDetail(item, detail, t) {
     const open = item.classList.toggle('expanded');
-    if (open) detail.innerHTML = renderToolDetail(t);
+    if (open) fillToolDetail(detail, t);
   }
+
+  const CHEVRON_SVG = '<svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
   // ── Steps group — persistent, collapsed record of a turn's tool work ───
   function buildToolGroup(details, turnMs) {
@@ -5448,7 +5531,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     const header = document.createElement('div');
     header.className = 'tool-group-header';
     header.innerHTML =
-      '<span class="tool-group-chevron"><svg width="8" height="8" viewBox="0 0 8 8" fill="none"><path d="M2.5 1l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>' +
+      '<span class="tool-group-chevron">' + CHEVRON_SVG + '</span>' +
       '<span class="tool-group-count">' + details.length + (details.length === 1 ? ' step' : ' steps') + '</span>' +
       (fails ? '<span class="tool-group-fail">' + fails + ' failed</span>' : '') +
       (turnMs ? '<span class="tool-group-time">' + fmtDuration(turnMs) + '</span>' : '');
@@ -5479,6 +5562,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       '<span class="tool-time">' + ((completed || failed) && t.duration != null ? fmtDuration(t.duration) : '—') + '</span>' +
       (failed ? '<span class="tool-fail">' + ICON_X_CIRCLE + '</span>'
               : completed ? '<span class="tool-check">' + ICON_CHECK + '</span>' : '');
+    bindTapRow(row, t);
     const detail = document.createElement('div');
     detail.className = 'tool-detail';
     row.addEventListener('click', () => toggleToolDetail(item, detail, t));
@@ -5538,11 +5622,14 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     const detail = document.createElement('div');
     detail.className = 'tool-detail';
     row.addEventListener('click', () => toggleToolDetail(item, detail, d));
+    bindTapRow(row, d);
     item.appendChild(row);
     item.appendChild(detail);
     s.thinking.appendChild(item);
+    ensureActivityHeader(s);
     s.toolRows[id] = { el: row, item, detail, startTime: Date.now() - (startedMsAgo || 0), timerEl: tm, finished: false, idx: s.toolDetails.length - 1 };
     s.runningTools++;
+    syncActivitySteps(s);
     syncFeed(s);
     if (sid === activeSid) scrollToBottom();
   };
@@ -5562,6 +5649,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       d.rawOutput = rawOutput;
     }
     registerTapRunPrompt(s, d.toolName, d.rawInput, d.rawOutput);
+    bindTapRow(t.el, d);
     if ((status === 'completed' || status === 'failed') && !t.finished) {
       t.finished = true;
       s.runningTools = Math.max(0, s.runningTools - 1);
@@ -5580,11 +5668,12 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         mark.innerHTML = ICON_X_CIRCLE;
       }
       t.el.appendChild(mark);
+      syncActivitySteps(s);
       syncFeed(s);
     }
     // Inline detail open on a live row — refresh so output lands as it arrives.
     if (t.item.classList.contains('expanded')) {
-      t.detail.innerHTML = renderToolDetail(d);
+      fillToolDetail(t.detail, d);
     }
   };
 
@@ -5630,13 +5719,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       finishLiveTurn(s);
       if (elapsedMs !== undefined) s.busy = true;
       s.activityStart = Date.now() - (elapsedMs || 0);
-      const hdr = document.createElement('div');
-      hdr.className = 'activity-header';
-      hdr.innerHTML = '<span class="activity-dots"><span></span><span></span><span></span></span>' +
-        '<span class="activity-label">Working…</span>' +
-        '<span class="activity-elapsed">' + fmtElapsed(elapsedMs || 0) + '</span>';
-      s.thinking.appendChild(hdr);
-      s.activityTimer = setInterval(() => tickActivity(s), 1000);
+      ensureActivityHeader(s);
       syncFeed(s);
       if (sid === activeSid) scrollToBottom();
     } else {
@@ -5695,8 +5778,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       appendMessage(s, role, text);
     } else if (role === 'specialist') {
       appendSpecialistMsg(s, text);
-    } else if (role === 'run') {
-      renderRun(s, m.run);
     } else if (role === 'agent') {
       const bubble = startAgentBubble(s);
       if (!bubble) return;
@@ -5728,7 +5809,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   // reload, re-entering a workspace) would otherwise stack a duplicate copy
   // of the whole conversation on top of the first.
   function resetSessionDom(s) {
-    s.runViews.clear();
     for (const entry of Array.from(a2uiBlocks)) {
       const fid = entry[0], b = entry[1];
       if (b.sid !== s.sid) continue;
@@ -5867,14 +5947,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   let csTimer = null;
 
   const CS_ROLE_LABEL = {
-    user: 'You', agent: 'Octopus', error: 'Error', specialist: 'Specialist', run: 'Specialist', ui: 'Surface',
+    user: 'You', agent: 'Octopus', error: 'Error', specialist: 'Specialist', ui: 'Surface',
   };
 
   // What a record contributes to the index. A2UI records carry their content
   // in components rather than `text` (which is just the call id).
   function logRecordText(m) {
     if (!m) return '';
-    if (m.role === 'run') return m.run.events.filter(event => typeof event.content === 'string').map(event => event.content).join('\n');
     if (m.role === 'ui') {
       const out = [];
       const envelopes = (m.a2ui && Array.isArray(m.a2ui.messages)) ? m.a2ui.messages : [];
@@ -7825,7 +7904,7 @@ mod tests {
 	}
 
 	#[test]
-	fn specialist_cards_keep_activity_and_parent_state_separate() {
+	fn tap_run_log_lives_in_its_tap_step() {
 		let source = format!(
 			"{}\ncheckSpecialist({}, {});",
 			include_str!("specialist_test.js"),
