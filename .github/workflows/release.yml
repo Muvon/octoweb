@@ -101,13 +101,6 @@ jobs:
           # Without the tap, octoweb:assistant never resolves and the AI sidebar has no tools.
           test -f "dist/$APP_NAME.app/Contents/Resources/tap/capabilities/octoweb/octoweb.toml"
 
-      # Checksum
-      - name: Generate checksum
-        run: |
-          cd dist
-          shasum -a 256 "$APP_NAME-$VERSION.dmg" > "$APP_NAME-$VERSION.dmg.sha256"
-          cat "$APP_NAME-$VERSION.dmg.sha256"
-
       # Create draft release with DMG. Homebrew-tap update is intentionally
       # NOT triggered here — it lives in notify-tap.yml and fires on
       # `release: published`, after ./release.sh --skip-build has signed this

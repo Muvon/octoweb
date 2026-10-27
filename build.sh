@@ -248,8 +248,12 @@ if ! $DEV_BUILD && ! $SKIP_DMG; then
     echo "▶ Notarization complete"
   fi
 
+  # After stapling: the ticket changes the DMG bytes. Bare file name inside, so
+  # `shasum -c` works from the download folder.
+  (cd "$OUT_DIR" && shasum -a 256 "$DMG_NAME" > "$DMG_NAME.sha256")
+
   echo ""
-  echo "✅ DMG: $DMG_PATH"
+  echo "✅ DMG: $DMG_PATH (+ .sha256)"
 fi
 
 echo ""
