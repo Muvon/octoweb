@@ -524,14 +524,24 @@ async fn serve_session(
 		asking_user: HashSet::new(),
 	};
 
-	session.bind(&mut stream, cwd, &spec.role).await?;
-	if spec.one_shot {
-		session.recover_runs(specialist::Cache::default()).await?;
+	// A session that failed to come up may still be loading server-side; a
+	// one-shot must be closed below or it holds a slot of the server's session cap.
+	let started = async {
+		session.bind(&mut stream, cwd, &spec.role).await?;
+		if spec.one_shot {
+			session.recover_runs(specialist::Cache::default()).await?;
+		}
+		anyhow::Ok(())
 	}
-	events.send(AgentEvent::Connected(session_id.clone()));
-	events.send(AgentEvent::AvailableCommands(available_commands()));
-
-	let result = session.serve(&mut stream, &mut requests).await;
+	.await;
+	let result = match started {
+		Ok(()) => {
+			events.send(AgentEvent::Connected(session_id.clone()));
+			events.send(AgentEvent::AvailableCommands(available_commands()));
+			session.serve(&mut stream, &mut requests).await
+		}
+		Err(e) => Err(e),
+	};
 
 	// Leaving mid-turn: stop the turn rather than leave it holding the session
 	// against the next connection (a reconnect would only hear "busy").
