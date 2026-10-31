@@ -309,6 +309,14 @@ pub struct AcpMessage {
 	/// Wall-clock duration of the whole turn in ms (role="agent" only).
 	#[serde(default)]
 	pub turn_ms: u64,
+	/// Cost and token usage of this turn (role="agent" only), shown as the
+	/// bubble's footer on replay.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub usage: Option<crate::agent::Usage>,
+	/// The model's reasoning text for this turn, capped at persist time
+	/// (role="agent" only).
+	#[serde(default, skip_serializing_if = "String::is_empty")]
+	pub thinking: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,13 +324,22 @@ pub struct AcpSessionSnapshot {
 	pub id: u64,
 	pub title: String,
 	pub tag: String,
-	/// ACP-protocol session id reported by the agent on Connected. Passed back
-	/// as `--resume <id>` on next launch so the agent restores its in-memory
+	/// Octomind session id reported by the agent on Connected. Reconnects and
+	/// cold starts bind the same id on the shared server, which restores the
 	/// conversation context. None if the agent never connected successfully.
 	#[serde(default)]
 	pub acp_session_id: Option<String>,
 	#[serde(default)]
 	pub messages: Vec<AcpMessage>,
+	/// Session cost/token totals so far. None for chats saved before usage
+	/// was tracked: the first cost frame after restore can't be split into a
+	/// per-turn share.
+	#[serde(default)]
+	pub usage: Option<crate::agent::Usage>,
+	/// Unix epoch milliseconds when the chat was closed; 0 while open. Tells a
+	/// stale entry in the past-sessions list from the one the user clicked.
+	#[serde(default)]
+	pub closed_at: u64,
 }
 
 /// One workspace's ACP session history — session list + which one was

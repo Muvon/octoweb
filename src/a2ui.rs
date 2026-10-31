@@ -9,7 +9,7 @@
 //!
 //! Spec: <https://a2ui.org/specification/v1.0-a2ui/>
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Stamped on every message the agent sends us.
 pub const PROTOCOL_VERSION: &str = "v1.0";
@@ -465,10 +465,150 @@ fn check_components(
 	}
 }
 
+/// Button events of an elicitation surface. `elicitation_result` turns them into the MCP action.
+pub const ELICITATION_ACCEPT: &str = "accept";
+pub const ELICITATION_DECLINE: &str = "decline";
+
+/// The A2UI messages that show one MCP `elicitation/create` request from `server`: who asks and
+/// its message, a bound field per `requestedSchema` property (form mode) or the link to open (URL
+/// mode), and the two buttons.
+/// Field values live at `/<property>` in the data model (the path escaped per RFC 6901, the data
+/// model key raw), which `elicitation_result` reads back. The caller names the surface so two
+/// open forms never share one.
+pub fn elicitation_surface(surface_id: &str, server: &str, params: &Value) -> Value {
+	let message = params["message"].as_str().unwrap_or_default();
+	let url_mode = params["mode"] == "url";
+	let mut shown = format!("**{server}** asks: {message}");
+	let mut components = Vec::new();
+	let mut data_model = serde_json::Map::new();
+	let mut body = vec!["message".to_string()];
+	if url_mode {
+		if let Some(url) = params["url"].as_str() {
+			shown = format!("{shown}\n\n[{url}]({url})");
+		}
+	} else if let Some(properties) = params["requestedSchema"]["properties"].as_object() {
+		for (index, (name, property)) in properties.iter().enumerate() {
+			let id = format!("field_{index}");
+			components.push(elicitation_field(&id, name, property));
+			if let Some(initial) = elicitation_initial(property) {
+				data_model.insert(name.clone(), initial);
+			}
+			body.push(id);
+		}
+	}
+	body.push("actions".to_string());
+	let accept_label = if url_mode { "Done" } else { "Submit" };
+	components.extend([
+		json!({"id": "root", "component": "Card", "child": "body"}),
+		json!({"id": "body", "component": "Column", "children": body}),
+		json!({"id": "message", "component": "Text", "text": shown}),
+		json!({"id": "actions", "component": "Row", "children": ["accept", "decline"]}),
+		json!({"id": "accept_label", "component": "Text", "text": accept_label}),
+		json!({"id": "accept", "component": "Button", "child": "accept_label",
+			"action": {"event": {"name": ELICITATION_ACCEPT}}}),
+		json!({"id": "decline_label", "component": "Text", "text": "Decline"}),
+		json!({"id": "decline", "component": "Button", "child": "decline_label",
+			"action": {"event": {"name": ELICITATION_DECLINE}}}),
+	]);
+	json!([{
+		"version": PROTOCOL_VERSION,
+		"createSurface": {
+			"surfaceId": surface_id,
+			"catalogId": BASIC_CATALOG_ID,
+			"sendDataModel": true,
+			"components": components,
+			"dataModel": data_model,
+		}
+	}])
+}
+
+fn elicitation_field(id: &str, name: &str, property: &Value) -> Value {
+	let title = property["title"].as_str().unwrap_or(name);
+	let label = match property["description"].as_str() {
+		Some(description) => format!("{title} — {description}"),
+		None => title.to_string(),
+	};
+	// A property name may hold `/` or `~`, which are structure in a JSON Pointer.
+	let value = json!({"path": format!("/{}", name.replace('~', "~0").replace('/', "~1"))});
+	let kind = property["type"].as_str();
+	if kind == Some("boolean") {
+		return json!({"id": id, "component": "CheckBox", "label": label, "value": value});
+	}
+	if let (Some("string"), Some(choices)) = (kind, property["enum"].as_array()) {
+		let options: Vec<Value> = choices
+			.iter()
+			.filter_map(Value::as_str)
+			.map(|choice| json!({"label": choice, "value": choice}))
+			.collect();
+		return json!({"id": id, "component": "ChoicePicker", "label": label, "options": options,
+			"variant": "mutuallyExclusive", "value": value});
+	}
+	let variant = if matches!(kind, Some("number" | "integer")) {
+		"number"
+	} else {
+		"shortText"
+	};
+	json!({"id": id, "component": "TextField", "label": label, "variant": variant, "value": value})
+}
+
+/// What a field shows before the user touches it. A checkbox always has a value; a picker binds an array.
+fn elicitation_initial(property: &Value) -> Option<Value> {
+	if property["type"] == "boolean" {
+		return Some(json!(property["default"].as_bool().unwrap_or(false)));
+	}
+	let default = property.get("default")?;
+	if property["enum"].is_array() {
+		return Some(json!([default]));
+	}
+	Some(default.clone())
+}
+
+/// The MCP answer for a clicked elicitation surface. Only `accept` carries content, and only
+/// properties the schema asks for: a blank or unparsable field is left out so the server's own
+/// validation says what is missing.
+pub fn elicitation_result(schema: &Value, action: &str, data_model: &Value) -> Value {
+	if action != ELICITATION_ACCEPT {
+		return json!({"action": action});
+	}
+	let mut content = serde_json::Map::new();
+	if let Some(properties) = schema["properties"].as_object() {
+		for (name, property) in properties {
+			if let Some(value) = data_model.get(name).and_then(|raw| elicitation_value(property, raw)) {
+				content.insert(name.clone(), value);
+			}
+		}
+	}
+	json!({"action": ELICITATION_ACCEPT, "content": content})
+}
+
+fn elicitation_value(property: &Value, raw: &Value) -> Option<Value> {
+	// A number field writes a JSON number, but a text edit leaves a string behind.
+	let text = || raw.as_str().map(str::trim).filter(|t| !t.is_empty());
+	match property["type"].as_str() {
+		Some("boolean") => raw.as_bool().map(Value::Bool),
+		Some("integer") => match raw.as_i64() {
+			Some(n) => Some(json!(n)),
+			None => text()?.parse::<i64>().ok().map(|n| json!(n)),
+		},
+		Some("number") => match raw.as_f64() {
+			Some(n) => Some(json!(n)),
+			None => text()?
+				.parse::<f64>()
+				.ok()
+				.and_then(serde_json::Number::from_f64)
+				.map(Value::Number),
+		},
+		// A picker binds a one-element array, even when it is mutually exclusive.
+		_ => match raw.as_array() {
+			Some(picked) => picked.first().and_then(Value::as_str).map(|s| json!(s)),
+			None => raw.as_str().filter(|s| !s.is_empty()).map(|s| json!(s)),
+		},
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use serde_json::json;
 
 	/// One createSurface carrying a complete, valid tree.
 	fn good() -> Vec<Value> {
@@ -844,5 +984,104 @@ mod tests {
 		// Updating an existing surface: its Buttons may come from an earlier call.
 		let update = vec![json!({"updateDataModel": {"surfaceId": "s1", "path": "/a", "value": 1}})];
 		assert_eq!(unanswerable_wait(&update, &awaited), None);
+	}
+
+	#[test]
+	fn an_elicitation_form_has_a_bound_field_per_property_and_validates() {
+		let params = json!({
+			"mode": "form",
+			"message": "Which repo?",
+			"requestedSchema": {"type": "object", "properties": {
+				"repo": {"type": "string", "title": "Repository", "description": "owner/name"},
+				"kind": {"type": "string", "enum": ["a", "b"], "default": "b"},
+				"private": {"type": "boolean"},
+				"stars": {"type": "integer"}
+			}}
+		});
+		let messages = elicitation_surface("elicitation-call-1", "forms", &params);
+		let messages = messages.as_array().unwrap();
+		assert_eq!(validate(messages), Vec::<String>::new());
+		let surface = &messages[0]["createSurface"];
+		let components = surface["components"].as_array().unwrap();
+		let by_kind = |kind: &str| components.iter().filter(|c| c["component"] == kind).count();
+		assert_eq!(by_kind("TextField"), 2);
+		assert_eq!(by_kind("ChoicePicker"), 1);
+		assert_eq!(by_kind("CheckBox"), 1);
+		assert_eq!(by_kind("Button"), 2);
+		let repo = components.iter().find(|c| c["value"]["path"] == "/repo").unwrap();
+		assert_eq!(repo["label"], "Repository — owner/name");
+		assert_eq!(surface["dataModel"], json!({"kind": ["b"], "private": false}));
+		assert_eq!(surface["sendDataModel"], true);
+		assert_eq!(surface["surfaceId"], "elicitation-call-1");
+		let submit = components.iter().find(|c| c["id"] == "accept_label").unwrap();
+		assert_eq!(submit["text"], "Submit");
+	}
+
+	#[test]
+	fn an_elicitation_url_shows_the_link_and_asks_for_done() {
+		let params = json!({"mode": "url", "message": "Sign in", "url": "https://example.com/auth"});
+		let messages = elicitation_surface("elicitation-call-2", "auth", &params);
+		let messages = messages.as_array().unwrap();
+		assert_eq!(validate(messages), Vec::<String>::new());
+		let components = messages[0]["createSurface"]["components"].as_array().unwrap();
+		let shown = components.iter().find(|c| c["id"] == "message").unwrap();
+		assert!(shown["text"]
+			.as_str()
+			.unwrap()
+			.contains("[https://example.com/auth](https://example.com/auth)"));
+		assert!(components.iter().all(|c| c["component"] != "TextField"));
+		let done = components.iter().find(|c| c["id"] == "accept_label").unwrap();
+		assert_eq!(done["text"], "Done");
+	}
+
+	#[test]
+	fn a_property_name_with_pointer_characters_is_escaped_in_its_path_only() {
+		let properties = json!({
+			"a/b": {"type": "string", "default": "x"},
+			"c~d": {"type": "string"}
+		});
+		let params = json!({"message": "Where?", "requestedSchema": {"properties": properties}});
+		let messages = elicitation_surface("elicitation-call-3", "forms", &params);
+		let surface = &messages[0]["createSurface"];
+		let components = surface["components"].as_array().unwrap();
+		assert!(components.iter().any(|c| c["value"]["path"] == "/a~1b"));
+		assert!(components.iter().any(|c| c["value"]["path"] == "/c~0d"));
+		assert_eq!(surface["dataModel"], json!({"a/b": "x"}));
+		let result = elicitation_result(&json!({"properties": properties}), "accept", &json!({"a/b": "y"}));
+		assert_eq!(result, json!({"action": "accept", "content": {"a/b": "y"}}));
+	}
+
+	#[test]
+	fn an_accepted_elicitation_carries_typed_schema_properties_only() {
+		let schema = json!({"properties": {
+			"name": {"type": "string"},
+			"kind": {"type": "string", "enum": ["a", "b"]},
+			"count": {"type": "integer"},
+			"ratio": {"type": "number"},
+			"flag": {"type": "boolean"},
+			"blank": {"type": "string"},
+			"bad": {"type": "integer"}
+		}});
+		let model = json!({
+			"name": "octoweb", "kind": ["b"], "count": " 7 ", "ratio": 2.5, "flag": true,
+			"blank": "", "bad": "seven", "stray": "ignored"
+		});
+		let result = elicitation_result(&schema, "accept", &model);
+		assert_eq!(
+			result,
+			json!({"action": "accept", "content": {
+				"name": "octoweb", "kind": "b", "count": 7, "ratio": 2.5, "flag": true
+			}})
+		);
+	}
+
+	#[test]
+	fn a_declined_elicitation_carries_no_content() {
+		let schema = json!({"properties": {"name": {"type": "string"}}});
+		let model = json!({"name": "octoweb"});
+		assert_eq!(
+			elicitation_result(&schema, "decline", &model),
+			json!({"action": "decline"})
+		);
 	}
 }

@@ -43,7 +43,7 @@ function specialistFixture(html, source) {
   const s = { ...parent, sid: 1, container: new Element() };
   const context = { document: { createElement: () => new Element() }, window: {}, sessions: new Map([[1, s]]),
     escapeHtml, renderMd: escapeHtml,
-    KIND_ICONS: {}, kindIcon: () => '', ICON_X_CIRCLE: 'fail', ICON_CHECK: 'check', fmtDuration: ms => String(ms),
+    KIND_ICONS: {}, kindIcon: () => '', toolServerHtml: () => '', ICON_X_CIRCLE: 'fail', ICON_CHECK: 'check', fmtDuration: ms => String(ms),
   };
   function extract(start, end) {
     assert.notEqual(html.indexOf(start), -1); assert.notEqual(html.indexOf(end), -1);

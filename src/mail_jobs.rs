@@ -71,7 +71,7 @@ impl Jobs {
 						grew = true;
 					}
 					AgentEvent::Done => ended = Some(Ok(())),
-					AgentEvent::Error(e) | AgentEvent::TurnError(e) => ended = Some(Err(e)),
+					AgentEvent::Error { message: e, .. } | AgentEvent::TurnError(e) => ended = Some(Err(e)),
 					_ => {}
 				}
 			}

@@ -28,6 +28,57 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Running totals of a session's spend, straight from a `cost` frame (field
+/// names match it). Octomind counts per session, not per turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Usage {
+	#[serde(default)]
+	pub session_cost: f64,
+	#[serde(default)]
+	pub session_tokens: u64,
+	#[serde(default)]
+	pub input_tokens: u64,
+	#[serde(default)]
+	pub output_tokens: u64,
+	#[serde(default)]
+	pub cache_read_tokens: u64,
+	#[serde(default)]
+	pub cache_write_tokens: u64,
+	#[serde(default)]
+	pub reasoning_tokens: u64,
+	/// Provider-reported USD of the session's auxiliary model calls; already
+	/// part of `session_cost`.
+	#[serde(default)]
+	pub aux_cost: f64,
+}
+
+impl Usage {
+	/// Field-wise difference from an earlier snapshot of the same session. The
+	/// result is one turn's share, so its `session_*` fields hold that turn's
+	/// cost and tokens. A counter that went backwards (the session reloaded)
+	/// clamps to zero.
+	pub fn since(&self, earlier: &Usage) -> Usage {
+		Usage {
+			session_cost: (self.session_cost - earlier.session_cost).max(0.0),
+			session_tokens: self.session_tokens.saturating_sub(earlier.session_tokens),
+			input_tokens: self.input_tokens.saturating_sub(earlier.input_tokens),
+			output_tokens: self.output_tokens.saturating_sub(earlier.output_tokens),
+			cache_read_tokens: self.cache_read_tokens.saturating_sub(earlier.cache_read_tokens),
+			cache_write_tokens: self.cache_write_tokens.saturating_sub(earlier.cache_write_tokens),
+			reasoning_tokens: self.reasoning_tokens.saturating_sub(earlier.reasoning_tokens),
+			aux_cost: (self.aux_cost - earlier.aux_cost).max(0.0),
+		}
+	}
+}
+
+/// A place in a session's output stream: the server's stream id and the
+/// highest `stream_seq` received. Binding with it replays what came after.
+#[derive(Debug, Clone)]
+pub struct StreamPos {
+	pub stream: String,
+	pub seq: u64,
+}
+
 /// Events streamed from the agent back to the main thread.
 #[derive(Debug)]
 pub enum AgentEvent {
@@ -69,7 +120,9 @@ pub enum AgentEvent {
 	/// connection stay usable — this is not a disconnect.
 	TurnError(String),
 	/// The connection failed or closed: the handle is dead, reconnect.
-	Error(String),
+	/// `resume` is the last stream position seen on it, to pass as
+	/// `AgentSpec::resume`; `None` if the bind never produced a stream.
+	Error { message: String, resume: Option<StreamPos> },
 	/// Slash commands the session accepts, for the sidebar's autocomplete.
 	AvailableCommands(Vec<CommandInfo>),
 	/// Tap workflows the agent can run, as the JSON array from a `/workflow`
@@ -92,6 +145,33 @@ pub enum AgentEvent {
 		code: String,
 		already_signed_in: bool,
 	},
+	/// The bind picked the output stream up where `AgentSpec::resume` left off.
+	/// Sent before the replayed frames' events.
+	Resumed,
+	/// A `cost` frame arrived (every one, including a failed or background
+	/// turn's), before the `Done`/`Cancelled`/`BackgroundDone` it causes.
+	/// `usage` holds running session totals; `pending_work` says a follow-up
+	/// turn (a delegated run, an async job) will stream in on its own.
+	Cost { usage: Usage, pending_work: bool },
+	/// A whole reasoning block (not a delta).
+	Thinking(String),
+	/// The provider request failed and the turn waits to retry; the text is
+	/// ready to display.
+	Retry(String),
+	/// An MCP server asks the user for input mid-tool-call. Answer with
+	/// `AgentHandle::answer_elicitation`; the same `id` may be sent again
+	/// after a resume.
+	Elicitation {
+		id: String,
+		/// The MCP server asking — shown, since it is what the user answers to.
+		server: String,
+		/// MCP's own `elicitation/create` params, unchanged.
+		params: serde_json::Value,
+	},
+	/// The session's current model, after a `/model` probe or a typed `/model x`.
+	Model(String),
+	/// The session's current reasoning effort, after `/effort`.
+	Effort(String),
 }
 
 /// A prompt with optional image attachments.
@@ -126,6 +206,13 @@ pub struct AgentSpec {
 	/// A one-shot session (a background job): unloaded from the server once
 	/// the handle is dropped, instead of kept for a later resume.
 	pub one_shot: bool,
+	/// Where to pick the output stream up after a dropped connection (from
+	/// `AgentEvent::Error`); the server replays what came after it.
+	pub resume: Option<StreamPos>,
+	/// The dropped connection had a turn on screen. If the server resumes the
+	/// session and is still running that turn, this connection adopts it:
+	/// it can be cancelled and counts as running.
+	pub resume_turn: bool,
 }
 
 impl AgentSpec {
@@ -137,6 +224,8 @@ impl AgentSpec {
 			workspace_id: workspace_id.to_string(),
 			mcp_token,
 			one_shot: false,
+			resume: None,
+			resume_turn: false,
 		}
 	}
 
@@ -148,6 +237,8 @@ impl AgentSpec {
 			workspace_id: workspace_id.to_string(),
 			mcp_token,
 			one_shot: true,
+			resume: None,
+			resume_turn: false,
 		}
 	}
 }
@@ -157,6 +248,11 @@ enum Request {
 	Cancel,
 	Command(String),
 	RecoverRuns(specialist::Cache),
+	/// Answer an MCP elicitation. Not a turn: sent at once, even mid-turn.
+	AnswerElicitation {
+		id: String,
+		result: serde_json::Value,
+	},
 	/// Unload the session from the server, then disconnect.
 	Close,
 }
@@ -194,8 +290,12 @@ impl AgentHandle {
 		let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
 		RUNTIME.spawn(async move {
 			let events = Events { tx: event_tx, wake };
-			if let Err(e) = run(spec, request_rx, &events).await {
-				events.send(AgentEvent::Error(e.to_string()));
+			let mut position = None;
+			if let Err(e) = run(spec, request_rx, &events, &mut position).await {
+				events.send(AgentEvent::Error {
+					message: e.to_string(),
+					resume: position,
+				});
 			}
 		});
 		Ok(Self { rx, tx })
@@ -232,6 +332,13 @@ impl AgentHandle {
 	/// Returns false if the session task has exited.
 	pub fn send_command(&self, command: String) -> bool {
 		self.tx.send(Request::Command(command)).is_ok()
+	}
+
+	/// Answer an `AgentEvent::Elicitation` with MCP's own result (`action` is
+	/// `accept`, `decline` or `cancel`; `content` accompanies `accept`).
+	/// Returns false if the session task has exited.
+	pub fn answer_elicitation(&self, id: String, result: serde_json::Value) -> bool {
+		self.tx.send(Request::AnswerElicitation { id, result }).is_ok()
 	}
 
 	/// End the session for good: unload it from the server (its log stays on
@@ -329,60 +436,6 @@ fn random_hex() -> String {
 	buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Slash commands a session accepts over the server protocol, for the
-/// sidebar's autocomplete. CLI-only ones (clipboard, screen, file attach) are
-/// left out.
-fn available_commands() -> Vec<CommandInfo> {
-	let cmd = |name: &str, description: &str, hint: Option<&str>| CommandInfo {
-		name: name.to_string(),
-		description: description.to_string(),
-		hint: hint.map(str::to_string),
-	};
-	vec![
-		cmd("help", "Show available commands", None),
-		cmd("role", "View or change current role", Some("<role_name>")),
-		cmd("model", "View or change current AI model", Some("<provider:model>")),
-		cmd("done", "Compress the conversation so far", Some("[instructions]")),
-		cmd("info", "Display token and cost breakdown for this session", None),
-		cmd(
-			"context",
-			"Display session context",
-			Some("[all|assistant|user|tool|large]"),
-		),
-		cmd("workflow", "Execute a workflow", Some("<workflow_name> [input]")),
-		cmd(
-			"mcp",
-			"MCP server management",
-			Some("[info|list|full|health|dump|validate]"),
-		),
-		cmd("plan", "Display current supervisor-owned plan", None),
-		cmd("prompt", "Manage prompt templates", Some("[template_name]")),
-		cmd(
-			"report",
-			"Generate detailed usage report for this session",
-			Some("[day|week|month] [here]"),
-		),
-		cmd("skill", "List, filter, or toggle skills", Some("[name|pattern|page]")),
-		cmd(
-			"effort",
-			"View or change reasoning effort level",
-			Some("[low|medium|high]"),
-		),
-		cmd(
-			"schedule",
-			"Schedule a message to be injected at a future time",
-			Some("[list|add|remove|edit] [<id>] [when=...] [message=...] [every=...]"),
-		),
-		cmd(
-			"agents",
-			"Show running/offloaded agents in this session",
-			Some("[session]"),
-		),
-		cmd("usage", "Show spend and quotas for your Octomind account", None),
-		cmd("login", "Sign in to your Octomind account", None),
-	]
-}
-
 /// `/name arg …` → (`name`, args). `None` for plain text.
 fn parse_slash(text: &str) -> Option<(String, Vec<String>)> {
 	let rest = text.trim().strip_prefix('/')?;
@@ -428,6 +481,12 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(1200);
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 /// Account/quota refresh while the session is connected.
 const USAGE_REFRESH: Duration = Duration::from_secs(60);
+/// The server sends these only to clients that ask in their bind: the command
+/// list, and MCP questions (answered through `answer_elicitation`). Only a chat
+/// has a UI to answer a question; a background job that asked for them would
+/// hang its turn, so it leaves them to the server's auto-decline.
+const COMMAND_CAPABILITIES: [&str; 1] = ["commands_v1"];
+const CHAT_CAPABILITIES: [&str; 2] = ["elicitation_v1", "commands_v1"];
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -460,16 +519,37 @@ struct Session<'a, S> {
 	swallow_cost: bool,
 	cancel_deadline: Option<Instant>,
 	last_frame: Instant,
-	/// Open `render_ui` calls, by tool id: the turn is waiting on a click,
-	/// not stuck, so the idle timeout does not apply.
+	/// Open `render_ui` calls (by tool id): the turn is waiting on a click, not
+	/// stuck, so the idle timeout does not apply.
 	asking_user: HashSet<String>,
+	/// MCP elicitations the user has not answered yet (by id). The server closes
+	/// them when the turn's `cost` arrives, so an answer after that is stale.
+	open_elicitations: HashSet<String>,
+	one_shot: bool,
+	/// `spec.resume_turn`: the dropped connection had a turn on screen.
+	resume_turn: bool,
+	/// The server still runs a turn the dropped connection started. This
+	/// connection did not send it, but must be able to cancel it and wait on it.
+	adopted_turn: bool,
+	/// Where `spec.resume` asked the stream to pick up.
+	resume: Option<StreamPos>,
+	/// The stream id and highest `stream_seq` seen on this connection, from
+	/// the bind ack on.
+	position: Option<StreamPos>,
 }
 
 /// Start (or reuse) the server, then serve the session on it.
-async fn run(spec: AgentSpec, requests: mpsc::UnboundedReceiver<Request>, events: &Events) -> anyhow::Result<()> {
+async fn run(
+	spec: AgentSpec,
+	requests: mpsc::UnboundedReceiver<Request>,
+	events: &Events,
+	position: &mut Option<StreamPos>,
+) -> anyhow::Result<()> {
+	// An attempt that fails before the bind ack must still report where to resume.
+	*position = spec.resume.clone();
 	let endpoint = tokio::task::spawn_blocking(crate::octomind_server::endpoint).await??;
 	let cwd = crate::agent_workspace::prepare(&spec.workspace_id, &spec.role)?;
-	serve_session(&endpoint, &cwd, spec, requests, events).await
+	serve_session(&endpoint, &cwd, spec, requests, events, position).await
 }
 
 /// Connect, bind, and serve the session until the handle goes away or the
@@ -480,6 +560,7 @@ async fn serve_session(
 	spec: AgentSpec,
 	mut requests: mpsc::UnboundedReceiver<Request>,
 	events: &Events,
+	position: &mut Option<StreamPos>,
 ) -> anyhow::Result<()> {
 	let session_id = spec
 		.session_id
@@ -522,26 +603,37 @@ async fn serve_session(
 		cancel_deadline: None,
 		last_frame: Instant::now(),
 		asking_user: HashSet::new(),
+		resume: spec.resume.clone(),
+		position: None,
+		open_elicitations: HashSet::new(),
+		one_shot: spec.one_shot,
+		resume_turn: spec.resume_turn,
+		adopted_turn: false,
 	};
 
 	// A session that failed to come up may still be loading server-side; a
 	// one-shot must be closed below or it holds a slot of the server's session cap.
 	let started = async {
-		session.bind(&mut stream, cwd, &spec.role).await?;
+		let commands = session.bind(&mut stream, cwd, &spec.role).await?;
 		if spec.one_shot {
 			session.recover_runs(specialist::Cache::default()).await?;
 		}
-		anyhow::Ok(())
+		anyhow::Ok(commands)
 	}
 	.await;
 	let result = match started {
-		Ok(()) => {
+		Ok(commands) => {
 			events.send(AgentEvent::Connected(session_id.clone()));
-			events.send(AgentEvent::AvailableCommands(available_commands()));
+			events.send(AgentEvent::AvailableCommands(commands));
 			session.serve(&mut stream, &mut requests).await
 		}
 		Err(e) => Err(e),
 	};
+	// Whatever ended the connection, the caller resumes from here. Before the
+	// bind ack there is no newer position: keep the one this attempt started from.
+	if let Some(reached) = session.position.take() {
+		*position = Some(reached);
+	}
 
 	// Leaving mid-turn: stop the turn rather than leave it holding the session
 	// against the next connection (a reconnect would only hear "busy").
@@ -598,21 +690,34 @@ where
 	}
 
 	/// Bind the session (create or resume it under its id) and wait until the
-	/// server says it is ready.
+	/// server says it is ready. Returns the slash commands the server lists.
+	///
+	/// A resumed stream's replayed frames, and re-sent elicitations, arrive
+	/// after the ack and before the ready status; they are handled like live ones.
 	async fn bind(
 		&mut self,
 		stream: &mut (impl futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
 		cwd: &std::path::Path,
 		role: &str,
-	) -> anyhow::Result<()> {
-		self.send_frame(serde_json::json!({
+	) -> anyhow::Result<Vec<CommandInfo>> {
+		let capabilities: &[&str] = if self.one_shot {
+			&COMMAND_CAPABILITIES
+		} else {
+			&CHAT_CAPABILITIES
+		};
+		let mut bind = serde_json::json!({
 			"type": "session",
 			"request_id": "bind",
 			"session_id": self.session_id,
 			"cwd": cwd,
 			"role": role,
-		}))
-		.await?;
+			"capabilities": capabilities,
+		});
+		if let Some(resume) = &self.resume {
+			bind["resume"] = serde_json::json!({"stream": resume.stream, "after": resume.seq});
+		}
+		self.send_frame(bind).await?;
+		let mut commands = Vec::new();
 		// Resolving a role the server has not loaded yet may fetch its tap.
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
 		loop {
@@ -622,32 +727,69 @@ where
 				.ok_or_else(|| anyhow::anyhow!("the octomind server closed the connection"))??;
 			let Message::Text(text) = frame else { continue };
 			let value: serde_json::Value = serde_json::from_str(&text)?;
+			// Replayed frames carry a `stream_seq`; the ones that answer the
+			// bind itself (ack, ready status, a refusal) never do.
+			let replayed = value.get("stream_seq").is_some();
 			match value["type"].as_str() {
+				Some("ack") if value["request_id"] == "bind" => commands = self.on_bind_ack(&value),
 				Some("status")
 					if value["session_id"].as_str() == Some(self.session_id.as_str())
-						&& value.get("data").is_none() =>
+						&& value.get("data").is_none()
+						&& !replayed =>
 				{
-					return Ok(());
+					return Ok(commands);
 				}
-				Some("error") => {
+				Some("error") if !replayed => {
 					anyhow::bail!(
 						"{}",
 						value["message"].as_str().unwrap_or("the agent session failed to start")
 					);
 				}
-				Some("ack") if value["request_id"] == "bind" => {
-					self.run_events = value["capabilities"]
-						.as_array()
-						.is_some_and(|caps| caps.iter().any(|c| c == "run_events_v1"));
-					self.tagged_costs = value["capabilities"]
-						.as_array()
-						.is_some_and(|caps| caps.iter().any(|c| c == "session_control_v1"));
-				}
-				Some("run_event") => self.on_frame(value).await?,
-				// The greeting.
-				_ => {}
+				// The greeting, replayed frames, re-sent elicitations, run traffic.
+				_ => self.on_frame(value).await?,
 			}
 		}
+	}
+
+	/// Read what the bind ack reports: capabilities, the stream position and
+	/// the command list.
+	fn on_bind_ack(&mut self, ack: &serde_json::Value) -> Vec<CommandInfo> {
+		let has_capability = |name: &str| {
+			ack["capabilities"]
+				.as_array()
+				.is_some_and(|caps| caps.iter().any(|c| c == name))
+		};
+		self.run_events = has_capability("run_events_v1");
+		self.tagged_costs = has_capability("session_control_v1");
+		let resumed = ack["resumed"].as_bool().unwrap_or(false);
+		if let Some(stream) = ack["stream"].as_str() {
+			// A resumed stream replays the frames after our old position, which
+			// advances it as they arrive; the ack's own seq is already past them.
+			let seq = match &self.resume {
+				Some(old) if resumed => old.seq,
+				_ => ack["stream_seq"].as_u64().unwrap_or_default(),
+			};
+			self.position = Some(StreamPos {
+				stream: stream.to_string(),
+				seq,
+			});
+		}
+		if resumed {
+			self.adopted_turn = self.resume_turn;
+			self.events.send(AgentEvent::Resumed);
+		}
+		ack["commands"]
+			.as_array()
+			.into_iter()
+			.flatten()
+			.filter_map(|command| {
+				Some(CommandInfo {
+					name: command["name"].as_str()?.to_string(),
+					description: command["description"].as_str().unwrap_or_default().to_string(),
+					hint: command["hint"].as_str().map(str::to_string),
+				})
+			})
+			.collect()
 	}
 
 	async fn serve(
@@ -657,6 +799,8 @@ where
 	) -> anyhow::Result<Ending> {
 		// Account status shows on connect, then stays fresh.
 		self.send_probe("/usage").await?;
+		self.send_probe("/model").await?;
+		self.send_probe("/effort").await?;
 		let mut usage = tokio::time::interval_at(tokio::time::Instant::now() + USAGE_REFRESH, USAGE_REFRESH);
 		let mut tick = tokio::time::interval(Duration::from_secs(1));
 
@@ -669,6 +813,7 @@ where
 					}
 					Some(Request::Command(command)) => self.send_probe(&command).await?,
 					Some(Request::RecoverRuns(runs)) => self.recover_runs(runs).await?,
+					Some(Request::AnswerElicitation { id, result }) => self.answer_elicitation(id, result).await?,
 					Some(Request::Cancel) => self.cancel().await?,
 					Some(Request::Close) => return Ok(Ending::Closed),
 					None => return Ok(Ending::Dropped),
@@ -701,7 +846,7 @@ where
 		}
 		if self.cancel_deadline.is_some_and(|at| now >= at) {
 			self.cancel_deadline = None;
-			if self.current.as_ref().is_some_and(Sent::is_turn) {
+			if self.current.as_ref().is_some_and(Sent::is_turn) || self.adopted_turn {
 				// The turn ignored the stop. Report it stopped; its late cost
 				// closes nothing.
 				self.end_turn();
@@ -710,8 +855,14 @@ where
 				self.send_next_prompt().await?;
 			}
 		}
-		let waiting = self.current.as_ref().is_some_and(Sent::is_turn) || self.pending.values().any(Sent::is_turn);
-		if waiting && self.asking_user.is_empty() && now.duration_since(self.last_frame) > IDLE_TIMEOUT {
+		let waiting = self.current.as_ref().is_some_and(Sent::is_turn)
+			|| self.pending.values().any(Sent::is_turn)
+			|| self.adopted_turn;
+		if waiting
+			&& self.asking_user.is_empty()
+			&& self.open_elicitations.is_empty()
+			&& now.duration_since(self.last_frame) > IDLE_TIMEOUT
+		{
 			anyhow::bail!("agent idle for 20 minutes — no response");
 		}
 		Ok(())
@@ -789,11 +940,27 @@ where
 		Ok(())
 	}
 
+	/// Answer an MCP question. Not a turn: the server applies it at once, even
+	/// mid-turn, so it joins neither `pending` nor `current`.
+	async fn answer_elicitation(&mut self, id: String, result: serde_json::Value) -> anyhow::Result<()> {
+		self.open_elicitations.remove(&id);
+		let request_id = self.request_id("e");
+		self.send_frame(serde_json::json!({
+			"type": "elicitation_response",
+			"request_id": request_id,
+			"session_id": self.session_id,
+			"id": id,
+			"result": result,
+		}))
+		.await
+	}
+
 	/// Stop the running turn — the one we sent, or one the agent started.
 	async fn cancel(&mut self) -> anyhow::Result<()> {
 		let turn_running = self.current.as_ref().is_some_and(Sent::is_turn)
 			|| self.pending.values().any(Sent::is_turn)
-			|| self.injected_open;
+			|| self.injected_open
+			|| self.adopted_turn;
 		// A prompt still waiting (behind a busy session) never reaches the agent.
 		let dropped_waiting = !self.queue.is_empty() || self.busy_retry_at.is_some();
 		self.queue.clear();
@@ -828,7 +995,9 @@ where
 		}
 		self.cancel_deadline = None;
 		self.injected_open = false;
+		self.adopted_turn = false;
 		self.asking_user.clear();
+		self.open_elicitations.clear();
 	}
 
 	async fn recover_runs(&mut self, runs: specialist::Cache) -> anyhow::Result<()> {
@@ -858,6 +1027,9 @@ where
 	}
 
 	async fn on_frame(&mut self, value: serde_json::Value) -> anyhow::Result<()> {
+		if let (Some(position), Some(seq)) = (&mut self.position, value["stream_seq"].as_u64()) {
+			position.seq = position.seq.max(seq);
+		}
 		let kind = value["type"].as_str().unwrap_or_default();
 		// Run traffic is out of band, including replay acknowledgements. It
 		// must not consume any parent turn bookkeeping, even swallow_cost.
@@ -916,7 +1088,7 @@ where
 				self.events.send(AgentEvent::ToolStart {
 					id,
 					title,
-					kind: "other".to_string(),
+					kind: value["server"].as_str().unwrap_or_default().to_string(),
 					raw_input: value.get("params").cloned(),
 					locations: Vec::new(),
 				});
@@ -971,10 +1143,35 @@ where
 			"status" => self.on_status(&value).await?,
 			"cost" => self.on_cost(&value).await?,
 			"error" => {
-				let message = value["message"].as_str().unwrap_or("agent error").to_string();
-				self.on_error(message).await?;
+				if value["code"].as_str() == Some("elicitation_gone") {
+					// The answer to a question that already ended; no turn is affected.
+					tracing::debug!(message = ?value["message"], "elicitation already gone");
+				} else {
+					let message = value["message"].as_str().unwrap_or("agent error").to_string();
+					self.on_error(message).await?;
+				}
 			}
-			// thinking, skill, evolution: nothing to show.
+			"thinking" => {
+				if let Some(text) = value["content"].as_str().filter(|t| !t.is_empty()) {
+					self.events.send(AgentEvent::Thinking(text.to_string()));
+				}
+			}
+			"retry" => {
+				if let Some(message) = value["message"].as_str() {
+					self.events.send(AgentEvent::Retry(message.to_string()));
+				}
+			}
+			"elicitation" => {
+				let id = value["id"].as_str().unwrap_or_default().to_string();
+				// The turn waits on the user, like a `render_ui`.
+				self.open_elicitations.insert(id.clone());
+				self.events.send(AgentEvent::Elicitation {
+					id,
+					server: value["server"].as_str().unwrap_or_default().to_string(),
+					params: value["params"].clone(),
+				});
+			}
+			// skill, evolution: nothing to show.
 			_ => {}
 		}
 		Ok(())
@@ -1036,11 +1233,28 @@ where
 				code: out["user_code"].as_str().unwrap_or_default().to_string(),
 				already_signed_in: out["already_signed_in"].as_bool().unwrap_or(false),
 			}),
+			"model" => {
+				if let Some(model) = out["new_model"].as_str() {
+					self.events.send(AgentEvent::Model(model.to_string()));
+				}
+			}
+			"effort" => {
+				if let Some(effort) = out["new_effort"].as_str() {
+					self.events.send(AgentEvent::Effort(effort.to_string()));
+				}
+			}
 			_ => {}
 		}
 	}
 
 	async fn on_cost(&mut self, value: &serde_json::Value) -> anyhow::Result<()> {
+		// The server closes every open form when the turn's cost arrives, whoever's turn it was.
+		self.open_elicitations.clear();
+		let usage: Usage = serde_json::from_value(value.clone()).context("invalid cost frame")?;
+		self.events.send(AgentEvent::Cost {
+			usage,
+			pending_work: value["pending_work"].as_bool().unwrap_or(false),
+		});
 		if std::mem::take(&mut self.swallow_cost) {
 			return Ok(());
 		}
@@ -1057,10 +1271,16 @@ where
 			// not our prompt's end: that one, if any, is still waiting or running.
 			self.injected_open = false;
 			let ours = ours_running;
+			// A stop sent to an adopted turn is answered by its cost.
+			let adopted_cancelled = std::mem::take(&mut self.adopted_turn) && !ours && self.cancel_deadline.is_some();
 			if !ours {
 				self.cancel_deadline = None;
 			}
-			self.events.send(AgentEvent::BackgroundDone);
+			self.events.send(if adopted_cancelled {
+				AgentEvent::Cancelled
+			} else {
+				AgentEvent::BackgroundDone
+			});
 			if !ours {
 				// The session's lock is free again: a prompt refused as busy goes now.
 				self.busy_retry_at = None;
@@ -1314,7 +1534,25 @@ mod tests {
 		frame
 	}
 
-	/// Greeting, bind and the connect-time `/usage` probe. Returns the bind.
+	/// The connect-time `/usage`, `/model` and `/effort` probes, answered with
+	/// bare results (no model or effort to report).
+	async fn answer_connect_probes(ws: &mut ServerWs, sid: &serde_json::Value) {
+		for command in ["usage", "model", "effort"] {
+			let probe = recv(ws).await;
+			assert_eq!(probe["command"], command, "{probe}");
+			ack(ws, &probe).await;
+			send(
+				ws,
+				serde_json::json!({
+					"type": "status", "message": "ok", "session_id": sid,
+					"data": {"command_type": command}
+				}),
+			)
+			.await;
+		}
+	}
+
+	/// Greeting, bind and the connect-time probes. Returns the bind.
 	async fn accept_session(ws: &mut ServerWs) -> serde_json::Value {
 		accept_session_with_capabilities(ws, &[]).await
 	}
@@ -1334,17 +1572,7 @@ mod tests {
 			serde_json::json!({"type": "status", "message": "Session created", "session_id": sid}),
 		)
 		.await;
-		let probe = recv(ws).await;
-		assert_eq!(probe["command"], "usage", "{probe}");
-		ack(ws, &probe).await;
-		send(
-			ws,
-			serde_json::json!({
-				"type": "status", "message": "ok", "session_id": sid,
-				"data": {"command_type": "usage", "signed_in": true}
-			}),
-		)
-		.await;
+		answer_connect_probes(ws, &sid).await;
 		bind
 	}
 
@@ -1369,7 +1597,16 @@ mod tests {
 				tx: event_tx,
 				wake: Arc::new(|| {}),
 			};
-			serve_session(&endpoint, std::path::Path::new("/tmp"), spec, request_rx, &events).await
+			let mut position = None;
+			serve_session(
+				&endpoint,
+				std::path::Path::new("/tmp"),
+				spec,
+				request_rx,
+				&events,
+				&mut position,
+			)
+			.await
 		});
 		Client { requests, events, done }
 	}
@@ -1384,28 +1621,40 @@ mod tests {
 				.unwrap();
 		}
 
-		/// The next event, skipping the connect-time command list and account.
+		/// The next event, skipping the connect-time command list and account
+		/// and every `Cost` (see `next_with_cost`).
 		async fn next(&mut self) -> AgentEvent {
+			self.next_event(true).await
+		}
+
+		/// Like `next`, but a `Cost` is an event too.
+		async fn next_with_cost(&mut self) -> AgentEvent {
+			self.next_event(false).await
+		}
+
+		async fn next_event(&mut self, skip_cost: bool) -> AgentEvent {
 			loop {
 				let event = tokio::time::timeout(Duration::from_secs(10), self.events.recv())
 					.await
 					.expect("event in time")
 					.expect("session alive");
-				if !matches!(
+				let ambient = matches!(
 					event,
 					AgentEvent::AvailableCommands(_)
 						| AgentEvent::Account { .. }
 						| AgentEvent::Run(specialist::Update::Recovering { .. })
-				) {
+				) || (skip_cost && matches!(event, AgentEvent::Cost { .. }));
+				if !ambient {
 					return event;
 				}
 			}
 		}
 
-		/// No further event arrives within a short wait.
+		/// No further event arrives within a short wait (a `Cost` aside).
 		async fn quiet(&mut self) {
-			if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(300), self.events.recv()).await {
-				panic!("unexpected event: {event:?}");
+			let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+			while let Ok(Some(event)) = tokio::time::timeout_at(deadline, self.events.recv()).await {
+				assert!(matches!(event, AgentEvent::Cost { .. }), "unexpected event: {event:?}");
 			}
 		}
 	}
@@ -1516,6 +1765,12 @@ mod tests {
 			cancel_deadline: Some(deadline),
 			last_frame: deadline,
 			asking_user: HashSet::from(["ask".into()]),
+			resume: None,
+			position: None,
+			open_elicitations: HashSet::new(),
+			one_shot: false,
+			resume_turn: false,
+			adopted_turn: false,
 		};
 		(session, frames)
 	}
@@ -1894,9 +2149,7 @@ mod tests {
             }))
             .await;
             send(&mut ws, serde_json::json!({"type": "status", "message": "Session resumed", "session_id": bind["session_id"]})).await;
-            let probe = recv(&mut ws).await;
-            ack(&mut ws, &probe).await;
-            send(&mut ws, serde_json::json!({"type": "status", "message": "ok", "session_id": "sess-1", "data": {"command_type": "usage"}})).await;
+            answer_connect_probes(&mut ws, &bind["session_id"]).await;
 
             let msg = recv(&mut ws).await;
             ack(&mut ws, &msg).await;
@@ -1999,6 +2252,11 @@ mod tests {
 			let bind = accept_session(&mut ws).await;
 			let sid = bind["session_id"].as_str().unwrap().to_string();
 			assert!(sid.starts_with("octoweb-"), "{sid}");
+			assert_eq!(
+				bind["capabilities"],
+				serde_json::json!(["commands_v1"]),
+				"a job must not ask for elicitations"
+			);
 			let close = recv(&mut ws).await;
 			assert_eq!(close["type"], "close");
 			assert_eq!(close["session_id"].as_str(), Some(sid.as_str()));
@@ -2037,6 +2295,300 @@ mod tests {
 		let client = start(endpoint, AgentSpec::chat("x:y", None, "default", None));
 		let error = client.done.await.unwrap().unwrap_err().to_string();
 		assert!(error.contains("Failed to resolve role 'x:y'"), "{error}");
+	}
+
+	#[tokio::test]
+	async fn a_cost_frame_reports_its_usage_before_the_turn_ends() {
+		let endpoint = mock_server(|mut ws| async move {
+			accept_session(&mut ws).await;
+			let msg = recv(&mut ws).await;
+			ack(&mut ws, &msg).await;
+			send(
+				&mut ws,
+				cost(
+					"sess-1",
+					serde_json::json!({"session_cost": 0.25, "session_tokens": 120, "aux_cost": 0.5, "pending_work": true}),
+				),
+			)
+			.await;
+			let _ = ws.next().await;
+		})
+		.await;
+		let mut client = start(endpoint, chat_spec());
+		assert!(matches!(client.next().await, AgentEvent::Connected(_)));
+		client.prompt("hi");
+		let AgentEvent::Cost { usage, pending_work } = client.next_with_cost().await else {
+			panic!("the cost frame comes first")
+		};
+		assert!(pending_work);
+		assert_eq!(
+			usage,
+			Usage {
+				session_cost: 0.25,
+				session_tokens: 120,
+				input_tokens: 1,
+				aux_cost: 0.5,
+				..Usage::default()
+			}
+		);
+		assert!(matches!(client.next().await, AgentEvent::Done));
+	}
+
+	#[tokio::test]
+	async fn a_replayed_status_with_a_stream_position_is_not_the_ready_status() {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let events = Events {
+			tx,
+			wake: Arc::new(|| {}),
+		};
+		let (mut session, mut sent) = session_fixture(&events);
+		session.resume = Some(StreamPos {
+			stream: "s1".into(),
+			seq: 4,
+		});
+		let frames = [
+			serde_json::json!({"type":"ack","request_id":"bind","capabilities":["commands_v1"],"stream":"s1","stream_seq":9,"resumed":true,
+				"commands":[{"name":"help","description":"Show help"},{"name":"model","description":"Set model","hint":"[m]"}]}),
+			serde_json::json!({"type":"status","session_id":"sess-1","message":"Stopped: spending threshold reached","stream_seq":5}),
+			serde_json::json!({"type":"assistant","session_id":"sess-1","content":"replayed","stream_seq":6}),
+			serde_json::json!({"type":"status","session_id":"sess-1","message":"Session resumed"}),
+		];
+		let mut incoming = futures::stream::iter(frames.into_iter().map(|frame| Ok(Message::text(frame.to_string()))));
+		let commands = session
+			.bind(&mut incoming, std::path::Path::new("/tmp"), "octoweb:assistant")
+			.await
+			.unwrap();
+		assert_eq!(commands.len(), 2);
+		assert_eq!(commands[1].hint.as_deref(), Some("[m]"));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Resumed));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Chunk(t) if t.contains("Stopped: spending")));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Chunk(t) if t == "replayed"));
+		assert!(rx.try_recv().is_err());
+		let position = session.position.as_ref().unwrap();
+		assert_eq!((position.stream.as_str(), position.seq), ("s1", 6));
+		let Message::Text(bind) = sent.try_recv().unwrap() else {
+			panic!("bind frame")
+		};
+		let bind: serde_json::Value = serde_json::from_str(&bind).unwrap();
+		assert_eq!(
+			bind["capabilities"],
+			serde_json::json!(["elicitation_v1", "commands_v1"])
+		);
+		assert_eq!(bind["resume"], serde_json::json!({"stream": "s1", "after": 4}));
+	}
+
+	/// A session with nothing running, so a test starts from a clean slate.
+	fn idle_fixture(
+		events: &Events,
+	) -> (
+		Session<'_, impl futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin>,
+		futures::channel::mpsc::UnboundedReceiver<Message>,
+	) {
+		let (mut session, frames) = session_fixture(events);
+		session.pending.clear();
+		session.current = None;
+		session.current_id = None;
+		session.busy_retries = 0;
+		session.busy_retry_at = None;
+		session.busy_since = None;
+		session.injected_open = false;
+		session.swallow_cost = false;
+		session.cancel_deadline = None;
+		session.asking_user.clear();
+		(session, frames)
+	}
+
+	#[test]
+	fn only_a_resumed_session_with_a_turn_on_screen_adopts_its_turn() {
+		let (tx, _rx) = mpsc::unbounded_channel();
+		let events = Events {
+			tx,
+			wake: Arc::new(|| {}),
+		};
+		for (resumed, resume_turn, adopted) in [(true, true, true), (true, false, false), (false, true, false)] {
+			let (mut session, _frames) = idle_fixture(&events);
+			session.resume_turn = resume_turn;
+			session.on_bind_ack(&serde_json::json!({"resumed": resumed}));
+			assert_eq!(
+				session.adopted_turn, adopted,
+				"resumed={resumed} resume_turn={resume_turn}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn an_adopted_turn_is_cancelled_and_ends_cancelled_on_its_cost() {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let events = Events {
+			tx,
+			wake: Arc::new(|| {}),
+		};
+		let (mut session, mut frames) = idle_fixture(&events);
+		session.adopted_turn = true;
+		session.cancel().await.unwrap();
+		let Message::Text(sent) = frames.try_recv().unwrap() else {
+			panic!("cancel frame")
+		};
+		let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
+		assert_eq!(sent["type"], "cancel");
+		assert!(session.cancel_deadline.is_some());
+		session
+			.on_cost(&cost("sess-1", serde_json::json!({"cancelled": true})))
+			.await
+			.unwrap();
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Cost { .. }));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Cancelled));
+		assert!(!session.adopted_turn && session.cancel_deadline.is_none());
+	}
+
+	#[tokio::test]
+	async fn an_adopted_turn_that_ignores_the_stop_is_reported_cancelled_after_the_grace() {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let events = Events {
+			tx,
+			wake: Arc::new(|| {}),
+		};
+		let (mut session, _frames) = idle_fixture(&events);
+		session.adopted_turn = true;
+		session.cancel().await.unwrap();
+		session.cancel_deadline = Some(Instant::now());
+		session.on_tick().await.unwrap();
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Cancelled));
+		assert!(!session.adopted_turn && session.swallow_cost);
+	}
+
+	#[tokio::test]
+	async fn open_elicitations_close_on_a_background_cost() {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let events = Events {
+			tx,
+			wake: Arc::new(|| {}),
+		};
+		let (mut session, _frames) = idle_fixture(&events);
+		for id in ["e1", "e2"] {
+			session
+				.on_frame(serde_json::json!({"type": "elicitation", "id": id, "server": "forms", "params": {}}))
+				.await
+				.unwrap();
+		}
+		assert_eq!(
+			session.open_elicitations,
+			HashSet::from(["e1".to_string(), "e2".to_string()])
+		);
+		assert!(session.asking_user.is_empty());
+		session
+			.answer_elicitation("e1".into(), serde_json::json!({"action": "decline"}))
+			.await
+			.unwrap();
+		assert_eq!(session.open_elicitations, HashSet::from(["e2".to_string()]));
+		session.adopted_turn = true;
+		session.on_cost(&cost("sess-1", serde_json::json!({}))).await.unwrap();
+		assert!(session.open_elicitations.is_empty() && !session.adopted_turn);
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Elicitation { .. }));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Elicitation { .. }));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::Cost { .. }));
+		assert!(matches!(rx.try_recv().unwrap(), AgentEvent::BackgroundDone));
+	}
+
+	#[tokio::test]
+	async fn an_elicitation_gone_error_does_not_end_the_turn() {
+		let endpoint = mock_server(|mut ws| async move {
+			accept_session(&mut ws).await;
+			let msg = recv(&mut ws).await;
+			ack(&mut ws, &msg).await;
+			send(
+				&mut ws,
+				serde_json::json!({"type": "error", "message": "no pending elicitation 'e1'", "code": "elicitation_gone"}),
+			)
+			.await;
+			send(
+				&mut ws,
+				serde_json::json!({"type": "assistant", "content": "carry on", "session_id": "sess-1"}),
+			)
+			.await;
+			send(&mut ws, cost("sess-1", serde_json::json!({}))).await;
+			let _ = ws.next().await;
+		})
+		.await;
+		let mut client = start(endpoint, chat_spec());
+		assert!(matches!(client.next().await, AgentEvent::Connected(_)));
+		client.prompt("go");
+		assert!(matches!(client.next().await, AgentEvent::Chunk(t) if t == "carry on"));
+		assert!(matches!(client.next().await, AgentEvent::Done));
+	}
+
+	#[tokio::test]
+	async fn an_elicitation_reaches_the_ui_and_its_answer_goes_back_mid_turn() {
+		let endpoint = mock_server(|mut ws| async move {
+			accept_session(&mut ws).await;
+			let msg = recv(&mut ws).await;
+			ack(&mut ws, &msg).await;
+			send(
+				&mut ws,
+				serde_json::json!({"type": "elicitation", "session_id": "sess-1", "id": "e1", "server": "forms", "tool_id": "call-1",
+					"params": {"mode": "form", "message": "Pick a size"}}),
+			)
+			.await;
+			let answer = recv(&mut ws).await;
+			assert_eq!(answer["type"], "elicitation_response");
+			assert_eq!(answer["session_id"], "sess-1");
+			assert_eq!(answer["id"], "e1");
+			assert_eq!(answer["result"], serde_json::json!({"action": "accept"}));
+			assert!(answer["request_id"].as_str().is_some_and(|id| id.starts_with('e')));
+			send(&mut ws, cost("sess-1", serde_json::json!({}))).await;
+			let _ = ws.next().await;
+		})
+		.await;
+		let mut client = start(endpoint, chat_spec());
+		assert!(matches!(client.next().await, AgentEvent::Connected(_)));
+		client.prompt("ask me");
+		let AgentEvent::Elicitation { id, server, params } = client.next().await else {
+			panic!("expected the question")
+		};
+		assert_eq!((id.as_str(), server.as_str()), ("e1", "forms"));
+		assert_eq!(params["message"], "Pick a size");
+		client
+			.requests
+			.send(Request::AnswerElicitation {
+				id,
+				result: serde_json::json!({"action": "accept"}),
+			})
+			.unwrap();
+		assert!(matches!(client.next().await, AgentEvent::Done));
+	}
+
+	#[test]
+	fn usage_since_is_one_turns_share_and_never_negative() {
+		let before = Usage {
+			session_cost: 1.0,
+			session_tokens: 100,
+			input_tokens: 60,
+			output_tokens: 40,
+			aux_cost: 0.5,
+			..Usage::default()
+		};
+		let after = Usage {
+			session_cost: 1.75,
+			session_tokens: 180,
+			input_tokens: 110,
+			output_tokens: 70,
+			cache_read_tokens: 5,
+			aux_cost: 0.5,
+			..Usage::default()
+		};
+		assert_eq!(
+			after.since(&before),
+			Usage {
+				session_cost: 0.75,
+				session_tokens: 80,
+				input_tokens: 50,
+				output_tokens: 30,
+				cache_read_tokens: 5,
+				..Usage::default()
+			}
+		);
+		// A session that reloaded restarts its counters.
+		assert_eq!(before.since(&after), Usage::default());
 	}
 
 	#[test]

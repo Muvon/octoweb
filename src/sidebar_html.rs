@@ -26,6 +26,25 @@
 ///   window.__a2uiResolved(sid, fileId, payload)   — surface was resolved (gray it out)
 ///   window.__setAccount(sid, json)                — account card from octomind's /usage output
 ///   window.__loginPending(sid, code)              — sign-in started; show the device code
+///   window.__setUsage(sid, json)                  — session totals (cost, tokens) → header chip + tab tooltip
+///   window.__setModel(sid, model)                 — model name for the header chip
+///   window.__setEffort(sid, effort)               — reasoning effort for the header chip
+///   window.__setTurnUsage(sid, json, turnMs, attachNow) — usage footer under the turn's agent bubble (json = the turn's delta; attachNow skips the stash-until-finish wait)
+///   window.__appendThinking(sid, text)            — live reasoning (collapsed block, grows with each call)
+///   window.__showRetry(sid, text)                 — transient retry notice in the live feed
+///   window.__setPendingWork(sid, on)              — pulsing tab dot while background work runs
+///   window.__setClosedSessions(json)              — past-sessions list [{index, closed_at, title, tag, messages, cost}]
+///   window.__setWorkflows(sid, json)              — tap workflows for the `/workflow` dropdown
+///   window.__setRoutines(sid, text)               — `/schedule list` output → routines chip count
+///   window.__replayMessages(sid, msgs)            — render the persisted message log
+///   window.__setHistory(arr)                      — global prompt history (Ctrl+P/N)
+///   window.__clearMessages(sid)                   — empty a session's chat
+///   window.__appendUserMsg(sid, text)             — user bubble synthesized by Rust
+///   window.__scrollMessages(where)                — scroll the message list
+///   window.__openChatSearch()                     — toggle ⌘F chat search
+///   window.__openCreatePanel()                    — open the new-session panel
+///   window.__injectPrompt(text)                   — send text as a prompt in the active session
+///   window.__setSidebarFullscreen(on)             — fullscreen icon state
 ///
 /// IPC messages sent to Rust (all session-scoped messages include `session_id`):
 ///   { type: "acp_prompt",    session_id, text, images }
@@ -36,6 +55,7 @@
 ///   { type: "acp_session_close",  session_id }
 ///   { type: "acp_session_switch", session_id }
 ///   { type: "acp_session_rename", session_id, title }
+///   { type: "acp_session_reopen_at", index, closed_at }  — reopen a past session picked in the past-sessions panel
 ///   { type: "sidebar_close" }
 ///   { type: "sidebar_resize", width }                    — apply logical width while dragging
 ///   { type: "sidebar_resize_end", width }                — apply and persist logical width
@@ -504,6 +524,11 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     background: var(--err);
     box-shadow: none;
   }
+  /* Background work (workflows, routines, agents) running for this chat */
+  .session-tab .session-dot.pending {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
 
   .session-tab .session-title {
     overflow: hidden;
@@ -569,7 +594,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .session-tab .session-close:active { background: var(--fill-press); }
 
   /* Header controls */
-  #session-add-btn, #routines-btn, #fullscreen-btn, #close-btn {
+  #session-add-btn, #sessions-btn, #routines-btn, #fullscreen-btn, #close-btn {
     width: 24px; height: 24px;
     border-radius: var(--r-ctl);
     border: none;
@@ -581,22 +606,41 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     padding: 0;
     transition: background var(--t-fast), color var(--t-fast);
   }
-  #session-add-btn svg, #routines-btn svg, #fullscreen-btn svg, #close-btn svg {
+  #session-add-btn svg, #sessions-btn svg, #routines-btn svg, #fullscreen-btn svg, #close-btn svg {
     width: 14px;
     height: 14px;
   }
   #routines-btn { width: auto; padding: 0 6px; gap: 3px; font-size: 11px; }
-  #routines-btn.hidden { display: none; }
+  #routines-btn.hidden, #sessions-btn.hidden { display: none; }
+  /* Model · effort and running cost of the active chat, under the input */
+  #usage-chip {
+    display: flex; align-items: center; gap: 4px;
+    min-width: 0;
+  }
+  #usage-chip.hidden { display: none; }
+  #usage-model {
+    min-width: 0; padding: 0 4px; margin-left: -4px;
+    border: none; border-radius: var(--r-ctl); background: transparent;
+    color: inherit; font: inherit; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    transition: background var(--t-fast);
+  }
+  #usage-model:hover { background: var(--fill-hover); }
+  #usage-model:empty { display: none; }
+  #usage-total { flex-shrink: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
   #session-add-btn:hover:not(:disabled),
+  #sessions-btn:hover,
   #routines-btn:hover, #fullscreen-btn:hover, #close-btn:hover {
     background: var(--fill-hover);
     color: var(--label-2);
   }
   #session-add-btn:active:not(:disabled),
+  #sessions-btn:active,
   #fullscreen-btn:active, #close-btn:active {
     background: var(--fill-press);
   }
   #session-add-btn:focus-visible,
+  #sessions-btn:focus-visible,
   #fullscreen-btn:focus-visible, #close-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
@@ -813,21 +857,21 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   }
 
   /* ── Chat search (⌘F) ───────────────────────────────────────────────────── */
-  #chat-search {
+  #chat-search, #past-sessions {
     display: flex;
     flex-direction: column;
     border-bottom: 1px solid var(--divider);
     flex-shrink: 0;
   }
-  #chat-search.hidden { display: none; }
-  #cs-bar {
+  #chat-search.hidden, #past-sessions.hidden { display: none; }
+  #cs-bar, #ps-bar {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
     color: var(--text-secondary);
   }
-  #cs-input {
+  #cs-input, #ps-input {
     flex: 1;
     min-width: 0;
     border: none;
@@ -844,7 +888,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
-  #cs-bar button {
+  #cs-bar button, #ps-bar button {
     border: none;
     background: transparent;
     color: var(--text-secondary);
@@ -856,15 +900,15 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     font-size: 12px;
     flex-shrink: 0;
   }
-  #cs-bar button:hover { background: var(--hover-bg); color: var(--text-primary); }
-  #cs-results {
+  #cs-bar button:hover, #ps-bar button:hover { background: var(--hover-bg); color: var(--text-primary); }
+  #cs-results, #ps-results {
     max-height: 220px;
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  #cs-results::-webkit-scrollbar { width: 3px; }
-  #cs-results::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
-  #cs-results:empty { display: none; }
+  #cs-results::-webkit-scrollbar, #ps-results::-webkit-scrollbar { width: 3px; }
+  #cs-results::-webkit-scrollbar-thumb, #ps-results::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
+  #cs-results:empty, #ps-results:empty { display: none; }
   .cs-hit {
     display: flex;
     flex-direction: column;
@@ -903,7 +947,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     border-radius: 2px;
     padding: 0 1px;
   }
-  #cs-empty {
+  #cs-empty, #ps-empty {
     padding: 10px;
     font-size: 12px;
     color: var(--text-secondary);
@@ -1846,6 +1890,25 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* MCP server name of a tool (`kind` carries it) — muted prefix before the title */
+  .tool-server {
+    flex-shrink: 0;
+    max-width: 30%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+  /* Transient API-retry notice in the live feed — not a step, never persisted */
+  .tool-row.retry-row { color: var(--warn); cursor: default; }
+  .tool-row.retry-row:hover { background: transparent; }
+  .tool-kind.retry {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 14%, transparent);
+    font-size: 10px;
+    font-weight: 700;
+  }
   .tool-time {
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
@@ -2086,6 +2149,28 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     white-space: pre-wrap;
     word-break: break-word;
   }
+  /* Reasoning block body — the summary reuses the specialist-report look */
+  .reasoning-body {
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 3px 0 4px 6px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: var(--md-pre-bg);
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  /* Per-turn usage line under an agent message */
+  .turn-usage {
+    align-self: flex-start;
+    padding: 0 6px;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
   #input-area {
@@ -2096,13 +2181,14 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     gap: 6px;
     position: relative;
   }
-  #composer-hint {
+  #composer-meta {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
     padding: 0 10px;
     color: var(--label-2);
     font-size: 11px;
     line-height: 1.3;
-    text-align: right;
   }
+  #composer-hint { flex-shrink: 0; margin-left: auto; }
 
   /* ── Slash command dropdown — floating glass sheet with springy pop ──── */
   #cmd-dropdown {
@@ -2878,6 +2964,12 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
     </button>
+    <button id="sessions-btn" class="hidden" type="button" title="Past sessions" aria-label="Past sessions">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+        <path d="M1.5 5a3.5 3.5 0 1 0 1.1-2.55M1.2 1.2v1.8h1.8M5 3v2l1.2.8"
+              stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
     <button id="routines-btn" class="hidden" type="button" title="Scheduled routines — click to list" aria-label="Scheduled routines">
       <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
         <circle cx="5" cy="6" r="3" stroke="currentColor" stroke-width="1.4"/>
@@ -2959,6 +3051,19 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       <button id="cs-close" type="button" title="Close (Esc)" aria-label="Close search">×</button>
     </div>
     <div id="cs-results" role="listbox"></div>
+  </div>
+
+  <!-- Past sessions (closed chats of this workspace) — same panel shape as chat search -->
+  <div id="past-sessions" class="hidden">
+    <div id="ps-bar">
+      <svg width="12" height="12" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+        <path d="M1.5 5a3.5 3.5 0 1 0 1.1-2.55M1.2 1.2v1.8h1.8M5 3v2l1.2.8"
+              stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <input id="ps-input" type="text" placeholder="Search past sessions" autocomplete="off" spellcheck="false" aria-label="Search past sessions">
+      <button id="ps-close" type="button" title="Close (Esc)" aria-label="Close past sessions">×</button>
+    </div>
+    <div id="ps-results" role="listbox"></div>
   </div>
 
   <!-- Messages — host element; per-session containers mounted/swapped by JS -->
@@ -3044,7 +3149,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         </svg>
       </button>
     </div>
-    <div id="composer-hint">↵ send, ⇧↵ newline</div>
+    <div id="composer-meta">
+      <div id="usage-chip" class="hidden">
+        <button id="usage-model" type="button" aria-label="Change model"></button>
+        <span id="usage-total"></span>
+      </div>
+      <div id="composer-hint">↵ send, ⇧↵ newline</div>
+    </div>
     <div id="image-preview"></div>
     <div id="queue-list"></div>
   </div>
@@ -3360,6 +3471,17 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       availableCommands: [],
       workflows: [],
       routines: 0,
+      // session meta, pushed by Rust: usage totals, model, effort, background work
+      usage: null,
+      model: '',
+      effort: '',
+      pendingWork: false,
+      // live-turn extras: reasoning text + its feed block, retry row, and a turn
+      // usage that arrived before the turn's bubble was finalized
+      reasoning: '',
+      reasoningEl: null,
+      retryRow: null,
+      turnUsage: null,
       // queue (per-session: each session has its own pending list)
       msgQueue: [],
       drainingQueue: false,
@@ -3516,8 +3638,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
 
   function applyStatus(s, st) {
     s.status = st;
-    s.tabDot.className = 'session-dot ' + (st === 'ready' ? '' : st);
-    s.tabDot.className = s.tabDot.className.trim();
+    s.tabDot.className = ('session-dot ' + (st === 'ready' ? '' : st)).trim();
+    s.tabDot.classList.toggle('pending', s.pendingWork);
   }
 
   function switchTo(sid) {
@@ -3541,6 +3663,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     activeSid = sid;
     active = s;
     renderRoutinesChip();
+    syncSessionMeta(s);
     messagesHost.appendChild(s.container);
     refreshTabActiveStates();
     // Restore new session's input state (history is global — no swap needed)
@@ -3624,7 +3747,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     const s = sessions.get(sid);
     if (!s) return;
     s.tag = tag;
-    s.tabTitle.title = tag;
+    syncSessionMeta(s);
   };
   window.__switchSession = switchTo;
   window.__setSessionStatus = function(sid, st) {
@@ -3632,6 +3755,54 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (!s) return;
     applyStatus(s, st);
   };
+
+  // ── Session meta: model · effort and running cost ─────────────────────
+  // Pushed per session by Rust; the line under the input shows the active
+  // chat's, every tab's tooltip carries its own cost.
+  function parseJsonArg(json, fallback) {
+    try { return JSON.parse(json) || fallback; } catch (e) { return fallback; }
+  }
+  function syncSessionMeta(s) {
+    const cost = s.usage ? fmtCost(s.usage.session_cost) + ' · ' + fmtTokens(s.usage.session_tokens) + ' tok' : '';
+    s.tabTitle.title = s.tag + (cost ? ' · ' + cost : '');
+    if (s !== active) return;
+    const model = [s.model, s.effort].filter(Boolean).join(' · ');
+    const modelEl = document.getElementById('usage-model');
+    modelEl.textContent = model;
+    modelEl.title = model ? model + ' — click to change model' : '';
+    document.getElementById('usage-total').textContent = cost ? (model ? '· ' : '') + cost : '';
+    document.getElementById('usage-chip').classList.toggle('hidden', !model && !cost);
+  }
+  window.__setUsage = function(sid, json) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.usage = parseJsonArg(json, null);
+    syncSessionMeta(s);
+  };
+  window.__setModel = function(sid, model) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.model = model || '';
+    syncSessionMeta(s);
+  };
+  window.__setEffort = function(sid, effort) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.effort = effort || '';
+    syncSessionMeta(s);
+  };
+  window.__setPendingWork = function(sid, on) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.pendingWork = !!on;
+    s.tabDot.classList.toggle('pending', s.pendingWork);
+    s.tabDot.title = on ? 'Background work running' : '';
+  };
+  document.getElementById('usage-model').addEventListener('click', () => {
+    input.value = '/model ';
+    input.dispatchEvent(new Event('input'));
+    input.focus();
+  });
 
   // ── Account card (sign-in and usage)───────────────────────────────────────────
   // One row while collapsed: who is signed in and how much of the tightest
@@ -4013,6 +4184,10 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     active.thinking.className = 'activity-feed';
     active.thinking.innerHTML = '';
     active.currentAgentBubble = null;
+    active.reasoning = '';
+    active.reasoningEl = null;
+    active.retryRow = null;
+    active.turnUsage = null;
     active.currentAgentRaw = '';
     forgetRuns(active.sid);
     active.isThinking = false;
@@ -4046,6 +4221,10 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     s.thinking.className = 'activity-feed';
     s.thinking.innerHTML = '';
     s.currentAgentBubble = null;
+    s.reasoning = '';
+    s.reasoningEl = null;
+    s.retryRow = null;
+    s.turnUsage = null;
     s.currentAgentRaw = '';
     s.availableCommands = [];
     s.log = [];
@@ -5196,7 +5375,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
 
   // Called once Done arrives — stores raw, mounts the steps group above the
   // bubble, appends copy btn, collapses if tall.
-  function finishAgentBubble(s, bubble, rawText, toolCount, details, turnMs) {
+  function finishAgentBubble(s, bubble, rawText, toolCount, details, turnMs, thinking) {
     const wrap = bubble.closest('.msg');
     if (!wrap) return;
     wrap.dataset.raw = rawText;
@@ -5209,6 +5388,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       bubble.innerHTML = renderCommandOutput(cmdObj);
     }
 
+    if (thinking) wrap.insertBefore(buildReasoning(thinking), bubble);
     if (toolCount > 0) {
       wrap.insertBefore(buildToolGroup(details, turnMs), bubble);
     }
@@ -5276,6 +5456,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   window.__appendChunk = function(sid, text) {
     const s = sessions.get(sid);
     if (!s) return;
+    clearRetry(s);
     // Text never resumes after a tool call within one LLM message — a chunk
     // arriving after tools is a new message, not more of the previous one.
     if (s.toolSinceText && s.currentAgentBubble) {
@@ -5433,6 +5614,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     s.thinking.classList.remove('expanded');
     for (const k in s.toolRows) delete s.toolRows[k];
     s.runningTools = 0;
+    s.reasoningEl = null;
+    s.retryRow = null;
   }
 
   // Text streaming after tools splits the turn and clears the feed, so a tool
@@ -5557,7 +5740,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     row.className = 'tool-row ' + (failed ? 'failed' : live && t.status === 'running' ? 'running' : 'done');
     row.innerHTML =
       '<span class="tool-kind ' + (KIND_ICONS[t.kind] ? t.kind : 'other') + '">' + kindIcon(t.kind) + '</span>' +
-      '<span class="tool-title">' + escapeHtml(t.title) + '</span>' +
+      toolServerHtml(t.kind) + '<span class="tool-title">' + escapeHtml(t.title) + '</span>' +
       // A tool still 'running' at turn end was interrupted — no duration, no mark.
       '<span class="tool-time">' + ((completed || failed) && t.duration != null ? fmtDuration(t.duration) : '—') + '</span>' +
       (failed ? '<span class="tool-fail">' + ICON_X_CIRCLE + '</span>'
@@ -5593,6 +5776,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   window.__toolStart = function(sid, id, title, kind, rawInput, locations, startedMsAgo) {
     const s = sessions.get(sid);
     if (!s) return;
+    clearRetry(s);
     registerTapRunPrompt(s, title, rawInput, null);
     s.toolSinceText = true;
     if (isRenderUiTool(title)) {
@@ -5618,6 +5802,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     tm.textContent = fmtElapsed(startedMsAgo || 0);
     row.appendChild(icon);
     row.appendChild(ttl);
+    ttl.insertAdjacentHTML('beforebegin', toolServerHtml(kind));
     row.appendChild(tm);
     const detail = document.createElement('div');
     detail.className = 'tool-detail';
@@ -5677,27 +5862,125 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     }
   };
 
+  // `kind` carries the MCP server name; real kinds (read, edit, …) are icons, not labels.
+  function toolServerHtml(kind) {
+    return kind && !KIND_ICONS[kind] ? '<span class="tool-server">' + escapeHtml(kind) + '</span>' : '';
+  }
+
+  // Retry notice: one row in the live feed, replaced by the next retry and
+  // dropped as soon as the turn moves on (chunk, tool start, turn end).
+  function clearRetry(s) {
+    if (!s.retryRow) return;
+    s.retryRow.remove();
+    s.retryRow = null;
+  }
+  window.__showRetry = function(sid, text) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    if (!s.retryRow) {
+      s.retryRow = document.createElement('div');
+      s.retryRow.className = 'tool-row retry-row';
+      s.retryRow.innerHTML = '<span class="tool-kind retry">!</span><span class="tool-title"></span>';
+      s.thinking.appendChild(s.retryRow);
+    }
+    const title = s.retryRow.querySelector('.tool-title');
+    title.textContent = text;
+    title.title = text;
+    if (sid === activeSid) scrollToBottom();
+  };
+
+  // Reasoning: a collapsed disclosure in the specialist-report look. Live it
+  // sits in the activity feed and grows; on turn end a copy lands above the
+  // turn's bubble (finishAgentBubble).
+  function fillReasoning(el, text) {
+    el.querySelector('.specialist-report-preview').textContent = text.trim().split('\n')[0];
+    el.querySelector('.reasoning-body').textContent = text;
+  }
+  function buildReasoning(text) {
+    const el = document.createElement('details');
+    el.className = 'specialist-report specialist-report-details';
+    el.innerHTML =
+      '<summary class="specialist-report-summary">' +
+        '<span class="specialist-report-chevron">' + CHEVRON_SVG + '</span>' +
+        '<span class="specialist-report-who">Reasoning</span>' +
+        '<span class="specialist-report-preview"></span>' +
+      '</summary><div class="reasoning-body"></div>';
+    fillReasoning(el, text);
+    return el;
+  }
+  window.__appendThinking = function(sid, text) {
+    const s = sessions.get(sid);
+    if (!s) return;
+    if (s.reasoning) s.reasoning += '\n\n';
+    s.reasoning += text;
+    if (s.reasoningEl) {
+      fillReasoning(s.reasoningEl, s.reasoning);
+    } else {
+      s.reasoningEl = buildReasoning(s.reasoning);
+      s.thinking.appendChild(s.reasoningEl);
+    }
+    if (sid === activeSid) scrollToBottom();
+  };
+
+  // Turn usage footer: `u` holds the TURN's figures (session_cost/session_tokens
+  // are this turn's cost/tokens). Shared by the live path and replay.
+  function appendTurnFooter(wrap, u, turnMs) {
+    const parts = [];
+    if (u.input_tokens > 0) parts.push(fmtTokens(u.input_tokens) + ' in');
+    if (u.output_tokens > 0) parts.push(fmtTokens(u.output_tokens) + ' out');
+    if (u.cache_read_tokens > 0) parts.push(fmtTokens(u.cache_read_tokens) + ' cached');
+    if (u.reasoning_tokens > 0) parts.push(fmtTokens(u.reasoning_tokens) + ' reasoning');
+    if (u.session_cost > 0) parts.push(fmtCost(u.session_cost));
+    if (turnMs > 0) parts.push(fmtDuration(turnMs));
+    const old = wrap.querySelector(':scope > .turn-usage');
+    if (old) old.remove();
+    if (!parts.length) return;
+    const el = document.createElement('div');
+    el.className = 'turn-usage';
+    el.textContent = parts.join(' · ');
+    wrap.appendChild(el);
+  }
+  window.__setTurnUsage = function(sid, json, turnMs, attachNow) {
+    const s = sessions.get(sid);
+    const u = parseJsonArg(json, null);
+    if (!s || !u) return;
+    // The cost frame can land before the turn's bubble is finalized; hold it
+    // for finishLiveTurn, which knows which bubble is the turn's.
+    if (!attachNow && (s.isThinking || s.currentAgentBubble || s.toolCount || s.reasoning)) {
+      s.turnUsage = { u, turnMs };
+      return;
+    }
+    const wraps = s.container.querySelectorAll('.msg.agent:not(.specialist)');
+    if (wraps.length) appendTurnFooter(wraps[wraps.length - 1], u, turnMs);
+    if (sid === activeSid) scrollToBottom();
+  };
+
   // Finalize and reset one live response without changing queue/busy state.
   // Injections use this as a causal boundary; terminal prompt events use the
   // same path before they release the queue.
   function finishLiveTurn(s) {
     const savedToolCount = s.toolCount;
     const savedToolDetails = [...s.toolDetails];
+    const savedReasoning = s.reasoning;
+    const savedUsage = s.turnUsage;
     const turnMs = s.activityStart ? Date.now() - s.activityStart : 0;
     clearActivity(s);
-    // Synthesize a bubble for tool-only turns — finishAgentBubble keeps the
-    // steps group as the record and hides the empty bubble itself.
-    if (!s.currentAgentBubble && savedToolCount > 0) {
+    // Synthesize a bubble for tool-only / reasoning-only turns — finishAgentBubble
+    // keeps the steps group and reasoning as the record and hides the empty bubble.
+    if (!s.currentAgentBubble && (savedToolCount > 0 || savedReasoning)) {
       s.currentAgentBubble = startAgentBubble(s);
       s.currentAgentRaw = '';
     }
     if (s.currentAgentBubble) {
-      finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails, turnMs);
+      finishAgentBubble(s, s.currentAgentBubble, s.currentAgentRaw, savedToolCount, savedToolDetails, turnMs, savedReasoning);
+      if (savedUsage) appendTurnFooter(s.currentAgentBubble.closest('.msg'), savedUsage.u, savedUsage.turnMs);
     }
     s.currentAgentBubble = null;
     s.currentAgentRaw = '';
     s.toolCount = 0;
     s.toolDetails = [];
+    s.reasoning = '';
+    s.turnUsage = null;
     s.activityStart = 0;
   }
 
@@ -5729,6 +6012,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       s.busy = false;
       finishLiveTurn(s);
       syncFeed(s);
+      setTimeout(() => drainQueueForSession(s), 80);
       // A2UI: a click optimistically locks its card into "Processing…" and
       // waits for the agent's next envelope to lift it. Turn end (Done /
       // Cancelled / Error) means no envelope is coming — unlock the cards.
@@ -5766,7 +6050,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   // Replay persisted messages on cold-start. Rust calls this once per session
   // on sidebar bootstrap with the full message log restored from disk.
   // Entries: { role: 'user'|'agent'|'specialist'|'error'|'ui', text: string, ts?: number,
-  //            a2ui?: <envelope-body>, tools?: [tool records], turn_ms?: number }.
+  //            a2ui?: <envelope-body>, tools?: [tool records], turn_ms?: number,
+  //            usage?: <turn usage>, thinking?: string }.
   // Agent turns rebuild their steps group from `tools`; inline images are
   // live-only and skipped.
   // Render one persisted record into `s.container`. Shared by first paint and
@@ -5794,7 +6079,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         rawOutput: t.raw_output != null ? t.raw_output : null
       })) : [];
       for (const t of tools) registerTapRunPrompt(s, t.title, t.rawInput, t.rawOutput);
-      finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0);
+      finishAgentBubble(s, bubble, text, tools.length, tools, m.turn_ms || 0, m.thinking);
+      if (m.usage) appendTurnFooter(bubble.closest('.msg'), m.usage, m.turn_ms || 0);
     } else if (role === 'ui' && m && m.a2ui) {
       // Rebuild the A2UI bubble from the persisted envelope body. Replays are
       // ghosts (nothing is blocked on them) and anchor on the persisted
@@ -6131,6 +6417,94 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   document.getElementById('cs-next').addEventListener('click', () => jumpToHit(csIdx + 1));
   document.getElementById('cs-prev').addEventListener('click', () => jumpToHit(csIdx - 1));
   document.getElementById('cs-close').addEventListener('click', closeChatSearch);
+
+  // ── Past sessions (closed chats of this workspace) ─────────────────────
+  // Same panel shape as chat search. Rust pushes the list newest-first;
+  // picking a row asks Rust to reopen it.
+  const pastEl      = document.getElementById('past-sessions');
+  const psInput     = document.getElementById('ps-input');
+  const psResults   = document.getElementById('ps-results');
+  const sessionsBtn = document.getElementById('sessions-btn');
+  let psList = [];
+  let psShown = [];
+  let psIdx = -1;
+
+  window.__setClosedSessions = function(json) {
+    psList = parseJsonArg(json, []);
+    sessionsBtn.classList.toggle('hidden', psList.length === 0);
+    if (pastEl.classList.contains('hidden')) return;
+    if (psList.length) renderPastSessions(); else closePastSessions();
+  };
+
+  function renderPastSessions() {
+    const q = psInput.value.trim().toLowerCase();
+    psShown = psList.filter(c => ((c.title || '') + ' ' + (c.tag || '')).toLowerCase().includes(q));
+    psResults.innerHTML = '';
+    if (!psShown.length) {
+      const empty = document.createElement('div');
+      empty.id = 'ps-empty';
+      empty.textContent = 'No matches';
+      psResults.appendChild(empty);
+    }
+    for (const c of psShown) {
+      const row = document.createElement('div');
+      row.className = 'cs-hit';
+      row.setAttribute('role', 'option');
+      const title = document.createElement('div');
+      title.className = 'cs-hit-snippet';
+      title.textContent = c.title || c.tag || '';
+      const meta = document.createElement('div');
+      meta.className = 'cs-hit-meta';
+      meta.textContent = [
+        c.tag,
+        c.closed_at ? fmtAgo(Math.max(0, Date.now() - c.closed_at) / 1000) : '',
+        (c.messages || 0) + ' msgs',
+        c.cost != null ? fmtCost(c.cost) : '',
+      ].filter(Boolean).join(' · ');
+      row.appendChild(title);
+      row.appendChild(meta);
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); pickPastSession(c); });
+      psResults.appendChild(row);
+    }
+    setPastActive(0);
+  }
+
+  function setPastActive(i) {
+    const n = psShown.length;
+    psIdx = n ? ((i % n) + n) % n : -1;
+    const rows = psResults.querySelectorAll('.cs-hit');
+    rows.forEach((r, k) => r.classList.toggle('active', k === psIdx));
+    if (rows[psIdx]) rows[psIdx].scrollIntoView({ block: 'nearest' });
+  }
+
+  function pickPastSession(c) {
+    window.ipc.postMessage(JSON.stringify({ type: 'acp_session_reopen_at', index: c.index, closed_at: c.closed_at }));
+    closePastSessions();
+  }
+
+  function openPastSessions() {
+    pastEl.classList.remove('hidden');
+    psInput.value = '';
+    renderPastSessions();
+    psInput.focus();
+  }
+
+  function closePastSessions() {
+    pastEl.classList.add('hidden');
+    input.focus();
+  }
+
+  sessionsBtn.addEventListener('click', () => {
+    if (pastEl.classList.contains('hidden')) openPastSessions(); else closePastSessions();
+  });
+  psInput.addEventListener('input', renderPastSessions);
+  psInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closePastSessions(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); if (psShown[psIdx]) pickPastSession(psShown[psIdx]); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setPastActive(psIdx + 1); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setPastActive(psIdx - 1); return; }
+  });
+  document.getElementById('ps-close').addEventListener('click', closePastSessions);
 
   // ── Queue (per-session, max 2 pending) ─────────────────────────────────
   function renderQueue() {
@@ -6584,16 +6958,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       hideCmdDropdown();
     }
   });
-
-  // Hook into __setThinking to drain queue when agent becomes free
-  const _origSetThinking = window.__setThinking;
-  window.__setThinking = function(sid, on, elapsedMs) {
-    _origSetThinking(sid, on, elapsedMs);
-    if (!on) {
-      const s = sessions.get(sid);
-      if (s) setTimeout(() => drainQueueForSession(s), 80);
-    }
-  };
 
   // ── Close sidebar ──────────────────────────────────────────────────────
   document.getElementById('close-btn').addEventListener('click', () => {

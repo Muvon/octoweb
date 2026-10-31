@@ -135,28 +135,32 @@ enum AppEvent {
 	/// overrides what the chat shows for it; A2UI clicks send the agent a full
 	/// instruction block but show the user a one-liner.
 	AcpPrompt(u64, String, Vec<(String, String)>, Option<String>),
-	AcpCancel(u64),                                 // (session_id) — user clicked stop button
-	AcpSetAgent(u64, String),                       // (session_id, tag) — change agent tag and restart that session
-	AcpClearSession(u64),                           // (session_id) — restart session with same tag (clear chat)
-	AcpSessionCreate(String, String),               // (title, tag) — create new session (capped at MAX_SESSIONS)
-	AcpSessionCreatePanel,                          // ⌘T in sidebar — open the new-session input panel
-	AcpSessionClose(u64),                           // (session_id) — close session (refused if last one)
-	AcpSessionCloseActive,                          // ⌘W in sidebar — close currently active session
-	AcpSessionReopen,                               // ⌘⇧T in sidebar — reopen the last session closed in this workspace
-	AcpSessionSwitch(u64),                          // (session_id) — switch active session
-	AcpSessionRename(u64, String),                  // (session_id, title) — rename session
-	SidebarReady,                                   // sidebar JS finished initializing — push restore
-	SidebarReFocus,                                 // sidebar window became key — restore textarea focus
-	AskAI(String),                                  // overlay Ask AI row — open sidebar + send prompt
-	AskSelectionRequest,                            // ⌘⇧K — capture the page selection for the sidebar
+	AcpCancel(u64),                   // (session_id) — user clicked stop button
+	AcpSetAgent(u64, String),         // (session_id, tag) — change agent tag and restart that session
+	AcpClearSession(u64),             // (session_id) — restart session with same tag (clear chat)
+	AcpSessionCreate(String, String), // (title, tag) — create new session (capped at MAX_SESSIONS)
+	AcpSessionCreatePanel,            // ⌘T in sidebar — open the new-session input panel
+	AcpSessionClose(u64),             // (session_id) — close session (refused if last one)
+	AcpSessionCloseActive,            // ⌘W in sidebar — close currently active session
+	AcpSessionReopen,                 // ⌘⇧T in sidebar — reopen the last session closed in this workspace
+	AcpSessionReopenAt {
+		index: usize,
+		closed_at: u64,
+	}, // past-sessions list click — reopen that entry; closed_at rejects a list gone stale
+	AcpSessionSwitch(u64),            // (session_id) — switch active session
+	AcpSessionRename(u64, String),    // (session_id, title) — rename session
+	SidebarReady,                     // sidebar JS finished initializing — push restore
+	SidebarReFocus,                   // sidebar window became key — restore textarea focus
+	AskAI(String),                    // overlay Ask AI row — open sidebar + send prompt
+	AskSelectionRequest,              // ⌘⇧K — capture the page selection for the sidebar
 	SelectionCaptured(usize, String, String, bool), // (tab_id, text, purpose ask|copy|copy_md, whole_page)
-	CopyRequest(bool),                              // ⌘⇧C / ⌥⌘C — copy URL or selection; markdown when true
-	LaterToggle,                                    // ⌘⇧L / address-bar flag — save or unsave the active page
-	LaterRemove(String),                            // (url) — drop from the Later queue
-	LaterOpen(String),                              // (url) — open from the Later queue and drop it
-	PageText(usize, String),                        // (tab_id, visible text) — feed the full-text history index
-	ContentSearch(String),                          // palette `/query` — search page text, push results back
-	ToggleDevTools,                                 // Cmd+Shift+I — open devtools for active tab
+	CopyRequest(bool),                // ⌘⇧C / ⌥⌘C — copy URL or selection; markdown when true
+	LaterToggle,                      // ⌘⇧L / address-bar flag — save or unsave the active page
+	LaterRemove(String),              // (url) — drop from the Later queue
+	LaterOpen(String),                // (url) — open from the Later queue and drop it
+	PageText(usize, String),          // (tab_id, visible text) — feed the full-text history index
+	ContentSearch(String),            // palette `/query` — search page text, push results back
+	ToggleDevTools,                   // Cmd+Shift+I — open devtools for active tab
 	// Open URL in a new tab. Second field = the tab that requested it (a page's
 	// window.open / target=_blank), or None for UI surfaces (sidebar, A2UI, ACP
 	// login). Foregrounded only when the source is the visible tab or None — so a
@@ -341,6 +345,29 @@ fn push_closed<T>(stack: &mut Vec<T>, item: T, cap: usize) {
 	if stack.len() > cap {
 		stack.remove(0);
 	}
+}
+
+/// Script that hands the sidebar's past-sessions list the workspace's closed
+/// chats, newest first. `index` is the entry's position in `closed`, which
+/// `acp_session_reopen_at` sends back.
+fn closed_sessions_script(closed: &[config::AcpSessionSnapshot]) -> String {
+	let entries: Vec<serde_json::Value> = closed
+		.iter()
+		.enumerate()
+		.rev()
+		.map(|(index, snap)| {
+			serde_json::json!({
+				"index": index,
+				"closed_at": snap.closed_at,
+				"title": snap.title,
+				"tag": snap.tag,
+				"messages": snap.messages.len(),
+				"cost": snap.usage.map(|usage| usage.session_cost),
+			})
+		})
+		.collect();
+	let escaped = webview_utils::escape_js_template(&serde_json::Value::Array(entries).to_string());
+	format!("window.__setClosedSessions && window.__setClosedSessions(`{escaped}`)")
 }
 
 fn close_affects_display(closed_id: usize, active_wv_id: usize, pending_swap: Option<(usize, usize)>) -> bool {
@@ -548,6 +575,16 @@ struct PendingA2ui {
 	response: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
 }
 
+/// An MCP elicitation shown as an A2UI surface and not answered yet. The
+/// agent's tool call waits on the server until `answer_elicitation`.
+struct PendingElicitation {
+	sid: u64,
+	/// The server's id for the request, echoed back with the answer.
+	elicitation_id: String,
+	/// `requestedSchema`: decides which data-model entries become the answer's content.
+	schema: serde_json::Value,
+}
+
 /// Per-assistant-session live state.
 ///
 /// Multiple sessions can run in parallel (capped at `MAX_SESSIONS`). Each is an
@@ -615,6 +652,25 @@ pub(crate) struct AcpSession {
 	/// last `/usage` probe. Re-pushed on `sidebar_ready` so the login chip
 	/// survives sidebar opens that happen after the probe.
 	account_json: Option<String>,
+	/// Running cost/token totals of the octomind session. `None` for a restored
+	/// chat saved before usage was tracked: its first cost frame only sets a
+	/// baseline, since a turn's share can't be told from the session total.
+	usage_total: Option<agent::Usage>,
+	/// This turn's share of `usage_total`, kept from its cost frame until the
+	/// turn is flushed into `messages`.
+	turn_usage: Option<agent::Usage>,
+	/// Reasoning blocks of the in-flight turn, blank-line separated; flushed
+	/// into the agent message beside `agent_buf`.
+	thinking_buf: String,
+	/// Current model and reasoning effort, re-pushed to the sidebar on mount.
+	model: Option<String>,
+	effort: Option<String>,
+	/// Where the dead connection's output stream stopped; the reconnect asks
+	/// the server to replay what came after it.
+	stream_pos: Option<agent::StreamPos>,
+	/// A turn was running when the connection dropped, so the replayed stream
+	/// (`AgentEvent::Resumed`) carries the rest of it.
+	resume_turn: bool,
 }
 
 impl AcpSession {
@@ -640,6 +696,13 @@ impl AcpSession {
 			turn_started: None,
 			available_commands_json: None,
 			account_json: None,
+			usage_total: snap.usage,
+			turn_usage: None,
+			thinking_buf: String::new(),
+			model: None,
+			effort: None,
+			stream_pos: None,
+			resume_turn: false,
 		}
 	}
 
@@ -651,7 +714,21 @@ impl AcpSession {
 			tag: self.tag.clone(),
 			acp_session_id: self.acp_session_id.clone(),
 			messages: acp_messages_snapshot(self, max_msgs),
+			usage: self.usage_total,
+			closed_at: 0,
 		}
+	}
+
+	/// A fresh octomind session replaces the old one (agent switch, cleared
+	/// chat): its cost counts from zero and no stream is left to resume.
+	fn reset_session_state(&mut self) {
+		self.usage_total = Some(agent::Usage::default());
+		self.turn_usage = None;
+		self.thinking_buf.clear();
+		self.model = None;
+		self.effort = None;
+		self.stream_pos = None;
+		self.resume_turn = false;
 	}
 }
 
@@ -670,9 +747,9 @@ const OCTOMIND_USAGE_URL: &str = "https://octomind.run/app/usage";
 
 /// How many closed tabs per workspace ⌘⇧T can walk back through.
 const CLOSED_TAB_HISTORY: usize = 16;
-/// How many closed assistant chats per workspace ⌘⇧T in the sidebar can bring
-/// back. Each keeps its message log on disk, so this stays small.
-const CLOSED_SESSION_HISTORY: usize = 10;
+/// How many closed assistant chats per workspace the sidebar's past-sessions
+/// list (and ⌘⇧T) can bring back. Each keeps its message log on disk.
+const CLOSED_SESSION_HISTORY: usize = 50;
 /// Quiet time after mail changes before the summarizer runs (AI-1).
 const MAIL_SUMMARY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Local hour from which the morning brief may run (AI-4).
@@ -2160,6 +2237,12 @@ fn main() {
 							let title = v["title"].as_str().unwrap_or("").to_string();
 							let _ = p.send_event(AppEvent::AcpSessionRename(sid, title));
 						}
+						Some("acp_session_reopen_at") => {
+							let index = v["index"].as_u64().and_then(|index| usize::try_from(index).ok());
+							if let (Some(index), Some(closed_at)) = (index, v["closed_at"].as_u64()) {
+								let _ = p.send_event(AppEvent::AcpSessionReopenAt { index, closed_at });
+							}
+						}
 						Some("panel_focus") => {
 							let title = v["title"].as_str().unwrap_or("").to_string();
 							let _ = p.send_event(AppEvent::SidebarFocus(Some(title)));
@@ -2684,6 +2767,10 @@ fn main() {
 	// echoes back in `a2ui_resolve`. Entries live only as long as the agent
 	// waits; a restart drops them and the surface replays as a ghost.
 	let mut pending_a2ui: HashMap<String, PendingA2ui> = HashMap::new();
+	// MCP elicitations shown as A2UI surfaces, keyed like `pending_a2ui` by the
+	// call id the sidebar echoes back. The server cancels one when its tool call
+	// ends, so entries are dropped with the turn.
+	let mut pending_elicitations: HashMap<String, PendingElicitation> = HashMap::new();
 	// Restore persisted assistant history (sessions + per-session message log)
 	// per workspace. A captured `acp_session_id` is bound again on connect, so
 	// the agent restores its conversation context, matching what the user sees
@@ -2820,6 +2907,13 @@ fn main() {
 					prompt_in_flight: false,
 					available_commands_json: None,
 					account_json: None,
+					usage_total: Some(agent::Usage::default()),
+					turn_usage: None,
+					thinking_buf: String::new(),
+					model: None,
+					effort: None,
+					stream_pos: None,
+					resume_turn: false,
 				};
 				(vec![default_session], id)
 			}
@@ -4741,6 +4835,50 @@ fn main() {
                 });
                 push_a2ui_surface!(p.sid, call_id, &body);
             }
+            // Elicitations wait on a click just the same.
+            for (call_id, p) in pending_elicitations
+                .iter()
+                .filter(|(_, p)| workspace_manager.active().acp_sessions.iter().any(|s| s.id == p.sid))
+            {
+                let body = serde_json::json!({
+                    "id": call_id,
+                    "status": "pending",
+                    "await_events": [a2ui::ELICITATION_ACCEPT, a2ui::ELICITATION_DECLINE],
+                });
+                push_a2ui_surface!(p.sid, call_id, &body);
+            }
+        }};
+    }
+
+	/// An elicitation dies with the tool call that raised it, so a surface still
+	/// waiting when the turn ends or the connection drops can no longer be
+	/// answered. Closes those of one chat: each bubble is marked cancelled.
+	macro_rules! drop_pending_elicitations {
+        ($ws_idx:expr, $sid:expr) => {{
+            let (ws_idx, sid) = ($ws_idx, $sid);
+            let ended: Vec<String> = pending_elicitations
+                .iter()
+                .filter(|(_, p)| p.sid == sid)
+                .map(|(call_id, _)| call_id.clone())
+                .collect();
+            for call_id in &ended {
+                pending_elicitations.remove(call_id);
+                let resolution = serde_json::json!({"name": "cancelled", "actor": "system"});
+                let updated = workspace_manager
+                    .at_mut(ws_idx)
+                    .acp_sessions
+                    .iter_mut()
+                    .find(|s| s.id == sid)
+                    .and_then(|s| mark_a2ui_resolved(s, call_id, &resolution));
+                if let Some(body) = updated {
+                    if ws_idx == workspace_manager.active_index() {
+                        push_a2ui_surface!(sid, call_id, &body);
+                    }
+                }
+            }
+            if !ended.is_empty() {
+                persist_acp_history(&workspace_manager.at(ws_idx).id, &workspace_manager.at(ws_idx).acp_sessions, workspace_manager.at(ws_idx).acp_active_session_id, cfg.max_acp_session_messages);
+            }
         }};
     }
 
@@ -4864,6 +5002,23 @@ fn main() {
 						"window.__setAccount && window.__setAccount({sid},`{escaped}`)"
 					));
 				}
+				if let Some(ref model) = s.model {
+					let escaped = webview_utils::escape_js_template(model);
+					let _ = sidebar_wv
+						.evaluate_script(&format!("window.__setModel && window.__setModel({sid},`{escaped}`)"));
+				}
+				if let Some(ref effort) = s.effort {
+					let escaped = webview_utils::escape_js_template(effort);
+					let _ = sidebar_wv
+						.evaluate_script(&format!("window.__setEffort && window.__setEffort({sid},`{escaped}`)"));
+				}
+				if let Some(usage) = s.usage_total {
+					let escaped = webview_utils::escape_js_template(
+						&serde_json::to_string(&usage).unwrap_or_else(|_| "{}".into()),
+					);
+					let _ = sidebar_wv
+						.evaluate_script(&format!("window.__setUsage && window.__setUsage({sid},`{escaped}`)"));
+				}
 				if !s.messages.is_empty() {
 					// The whole log, deliberately. Replaying a tail looked like
 					// a pure render-window optimisation, but `s.log = msgs` IS
@@ -4878,6 +5033,8 @@ fn main() {
 				}
 				replay_live_turn!(s);
 			}
+			let _ =
+				sidebar_wv.evaluate_script(&closed_sessions_script(&workspace_manager.active().closed_acp_sessions));
 			let active = workspace_manager.active().acp_active_session_id;
 			let _ = sidebar_wv.evaluate_script(&format!("window.__switchSession && window.__switchSession({active})"));
 		}};
@@ -5578,6 +5735,8 @@ fn main() {
                         let mut should_persist = false;
                         if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.retry_count = 0;
+                            s.resume_turn = false;
+                            s.stream_pos = None;
                             if let Some(handle) = &s.handle {
                                 if !handle.recover_runs(s.specialist_runs.clone()) {
                                     tracing::error!("could not recover specialists: session disconnected");
@@ -5670,9 +5829,15 @@ fn main() {
                         // running behind it, keep that prompt's live feed going;
                         // otherwise the session is idle again.
                         let mut in_flight = false;
+                        let mut usage_script = None;
                         if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
                             in_flight = s.prompt_in_flight;
-                            flush_agent_turn(s, cfg.max_acp_session_messages);
+                            let had_usage = s.turn_usage.is_some();
+                            if flush_agent_turn(s, cfg.max_acp_session_messages) && had_usage {
+                                // The user's prompt may keep the feed live, but this
+                                // turn's bubble is finished: its footer goes on now.
+                                usage_script = turn_usage_script(s, true);
+                            }
                             if in_flight {
                                 s.turn_started = Some(std::time::Instant::now());
                             } else {
@@ -5682,6 +5847,10 @@ fn main() {
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},{in_flight})"
                         ));
+                        if let Some(script) = usage_script {
+                            let _ = sidebar_wv.evaluate_script(&script);
+                        }
+                        drop_pending_elicitations!(ws_idx, sid);
                         if !in_flight && (!sidebar_visible || !on_screen) {
                             let _ = address_bar_wv.evaluate_script(
                                 "window.__setBadge && window.__setBadge(true)"
@@ -5775,6 +5944,7 @@ fn main() {
                     }
                     agent::AgentEvent::Done | agent::AgentEvent::Cancelled => {
                         let mut should_persist = false;
+                        let mut usage_script = None;
                         if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
                             s.last_cancel_at = None;
                             s.prompt_in_flight = false;
@@ -5782,13 +5952,21 @@ fn main() {
                             // persisted log as a single "agent" message so the
                             // steps group survives restarts. Cancelled saves the
                             // partial turn so the user sees what was on screen.
+                            let had_usage = s.turn_usage.is_some();
                             if flush_agent_turn(s, cfg.max_acp_session_messages) {
                                 should_persist = true;
+                                if had_usage {
+                                    usage_script = turn_usage_script(s, false);
+                                }
                             }
                         }
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__setThinking && window.__setThinking({sid},false)"
                         ));
+                        if let Some(script) = usage_script {
+                            let _ = sidebar_wv.evaluate_script(&script);
+                        }
+                        drop_pending_elicitations!(ws_idx, sid);
                         // Only Done bumps the hidden-sidebar badge.
                         if matches!(ev, agent::AgentEvent::Done) && (!sidebar_visible || !on_screen) {
                             let _ = address_bar_wv.evaluate_script(
@@ -5809,6 +5987,7 @@ fn main() {
                             flush_agent_turn(s, cfg.max_acp_session_messages);
                             push_acp_msg(s, "error", err.clone(), cfg.max_acp_session_messages);
                         }
+                        drop_pending_elicitations!(ws_idx, sid);
                         let escaped = webview_utils::escape_js_template(&err);
                         let _ = sidebar_wv.evaluate_script(&format!(
                             "window.__appendError && window.__appendError({sid},`{escaped}`)"
@@ -5823,7 +6002,7 @@ fn main() {
                         }
                         persist_acp_history(&workspace_manager.at(ws_idx).id, &workspace_manager.at(ws_idx).acp_sessions, workspace_manager.at(ws_idx).acp_active_session_id, cfg.max_acp_session_messages);
                     }
-                    agent::AgentEvent::Error(err) => {
+                    agent::AgentEvent::Error { message: err, resume } => {
                         tracing::warn!(session_id = sid, error = %err, "agent connection error");
                         // Mutate session state in an inner scope so the &mut borrow
                         // is released before we call evaluate_script + persist (both
@@ -5834,6 +6013,12 @@ fn main() {
                         let mut user_facing_err: Option<String> = None;
                         {
                             let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) else { continue };
+                            // Read before the clearing below: a cut-off turn is what the
+                            // replayed stream (`AgentEvent::Resumed`) picks back up.
+                            s.resume_turn |= s.prompt_in_flight || s.turn_started.is_some();
+                            if resume.is_some() {
+                                s.stream_pos = resume;
+                            }
                             // Drop dead handle immediately so prompts aren't silently lost.
                             s.handle = None;
                             s.last_cancel_at = None;
@@ -5871,6 +6056,7 @@ fn main() {
                                 decision = Some(Decision::MaxExceeded);
                             }
                         }
+                        drop_pending_elicitations!(ws_idx, sid);
                         match decision {
                             Some(Decision::Reconnect(gen, delay)) => {
                                 if let Some(m) = &user_facing_err {
@@ -5917,6 +6103,108 @@ fn main() {
                         if should_persist {
                             persist_acp_history(&workspace_manager.at(ws_idx).id, &workspace_manager.at(ws_idx).acp_sessions, workspace_manager.at(ws_idx).acp_active_session_id, cfg.max_acp_session_messages);
                         }
+                    }
+                    agent::AgentEvent::Cost { usage, pending_work } => {
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            // Octomind counts per session, so this turn's share is the
+                            // growth since the last cost frame. A restored chat without
+                            // saved totals has no baseline: this first frame only sets one.
+                            let delta = s.usage_total.map(|total| usage.since(&total));
+                            // A cost landing after TurnError or a timed-out cancel has
+                            // no open turn left to hang its footer on.
+                            if s.turn_started.is_some() || s.prompt_in_flight {
+                                s.turn_usage = delta;
+                            }
+                            s.usage_total = Some(usage);
+                        }
+                        let escaped = webview_utils::escape_js_template(&serde_json::to_string(&usage).unwrap_or_else(|_| "{}".into()));
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setUsage && window.__setUsage({sid},`{escaped}`);window.__setPendingWork && window.__setPendingWork({sid},{pending_work})"
+                        ));
+                    }
+                    agent::AgentEvent::Thinking(text) => {
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            if !s.thinking_buf.is_empty() {
+                                s.thinking_buf.push_str("\n\n");
+                            }
+                            s.thinking_buf.push_str(&text);
+                        }
+                        let escaped = webview_utils::escape_js_template(&text);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__appendThinking && window.__appendThinking({sid},`{escaped}`)"
+                        ));
+                    }
+                    agent::AgentEvent::Retry(text) => {
+                        let escaped = webview_utils::escape_js_template(&text);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__showRetry && window.__showRetry({sid},`{escaped}`)"
+                        ));
+                    }
+                    agent::AgentEvent::Model(model) => {
+                        let escaped = webview_utils::escape_js_template(&model);
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            s.model = Some(model);
+                        }
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setModel && window.__setModel({sid},`{escaped}`)"
+                        ));
+                    }
+                    agent::AgentEvent::Effort(effort) => {
+                        let escaped = webview_utils::escape_js_template(&effort);
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            s.effort = Some(effort);
+                        }
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setEffort && window.__setEffort({sid},`{escaped}`)"
+                        ));
+                    }
+                    agent::AgentEvent::Resumed => {
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            if s.resume_turn {
+                                // The replayed frames are the rest of the turn the dropped
+                                // connection cut off: show it as running again.
+                                s.turn_started = Some(std::time::Instant::now());
+                                s.resume_turn = false;
+                                let _ = sidebar_wv.evaluate_script(&format!(
+                                    "window.__setThinking && window.__setThinking({sid},true,0)"
+                                ));
+                            }
+                        }
+                    }
+                    agent::AgentEvent::Elicitation { id, server, params } => {
+                        // A resumed stream sends the ones still open again.
+                        if pending_elicitations.values().any(|p| p.sid == sid && p.elicitation_id == id) {
+                            continue;
+                        }
+                        let call_id = next_a2ui_call_id();
+                        let body = serde_json::json!({
+                            "id": call_id,
+                            "status": "pending",
+                            "messages": a2ui::elicitation_surface(&format!("elicitation-{call_id}"), &server, &params),
+                            "await_events": [a2ui::ELICITATION_ACCEPT, a2ui::ELICITATION_DECLINE],
+                        });
+                        if on_screen {
+                            push_a2ui_surface!(sid, &call_id, &body);
+                        }
+                        if let Some(s) = workspace_manager.at_mut(ws_idx).acp_sessions.iter_mut().find(|s| s.id == sid) {
+                            upsert_a2ui_msg(s, &call_id, body, cfg.max_acp_session_messages);
+                        }
+                        persist_acp_history(&workspace_manager.at(ws_idx).id, &workspace_manager.at(ws_idx).acp_sessions, workspace_manager.at(ws_idx).acp_active_session_id, cfg.max_acp_session_messages);
+                        // The tool call is blocked until a person answers; say so
+                        // when the surface is out of sight.
+                        if !sidebar_visible || !on_screen {
+                            notif_origin = Some((workspace_manager.at(ws_idx).id.clone(), sid));
+                            let _ = address_bar_wv.evaluate_script("window.__setBadge && window.__setBadge(true)");
+                            if !notification_visible {
+                                let _ = notification_wv.set_visible(true);
+                                notification_visible = true;
+                            }
+                            let _ = notification_wv.evaluate_script("window.__show && window.__show(`The AI is asking for your input`)");
+                        }
+                        pending_elicitations.insert(
+                            call_id,
+                            PendingElicitation { sid, elicitation_id: id, schema: params["requestedSchema"].clone() },
+                        );
                     }
                     agent::AgentEvent::Workflows(json) => {
                         let escaped = webview_utils::escape_js_template(&json);
@@ -6022,7 +6310,7 @@ fn main() {
                     inline_edit_acp = None;
                     inline_edit_response.clear();
                 }
-                agent::AgentEvent::Error(err) | agent::AgentEvent::TurnError(err) => {
+                agent::AgentEvent::Error { message: err, .. } | agent::AgentEvent::TurnError(err) => {
                     tracing::warn!(error = %err, "inline edit agent error");
                     // Reset cursor on target tab
                     if let Some(wv) = workspace_manager.active().webviews.get(&inline_edit_tab_id) {
@@ -6082,7 +6370,7 @@ fn main() {
                         tracing::info!("proactive learning run completed");
                         learning_handle = None;
                     }
-                    agent::AgentEvent::Error(err) | agent::AgentEvent::TurnError(err) => {
+                    agent::AgentEvent::Error { message: err, .. } | agent::AgentEvent::TurnError(err) => {
                         tracing::warn!(error = %err, "proactive learning error");
                         learning_handle = None;
                     }
@@ -8076,6 +8364,13 @@ fn main() {
                     prompt_in_flight: false,
                     available_commands_json: None,
                     account_json: None,
+                    usage_total: Some(agent::Usage::default()),
+                    turn_usage: None,
+                    thinking_buf: String::new(),
+                    model: None,
+                    effort: None,
+                    stream_pos: None,
+                    resume_turn: false,
                 });
                 workspace_manager.active_mut().acp_active_session_id = default_sid;
                 push_workspace_dot!();
@@ -9558,6 +9853,7 @@ fn main() {
                 let workspace_id = workspace_manager.active().id.clone();
                 // The chat log is cleared below, taking every surface with it.
                 pending_a2ui.retain(|_, p| p.sid != sid);
+                pending_elicitations.retain(|_, p| p.sid != sid);
                 let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.tag = tag.clone();
@@ -9580,6 +9876,11 @@ fn main() {
                     s.tool_starts.clear();
                     s.turn_started = None;
                     s.prompt_in_flight = false;
+                    s.reset_session_state();
+                    let escaped = webview_utils::escape_js_template(&serde_json::to_string(&agent::Usage::default()).unwrap_or_else(|_| "{}".into()));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setUsage && window.__setUsage({sid},`{escaped}`)"
+                    ));
                     s.available_commands_json = None;
                     should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -9601,6 +9902,7 @@ fn main() {
                 let workspace_id = workspace_manager.active().id.clone();
                 // The chat log is cleared below, taking every surface with it.
                 pending_a2ui.retain(|_, p| p.sid != sid);
+                pending_elicitations.retain(|_, p| p.sid != sid);
                 let mcp_token = session_mcp_token!(sid);
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.retry_count = 0;
@@ -9622,6 +9924,11 @@ fn main() {
                     s.tool_starts.clear();
                     s.turn_started = None;
                     s.prompt_in_flight = false;
+                    s.reset_session_state();
+                    let escaped = webview_utils::escape_js_template(&serde_json::to_string(&agent::Usage::default()).unwrap_or_else(|_| "{}".into()));
+                    let _ = sidebar_wv.evaluate_script(&format!(
+                        "window.__setUsage && window.__setUsage({sid},`{escaped}`)"
+                    ));
                     should_persist = true;
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
@@ -9674,6 +9981,13 @@ fn main() {
                         prompt_in_flight: false,
                         available_commands_json: None,
                         account_json: None,
+                        usage_total: Some(agent::Usage::default()),
+                        turn_usage: None,
+                        thinking_buf: String::new(),
+                        model: None,
+                        effort: None,
+                        stream_pos: None,
+                        resume_turn: false,
                     });
                     workspace_manager.active_mut().acp_active_session_id = sid; // auto-switch to new session
                     let etitle = webview_utils::escape_js_template(&title);
@@ -9703,9 +10017,11 @@ fn main() {
                     // Kept for ⌘⇧T. A chat that never reached octomind and has
                     // no messages has nothing to bring back.
                     if removed.acp_session_id.is_some() || !removed.messages.is_empty() {
-                        let snap = removed.snapshot(cfg.max_acp_session_messages);
+                        let mut snap = removed.snapshot(cfg.max_acp_session_messages);
+                        snap.closed_at = epoch_ms();
                         push_closed(&mut workspace_manager.active_mut().closed_acp_sessions, snap, CLOSED_SESSION_HISTORY);
                         persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                        let _ = sidebar_wv.evaluate_script(&closed_sessions_script(&workspace_manager.active().closed_acp_sessions));
                     }
                     if let Some(handle) = removed.handle {
                         handle.close();
@@ -9716,6 +10032,7 @@ fn main() {
                     // Its surfaces went with the chat — release anything the
                     // dying agent was still blocked on.
                     pending_a2ui.retain(|_, p| p.sid != sid);
+                    pending_elicitations.retain(|_, p| p.sid != sid);
                     // If we closed the active session, fall back to the first one.
                     if workspace_manager.active().acp_active_session_id == sid {
                         workspace_manager.active_mut().acp_active_session_id = workspace_manager.active().acp_sessions[0].id;
@@ -9731,11 +10048,22 @@ fn main() {
                 }
             }
 
-            // ── ⌘⇧T in sidebar — reopen the last session closed here ──────────────
-            Event::UserEvent(AppEvent::AcpSessionReopen) => {
+            // ── Reopen a closed chat — ⌘⇧T takes the newest, the past-sessions list names one ──
+            Event::UserEvent(reopen @ (AppEvent::AcpSessionReopen | AppEvent::AcpSessionReopenAt { .. })) => {
+                let closed = &workspace_manager.active().closed_acp_sessions;
+                // `closed_at` pins the entry the user saw: the list may have
+                // changed since it was drawn, shifting positions.
+                let index = match reopen {
+                    AppEvent::AcpSessionReopenAt { index, closed_at } => closed
+                        .get(index)
+                        .filter(|snap| snap.closed_at == closed_at)
+                        .map(|_| index),
+                    _ => closed.len().checked_sub(1),
+                };
                 if workspace_manager.active().acp_sessions.len() >= MAX_SESSIONS {
                     tracing::warn!(max = MAX_SESSIONS, "session reopen rejected — cap reached");
-                } else if let Some(snap) = workspace_manager.active_mut().closed_acp_sessions.pop() {
+                } else if let Some(index) = index {
+                    let snap = workspace_manager.active_mut().closed_acp_sessions.remove(index);
                     let sid = next_acp_session_id();
                     tracing::debug!(session_id = sid, acp_session_id = ?snap.acp_session_id, "reopening closed session");
                     let etitle = webview_utils::escape_js_template(&snap.title);
@@ -9745,6 +10073,7 @@ fn main() {
                     } else {
                         serde_json::to_string(&snap.messages).ok()
                     };
+                    let usage_json = snap.usage.and_then(|usage| serde_json::to_string(&usage).ok());
                     workspace_manager.active_mut().acp_sessions.push(AcpSession::from_snapshot(sid, snap, None));
                     let _ = sidebar_wv.evaluate_script(&format!(
                         "window.__addSession && window.__addSession({sid},`{etitle}`,`{etag}`,'ready')"
@@ -9754,7 +10083,14 @@ fn main() {
                             "window.__replayMessages && window.__replayMessages({sid},{msgs_json})"
                         ));
                     }
+                    if let Some(usage_json) = usage_json {
+                        let escaped = webview_utils::escape_js_template(&usage_json);
+                        let _ = sidebar_wv.evaluate_script(&format!(
+                            "window.__setUsage && window.__setUsage({sid},`{escaped}`)"
+                        ));
+                    }
                     persist_acp_closed(&workspace_manager.active().id, &workspace_manager.active().closed_acp_sessions);
+                    let _ = sidebar_wv.evaluate_script(&closed_sessions_script(&workspace_manager.active().closed_acp_sessions));
                     // Connects it the way any persisted chat connects, brings it
                     // to the front, and persists the strip.
                     let _ = proxy.send_event(AppEvent::AcpSessionSwitch(sid));
@@ -9800,6 +10136,10 @@ fn main() {
                 let mut should_persist = false;
                 if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
                     s.title = title.clone();
+                    // Octomind keeps the session's title too; an empty one clears it.
+                    if let Some(handle) = &s.handle {
+                        let _ = handle.send_command(format!("/rename {title}"));
+                    }
                     should_persist = true;
                     let etitle = webview_utils::escape_js_template(&title);
                     let _ = sidebar_wv.evaluate_script(&format!(
@@ -10284,6 +10624,47 @@ fn main() {
             // reach the agent, so it goes as a prompt instead. The sidebar
             // does not try to tell these apart; it always sends the click here.
             Event::UserEvent(AppEvent::A2uiResolve(call_id, click_sid, action)) => {
+                if let Some(elicitation) = pending_elicitations.remove(&call_id) {
+                    // Our own Submit/Decline buttons: the click names the MCP action
+                    // and, as the surface sends its data model, carries the fields.
+                    let name = action["name"].as_str().unwrap_or_default();
+                    let result = a2ui::elicitation_result(&elicitation.schema, name, &action["dataModel"]);
+                    let mut resolution = action;
+                    if let Some(obj) = resolution.as_object_mut() {
+                        obj.insert("actor".into(), serde_json::Value::String("human".into()));
+                    }
+                    let Some(ws_idx) = workspace_manager.index_of_session(elicitation.sid) else {
+                        return; // chat closed mid-flight; the server cancels the elicitation itself
+                    };
+                    let answered = workspace_manager
+                        .at(ws_idx)
+                        .acp_sessions
+                        .iter()
+                        .find(|s| s.id == elicitation.sid)
+                        .and_then(|s| s.handle.as_ref())
+                        .is_some_and(|handle| handle.answer_elicitation(elicitation.elicitation_id, result));
+                    if !answered {
+                        tracing::warn!(%call_id, "elicitation answer not sent — session has no live connection");
+                    }
+                    let updated = workspace_manager
+                        .at_mut(ws_idx)
+                        .acp_sessions
+                        .iter_mut()
+                        .find(|s| s.id == elicitation.sid)
+                        .and_then(|s| mark_a2ui_resolved(s, &call_id, &resolution));
+                    if let Some(body) = updated {
+                        if ws_idx == workspace_manager.active_index() {
+                            push_a2ui_surface!(elicitation.sid, &call_id, &body);
+                        }
+                        persist_acp_history(
+                            &workspace_manager.at(ws_idx).id,
+                            &workspace_manager.at(ws_idx).acp_sessions,
+                            workspace_manager.at(ws_idx).acp_active_session_id,
+                            cfg.max_acp_session_messages,
+                        );
+                    }
+                    return;
+                }
                 let Some(pending) = pending_a2ui.remove(&call_id) else {
                     tracing::debug!(%call_id, "A2UI click with no waiting render_ui call — sending as a prompt");
                     let _ = proxy.send_event(AppEvent::AcpPrompt(
@@ -10443,16 +10824,16 @@ fn main() {
                     } else {
                         tracing::info!(session_id = sid, retry = s.retry_count, "attempting ACP reconnection");
                         s.handle = None; // drop old handle if any
-                        s.handle = agent::AgentHandle::connect(
-                            agent::AgentSpec::chat(
-                                &s.tag,
-                                s.acp_session_id.clone(),
-                                workspace_id,
-                                mcp_token.clone(),
-                            ),
-                            make_wake(acp_proxy.clone()),
-                        )
-                        .ok();
+                        let mut spec = agent::AgentSpec::chat(
+                            &s.tag,
+                            s.acp_session_id.clone(),
+                            workspace_id,
+                            mcp_token.clone(),
+                        );
+                        // Replays what the dead connection's stream still held.
+                        spec.resume = s.stream_pos.clone();
+                        spec.resume_turn = s.resume_turn;
+                        s.handle = agent::AgentHandle::connect(spec, make_wake(acp_proxy.clone())).ok();
                     }
                 } else {
                     tracing::debug!(session_id = sid, "reconnect for unknown session — ignoring");
@@ -13375,6 +13756,8 @@ fn push_acp_msg(s: &mut AcpSession, role: &str, text: String, max_msgs: usize) {
 		a2ui: None,
 		tools: Vec::new(),
 		turn_ms: 0,
+		usage: None,
+		thinking: String::new(),
 	};
 	push_acp_message(s, msg, max_msgs);
 }
@@ -13394,21 +13777,39 @@ fn epoch_ms() -> u64 {
 		.unwrap_or(0)
 }
 
-/// Flush the in-flight response (streamed text + tool runs) into the
-/// persisted log. All streamed responses belong to the main agent, including
-/// autonomous replies triggered by specialist injections. Returns true if
-/// anything was committed. Tool-only turns are kept so the sidebar can replay
-/// their steps group.
+/// Longest reasoning text kept per agent message. It is display-only and can
+/// run to many KB per turn, which would bloat every acp_history.json save.
+const ACP_THINKING_CAP: usize = 8 * 1024;
+
+fn capped_thinking(mut thinking: String) -> String {
+	if thinking.len() > ACP_THINKING_CAP {
+		let mut end = ACP_THINKING_CAP;
+		while !thinking.is_char_boundary(end) {
+			end -= 1;
+		}
+		thinking.truncate(end);
+	}
+	thinking
+}
+
+/// Flush the in-flight response (streamed text, reasoning, tool runs and the
+/// turn's usage) into the persisted log. All streamed responses belong to the
+/// main agent, including autonomous replies triggered by specialist
+/// injections. Returns true if anything was committed. Tool-only turns are
+/// kept so the sidebar can replay their steps group.
 fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
 	let text = std::mem::take(&mut s.agent_buf);
 	let tools = std::mem::take(&mut s.tool_buf);
+	let thinking = capped_thinking(std::mem::take(&mut s.thinking_buf));
+	let usage = s.turn_usage.take();
 	s.tool_starts.clear();
 	let turn_ms = s
 		.turn_started
 		.take()
 		.map(|t| t.elapsed().as_millis() as u64)
 		.unwrap_or(0);
-	if text.is_empty() && tools.is_empty() {
+	if text.is_empty() && tools.is_empty() && thinking.is_empty() {
+		// No bubble to carry the turn's usage, so it is dropped.
 		return false;
 	}
 	let msg = config::AcpMessage {
@@ -13418,9 +13819,24 @@ fn flush_agent_turn(s: &mut AcpSession, max_msgs: usize) -> bool {
 		a2ui: None,
 		tools,
 		turn_ms,
+		usage,
+		thinking,
 	};
 	push_acp_message(s, msg, max_msgs);
 	true
+}
+
+/// Script that puts a finished turn's usage on the last agent bubble, read
+/// back from the message `flush_agent_turn` stored it on. `attach_now` skips
+/// the sidebar's wait for its live turn to finish (a background turn).
+fn turn_usage_script(s: &AcpSession, attach_now: bool) -> Option<String> {
+	let msg = s.messages.iter().rev().find(|m| m.role == "agent")?;
+	let json = serde_json::to_string(&msg.usage?).ok()?;
+	let escaped = webview_utils::escape_js_template(&json);
+	Some(format!(
+		"window.__setTurnUsage && window.__setTurnUsage({},`{escaped}`,{},{attach_now})",
+		s.id, msg.turn_ms
+	))
 }
 
 /// Commit the streamed text so far as its own finalized message, mid-turn.
@@ -13437,7 +13853,7 @@ fn split_agent_segment(s: &mut AcpSession, max_msgs: usize) {
 /// may still be open when the app exits; omitting it here would lose the reply.
 fn acp_messages_snapshot(s: &AcpSession, max_msgs: usize) -> Vec<config::AcpMessage> {
 	let mut messages = s.messages.clone();
-	if !s.agent_buf.is_empty() || !s.tool_buf.is_empty() {
+	if !s.agent_buf.is_empty() || !s.tool_buf.is_empty() || !s.thinking_buf.is_empty() {
 		messages.push(config::AcpMessage {
 			role: "agent".to_string(),
 			text: s.agent_buf.clone(),
@@ -13445,6 +13861,8 @@ fn acp_messages_snapshot(s: &AcpSession, max_msgs: usize) -> Vec<config::AcpMess
 			a2ui: None,
 			tools: s.tool_buf.clone(),
 			turn_ms: s.turn_started.map(|t| t.elapsed().as_millis() as u64).unwrap_or(0),
+			usage: s.turn_usage,
+			thinking: capped_thinking(s.thinking_buf.clone()),
 		});
 	}
 	if messages.len() > max_msgs {
@@ -13637,6 +14055,8 @@ fn upsert_a2ui_msg(s: &mut AcpSession, file_id: &str, body: serde_json::Value, m
 		a2ui: Some(body),
 		tools: Vec::new(),
 		turn_ms: 0,
+		usage: None,
+		thinking: String::new(),
 	});
 	if s.messages.len() > max_msgs {
 		let drop = s.messages.len() - max_msgs;
@@ -14330,6 +14750,13 @@ mod injected_turn_tests {
 			prompt_in_flight: false,
 			available_commands_json: None,
 			account_json: None,
+			usage_total: None,
+			turn_usage: None,
+			thinking_buf: String::new(),
+			model: None,
+			effort: None,
+			stream_pos: None,
+			resume_turn: false,
 		}
 	}
 
@@ -14425,6 +14852,13 @@ mod a2ui_tests {
 			prompt_in_flight: false,
 			available_commands_json: None,
 			account_json: None,
+			usage_total: None,
+			turn_usage: None,
+			thinking_buf: String::new(),
+			model: None,
+			effort: None,
+			stream_pos: None,
+			resume_turn: false,
 		}
 	}
 
