@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 # WebView + windowing (Tauri team — must stay in sync)
-wry = { version = "0.55", features = ["transparent", "devtools", "fullscreen", "mac-proxy"] }
+wry = { version = "0.57.1", features = ["devtools", "mac-proxy"] }
 tao = "0.35"
 objc2 = "0.6"
 block2 = "0.6"

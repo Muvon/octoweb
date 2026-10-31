@@ -1135,6 +1135,11 @@ fn main() {
                 .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
                 .with_bounds(bounds)
+                // Tabs are created hidden and focused explicitly once shown. A
+                // focused child WebView makes wry activate the app, which pulls
+                // octoweb in front of the user's app whenever an agent opens or
+                // wakes a background tab, and hands the keyboard to chrome_win.
+                .with_focused(false)
                 // Throttle JS timers/rAF on hidden tabs (macOS 14+, no-op on older).
                 // Suspend would also pause page loads in hidden webviews — new tabs
                 // spawn hidden and load before the deferred swap, so Suspend stalls
