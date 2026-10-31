@@ -50,7 +50,6 @@
 ///   { type: "acp_prompt",    session_id, text, images }
 ///   { type: "acp_cancel",    session_id }
 ///   { type: "acp_set_agent", session_id, tag }
-///   { type: "acp_clear_session", session_id }
 ///   { type: "acp_session_create", title, tag }
 ///   { type: "acp_session_close",  session_id }
 ///   { type: "acp_session_switch", session_id }
@@ -2668,24 +2667,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     transition: box-shadow 0.25s ease, transform 0.3s var(--spring);
   }
 
-  #new-session-btn {
-    width: 26px; height: 26px;
-    border-radius: var(--r-ctl);
-    border: none;
-    background: transparent;
-    color: var(--label-2);
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-    transition: background var(--t-fast), color var(--t-fast);
-    padding: 0;
-  }
-  #new-session-btn svg { width: 14px; height: 14px; }
-  #new-session-btn:hover {
-    background: var(--fill-hover);
-    color: var(--label-2);
-  }
-  #new-session-btn:active { background: var(--fill-press); }
   #input-row:focus-within {
     transform: translateY(-1px);
     box-shadow: 0 0 0 1px var(--input-focus-border), var(--float-shadow),
@@ -2764,7 +2745,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     display: none;
     position: absolute;
     bottom: calc(100% + 8px);
-    right: 0;
+    left: 0;
     background: var(--glass-bg);
     -webkit-backdrop-filter: blur(40px) saturate(1.6);
     backdrop-filter: blur(40px) saturate(1.6);
@@ -3093,24 +3074,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   <div id="input-area">
     <div id="cmd-dropdown"></div>
     <div id="input-row">
-      <button id="new-session-btn" title="New session" aria-label="New session">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-          <path d="M13.5 3.5L7 10l-2.5-.5L5 7l6.5-6.5a1.4 1.4 0 0 1 2 0v0a1.4 1.4 0 0 1 0 2z"
-                stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M12 6l-2-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-          <path d="M2.5 13.5h11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <div id="prompt-ghost-wrap">
-        <textarea
-          id="prompt-input"
-          rows="1"
-          placeholder="Ask Octopus"
-          autocomplete="off"
-          spellcheck="false"
-        ></textarea>
-        <div id="prompt-ghost" aria-hidden="true"></div>
-      </div>
       <input type="file" id="file-input-image" accept="image/*" multiple style="display:none">
       <input type="file" id="file-input-doc" accept=".pdf,.docx,.doc" multiple style="display:none">
       <div id="attach-wrap">
@@ -3137,6 +3100,16 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
             Document
           </button>
         </div>
+      </div>
+      <div id="prompt-ghost-wrap">
+        <textarea
+          id="prompt-input"
+          rows="1"
+          placeholder="Ask Octopus"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <div id="prompt-ghost" aria-hidden="true"></div>
       </div>
       <button id="send-btn" title="Send (Return)" aria-label="Send">
         <svg class="send-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -3223,7 +3196,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   const scCancel       = document.getElementById('sc-cancel');
   const input          = document.getElementById('prompt-input');
   const sendBtn        = document.getElementById('send-btn');
-  const newSessBtn     = document.getElementById('new-session-btn');
   const cmdDropdown    = document.getElementById('cmd-dropdown');
   const queueList      = document.getElementById('queue-list');
   const inputRow       = document.getElementById('input-row');
@@ -4172,45 +4144,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   // messages, last-active session). Fires once per sidebar webview lifetime
   // (the webview survives toggle visibility — JS state is not re-run).
   window.ipc.postMessage(JSON.stringify({ type: 'sidebar_ready' }));
-
-  // ── Clear current session (toolbar pencil button) ───────────────────────
-  newSessBtn.addEventListener('click', () => {
-    if (!active) return;
-    // Wipe local DOM optimistically; Rust will restart the agent.
-    while (active.container.firstChild) {
-      active.container.removeChild(active.container.firstChild);
-    }
-    active.container.appendChild(active.thinking);
-    active.thinking.className = 'activity-feed';
-    active.thinking.innerHTML = '';
-    active.currentAgentBubble = null;
-    active.reasoning = '';
-    active.reasoningEl = null;
-    active.retryRow = null;
-    active.turnUsage = null;
-    active.currentAgentRaw = '';
-    forgetRuns(active.sid);
-    active.isThinking = false;
-    active.runningTools = 0;
-    // Clearing the session restarts the agent on Rust side — drop busy and any
-    // queued prompts so we don't dispatch stale messages into the new run.
-    active.busy = false;
-    active.msgQueue = [];
-    renderQueue();
-    updateInputLock();
-    active.toolCount = 0;
-    active.toolDetails = [];
-    active.toolRows = {};
-    if (active.activityTimer) { clearInterval(active.activityTimer); active.activityTimer = null; }
-    active.inputDraft = '';
-    active.inputSelectionStart = 0;
-    active.inputSelectionEnd = 0;
-    sendBtn.className = '';
-    input.value = '';
-    input.style.height = 'auto';
-    _ph.resetState();
-    window.ipc.postMessage(JSON.stringify({ type: 'acp_clear_session', session_id: active.sid }));
-  });
 
   // Callable from Rust to clear messages for a specific session
   window.__clearMessages = function(sid) {

@@ -137,7 +137,6 @@ enum AppEvent {
 	AcpPrompt(u64, String, Vec<(String, String)>, Option<String>),
 	AcpCancel(u64),                   // (session_id) — user clicked stop button
 	AcpSetAgent(u64, String),         // (session_id, tag) — change agent tag and restart that session
-	AcpClearSession(u64),             // (session_id) — restart session with same tag (clear chat)
 	AcpSessionCreate(String, String), // (title, tag) — create new session (capped at MAX_SESSIONS)
 	AcpSessionCreatePanel,            // ⌘T in sidebar — open the new-session input panel
 	AcpSessionClose(u64),             // (session_id) — close session (refused if last one)
@@ -617,8 +616,7 @@ pub(crate) struct AcpSession {
 	prompt_in_flight: bool,
 	/// Octomind session id: reported on `AgentEvent::Connected` for a new
 	/// session and bound again on every reconnect, so the agent resumes its
-	/// conversation context. Cleared on AcpSetAgent / AcpClearSession (which
-	/// want a fresh chat).
+	/// conversation context. Cleared on AcpSetAgent (which wants a fresh chat).
 	acp_session_id: Option<String>,
 	/// Persisted message log — user prompts, finalized agent responses with
 	/// their tool runs, errors. Survives app restarts via `acp_history.json`.
@@ -2212,10 +2210,6 @@ fn main() {
 							if let Some(tag) = v["tag"].as_str() {
 								let _ = p.send_event(AppEvent::AcpSetAgent(sid, tag.to_string()));
 							}
-						}
-						Some("acp_clear_session") => {
-							let sid = v["session_id"].as_u64().unwrap_or(0);
-							let _ = p.send_event(AppEvent::AcpClearSession(sid));
 						}
 						Some("acp_session_create") => {
 							let title = v["title"].as_str().unwrap_or("").to_string();
@@ -9896,49 +9890,6 @@ fn main() {
                 }
             }
 
-            // ── ACP clear session (same agent, fresh chat) ────────────────────────
-            Event::UserEvent(AppEvent::AcpClearSession(sid)) => {
-                let mut should_persist = false;
-                let workspace_id = workspace_manager.active().id.clone();
-                // The chat log is cleared below, taking every surface with it.
-                pending_a2ui.retain(|_, p| p.sid != sid);
-                pending_elicitations.retain(|_, p| p.sid != sid);
-                let mcp_token = session_mcp_token!(sid);
-                if let Some(s) = workspace_manager.active_mut().acp_sessions.iter_mut().find(|s| s.id == sid) {
-                    s.retry_count = 0;
-                    s.reconnect_gen += 1;
-                    s.acp_session_id = None; // explicit fresh chat
-                    if let Some(old) = s.handle.take() {
-                        old.close();
-                    }
-                    s.handle = agent::AgentHandle::connect(
-                        agent::AgentSpec::chat(&s.tag, None, &workspace_id, mcp_token.clone()),
-                        make_wake(acp_proxy.clone()),
-                    )
-                    .ok();
-                    // User asked for a fresh chat — drop the persisted log too.
-                    s.messages.clear();
-                    s.specialist_runs.clear();
-                    s.agent_buf.clear();
-                    s.tool_buf.clear();
-                    s.tool_starts.clear();
-                    s.turn_started = None;
-                    s.prompt_in_flight = false;
-                    s.reset_session_state();
-                    let escaped = webview_utils::escape_js_template(&serde_json::to_string(&agent::Usage::default()).unwrap_or_else(|_| "{}".into()));
-                    let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__setUsage && window.__setUsage({sid},`{escaped}`)"
-                    ));
-                    should_persist = true;
-                    let _ = sidebar_wv.evaluate_script(&format!(
-                        "window.__setSessionStatus && window.__setSessionStatus({sid},'connecting')"
-                    ));
-                }
-                if should_persist {
-                    persist_acp_history(&workspace_manager.active().id, &workspace_manager.active().acp_sessions, workspace_manager.active().acp_active_session_id, cfg.max_acp_session_messages);
-                }
-            }
-
             // ── ⌘T in sidebar — open the new-session panel and focus title ─────────
             Event::UserEvent(AppEvent::AcpSessionCreatePanel) => {
                 let _ = sidebar_wv.evaluate_script(
@@ -10817,7 +10768,7 @@ fn main() {
                 };
                 if let Some((workspace_id, s)) = session {
                     // Ignore stale timers from a previous error cycle — the user may
-                    // have manually reconnected (AcpSetAgent / AcpClearSession) in the
+                    // have manually reconnected (AcpSetAgent) in the
                     // meantime, which already bumped this session's reconnect_gen.
                     if gen != s.reconnect_gen {
                         tracing::debug!(session_id = sid, gen, current = s.reconnect_gen, "ignoring stale ACP reconnect timer");
