@@ -21,6 +21,30 @@ pub fn copy_text_to_pasteboard(text: &str) {
 	}
 }
 
+/// Silence a tab whose WebView is going away. Playback, picture-in-picture
+/// and camera/mic otherwise last until WebKit frees the view, and a lingering
+/// reference to it kept a closed YouTube tab playing.
+pub fn stop_media(wv: &wry::WebView) {
+	use objc2::runtime::{AnyObject, Bool, Sel};
+	use objc2::{msg_send, sel};
+	use wry::WebViewExtMacOS;
+
+	let wk = wv.webview();
+	let wk_ptr = objc2::rc::Retained::as_ptr(&wk) as *mut AnyObject;
+	// Both are macOS 12+.
+	let responds = |s: Sel| -> bool { unsafe { msg_send![wk_ptr, respondsToSelector: s] } };
+	let none: Option<&block2::Block<dyn Fn()>> = None;
+	unsafe {
+		if responds(sel!(setAllMediaPlaybackSuspended:completionHandler:)) {
+			let _: () = msg_send![wk_ptr, setAllMediaPlaybackSuspended: Bool::YES, completionHandler: none];
+		}
+		if responds(sel!(closeAllMediaPresentationsWithCompletionHandler:)) {
+			let _: () = msg_send![wk_ptr, closeAllMediaPresentationsWithCompletionHandler: none];
+		}
+	}
+	crate::site_permissions::stop_capture(wk_ptr as usize);
+}
+
 /// Reveal a downloaded file in Finder.
 pub fn reveal_file_in_finder(path: &str) {
 	use objc2_app_kit::NSWorkspace;

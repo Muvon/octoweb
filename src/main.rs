@@ -6825,6 +6825,9 @@ fn main() {
                                 // CloseTab only reaches the active workspace's
                                 // WebViews, so drop this one here or it leaks a
                                 // live WKWebView with no tab behind it.
+                                if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&tab_id) {
+                                    webview_utils::stop_media(wv);
+                                }
                                 workspace_manager.at_mut(ws_idx).webviews.remove(&tab_id);
                                 pending_tabs.remove(&tab_id);
                                 workspace_manager.at_mut(ws_idx).mru.retain(|&t| t != tab_id);
@@ -8126,6 +8129,9 @@ fn main() {
                                 // CloseTab only reaches the active workspace (see MCP close_tab).
                                 workspace_manager.at(ws_idx).tabs.lock().unwrap().close(tab_id);
                                 tab_nav::forget(tab_id);
+                                if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&tab_id) {
+                                    webview_utils::stop_media(wv);
+                                }
                                 workspace_manager.at_mut(ws_idx).webviews.remove(&tab_id);
                                 pending_tabs.remove(&tab_id);
                                 workspace_manager.at_mut(ws_idx).mru.retain(|&t| t != tab_id);
@@ -8565,6 +8571,7 @@ fn main() {
                 tab_nav::forget(tab_id);
                 driven_tabs.forget(tab_id);
                 if let Some(wv) = workspace_manager.active().webviews.get(&tab_id) {
+                    webview_utils::stop_media(wv);
                     let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                     nav_error_patch::unregister(wv_ptr);
                     site_proxy::unregister(wv_ptr);
@@ -9287,6 +9294,7 @@ fn main() {
                     workspace_manager.active().tabs.lock().unwrap().close(id);
                     tab_nav::forget(id);
                     if let Some(wv) = workspace_manager.active().webviews.get(&id) {
+                        webview_utils::stop_media(wv);
                         let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
                         nav_error_patch::unregister(wv_ptr);
                         site_proxy::unregister(wv_ptr);

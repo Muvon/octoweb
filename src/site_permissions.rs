@@ -180,6 +180,12 @@ pub fn is_capturing(wv_ptr: usize) -> bool {
 	unsafe { capture_state(wv, Kind::Camera) != CAPTURE_NONE || capture_state(wv, Kind::Microphone) != CAPTURE_NONE }
 }
 
+/// Turn the camera and microphone off in `wv_ptr`.
+pub fn stop_capture(wv_ptr: usize) {
+	set_capture(wv_ptr, Kind::Camera, CaptureState::None);
+	set_capture(wv_ptr, Kind::Microphone, CaptureState::None);
+}
+
 /// Address-bar state for the page in `wv_ptr`, as JSON (`null` off http(s)):
 /// `{origin, host, items: [{kind, decision, live, refused}], prompt: {id, kinds} | null}`.
 pub fn state_json(wv_ptr: usize) -> String {
