@@ -1851,7 +1851,7 @@ impl McpServer {
 	}
 
 	#[tool(
-		description = "Press a key with a TRUSTED native key event (isTrusted=true, real default actions: Enter submits forms and activates buttons, Space toggles, Tab moves focus, Escape closes, characters insert). Optional modifiers. If selector is given, focus that element first; otherwise the currently focused element receives the key. For setting a whole field value prefer browser_type; use this for single keys. Reports what changed, like browser_click. Unknown key names are rejected — use KeyboardEvent.key names (Enter, Escape, Tab, ArrowDown, Backspace, F5) or a single character. Defaults to the visible tab."
+		description = "Press a key with a TRUSTED native key event (isTrusted=true, real default actions: Enter submits forms and activates buttons, Space toggles, Tab moves focus, Escape closes, characters insert). Optional modifiers. meta+a / meta+c / meta+x / meta+v run Select All / Copy / Cut / Paste on this tab's focused element; paste inserts the system clipboard with its rich types (HTML formatting, links) via a trusted paste event. If selector is given, focus that element first; otherwise the currently focused element receives the key. For setting a whole field value prefer browser_type; use this for single keys. Reports what changed, like browser_click. Unknown key names are rejected — use KeyboardEvent.key names (Enter, Escape, Tab, ArrowDown, Backspace, F5) or a single character. Defaults to the visible tab."
 	)]
 	async fn browser_press_key(
 		&self,

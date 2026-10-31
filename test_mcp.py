@@ -1252,6 +1252,21 @@ def press_key_rejects_unknown():
 
 
 @test
+def command_shortcuts_copy_and_paste_rich_text():
+    """meta+a/c/v run the Edit actions on the tab: a trusted paste event with
+    text/html lands in the editor and keeps the formatting. Overwrites the clipboard."""
+    with fixture_tab("rich_paste.html") as tab:
+        tool_text("browser_press_key", {"tab_id": tab, "key": "a", "modifiers": ["meta"], "selector": "#source"}, timeout=15)
+        tool_text("browser_press_key", {"tab_id": tab, "key": "c", "modifiers": ["meta"]}, timeout=15)
+        tool_text("browser_press_key", {"tab_id": tab, "key": "v", "modifiers": ["meta"], "selector": "#target"}, timeout=15)
+        status = js_text(tab, "pastestatus").strip('"')
+        expect(status == "trusted:html", f"meta+v did not fire a trusted paste with text/html: {status!r}")
+        html = exec_js(tab, "document.getElementById('target').innerHTML")
+        expect("<b>bold</b>" in html and 'href="https://example.com/"' in html,
+               f"pasted content lost its formatting: {html[:300]!r}")
+
+
+@test
 def snapshot_labels_and_state():
     """Snapshot shows <label> text for controls, headings, alerts and hidden-control count."""
     with fixture_tab("labels_state.html") as tab:

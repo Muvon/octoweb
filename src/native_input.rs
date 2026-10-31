@@ -18,8 +18,8 @@
 //! top document; view points = CSS px × page zoom; `convertPoint:toView:nil`
 //! turns view points into the window coordinates NSEvent expects.
 
-use objc2::runtime::{AnyObject, Bool};
-use objc2::{class, msg_send};
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::NSString;
 
@@ -273,13 +273,46 @@ unsafe fn key_event(ty: usize, key: &KeyInfo, flags: usize, win: isize) -> *mut 
 	]
 }
 
-/// Trusted key press (down + up) delivered to the webview's focused element.
-pub fn press_key(wk: *mut AnyObject, key: &KeyInfo, modifiers: &[String]) {
-	let mut flags = modifier_flags(modifiers);
-	if key.shift {
-		flags |= FLAG_SHIFT;
+/// The Edit-menu action (`macos::setup_edit_menu`) a Cmd shortcut stands for.
+/// AppKit runs these as menu key equivalents dispatched to the key window's
+/// first responder; a `keyDown:` sent straight to the view never becomes
+/// `paste:` (no paste event, nothing inserted), and the menu route would hit
+/// whichever tab has focus rather than the target. So the action is sent to
+/// the target view instead — WebKit then reads the pasteboard with all its
+/// types (rich HTML included) and fires a trusted `paste` on the focused element.
+fn edit_action(key: &KeyInfo, flags: usize) -> Option<Sel> {
+	if flags != FLAG_COMMAND {
+		return None;
 	}
+	match key.base_chars.as_str() {
+		"a" => Some(sel!(selectAll:)),
+		"x" => Some(sel!(cut:)),
+		"c" => Some(sel!(copy:)),
+		"v" => Some(sel!(paste:)),
+		_ => None,
+	}
+}
+
+/// Modifier flags for a press: the requested ones plus Shift when the key implies it.
+fn key_flags(key: &KeyInfo, modifiers: &[String]) -> usize {
+	let flags = modifier_flags(modifiers);
+	if key.shift {
+		flags | FLAG_SHIFT
+	} else {
+		flags
+	}
+}
+
+/// Trusted key press (down + up) delivered to the webview's focused element;
+/// Edit-menu shortcuts run their action on the webview instead.
+pub fn press_key(wk: *mut AnyObject, key: &KeyInfo, modifiers: &[String]) {
+	let flags = key_flags(key, modifiers);
 	unsafe {
+		if let Some(action) = edit_action(key, flags) {
+			let nil_sender: *const AnyObject = std::ptr::null();
+			let _: *mut AnyObject = msg_send![&*wk, performSelector: action, withObject: nil_sender];
+			return;
+		}
 		let win: *mut AnyObject = msg_send![&*wk, window];
 		let num: isize = if win.is_null() {
 			0
@@ -354,5 +387,30 @@ mod tests {
 		assert_eq!(m(&["shift"]), FLAG_SHIFT);
 		assert_eq!(m(&["ctrl", "meta"]), FLAG_CONTROL | FLAG_COMMAND);
 		assert_eq!(m(&["alt", "bogus"]), FLAG_OPTION);
+	}
+
+	fn shortcut_action(key: &str, mods: &[&str]) -> Option<Sel> {
+		let info = key_info(key).unwrap();
+		let mods: Vec<String> = mods.iter().map(|x| x.to_string()).collect();
+		edit_action(&info, key_flags(&info, &mods))
+	}
+
+	#[test]
+	fn command_shortcuts_map_to_edit_actions() {
+		assert_eq!(shortcut_action("v", &["meta"]), Some(sel!(paste:)));
+		assert_eq!(shortcut_action("c", &["cmd"]), Some(sel!(copy:)));
+		assert_eq!(shortcut_action("x", &["command"]), Some(sel!(cut:)));
+		assert_eq!(shortcut_action("a", &["meta"]), Some(sel!(selectAll:)));
+	}
+
+	#[test]
+	fn other_combos_stay_key_events() {
+		assert_eq!(shortcut_action("v", &[]), None);
+		assert_eq!(shortcut_action("V", &["meta"]), None);
+		assert_eq!(shortcut_action("v", &["meta", "shift"]), None);
+		assert_eq!(shortcut_action("v", &["meta", "alt"]), None);
+		assert_eq!(shortcut_action("v", &["ctrl"]), None);
+		assert_eq!(shortcut_action("z", &["meta"]), None);
+		assert_eq!(shortcut_action("Enter", &["meta"]), None);
 	}
 }
