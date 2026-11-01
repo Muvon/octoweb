@@ -399,10 +399,18 @@ pub fn format_effect_with_download(payload_json: &str, download: Option<&str>) -
 		let got = v.get("got").and_then(|x| x.as_str()).unwrap_or("");
 		let len = v.get("len").and_then(|x| x.as_u64()).unwrap_or(0);
 		let want = v.get("want").and_then(|x| x.as_u64()).unwrap_or(0);
+		let keys_left = v.get("keys_left").and_then(|x| x.as_u64()).unwrap_or(0);
 		Some(if !connected {
 			"⚠ TEXT DID NOT STICK: the field was removed from the page after typing — \
              the value is gone. Re-snapshot and type into the new element."
 				.to_string()
+		} else if keys_left > 0 {
+			// Our wait ran out, not the page: nothing was rejected yet.
+			format!(
+				"⚠ STILL TYPING: {keys_left} keystrokes had not reached the page yet when the field was \
+                 read back (it held {len} of {want} chars) — the editor is slow, the text is not \
+                 rejected. Read the field again before submitting; do not retype."
+			)
 		} else if stale {
 			format!(
 				"⚠ TEXT DID NOT REPLACE: what you sent is there, but so is the text the field held \
@@ -747,6 +755,13 @@ pub struct TabIdRequest {
 /// Default cap on `browser_get_page_content` output. Long enough for an article,
 /// short enough that one call cannot consume an agent's whole context window.
 pub const DEFAULT_PAGE_CONTENT_LIMIT: usize = 20_000;
+
+/// How long `send_command` waits for the main loop's answer.
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Headroom a scaled `send_command_within` timeout keeps over the main loop's
+/// own watchdog, so the watchdog's precise answer always arrives first.
+const WATCHDOG_HEADROOM_MS: u64 = 5000;
 
 /// Ceiling on `browser_wait` and `browser_execute_js` timeouts — below
 /// send_command's 30 s window, so a maxed-out wait answers "timeout" itself.
@@ -1271,13 +1286,25 @@ impl McpServer {
 		}
 	}
 
-	/// Send a command to the main event loop and wait for the response (30 s timeout).
+	/// Send a command to the main event loop and wait for the response
+	/// (`COMMAND_TIMEOUT`).
 	///
 	/// Outer error = infrastructure failure (channel/timeout) → protocol error.
 	/// Inner error = browser-domain failure → tools surface it via
 	/// `browser_try!` as a model-visible `isError` result.
 	async fn send_command<T>(
 		&self,
+		build: impl FnOnce(oneshot::Sender<Result<T, String>>) -> McpCommand,
+	) -> Result<Result<T, String>, McpError> {
+		self.send_command_within(COMMAND_TIMEOUT, build).await
+	}
+
+	/// `send_command` for a command whose own watchdog runs longer than
+	/// `COMMAND_TIMEOUT` — `timeout` must stay above it, so the main loop's
+	/// precise answer wins over this generic one.
+	async fn send_command_within<T>(
+		&self,
+		timeout: std::time::Duration,
 		build: impl FnOnce(oneshot::Sender<Result<T, String>>) -> McpCommand,
 	) -> Result<Result<T, String>, McpError> {
 		let (tx, rx) = oneshot::channel();
@@ -1287,9 +1314,11 @@ impl McpServer {
 			.map_err(|e| McpError::internal_error(e.to_string(), None))?;
 		// (workspace_id is stamped by `call_tool`, which resolves the request's
 		// workspace header before dispatching into any of these tools.)
-		tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+		tokio::time::timeout(timeout, rx)
 			.await
-			.map_err(|_| McpError::internal_error("browser did not respond within 30 s".to_string(), None))?
+			.map_err(|_| {
+				McpError::internal_error(format!("browser did not respond within {} s", timeout.as_secs()), None)
+			})?
 			// Inner `RecvError` means the main-loop sender was dropped
 			// without sending. With the per-handler watchdogs in main.rs,
 			// every JS-callback path now claims its Sender on timeout and
@@ -1696,8 +1725,11 @@ impl McpServer {
 				)))
 			}
 		};
+		// Keystrokes take time per character, so a long text gets a longer wait.
+		let watchdog_ms = crate::dom_actions::type_watchdog_ms(req.text.chars().count());
+		let timeout = COMMAND_TIMEOUT.max(std::time::Duration::from_millis(watchdog_ms + WATCHDOG_HEADROOM_MS));
 		let summary = browser_try!(
-			self.send_command(|tx| McpCommand::Type {
+			self.send_command_within(timeout, |tx| McpCommand::Type {
 				tab_id: req.tab_id,
 				selector: req.selector.clone(),
 				text: req.text,
@@ -2985,6 +3017,21 @@ mod tests {
         );
 		assert!(out.contains("DID NOT REPLACE"), "{out}");
 		assert!(!out.contains("DID NOT STICK"), "{out}");
+	}
+
+	#[test]
+	fn effect_tells_slow_typing_from_rejected_text() {
+		let out = format_effect_with_download(
+            "{\"diff\":{},\"met\":true,\"val\":{\"ok\":false,\"connected\":true,\"got\":\"Hello\",\"len\":693,\"want\":975,\"keys_left\":282}}",
+            None,
+        );
+		assert!(out.contains("STILL TYPING: 282 keystrokes"), "{out}");
+		assert!(!out.contains("DID NOT STICK"), "{out}");
+		let out = format_effect_with_download(
+            "{\"diff\":{},\"met\":true,\"val\":{\"ok\":false,\"connected\":true,\"got\":\"Hello\",\"len\":205,\"want\":975,\"keys_left\":0}}",
+            None,
+        );
+		assert!(out.contains("DID NOT STICK: the field now holds 205 chars"), "{out}");
 	}
 
 	#[test]

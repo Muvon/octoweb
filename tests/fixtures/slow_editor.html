@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OW Fixture: Slow Editor</title>
+</head>
+<body>
+  <h1>Slow Editor Fixture</h1>
+  <div id="editor" contenteditable="true"></div>
+  <script>
+    // A heavy rich editor: every keystroke costs main-thread time, so trusted
+    // keystrokes reach the page well behind the typing.
+    var KEY_COST_MS = 8;
+    document.getElementById('editor').addEventListener('keydown', function () {
+      var until = performance.now() + KEY_COST_MS;
+      while (performance.now() < until) {}
+    });
+  </script>
+</body>
+</html>

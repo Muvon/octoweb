@@ -7135,6 +7135,7 @@ fn main() {
                             let _ = mcp_ensure_tab!(ws_idx, id);
                             if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
                                 let script = dom_actions::type_script(&selector, &text, expect.as_deref(), keys_only);
+                                let watchdog_ms = dom_actions::type_watchdog_ms(text.chars().count());
                                 let response = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
                                 let response_cb = response.clone();
                                 let sel_for_err = selector.clone();
@@ -7177,13 +7178,13 @@ fn main() {
                                     }
                                 });
                                 let sel_wd = selector.clone();
-                                mcp_nav_watchdog!(ws_idx, response, dom_actions::WATCHDOG_MS, id, gen0,
+                                mcp_nav_watchdog!(ws_idx, response, watchdog_ms, id, gen0,
                                     move |url: String| Ok(format!("Typed into '{sel_wd}' → page navigated to {url}")),
                                     format!(
                                         "Type into '{selector}' got no answer from the page within {}s and the tab did \
                                          not navigate. Whether the text was set is unknown — re-snapshot, verify the \
                                          field state, and retry.",
-                                        dom_actions::WATCHDOG_MS / 1000
+                                        watchdog_ms / 1000
                                     ));
                             } else {
                                 let _ = response.send(Err("Tab not found".to_string()));

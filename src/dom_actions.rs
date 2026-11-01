@@ -49,10 +49,30 @@ pub const EFFECT_MS: u64 = 450;
 /// unmet. Matches the feel of an explicit wait without a separate call.
 pub const SETTLE_MS: u64 = 6000;
 
-/// Ceiling on waiting for trusted keystrokes to reach the page. Only hit when
-/// a keyup never arrives (the page swallowed it, or the character had no key
-/// code); normal typing clears in well under a tenth of this.
-pub const KEY_WAIT_MS: u64 = 3000;
+/// Keystroke budget per character. A slow rich editor takes ~4 ms per key
+/// (LinkedIn: 975 chars in ~4 s); 2.5× that leaves room for a slower page.
+/// The wait ends as soon as the last keystroke lands, so the budget is only a
+/// ceiling for a page that keeps receiving keys.
+pub const KEY_BUDGET_MS: u64 = 10;
+
+/// Floor of the keystroke wait, for short text.
+pub const KEY_WAIT_MIN_MS: u64 = 3000;
+
+/// Stop waiting early once no keyup has arrived for this long: the page
+/// swallowed one, or the character had no key code. A slow editor still
+/// delivers a keyup every few ms, so it never looks stalled.
+pub const KEY_STALL_MS: u64 = 1500;
+
+/// Ceiling on waiting for `chars` trusted keystrokes to reach the page.
+pub fn key_wait_ms(chars: usize) -> u64 {
+	(chars as u64 * KEY_BUDGET_MS).max(KEY_WAIT_MIN_MS)
+}
+
+/// Watchdog for a `browser_type` of `chars` characters: the action watchdog
+/// plus the keystroke wait.
+pub fn type_watchdog_ms(chars: usize) -> u64 {
+	WATCHDOG_MS + key_wait_ms(chars)
+}
 
 /// Effect-capture helpers, shared by the harness and the standalone effect
 /// probe. Installs `window.__octoweb_pre` with a `diff()` method.
@@ -182,10 +202,18 @@ const EFFECT_PRE_JS: &str = r#"
             setTimeout(poll, 100);
           })();
         }
-        var k = window.__octoweb_keys, until = performance.now() + __KEY_WAIT_MS__;
+        var k = window.__octoweb_keys, t0 = performance.now(), until = t0 + (k ? k.wait || 0 : 0);
+        var seen = k ? k.got : 0, quietUntil = t0 + __KEY_STALL_MS__;
         (function keys() {
           if (!k) return measure();
-          if (k.got >= k.want || performance.now() >= until) { k.want = 0; return measure(); }
+          var now = performance.now();
+          if (k.got !== seen) { seen = k.got; quietUntil = now + __KEY_STALL_MS__; }
+          if (k.got >= k.want || now >= until || now >= quietUntil) {
+            // The readback reports keystrokes still in flight as such, not as
+            // text the page rejected.
+            k.target = k.want; k.want = 0; k.wait = 0;
+            return measure();
+          }
           setTimeout(keys, 20);
         })();
       });
@@ -365,7 +393,7 @@ fn build(sel_json: &str, gate: &str, stability: bool, occlusion: bool, expect_js
 		.replace("__PRE__", EFFECT_PRE_JS)
 		.replace("__EFFECT_MS__", &EFFECT_MS.to_string())
 		.replace("__SETTLE_MS__", &SETTLE_MS.to_string())
-		.replace("__KEY_WAIT_MS__", &KEY_WAIT_MS.to_string())
+		.replace("__KEY_STALL_MS__", &KEY_STALL_MS.to_string())
 		.replace("__EXPECT__", expect_json)
 		.replace("__GATE__", gate)
 		.replace("__STABILITY__", if stability { "true" } else { "false" })
@@ -513,7 +541,7 @@ pub fn dismiss_overlay_script() -> String {
 	// `return` would trip ASI into `return;` and drop the Promise.
 	format!(
 		"(function(){{{pre}\nreturn ({body});}})()",
-		pre = EFFECT_PRE_JS.replace("__KEY_WAIT_MS__", &KEY_WAIT_MS.to_string()),
+		pre = EFFECT_PRE_JS.replace("__KEY_STALL_MS__", &KEY_STALL_MS.to_string()),
 		body = DISMISS_BODY
 	)
 }
@@ -645,7 +673,8 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
 	let act = r#"
     var TXT = __TXT__, KEYS_ONLY = __KEYS_ONLY__;
     // One keyup per character Rust is about to send — `\r` is the only one it
-    // drops. Absolute target, not a reset, so a stray keyup cannot uncount it.
+    // drops; Array.from counts code points, as Rust's chars() does. Absolute
+    // target, not a reset, so a stray keyup cannot uncount it.
     function armKeys() {
       var k = window.__octoweb_keys;
       if (!k) return;
@@ -656,7 +685,8 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
         d.__octoweb_keys_bound = true;
         d.addEventListener('keyup', function () { k.got++; }, true);
       }
-      k.want = k.got + String(TXT).replace(/\r/g, '').length;
+      k.want = k.got + Array.from(String(TXT).replace(/\r/g, '')).length;
+      k.wait = __KEY_WAIT__;
     }
     // Marker for the NEXT action's effect diff: did it throw this text away?
     function armTyped() {
@@ -733,13 +763,15 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
           var live = host.isConnected;
           var now = live ? norm(host.textContent) : '';
           var stale = !!oldProbe && want.indexOf(oldProbe) === -1 && now.indexOf(oldProbe) !== -1;
+          var k = window.__octoweb_keys;
           return {
             ok: live && (want === '' || now.indexOf(want) !== -1) && !stale,
             connected: live,
             stale: stale,
             got: (live ? String(host.textContent || '') : '').substring(0, 60),
             len: now.length,
-            want: want.length
+            want: want.length,
+            keys_left: k && k.target ? Math.max(0, k.target - k.got) : 0
           };
         };
         armTyped();
@@ -805,12 +837,14 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
       window.__octoweb_verify = function () {
         var live = el.isConnected;
         var now = live ? String(el.value == null ? '' : el.value) : '';
+        var k = window.__octoweb_keys;
         return {
           ok: live && now === TXT,
           connected: live,
           got: now.substring(0, 60),
           len: now.length,
-          want: String(TXT).length
+          want: String(TXT).length,
+          keys_left: k && k.target ? Math.max(0, k.target - k.got) : 0
         };
       };
       armTyped();
@@ -828,8 +862,10 @@ pub fn type_script(selector: &str, text: &str, expect: Option<&str>, keys_only: 
     armFieldVerify();
     __done('true');
 "#
-    .replace("__TXT__", &json(text))
-    .replace("__KEYS_ONLY__", if keys_only { "true" } else { "false" });
+    .replace("__KEYS_ONLY__", if keys_only { "true" } else { "false" })
+    .replace("__KEY_WAIT__", &key_wait_ms(text.chars().count()).to_string())
+    // Last: the text itself may contain a placeholder's name.
+    .replace("__TXT__", &json(text));
 	build(&json(selector), GATE_TYPE, false, false, &expect_json(expect), &act)
 }
 
@@ -887,6 +923,22 @@ pub fn scroll_script(selector: &str, direction: &str, pixels: Option<i32>) -> St
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn keystroke_wait_scales_with_text_length() {
+		assert_eq!(key_wait_ms(10), KEY_WAIT_MIN_MS);
+		// LinkedIn's measured pace, ~4 ms per key, fits a 20 000-char article.
+		let article = 20_000;
+		assert!(key_wait_ms(article) >= article as u64 * 4);
+		assert!(type_watchdog_ms(article) > key_wait_ms(article) + SETTLE_MS);
+	}
+
+	#[test]
+	fn type_script_budgets_its_own_text_and_keeps_placeholders_in_text() {
+		let s = type_script("#e", "__KEY_WAIT__ é", None, true);
+		assert!(s.contains("k.wait = 3000;"), "budget not substituted");
+		assert!(s.contains("\"__KEY_WAIT__ é\""), "text was rewritten by a placeholder");
+	}
 
 	#[test]
 	fn parse_target_variants() {
