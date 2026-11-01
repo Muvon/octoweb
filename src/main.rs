@@ -122,6 +122,7 @@ enum AppEvent {
 	CloseTab(usize),
 	PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
 	NextTab,                 // Ctrl+N — switch to next tab in MRU order
+	TabWalkEnd,              // Ctrl+P/N chord released — the landed tab becomes most recent
 	ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
 	SidebarResize(u32),      // live drag/keyboard width update (logical px)
 	SidebarResizeEnd(u32),   // final width update — persist to config
@@ -3204,8 +3205,9 @@ fn main() {
 		use objc2::runtime::AnyObject;
 		use objc2::{class, msg_send};
 
-		// NSEventMaskKeyDown = 1 << NSEventTypeKeyDown(10)
-		const MASK_KEYDOWN: u64 = 1 << 10;
+		// NSEventMask bits are 1 << NSEventType: KeyDown = 10, FlagsChanged = 12.
+		const NS_FLAGS_CHANGED: usize = 12;
+		const MASK_KEYDOWN_AND_FLAGS: u64 = (1 << 10) | (1 << NS_FLAGS_CHANGED);
 		// NSEventModifierFlags bits (see NSEvent.h)
 		const FLAG_SHIFT: u64 = 1 << 17;
 		const FLAG_CONTROL: u64 = 1 << 18;
@@ -3229,13 +3231,16 @@ fn main() {
 		let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
 		let workspaces_state = Arc::clone(&workspace_switcher_visible);
 		let joinable = Arc::clone(&meeting_joinable);
+		// Modifiers of the chord that started a Ctrl+P/N walk; 0 when none is
+		// running. Their release ends the walk (AppEvent::TabWalkEnd).
+		let tab_walk_mods = std::cell::Cell::new(0u8);
 
 		let handler = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
 			if event.is_null() {
 				return event;
 			}
-			// SAFETY: KeyDown mask guarantees `event` is an NSEvent of that type.
-			let keycode: u16 = unsafe { msg_send![event, keyCode] };
+			// SAFETY: the mask guarantees `event` is a KeyDown or FlagsChanged NSEvent.
+			let event_type: usize = unsafe { msg_send![event, type] };
 			let flags: u64 = unsafe { msg_send![event, modifierFlags] };
 			let cmd = flags & FLAG_COMMAND != 0;
 			let ctrl = flags & FLAG_CONTROL != 0;
@@ -3244,12 +3249,6 @@ fn main() {
 
 			let consume = std::ptr::null_mut::<AnyObject>();
 			let pass = event;
-
-			// While the settings panel is recording a chord, let every key reach
-			// the focused WebView so it can be captured (don't fire shortcuts).
-			if capturing.load(Ordering::Relaxed) {
-				return pass;
-			}
 
 			let mut mods = 0u8;
 			if cmd {
@@ -3263,6 +3262,22 @@ fn main() {
 			}
 			if shift {
 				mods |= keybindings::MOD_SHIFT;
+			}
+
+			if event_type == NS_FLAGS_CHANGED {
+				let walk = tab_walk_mods.get();
+				if walk != 0 && mods & walk != walk {
+					tab_walk_mods.set(0);
+					let _ = p.send_event(AppEvent::TabWalkEnd);
+				}
+				return pass;
+			}
+			let keycode: u16 = unsafe { msg_send![event, keyCode] };
+
+			// While the settings panel is recording a chord, let every key reach
+			// the focused WebView so it can be captured (don't fire shortcuts).
+			if capturing.load(Ordering::Relaxed) {
+				return pass;
 			}
 
 			// Configurable bindings take priority. A chord matched to an action
@@ -3330,7 +3345,16 @@ fn main() {
 					address_edit_state.load(Ordering::Relaxed),
 					workspaces_state.load(Ordering::Relaxed),
 				) {
+					let walks_tabs = matches!(ev, AppEvent::PrevTab | AppEvent::NextTab);
 					let _ = p.send_event(ev);
+					if walks_tabs {
+						// A chord without modifiers has no release to wait for.
+						if mods == 0 {
+							let _ = p.send_event(AppEvent::TabWalkEnd);
+						} else {
+							tab_walk_mods.set(mods);
+						}
+					}
 					return consume;
 				}
 			}
@@ -3372,7 +3396,7 @@ fn main() {
 		let monitor: *mut AnyObject = unsafe {
 			msg_send![
 				class!(NSEvent),
-				addLocalMonitorForEventsMatchingMask: MASK_KEYDOWN,
+				addLocalMonitorForEventsMatchingMask: MASK_KEYDOWN_AND_FLAGS,
 				handler: &*handler,
 			]
 		};
@@ -9372,34 +9396,29 @@ fn main() {
                 refresh_overlay!();
             }
 
-            // ── Ctrl+P: switch to previous tab in MRU order ───────────────
+            // ── Ctrl+P / Ctrl+N: walk the MRU list (macos::mru_step) ─────────
             Event::UserEvent(AppEvent::PrevTab) => {
                 if overlay_visible {
                     return;
                 }
-                // Find current position in MRU, go to next older tab
-                if workspace_manager.active().mru.len() < 2 {
+                let Some(target) = macos::mru_step(&workspace_manager.active().mru, active_wv_id, true) else {
                     return;
-                }
-                let pos = workspace_manager.active().mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
-                let target = workspace_manager.active().mru[(pos + 1) % workspace_manager.active().mru.len()];
+                };
                 switch_visible_tab!(target);
                 browser_win.set_focus();
             }
-
-            // ── Ctrl+N: switch to next tab in MRU order ───────────────────
             Event::UserEvent(AppEvent::NextTab) => {
                 if overlay_visible {
                     return;
                 }
-                // Find current position in MRU, go to next newer tab (wrap to end)
-                if workspace_manager.active().mru.len() < 2 {
+                let Some(target) = macos::mru_step(&workspace_manager.active().mru, active_wv_id, false) else {
                     return;
-                }
-                let pos = workspace_manager.active().mru.iter().position(|&id| id == active_wv_id).unwrap_or(0);
-                let target = if pos == 0 { *workspace_manager.active().mru.last().unwrap() } else { workspace_manager.active().mru[pos - 1] };
+                };
                 switch_visible_tab!(target);
                 browser_win.set_focus();
+            }
+            Event::UserEvent(AppEvent::TabWalkEnd) => {
+                macos::mru_push(&mut workspace_manager.active_mut().mru, active_wv_id);
             }
 
             // ── Toggle sidebar (Cmd+Shift+A or JS sidebar_close) ──────────

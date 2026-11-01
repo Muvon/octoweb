@@ -627,6 +627,19 @@ pub fn mru_push(mru: &mut Vec<usize>, id: usize) {
 	mru.truncate(64);
 }
 
+/// The tab one Ctrl+P (`older`) / Ctrl+N step from `current` lands on,
+/// wrapping at either end; `None` with fewer than two tabs. Steps never reorder
+/// the list — the walk's chord release commits the landed tab via `mru_push`,
+/// so held repeats reach further back while a single press toggles the last two.
+pub fn mru_step(mru: &[usize], current: usize, older: bool) -> Option<usize> {
+	let len = mru.len();
+	if len < 2 {
+		return None;
+	}
+	let pos = mru.iter().position(|&id| id == current).unwrap_or(0);
+	Some(mru[if older { (pos + 1) % len } else { (pos + len - 1) % len }])
+}
+
 /// Install a minimal macOS menu bar so that standard Edit shortcuts
 /// (Cmd+A, Cmd+C, Cmd+V, Cmd+X, Cmd+Z, Cmd+Shift+Z) are routed through
 /// the NSResponder chain to WKWebView.
@@ -816,6 +829,49 @@ pub fn octomind_agents() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// One walk: steps from the front, then the release commit.
+	fn walk(mru: &mut Vec<usize>, current: &mut usize, steps: &[bool]) {
+		for &older in steps {
+			*current = mru_step(mru, *current, older).unwrap();
+		}
+		mru_push(mru, *current);
+	}
+
+	#[test]
+	fn tab_walked_back_to_is_most_recent_again() {
+		let (a, b, c) = (1, 2, 3);
+		let mut mru = vec![a];
+		mru_push(&mut mru, b); // link opened B
+		let mut current = b;
+		walk(&mut mru, &mut current, &[true]);
+		assert_eq!(current, a);
+		mru_push(&mut mru, c); // another link opened C, from A
+		current = c;
+		walk(&mut mru, &mut current, &[true]);
+		assert_eq!(current, a, "Ctrl+P from C returns to A, where the user was");
+		assert_eq!(mru, vec![a, c, b]);
+	}
+
+	#[test]
+	fn single_presses_toggle_and_held_presses_reach_back() {
+		let mut mru = vec![3, 2, 1];
+		let mut current = 3;
+		walk(&mut mru, &mut current, &[true]);
+		walk(&mut mru, &mut current, &[true]);
+		assert_eq!((current, mru.clone()), (3, vec![3, 2, 1]));
+		walk(&mut mru, &mut current, &[true, true]);
+		assert_eq!((current, mru), (1, vec![1, 3, 2]));
+	}
+
+	#[test]
+	fn steps_wrap_and_need_two_tabs() {
+		let mru = [3, 2, 1];
+		assert_eq!(mru_step(&mru, 1, true), Some(3));
+		assert_eq!(mru_step(&mru, 3, false), Some(1));
+		assert_eq!(mru_step(&mru, 2, false), Some(3));
+		assert_eq!(mru_step(&[7], 7, true), None);
+	}
 
 	/// A one-page PDF showing `text` in Helvetica.
 	fn pdf(text: &str) -> Vec<u8> {
