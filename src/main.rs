@@ -122,7 +122,6 @@ enum AppEvent {
 	CloseTab(usize),
 	PrevTab,                 // Ctrl+P — switch to previous tab in MRU order
 	NextTab,                 // Ctrl+N — switch to next tab in MRU order
-	TabWalkEnd,              // Ctrl+P/N chord released — the landed tab becomes most recent
 	ToggleSidebar,           // Cmd+Shift+A — toggle AI assistant sidebar
 	SidebarResize(u32),      // live drag/keyboard width update (logical px)
 	SidebarResizeEnd(u32),   // final width update — persist to config
@@ -3205,9 +3204,8 @@ fn main() {
 		use objc2::runtime::AnyObject;
 		use objc2::{class, msg_send};
 
-		// NSEventMask bits are 1 << NSEventType: KeyDown = 10, FlagsChanged = 12.
-		const NS_FLAGS_CHANGED: usize = 12;
-		const MASK_KEYDOWN_AND_FLAGS: u64 = (1 << 10) | (1 << NS_FLAGS_CHANGED);
+		// NSEventMaskKeyDown = 1 << NSEventTypeKeyDown(10)
+		const MASK_KEYDOWN: u64 = 1 << 10;
 		// NSEventModifierFlags bits (see NSEvent.h)
 		const FLAG_SHIFT: u64 = 1 << 17;
 		const FLAG_CONTROL: u64 = 1 << 18;
@@ -3231,16 +3229,12 @@ fn main() {
 		let sidebar_state = Arc::clone(&sidebar_hotkey_visible);
 		let workspaces_state = Arc::clone(&workspace_switcher_visible);
 		let joinable = Arc::clone(&meeting_joinable);
-		// Modifiers of the chord that started a Ctrl+P/N walk; 0 when none is
-		// running. Their release ends the walk (AppEvent::TabWalkEnd).
-		let tab_walk_mods = std::cell::Cell::new(0u8);
 
 		let handler = RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
 			if event.is_null() {
 				return event;
 			}
-			// SAFETY: the mask guarantees `event` is a KeyDown or FlagsChanged NSEvent.
-			let event_type: usize = unsafe { msg_send![event, type] };
+			// SAFETY: KeyDown mask guarantees `event` is an NSEvent of that type.
 			let flags: u64 = unsafe { msg_send![event, modifierFlags] };
 			let cmd = flags & FLAG_COMMAND != 0;
 			let ctrl = flags & FLAG_CONTROL != 0;
@@ -3264,14 +3258,6 @@ fn main() {
 				mods |= keybindings::MOD_SHIFT;
 			}
 
-			if event_type == NS_FLAGS_CHANGED {
-				let walk = tab_walk_mods.get();
-				if walk != 0 && mods & walk != walk {
-					tab_walk_mods.set(0);
-					let _ = p.send_event(AppEvent::TabWalkEnd);
-				}
-				return pass;
-			}
 			let keycode: u16 = unsafe { msg_send![event, keyCode] };
 
 			// While the settings panel is recording a chord, let every key reach
@@ -3345,16 +3331,7 @@ fn main() {
 					address_edit_state.load(Ordering::Relaxed),
 					workspaces_state.load(Ordering::Relaxed),
 				) {
-					let walks_tabs = matches!(ev, AppEvent::PrevTab | AppEvent::NextTab);
 					let _ = p.send_event(ev);
-					if walks_tabs {
-						// A chord without modifiers has no release to wait for.
-						if mods == 0 {
-							let _ = p.send_event(AppEvent::TabWalkEnd);
-						} else {
-							tab_walk_mods.set(mods);
-						}
-					}
 					return consume;
 				}
 			}
@@ -3396,7 +3373,7 @@ fn main() {
 		let monitor: *mut AnyObject = unsafe {
 			msg_send![
 				class!(NSEvent),
-				addLocalMonitorForEventsMatchingMask: MASK_KEYDOWN_AND_FLAGS,
+				addLocalMonitorForEventsMatchingMask: MASK_KEYDOWN,
 				handler: &*handler,
 			]
 		};
@@ -9107,6 +9084,9 @@ fn main() {
                 // the previous tab's URL displayed until WebKit commits.
                 update_address_bar_url!(url);
                 tracing::debug!(tab_id, visible_id, url, "NavigateTo: pending_swap set");
+                // A Ctrl+P/N walk never reorders the MRU list; opening a tab
+                // from the page the walk landed on is what makes that page recent.
+                macos::mru_push(&mut workspace_manager.active_mut().mru, visible_id);
                 macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
                 // Show progress bar immediately — PageLoadStarted fires on didCommitNavigation
@@ -9180,6 +9160,7 @@ fn main() {
                 pending_swap = Some((visible_id, tab_id));
                 pending_swap_at = Some(std::time::Instant::now());
                 update_address_bar_url!(url);
+                macos::mru_push(&mut workspace_manager.active_mut().mru, visible_id);
                 macos::mru_push(&mut workspace_manager.active_mut().mru, tab_id);
                 browser_win.set_focus();
             }
@@ -9417,9 +9398,6 @@ fn main() {
                 };
                 switch_visible_tab!(target);
                 browser_win.set_focus();
-            }
-            Event::UserEvent(AppEvent::TabWalkEnd) => {
-                macos::mru_push(&mut workspace_manager.active_mut().mru, active_wv_id);
             }
 
             // ── Toggle sidebar (Cmd+Shift+A or JS sidebar_close) ──────────

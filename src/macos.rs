@@ -629,8 +629,8 @@ pub fn mru_push(mru: &mut Vec<usize>, id: usize) {
 
 /// The tab one Ctrl+P (`older`) / Ctrl+N step from `current` lands on,
 /// wrapping at either end; `None` with fewer than two tabs. Steps never reorder
-/// the list — the walk's chord release commits the landed tab via `mru_push`,
-/// so held repeats reach further back while a single press toggles the last two.
+/// the list, so Ctrl+P/N go back and forth freely; opening a new tab from the
+/// landed tab commits it via `mru_push`.
 pub fn mru_step(mru: &[usize], current: usize, older: bool) -> Option<usize> {
 	let len = mru.len();
 	if len < 2 {
@@ -830,7 +830,7 @@ pub fn octomind_agents() -> Vec<(String, String)> {
 mod tests {
 	use super::*;
 
-	/// One walk: steps from the front, then the release commit.
+	/// One walk: steps from the front, then the commit by opening a tab from the landed one.
 	fn walk(mru: &mut Vec<usize>, current: &mut usize, steps: &[bool]) {
 		for &older in steps {
 			*current = mru_step(mru, *current, older).unwrap();
@@ -854,12 +854,14 @@ mod tests {
 	}
 
 	#[test]
-	fn single_presses_toggle_and_held_presses_reach_back() {
+	fn steps_go_back_and_forth_until_a_new_tab_commits() {
 		let mut mru = vec![3, 2, 1];
 		let mut current = 3;
+		walk(&mut mru, &mut current, &[true, true, false, false]);
+		assert_eq!((current, mru.clone()), (3, vec![3, 2, 1]), "Ctrl+N retraces Ctrl+P");
 		walk(&mut mru, &mut current, &[true]);
 		walk(&mut mru, &mut current, &[true]);
-		assert_eq!((current, mru.clone()), (3, vec![3, 2, 1]));
+		assert_eq!((current, mru.clone()), (3, vec![3, 2, 1]), "committed steps toggle");
 		walk(&mut mru, &mut current, &[true, true]);
 		assert_eq!((current, mru), (1, vec![1, 3, 2]));
 	}
