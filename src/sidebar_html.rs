@@ -3705,6 +3705,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (s.container.parentNode === messagesHost) messagesHost.removeChild(s.container);
     if (s.tab.parentNode === sessionStrip) sessionStrip.removeChild(s.tab);
     forgetRuns(sid);
+    forgetA2uiBlocks(sid);
     sessions.delete(sid);
     refreshAddBtn();
   };
@@ -6023,18 +6024,26 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     }
   }
 
+  // Drop a session's A2UI block state. The maps are keyed by fileId, not by
+  // session, so a session that is unmounted and mounted again (workspace
+  // switch) would otherwise replay its surfaces into the old, detached
+  // container and never show them.
+  function forgetA2uiBlocks(sid) {
+    for (const entry of Array.from(a2uiBlocks)) {
+      const fid = entry[0], b = entry[1];
+      if (b.sid !== sid) continue;
+      a2uiBlocks.delete(fid);
+      a2uiBubbleByFile.delete(fid);
+      if (b.surfaceId != null) a2uiSurfaceIndex.delete(a2uiSurfaceKey(sid, b.surfaceId));
+    }
+  }
+
   // Tear a session's rendered history back down to empty. `__addSession` is a
   // no-op for a session that already exists, so a second replay (sidebar
   // reload, re-entering a workspace) would otherwise stack a duplicate copy
   // of the whole conversation on top of the first.
   function resetSessionDom(s) {
-    for (const entry of Array.from(a2uiBlocks)) {
-      const fid = entry[0], b = entry[1];
-      if (b.sid !== s.sid) continue;
-      a2uiBlocks.delete(fid);
-      a2uiBubbleByFile.delete(fid);
-      if (b.surfaceId != null) a2uiSurfaceIndex.delete(a2uiSurfaceKey(s.sid, b.surfaceId));
-    }
+    forgetA2uiBlocks(s.sid);
     while (s.container.firstChild) s.container.removeChild(s.container.firstChild);
     s.container.appendChild(s.thinking);
     s.moreRow = null;
