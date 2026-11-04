@@ -1261,7 +1261,8 @@ def command_shortcuts_copy_and_paste_rich_text():
         tool_text("browser_press_key", {"tab_id": tab, "key": "v", "modifiers": ["meta"], "selector": "#target"}, timeout=15)
         status = js_text(tab, "pastestatus").strip('"')
         expect(status == "trusted:html", f"meta+v did not fire a trusted paste with text/html: {status!r}")
-        html = exec_js(tab, "document.getElementById('target').innerHTML")
+        # The result is JSON-encoded, and NSJSONSerialization escapes "/" as "\/".
+        html = json.loads(exec_js(tab, "document.getElementById('target').innerHTML"))
         expect("<b>bold</b>" in html and 'href="https://example.com/"' in html,
                f"pasted content lost its formatting: {html[:300]!r}")
 
@@ -1423,16 +1424,17 @@ def keystroke_typing_reads_the_field_back():
 @test
 def keystroke_typing_waits_for_a_slow_editor():
     """A slow editor still receiving keystrokes is not reported as rejecting the text.
-    4180 keys at 8 ms each (~33 s) outlast both the old fixed 3 s wait and the
-    old 30 s ceiling on every MCP call."""
-    words = "slow editor keystroke " * 190
+    6600 keys at 5 ms each (~33 s) outlast both the old fixed 3 s wait and the
+    old 30 s ceiling on every MCP call. 5 ms leaves room under the 10 ms/key
+    budget for the ~3 ms a CI runner adds to deliver each key."""
+    words = "slow editor keystroke " * 300
     with fixture_tab("slow_editor.html") as tab:
         text = tool_text("browser_type", {"tab_id": tab, "selector": "#editor", "text": words, "mode": "keys"},
                          timeout=90)
         expect("DID NOT STICK" not in text and "STILL TYPING" not in text,
                f"a slow editor was reported as failing: {text!r}")
         content = js_text(tab, "editor")
-        expect(content.count("keystroke") == 190, f"not every keystroke landed: {content[-120:]!r}")
+        expect(content.count("keystroke") == 300, f"not every keystroke landed: {content[-120:]!r}")
 
 
 @test

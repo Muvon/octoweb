@@ -10,7 +10,7 @@
   <script>
     // A heavy rich editor: every keystroke costs main-thread time, so trusted
     // keystrokes reach the page well behind the typing.
-    var KEY_COST_MS = 8;
+    var KEY_COST_MS = 5;
     document.getElementById('editor').addEventListener('keydown', function () {
       var until = performance.now() + KEY_COST_MS;
       while (performance.now() < until) {}
