@@ -93,10 +93,7 @@ use tao::{
 	window::WindowBuilder,
 };
 use wry::http::Response;
-use wry::{
-	BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewBuilderExtDarwin, WebViewBuilderExtMacos,
-	WebViewExtMacOS,
-};
+use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewBuilderExtMacos, WebViewExtMacOS};
 
 use browser::TabManager;
 use config::Config;
@@ -1434,19 +1431,9 @@ fn main() {
 				Some(rule) => Some(site_proxy::store_id(data_store_id, rule)),
 				None => data_store_id,
 			};
-			let wv = if incognito {
-				wv.with_incognito(true)
-			} else {
-				// With extensions available the configuration carries the
-				// controller and this store; wry skips its own store setup.
-				match extensions::tab_configuration(url, workspace_id, store_id) {
-					Some(config) => wv.with_webview_configuration(config),
-					None => match store_id {
-						Some(id) => wv.with_data_store_identifier(id),
-						None => wv,
-					},
-				}
-			};
+			// The configuration carries the store; wry skips its own store setup.
+			let wv =
+				wv.with_webview_configuration(extensions::tab_configuration(url, workspace_id, store_id, incognito));
 			let wv = match &proxy_rule {
 				Some(rule) => wv.with_proxy_config(site_proxy::wry_config(rule)),
 				None => wv,

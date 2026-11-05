@@ -1135,34 +1135,53 @@ fn describe(error: *mut NSError) -> String {
 
 // ── Tab WebViews ─────────────────────────────────────────────────────────────
 
-/// Configuration for a normal tab's WKWebView in `workspace`. Extension pages
-/// need their own context's configuration; every other page gets the
-/// workspace's controller on the workspace's data store (wry leaves the
-/// store alone when handed a configuration). `None` when extensions are
-/// unavailable.
+/// macOS that has identified data stores (`dataStoreForIdentifier`).
+const IDENTIFIED_STORE_MIN_MACOS: isize = 14;
+
+thread_local! {
+	/// One process pool for every tab. WebKit handles each screen change (every
+	/// auto-brightness or HDR headroom step) once per pool on the main thread,
+	/// so a pool per tab froze the app for a second or more on each change.
+	static TAB_PROCESS_POOL: Retained<AnyObject> = unsafe { msg_send![objc2::class!(WKProcessPool), new] };
+}
+
+/// Configuration for a tab's WKWebView in `workspace`, on the shared tab
+/// process pool. Extension pages need their own context's configuration;
+/// other pages get the workspace's extension controller (when extensions are
+/// available) on the workspace's data store, or an in-memory store for
+/// incognito tabs. wry leaves the store alone when handed a configuration.
 pub fn tab_configuration(
 	url: &str,
 	workspace: &str,
 	data_store_id: Option<[u8; 16]>,
-) -> Option<Retained<WKWebViewConfiguration>> {
-	let mtm = MainThreadMarker::new()?;
-	let controller = ensure_space(workspace)?;
+	incognito: bool,
+) -> Retained<WKWebViewConfiguration> {
+	let mtm = MainThreadMarker::new().expect("tab WebViews are built on the main thread");
+	let controller = if incognito { None } else { ensure_space(workspace) };
 	unsafe {
-		if url.starts_with("webkit-extension:") {
+		if let Some(controller) = controller.as_ref().filter(|_| url.starts_with("webkit-extension:")) {
 			let context =
 				NSURL::URLWithString(&NSString::from_str(url)).and_then(|u| controller.extensionContextForURL(&u));
 			if let Some(config) = context.and_then(|c| c.webViewConfiguration()) {
-				return Some(config);
+				return config;
 			}
 		}
 		let config = WKWebViewConfiguration::new(mtm);
-		config.setWebExtensionController(Some(&controller));
+		TAB_PROCESS_POOL.with(|pool| {
+			let _: () = msg_send![&*config, setProcessPool: &**pool];
+		});
+		if let Some(controller) = &controller {
+			config.setWebExtensionController(Some(controller));
+		}
+		let identified_stores =
+			NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= IDENTIFIED_STORE_MIN_MACOS;
 		let store = match data_store_id {
-			Some(id) => WKWebsiteDataStore::dataStoreForIdentifier(&NSUUID::from_bytes(id), mtm),
-			None => WKWebsiteDataStore::defaultDataStore(mtm),
+			_ if incognito => WKWebsiteDataStore::nonPersistentDataStore(mtm),
+			Some(id) if identified_stores => WKWebsiteDataStore::dataStoreForIdentifier(&NSUUID::from_bytes(id), mtm),
+			_ => WKWebsiteDataStore::defaultDataStore(mtm),
 		};
 		config.setWebsiteDataStore(&store);
-		Some(config)
+		config
 	}
 }
 
