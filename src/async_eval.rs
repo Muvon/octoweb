@@ -30,9 +30,12 @@ pub fn eval_async_expr(webview: &wry::WebView, expr: &str, callback: impl Fn(Res
 /// chains: locate → trusted event → effect probe). The caller must keep the
 /// view retained until the callback fires.
 pub fn eval_async_expr_ptr(wk: *mut AnyObject, expr: &str, callback: impl Fn(Result<String, String>) + 'static) {
-	// Parenthesised on the same line as `return` — prevents ASI from
-	// turning `return\nnew Promise(...)` into `return;`.
-	let body = format!("return ({expr});");
+	// Serialised in the page: NSJSONSerialization throws an uncaught ObjC
+	// exception (app abort) on NaN/Infinity, where JSON.stringify writes null.
+	// undefined stays undefined so the callback still sees an empty result.
+	// Parenthesised on the same line as `await` — prevents ASI from
+	// turning `await\nnew Promise(...)` into `await;`.
+	let body = format!("const __octoweb_v = await ({expr});\nreturn __octoweb_v === undefined ? undefined : JSON.stringify(__octoweb_v);");
 
 	let handler = block2::RcBlock::new(move |result: *mut AnyObject, error: *mut AnyObject| {
 		if !error.is_null() {
@@ -44,24 +47,8 @@ pub fn eval_async_expr_ptr(wk: *mut AnyObject, expr: &str, callback: impl Fn(Res
 			callback(Ok(String::new()));
 			return;
 		}
-		// JSON-encode the fragment the way wry does, so downstream parsing
-		// (quoted strings, JSON payloads) stays identical across both paths.
-		let json = unsafe {
-			let data: *mut AnyObject = msg_send![
-				objc2::class!(NSJSONSerialization),
-				dataWithJSONObject: &*result,
-				options: 4usize, // NSJSONWritingFragmentsAllowed
-				error: std::ptr::null_mut::<*mut AnyObject>()
-			];
-			if data.is_null() {
-				None
-			} else {
-				let len: usize = msg_send![&*data, length];
-				let bytes: *const u8 = msg_send![&*data, bytes];
-				Some(String::from_utf8_lossy(std::slice::from_raw_parts(bytes, len)).into_owned())
-			}
-		};
-		match json {
+		let is_string: bool = unsafe { msg_send![&*result, isKindOfClass: objc2::class!(NSString)] };
+		match is_string.then(|| unsafe { ns_string(result) }).flatten() {
 			Some(s) => callback(Ok(s)),
 			None => callback(Err("result not JSON-serialisable".into())),
 		}
