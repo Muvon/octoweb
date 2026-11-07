@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.21.0] - 2026-11-07
+
+### 📋 Release Summary
+
+Added MRU tab walking on macOS, rich clipboard shortcuts, and ACP support for resumable sessions and MCP elicitations. Fixed tab navigation and focus, webview configuration and media cleanup, slow typing, async result serialization, A2UI reporting and session cleanup, startup-failed agent sessions, and post-notarization DMG checksums. The session reset flow was removed.
+
+### ✨ New Features & Enhancements
+
+- **macos**: support MRU tab walking `f0d8d710`
+- **input**: support rich clipboard shortcuts `41313277`
+- **acp**: support resumable sessions and MCP elicitations `81367619`
+
+### 🔧 Improvements & Optimizations
+
+- **tests**: cover escaped paste HTML and slow typing `8eb312a4`
+- **session**: remove session reset flow `f6dccf36`
+- **workflows**: pin GitHub Actions to commit SHAs `4aea7dbc`
+- **release**: install bash and validate the DMG `d4935b03`
+
+### 🐛 Bug Fixes & Stability
+
+- **async-eval**: serialize async results in the page `46d5c57c`
+- **a2ui**: report multiply referenced components `9b17dcd3`
+- **webview**: fix tab webview configuration `3edd89f0`
+- **sidebar**: clear A2UI blocks when resetting sessions `9c872b3b`
+- **tabs**: keep MRU order stable during tab navigation `cb0cd046`
+- **typing**: handle slow editor keystrokes reliably `730f8ba8`
+- **webview**: stop media when closing tabs `d6d3edb7`
+- **tabs**: prevent background tabs from stealing focus `64442bc5`
+- **agent**: close sessions that fail during startup `f86c3ed3`
+- **release**: generate DMG checksums after notarization `1fbad666`
+
+### 🔄 Other Changes
+
+1 maintenance, dependency, and tooling update not listed individually.
+
 ## [0.20.0] - 2026-10-25
 
 ### 📋 Release Summary
