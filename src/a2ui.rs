@@ -331,6 +331,18 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 				));
 			}
 		}
+		// The surface is a tree: a component listed by two parents is drawn
+		// twice, e.g. a Button's label Text also in the Row beside the Button.
+		for (k, (from, id)) in referenced.iter().enumerate() {
+			let first = referenced.iter().position(|(_, target)| target == id);
+			if let Some(first) = first.filter(|&first| first < k) {
+				problems.push(format!(
+					"{from} lists \"{id}\", which {} already lists, so it would render twice. \
+                     Each component has exactly one parent: give the second use its own id.",
+					referenced[first].0
+				));
+			}
+		}
 		// The renderer walks the tree down from "root", so a component no
 		// parent lists is silently never drawn — and a Button whose checks
 		// read its value can then never be clicked through.
@@ -929,12 +941,15 @@ mod tests {
 	fn every_button_action_the_renderer_accepts_validates() {
 		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
 			{"id": "root", "component": "Row", "children": ["a", "b", "c", "d"]},
-			{"id": "a", "component": "Button", "child": "t", "action": {"event": {"name": "ok"}}},
-			{"id": "b", "component": "Button", "child": "t",
+			{"id": "a", "component": "Button", "child": "ta", "action": {"event": {"name": "ok"}}},
+			{"id": "b", "component": "Button", "child": "tb",
 			 "action": {"functionCall": {"call": "openUrl", "args": {"url": "https://x.test"}}}},
-			{"id": "c", "component": "Button", "child": "t", "action": {"openUrl": {"url": "https://x.test"}}},
-			{"id": "d", "component": "Button", "child": "t", "actions": {"event": {"name": "no"}}},
-			{"id": "t", "component": "Text", "text": "Go"}
+			{"id": "c", "component": "Button", "child": "tc", "action": {"openUrl": {"url": "https://x.test"}}},
+			{"id": "d", "component": "Button", "child": "td", "actions": {"event": {"name": "no"}}},
+			{"id": "ta", "component": "Text", "text": "Go"},
+			{"id": "tb", "component": "Text", "text": "Go"},
+			{"id": "tc", "component": "Text", "text": "Go"},
+			{"id": "td", "component": "Text", "text": "Go"}
 		]}})];
 		assert_eq!(validate(&messages), Vec::<String>::new());
 	}
@@ -968,6 +983,20 @@ mod tests {
 		let problems = validate(&messages);
 		assert_eq!(problems.len(), 1, "{problems:?}");
 		assert!(problems[0].contains("\"ack\""), "{problems:?}");
+	}
+
+	#[test]
+	fn a_component_with_two_parents_is_reported() {
+		// The label Text drawn both beside its Button and inside it.
+		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Row", "children": ["keysLabel", "keys"]},
+			{"id": "keysLabel", "component": "Text", "text": "Type it"},
+			{"id": "keys", "component": "Button", "child": "keysLabel",
+			 "action": {"event": {"name": "pick"}}}
+		]}})];
+		let problems = validate(&messages);
+		assert_eq!(problems.len(), 1, "{problems:?}");
+		assert!(problems[0].contains("\"keysLabel\""), "{problems:?}");
 	}
 
 	#[test]
