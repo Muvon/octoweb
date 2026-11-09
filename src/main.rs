@@ -93,7 +93,10 @@ use tao::{
 	window::WindowBuilder,
 };
 use wry::http::Response;
-use wry::{BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewBuilderExtMacos, WebViewExtMacOS};
+use wry::{
+	BackgroundThrottlingPolicy, WebView, WebViewBuilder, WebViewBuilderExtDarwin, WebViewBuilderExtMacos,
+	WebViewExtMacOS,
+};
 
 use browser::TabManager;
 use config::Config;
@@ -250,10 +253,6 @@ enum AppEvent {
 	/// action payload). Completes the `render_ui` call blocked on that
 	/// surface, or — when nothing is waiting — reaches the agent as a prompt.
 	A2uiResolve(String, u64, serde_json::Value),
-	/// The renderer ran a function the agent asked for with
-	/// `callRendererFunction`: (call_id, `rendererFunctionResponse` envelope).
-	/// Completes the `render_ui` call blocked on that surface, if any.
-	A2uiFunctionResponse(String, serde_json::Value),
 	/// A control on an A2UI surface failed to render: (call_id, reason).
 	/// Fails the `render_ui` call blocked on that surface, if any.
 	A2uiFailed(String, String),
@@ -266,6 +265,7 @@ enum AppEvent {
 	TerminalScript(&'static str),     // keymap action run in the terminal page (new/close/cycle tab)
 	Terminal(terminal::Request),      // message from the terminal panel page
 	TerminalOutput(u32),              // (terminal_id) — shell output or exit: answer the panel's read
+	TerminalPageCrashed,              // the terminal panel's WebContent process died
 	ToggleNotes,                      // ⌘⇧J — show/hide the notes column
 	ToggleTasks,                      // ⌥⌘T — show/hide the notes column on its Tasks view
 	ShowTasks(Option<String>),        // the notes column on its Tasks view, focusing the task line given
@@ -1119,6 +1119,7 @@ fn main() {
 			let p6 = proxy.clone();
 			let p7 = proxy.clone();
 			let p8 = proxy.clone();
+			let p9 = proxy.clone();
 			let sz = browser_win.inner_size();
 			let scale = browser_win.scale_factor();
 			let bar_h = (ADDRESS_BAR_H_LOGICAL * scale) as u32;
@@ -1132,6 +1133,9 @@ fn main() {
                 .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
                 .with_bounds(bounds)
+                .with_on_web_content_process_terminate_handler(move || {
+                    let _ = p9.send_event(AppEvent::WebContentTerminated(tab_id));
+                })
                 // Tabs are created hidden and focused explicitly once shown. A
                 // focused child WebView makes wry activate the app, which pulls
                 // octoweb in front of the user's app whenever an agent opens or
@@ -1667,10 +1671,6 @@ fn main() {
 				let p = proxy.clone();
 				nav_error_patch::register(wv_ptr, move |url, code| {
 					let _ = p.send_event(AppEvent::NavigationError(tab_id, url, code.to_string()));
-				});
-				let pt = proxy.clone();
-				nav_error_patch::register_termination(wv_ptr, move || {
-					let _ = pt.send_event(AppEvent::WebContentTerminated(tab_id));
 				});
 				let pd = proxy.clone();
 				dialog_patch::register(wv_ptr, tab_id, move |info| {
@@ -2248,13 +2248,6 @@ fn main() {
 							let sid = v["sid"].as_u64().unwrap_or(0);
 							if !call_id.is_empty() && sid != 0 {
 								let _ = p.send_event(AppEvent::A2uiResolve(call_id, sid, v["action"].clone()));
-							}
-						}
-						Some("a2ui_fn_response") => {
-							// Result of an agent-issued `callRendererFunction`.
-							let call_id = v["file_id"].as_str().unwrap_or("").to_string();
-							if !call_id.is_empty() {
-								let _ = p.send_event(AppEvent::A2uiFunctionResponse(call_id, v["response"].clone()));
 							}
 						}
 						Some("a2ui_failed") => {
@@ -3015,6 +3008,12 @@ fn main() {
 				}
 			}
 		})
+		.with_on_web_content_process_terminate_handler({
+			let p = proxy.clone();
+			move || {
+				let _ = p.send_event(AppEvent::TerminalPageCrashed);
+			}
+		})
 		.build_as_child(&*chrome_win)
 		.expect("Failed to create terminal WebView");
 	let _ = terminal_wv.set_visible(false);
@@ -3026,6 +3025,9 @@ fn main() {
 		cfg.terminal_appearance.locked_dark(),
 	);
 	let mut terminal_visible = false;
+	let mut terminal_page_reloaded_at: Option<std::time::Instant> = None;
+	// Crashed again right after a reload: left for the panel's next opening.
+	let mut terminal_page_dead = false;
 	let mut terminal_focus_target = PanelFocusTarget::ActiveTab;
 	// Notes: the right-hand pane's first tab, beside a docked sidebar.
 	let notes_wv = WebViewBuilder::new()
@@ -3604,10 +3606,6 @@ fn main() {
 			nav_error_patch::register(wv_ptr, move |url, code| {
 				let _ = p.send_event(AppEvent::NavigationError(id, url, code.to_string()));
 			});
-			let pt = proxy.clone();
-			nav_error_patch::register_termination(wv_ptr, move || {
-				let _ = pt.send_event(AppEvent::WebContentTerminated(id));
-			});
 			let pd = proxy.clone();
 			dialog_patch::register(wv_ptr, id, move |info| {
 				let _ = pd.send_event(AppEvent::JsDialog(info));
@@ -3657,10 +3655,6 @@ fn main() {
                     nav_error_patch::register(wv_ptr, move |url, code| {
                         let _ =
                             p.send_event(AppEvent::NavigationError(target, url, code.to_string()));
-                    });
-                    let pt = proxy.clone();
-                    nav_error_patch::register_termination(wv_ptr, move || {
-                        let _ = pt.send_event(AppEvent::WebContentTerminated(target));
                     });
                     let pd = proxy.clone();
                     dialog_patch::register(wv_ptr, target, move |info| {
@@ -3977,6 +3971,19 @@ fn main() {
 		}};
 	}
 
+	/// Load the terminal panel afresh. Its `ready` message rebuilds the panes
+	/// from the layout Rust kept and they reattach to their running shells.
+	macro_rules! reload_terminal_page {
+		() => {{
+			terminal_page_reloaded_at = Some(std::time::Instant::now());
+			terminal_page_dead = false;
+			let _ = terminal_wv.load_html(&terminal_html::html(
+				&keymap.read().unwrap().ui_json().to_string(),
+				&terminal::shell_theme().map_or_else(|| "null".to_string(), |theme| theme.to_string()),
+				cfg.terminal_option_as_meta,
+			));
+		}};
+	}
 	macro_rules! hide_terminal {
 		() => {{
 			let _ = terminal_wv.set_visible(false);
@@ -5557,7 +5564,6 @@ fn main() {
                         nav_error_patch::unregister(wv_ptr);
                         site_proxy::unregister(wv_ptr);
                         site_permissions::forget(wv_ptr);
-                        nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }
                     workspace_manager.active_mut().webviews.remove(&victim_id); // WebView dropped → XPC process freed
@@ -5632,7 +5638,6 @@ fn main() {
                     nav_error_patch::unregister(wv_ptr);
                     site_proxy::unregister(wv_ptr);
                     site_permissions::forget(wv_ptr);
-                    nav_error_patch::unregister_termination(wv_ptr);
                     dialog_patch::unregister(wv_ptr);
                 }
                 workspace_manager.active_mut().webviews.remove(&victim_id);
@@ -7863,6 +7868,21 @@ fn main() {
                                     .any(|s| s.id == *id)
                             })
                             .unwrap_or(workspace_manager.at(ws_idx).acp_active_session_id);
+                        // A surface the session never created (or already deleted) has
+                        // nothing to update: tell the agent before painting a bubble.
+                        let saved_bodies = workspace_manager
+                            .at(ws_idx)
+                            .acp_sessions
+                            .iter()
+                            .find(|s| s.id == sid)
+                            .into_iter()
+                            .flat_map(|s| s.messages.iter())
+                            .filter(|m| m.role == "ui")
+                            .filter_map(|m| m.a2ui.as_ref());
+                        if let Some(error) = a2ui::surface_lifecycle_error(saved_bodies, &messages) {
+                            let _ = response.send(Err(error));
+                            continue;
+                        }
                         let call_id = next_a2ui_call_id();
                         let awaiting = !await_events.is_empty();
                         let body = serde_json::json!({
@@ -8565,7 +8585,6 @@ fn main() {
                     nav_error_patch::unregister(wv_ptr);
                     site_proxy::unregister(wv_ptr);
                     site_permissions::forget(wv_ptr);
-                    nav_error_patch::unregister_termination(wv_ptr);
                     dialog_patch::unregister(wv_ptr);
                 }
                 workspace_manager.active_mut().webviews.remove(&tab_id);
@@ -9051,7 +9070,6 @@ fn main() {
                             nav_error_patch::unregister(wv_ptr);
                             site_proxy::unregister(wv_ptr);
                             site_permissions::forget(wv_ptr);
-                            nav_error_patch::unregister_termination(wv_ptr);
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
@@ -9131,7 +9149,6 @@ fn main() {
                             nav_error_patch::unregister(wv_ptr);
                             site_proxy::unregister(wv_ptr);
                             site_permissions::forget(wv_ptr);
-                            nav_error_patch::unregister_termination(wv_ptr);
                         }
                         workspace_manager.active_mut().webviews.remove(&orphan);
                         pending_tabs.remove(&orphan);
@@ -9292,7 +9309,6 @@ fn main() {
                         nav_error_patch::unregister(wv_ptr);
                         site_proxy::unregister(wv_ptr);
                         site_permissions::forget(wv_ptr);
-                        nav_error_patch::unregister_termination(wv_ptr);
                         dialog_patch::unregister(wv_ptr);
                     }
                     workspace_manager.active_mut().webviews.remove(&id);
@@ -10662,7 +10678,9 @@ fn main() {
                 // A send error means the agent stopped listening — its call hit
                 // the 30-minute cap, or the process died. Don't swallow the
                 // click: hand it over as a prompt, same as a ghost surface.
-                if pending.response.send(Ok(resolution.clone())).is_err() {
+                // The agent gets the spec `action` message; the internal shape
+                // (with `actor`) stays for the prompt fallback and saved state.
+                if pending.response.send(Ok(a2ui::action_message(&resolution))).is_err() {
                     let _ = proxy.send_event(AppEvent::AcpPrompt(
                         pending.sid,
                         a2ui_replay_prompt(&resolution),
@@ -10687,22 +10705,6 @@ fn main() {
                     ));
                 }
             }
-            // ── A2UI renderer function result ───────────────────────────────
-            // The agent asked the renderer to run a function (A2UI v1.0
-            // `callRendererFunction`). If that same envelope has a `render_ui`
-            // call blocked on it, the result is its answer. Otherwise the agent
-            // never waited for one, so there is nowhere to send it.
-            Event::UserEvent(AppEvent::A2uiFunctionResponse(call_id, response)) => {
-                match pending_a2ui.remove(&call_id) {
-                    Some(pending) => {
-                        let _ = pending.response.send(Ok(response));
-                    }
-                    None => tracing::debug!(
-                        %call_id,
-                        "callRendererFunction result with no waiting render_ui call — dropping"
-                    ),
-                }
-            }
             // ── A2UI control that failed to render ──────────────────────────
             // Nobody can answer a surface through a broken control, so a
             // `render_ui` call blocked on it would sit until its 30-minute cap
@@ -10712,9 +10714,8 @@ fn main() {
             Event::UserEvent(AppEvent::A2uiFailed(call_id, detail)) => {
                 if let Some(pending) = pending_a2ui.remove(&call_id) {
                     let _ = pending.response.send(Err(format!(
-                        "The surface rendered, but a control on it failed and the user cannot \
-                         answer it: {detail} Fix the envelope and call render_ui again with the \
-                         same surfaceId."
+                        "Part of the surface is broken: {detail} Fix it with render_ui: \
+                         updateComponents on the same surfaceId."
                     )));
                 }
             }
@@ -10842,6 +10843,9 @@ fn main() {
                 if terminal_visible {
                     hide_terminal!();
                 } else {
+                    if terminal_page_dead {
+                        reload_terminal_page!();
+                    }
                     terminal_focus_target = capture_panel_focus!();
                     terminal_visible = true;
                     layout_terminal!();
@@ -10928,6 +10932,17 @@ fn main() {
                 terminal::Request::Blur => panel_focus!("Terminal", None),
             },
             Event::UserEvent(AppEvent::TerminalOutput(id)) => terminals.flush(id),
+            Event::UserEvent(AppEvent::TerminalPageCrashed) => {
+                crash_report::log_webcontent_terminated(0, "octoweb:terminal", None, 0);
+                // A page that dies on load must not be reloaded as fast as it crashes.
+                const TERMINAL_CRASH_LOOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+                if terminal_page_reloaded_at.is_some_and(|at| at.elapsed() < TERMINAL_CRASH_LOOP_WINDOW) {
+                    tracing::error!("terminal page keeps crashing, reloading when the panel next opens");
+                    terminal_page_dead = true;
+                } else {
+                    reload_terminal_page!();
+                }
+            }
 
             // ── Right-hand pane: Notes (⌘⇧J) and Mail (⌘⇧I) tabs, left of a docked
             //     sidebar. Each chord opens its tab, switches to it, or hides it.
@@ -13936,7 +13951,7 @@ fn a2ui_replay_prompt(action: &serde_json::Value) -> String {
 		_ => String::new(),
 	};
 	format!(
-        "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface no `render_ui` call is waiting on (fire-and-forget update, replay, or a call that already timed out). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}{data_model_line}"
+        "[A2UI event — out-of-band click on prior surface]\nThe user clicked a button on a surface no `render_ui` call is waiting on (fire-and-forget update, replay, or a call that already timed out). The click is below — treat it as the user's choice and **do the work the event implies right now** (post the tweet, save the draft, advance the wizard, etc.). Then call `render_ui` again with `updateComponents` or `updateDataModel` for the SAME `surfaceId` AND `await_events` listing the remaining choices so the next click resolves normally instead of routing through here again.\n\nsurfaceId: {surface_id}\nevent: {name}\nsourceComponentId: {source}\ncontext: {context_json}{data_model_line}"
     )
 }
 
@@ -14815,7 +14830,7 @@ mod a2ui_tests {
 		json!({
 			"id": "u_1_0",
 			"status": "pending",
-			"messages": [{"version": "v1.0", "createSurface": {"surfaceId": "s1"}}],
+			"messages": [{"version": "1.0", "createSurface": {"surfaceId": "s1"}}],
 			"await_events": ["approve"],
 		})
 	}

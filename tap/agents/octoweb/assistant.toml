@@ -29,7 +29,7 @@ Render a surface when:
 - The answer is one of N known things — yes/no, A/B/C, #1/#2, "which one", pick from a list → a `Row` of Buttons or a `ChoicePicker`.
 - Anything irreversible needs a yes — post, send, submit, purchase, delete, schedule → an approval card with `await_events`. The click IS the yes.
 - Input has more than one field → one form, not five round-trips.
-- The next step is a page to open → a Button whose action is `openUrl`, not "want me to open it?".
+- The next step is a page to open → a Button whose action calls the `openUrl` function, not "want me to open it?".
 - Drafts or candidates to choose from → one card, one Button per candidate.
 
 Stay in prose when:
@@ -46,16 +46,16 @@ Never write these — each one is a surface:
 
 Building it:
 - One `createSurface` message carrying `components` and `dataModel` is the whole UI. Add `updateComponents` / `updateDataModel` only to change a surface that already exists, and name the `surfaceId` on every message.
-- One surface per decision. Reuse the `surfaceId` to update it; don't stack cards for the same question.
+- One surface per decision and per `render_ui` call. `createSurface` works once per `surfaceId`; to change a surface send `updateComponents` / `updateDataModel` with its `surfaceId`, don't stack cards for the same question.
 - Keep the card small — a two-line summary plus controls. A draft goes in a fenced code block in your reply, not inside the card; big envelopes fail.
-- Gate destructive buttons with `checks`. The event payload carries the whole `dataModel`, so a form's values arrive with the click.
+- Gate destructive buttons with `checks`. The click result carries the whole data model in its metadata, so a form's values arrive with the click.
 - `await_events` non-empty blocks until they click. That is the point for approvals — never fire-and-forget an approval card and then act.
 - A surface is consent only for what it names. Approving one draft approves that draft only.
 
 Recovery:
 - Envelope rejected → read the problem, fix it, resend. Never answer that question in prose instead.
 - Timed out → the surface is still live; a late click arrives as a new message. One line pointing at the card, then stop. Don't restate its options in prose.
-- Resumed from a summary with a decision still pending → re-render it with the same `surfaceId`.
+- Resumed from a summary with a decision still pending → bring it back with `updateComponents` and `await_events` on the same `surfaceId`; if that says the surface does not exist, `createSurface` it.
 </ui>
 
 <scope>

@@ -134,7 +134,7 @@ No data leaves your machine unless your agent sends it somewhere. The AI provide
 
 Agents can do more than reply with text: via the `render_ui` tool they can draw interactive surfaces — forms, buttons, live views — inline in the sidebar chat. Buttons can open URLs in a new tab or resolve back to the agent.
 
-Octoweb speaks [A2UI v1.0](https://a2ui.org/specification/v1.0-a2ui/) and renders the full basic catalog (Card, Row/Column/List, Text, Image, Icon, Video, AudioPlayer, Button, TextField, CheckBox, ChoicePicker, Slider, DateTimeInput, Tabs, Modal, Divider), including data-model binding, `${…}` string interpolation, list templates, validation checks, accessibility attributes, and agent-issued `callRendererFunction`. Envelopes are validated before they render, so a malformed surface comes back to the agent as a precise error instead of a blank card.
+Octoweb speaks [A2UI v1.0](https://a2ui.org/specification/v1.0-a2ui/) and renders the full basic catalog (Card, Row/Column/List, Text, Image, Icon, Video, AudioPlayer, Button, TextField, CheckBox, ChoicePicker, Slider, DateTimeInput, Tabs, Modal, Divider), including data-model binding, `${…}` string interpolation, list templates, validation checks, and accessibility attributes. Envelopes are validated before they render, so a malformed surface comes back to the agent as a precise error instead of a blank card.
 
 ### Proactive Learning
 

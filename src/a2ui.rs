@@ -12,37 +12,286 @@
 use serde_json::{json, Value};
 
 /// Stamped on every message the agent sends us.
-pub const PROTOCOL_VERSION: &str = "v1.0";
+pub const PROTOCOL_VERSION: &str = "1.0";
 
 /// Surface default when the agent doesn't name a catalog.
 pub const BASIC_CATALOG_ID: &str = "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json";
 
-/// The v1.0 basic catalog, in catalog order.
-pub const CATALOG_COMPONENTS: &[&str] = &[
-	"AudioPlayer",
-	"Button",
-	"Card",
-	"CheckBox",
-	"ChoicePicker",
-	"Column",
-	"DateTimeInput",
-	"Divider",
-	"Icon",
-	"Image",
-	"List",
-	"Modal",
-	"Row",
-	"Slider",
-	"Tabs",
-	"Text",
-	"TextField",
-	"Video",
+/// One basic-catalog component, copied from `catalogs/basic/v1/catalog.json`:
+/// the props it must carry, the ones it may, and the closed value sets of its
+/// string props. `checks` is allowed only where the catalog applies `Checkable`.
+struct ComponentSpec {
+	name: &'static str,
+	required: &'static [&'static str],
+	optional: &'static [&'static str],
+	enums: &'static [(&'static str, &'static [&'static str])],
+	checkable: bool,
+}
+
+/// Props every catalog component accepts on top of its own.
+const COMMON_PROPS: &[&str] = &["id", "component", "weight", "accessibility", "catalogId", "metadata"];
+
+/// The v1.0 basic catalog's functions, plus the universal `@index`.
+const CATALOG_FUNCTIONS: &[&str] = &[
+	"required",
+	"regex",
+	"length",
+	"numeric",
+	"email",
+	"formatString",
+	"formatNumber",
+	"formatCurrency",
+	"formatDate",
+	"pluralize",
+	"openUrl",
+	"and",
+	"or",
+	"not",
+	"@index",
 ];
 
-/// Components the renderer still draws but the catalog never had. They predate
-/// the v1.0 upgrade and stay accepted so surfaces replayed from an older
-/// session keep working; `render_ui`'s description no longer offers them.
-const LEGACY_COMPONENTS: &[&str] = &["Heading", "Markdown", "Spacer"];
+/// The basic catalog's Icon `name` values; any other literal draws as plain text.
+const ICON_NAMES: &[&str] = &[
+	"accountCircle",
+	"add",
+	"arrowBack",
+	"arrowForward",
+	"attachFile",
+	"calendarToday",
+	"call",
+	"camera",
+	"check",
+	"close",
+	"delete",
+	"download",
+	"edit",
+	"event",
+	"error",
+	"fastForward",
+	"favorite",
+	"favoriteOff",
+	"folder",
+	"help",
+	"home",
+	"info",
+	"locationOn",
+	"lock",
+	"lockOpen",
+	"mail",
+	"menu",
+	"moreVert",
+	"moreHoriz",
+	"notificationsOff",
+	"notifications",
+	"pause",
+	"payment",
+	"person",
+	"phone",
+	"photo",
+	"play",
+	"print",
+	"refresh",
+	"rewind",
+	"search",
+	"send",
+	"settings",
+	"share",
+	"shoppingCart",
+	"skipNext",
+	"skipPrevious",
+	"star",
+	"starHalf",
+	"starOff",
+	"stop",
+	"upload",
+	"visibility",
+	"visibilityOff",
+	"volumeDown",
+	"volumeMute",
+	"volumeOff",
+	"volumeUp",
+	"warning",
+];
+
+/// The v1.0 basic catalog, in catalog order.
+const COMPONENT_SPECS: &[ComponentSpec] = &[
+	ComponentSpec {
+		name: "Text",
+		required: &["text"],
+		optional: &["variant"],
+		enums: &[("variant", &["caption", "body"])],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Image",
+		required: &["url"],
+		optional: &["description", "fit", "variant"],
+		enums: &[
+			("fit", &["contain", "cover", "fill", "none", "scaleDown"]),
+			(
+				"variant",
+				&[
+					"icon",
+					"avatar",
+					"smallFeature",
+					"mediumFeature",
+					"largeFeature",
+					"header",
+				],
+			),
+		],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Icon",
+		required: &["name"],
+		optional: &[],
+		enums: &[("name", ICON_NAMES)],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Video",
+		required: &["url"],
+		optional: &["posterUrl"],
+		enums: &[],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "AudioPlayer",
+		required: &["url"],
+		optional: &["description"],
+		enums: &[],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Row",
+		required: &["children"],
+		optional: &["justify", "align"],
+		enums: &[
+			(
+				"justify",
+				&[
+					"center",
+					"end",
+					"spaceAround",
+					"spaceBetween",
+					"spaceEvenly",
+					"start",
+					"stretch",
+				],
+			),
+			("align", &["start", "center", "end", "stretch"]),
+		],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Column",
+		required: &["children"],
+		optional: &["justify", "align"],
+		enums: &[
+			(
+				"justify",
+				&[
+					"start",
+					"center",
+					"end",
+					"spaceBetween",
+					"spaceAround",
+					"spaceEvenly",
+					"stretch",
+				],
+			),
+			("align", &["center", "end", "start", "stretch"]),
+		],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "List",
+		required: &["children"],
+		optional: &["direction", "align"],
+		enums: &[
+			("direction", &["vertical", "horizontal"]),
+			("align", &["start", "center", "end", "stretch"]),
+		],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Card",
+		required: &["child"],
+		optional: &[],
+		enums: &[],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Tabs",
+		required: &["tabs"],
+		optional: &[],
+		enums: &[],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Modal",
+		required: &["trigger", "content"],
+		optional: &[],
+		enums: &[],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Divider",
+		required: &[],
+		optional: &["axis"],
+		enums: &[("axis", &["horizontal", "vertical"])],
+		checkable: false,
+	},
+	ComponentSpec {
+		name: "Button",
+		required: &["child", "action"],
+		optional: &["variant"],
+		enums: &[("variant", &["default", "primary", "borderless"])],
+		checkable: true,
+	},
+	ComponentSpec {
+		name: "TextField",
+		required: &["label", "value"],
+		optional: &["placeholder", "variant"],
+		enums: &[("variant", &["longText", "number", "shortText", "obscured"])],
+		checkable: true,
+	},
+	ComponentSpec {
+		name: "CheckBox",
+		required: &["label", "value"],
+		optional: &[],
+		enums: &[],
+		checkable: true,
+	},
+	ComponentSpec {
+		name: "ChoicePicker",
+		required: &["options", "value"],
+		optional: &["label", "variant", "displayStyle", "filterable"],
+		enums: &[
+			("variant", &["multipleSelection", "mutuallyExclusive"]),
+			("displayStyle", &["checkbox", "chips"]),
+		],
+		checkable: true,
+	},
+	ComponentSpec {
+		name: "Slider",
+		required: &["value", "max"],
+		optional: &["label", "min", "steps"],
+		enums: &[],
+		checkable: true,
+	},
+	ComponentSpec {
+		name: "DateTimeInput",
+		required: &["value"],
+		optional: &["enableDate", "enableTime", "min", "max", "label"],
+		enums: &[],
+		checkable: true,
+	},
+];
+
+/// The message kinds that name a surface.
+const SURFACE_KINDS: &[&str] = &["createSurface", "updateComponents", "updateDataModel", "deleteSurface"];
 
 /// The six agent → renderer message kinds.
 const MESSAGE_KINDS: &[&str] = &[
@@ -57,50 +306,98 @@ const MESSAGE_KINDS: &[&str] = &[
 /// Props that name another component by id.
 const CHILD_PROPS: &[&str] = &["child", "trigger", "content"];
 
-fn is_known_component(name: &str) -> bool {
-	CATALOG_COMPONENTS.contains(&name) || LEGACY_COMPONENTS.contains(&name)
-}
-
-/// Mirrors the sidebar renderer's Button: a click needs an event, an `openUrl`
-/// or a `functionCall` to go anywhere, and without one the renderer draws a
-/// broken control. `actions` is a spelling agents emit that it also accepts.
-fn button_action(button: &serde_json::Map<String, Value>) -> Option<&Value> {
-	button.get("action").or_else(|| button.get("actions"))
-}
-
+/// A Button needs `action.event.name` or `action.functionCall.@call` to send a
+/// click anywhere; without one the renderer draws a broken control.
 fn has_button_action(button: &serde_json::Map<String, Value>) -> bool {
-	let Some(action) = button_action(button) else {
+	let Some(action) = button.get("action") else {
 		return false;
 	};
 	action
 		.pointer("/event/name")
 		.and_then(Value::as_str)
 		.is_some_and(|name| !name.is_empty())
-		|| action.pointer("/functionCall/call").is_some_and(Value::is_string)
-		|| action
-			.get("openUrl")
-			.is_some_and(|url| url.is_string() || url.pointer("/url").is_some_and(Value::is_string))
+		|| action.pointer("/functionCall/@call").is_some_and(Value::is_string)
 }
 
-/// Why a blocking `render_ui` on a new surface could never be answered: it
-/// waits on `await_events`, but no Button in the envelope sends an event. Any
-/// event click completes the call, so only a surface with none is stuck until
-/// the timeout. Incremental envelopes may be answered by Buttons an earlier
-/// call drew, and a `callRendererFunction` answers the call itself.
+/// Report a component's props against its catalog entry: missing required
+/// props, props the component does not have (naming the ones it does), and
+/// string values outside a closed set.
+fn check_component_props(
+	obj: &serde_json::Map<String, Value>,
+	spec: &ComponentSpec,
+	at: &str,
+	problems: &mut Vec<String>,
+) {
+	for prop in spec.required {
+		if !obj.contains_key(*prop) {
+			problems.push(format!("{at} ({}) is missing required \"{prop}\".", spec.name));
+		}
+	}
+	let allowed = || {
+		COMMON_PROPS
+			.iter()
+			.chain(spec.required)
+			.chain(spec.optional)
+			.chain(spec.checkable.then_some(&"checks"))
+	};
+	for key in obj.keys().filter(|key| !allowed().any(|prop| *prop == key.as_str())) {
+		problems.push(format!(
+			"{at}.{key} is not a {} prop. {} accepts: {}.",
+			spec.name,
+			spec.name,
+			allowed().copied().collect::<Vec<_>>().join(", ")
+		));
+	}
+	for (prop, values) in spec.enums {
+		if let Some(value) = obj.get(*prop).and_then(Value::as_str).filter(|v| !values.contains(v)) {
+			problems.push(format!("{at}.{prop} \"{value}\" is not one of: {}.", values.join(", ")));
+		}
+	}
+}
+
+/// Why a blocking `render_ui` could never be answered: it waits on
+/// `await_events`, but nothing on the surface sends an event. Any event click
+/// completes the call, so only a surface with none is stuck until the timeout.
+/// A Button that only opens a Modal (it is the Modal's `trigger`) sends
+/// nothing. Incremental envelopes may be answered by Buttons an earlier call
+/// drew, unless they delete the surface and draw no new one.
 pub fn unanswerable_wait(messages: &[Value], await_events: &[String]) -> Option<String> {
 	let creates_surface = messages.iter().any(|m| m.get("createSurface").is_some());
-	let calls_renderer = messages.iter().any(|m| m.get("callRendererFunction").is_some());
-	if await_events.is_empty() || !creates_surface || calls_renderer {
+	let deletes_surface = messages.iter().any(|m| m.get("deleteSurface").is_some());
+	if await_events.is_empty() {
 		return None;
 	}
-	let sends_event = messages
+	if deletes_surface && !creates_surface {
+		return Some(format!(
+			"await_events is {await_events:?}, but this envelope deletes the surface and draws no \
+             new one, so there is nothing to click and the call would wait until it times out. \
+             Drop await_events."
+		));
+	}
+	if !creates_surface {
+		return None;
+	}
+	let components: Vec<&serde_json::Map<String, Value>> = messages
 		.iter()
 		.filter_map(|m| m.get("createSurface").or_else(|| m.get("updateComponents")))
 		.filter_map(|body| body.get("components")?.as_array())
 		.flatten()
 		.filter_map(Value::as_object)
+		.collect();
+	let modal_triggers: Vec<&str> = components
+		.iter()
+		.filter(|c| c.get("component").and_then(Value::as_str) == Some("Modal"))
+		.filter_map(|modal| modal.get("trigger")?.as_str())
+		.collect();
+	let sends_event = components
+		.iter()
 		.filter(|c| c.get("component").and_then(Value::as_str) == Some("Button"))
-		.filter_map(button_action)
+		.filter(|c| {
+			!c.get("id")
+				.and_then(Value::as_str)
+				.is_some_and(|id| modal_triggers.contains(&id))
+		})
+		.filter_map(|button| button.get("action"))
 		.any(|action| {
 			action
 				.pointer("/event/name")
@@ -110,9 +407,9 @@ pub fn unanswerable_wait(messages: &[Value], await_events: &[String]) -> Option<
 	(!sends_event).then(|| {
 		format!(
 			"await_events is {await_events:?}, but no Button on this surface has an \
-             \"action\": {{\"event\": {{\"name\"}}}}, so nothing can answer and the call would \
-             wait until it times out. Give a Button one of those event names, or drop \
-             await_events for a fire-and-forget update."
+             \"action\": {{\"event\": {{\"name\"}}}} (a Button that only opens a Modal does not \
+             count), so nothing can answer and the call would wait until it times out. Give a \
+             Button one of those event names, or drop await_events for a fire-and-forget update."
 		)
 	})
 }
@@ -123,9 +420,12 @@ fn kinds_of(msg: &serde_json::Map<String, Value>) -> Vec<&'static str> {
 }
 
 /// Bring an envelope up to v1.0 shape: stamp the protocol version on every
-/// message and give a surface the basic catalog when it names none. Both are
-/// required by the schema but neither changes what gets drawn, so we fill them
-/// in rather than rejecting an envelope over them.
+/// message, give a surface the basic catalog when it names none, and turn
+/// `sendDataModel` on when it is absent. The first two are required by the
+/// schema but neither changes what gets drawn, so we fill them in rather than
+/// rejecting an envelope over them. The spec defaults `sendDataModel` to false;
+/// octoweb stamps true at this agent layer so a form's values reach the agent
+/// unless it opts out with an explicit false.
 /// Fill a missing `surfaceId` on follow-up messages from the one `createSurface`
 /// in the same envelope. Models routinely open a surface and update it in one
 /// call, naming the surface only once; the intent is unambiguous when exactly
@@ -166,6 +466,7 @@ pub fn normalize(messages: &mut [Value]) {
 			surface
 				.entry("catalogId")
 				.or_insert_with(|| Value::String(BASIC_CATALOG_ID.into()));
+			surface.entry("sendDataModel").or_insert(Value::Bool(true));
 		}
 	}
 }
@@ -182,6 +483,8 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 	// Buttons with nowhere for a click to go, as (path, id).
 	let mut actionless: Vec<(String, String)> = Vec::new();
 	let mut has_create_surface = false;
+	// Distinct surfaces the envelope touches, in the order first seen.
+	let mut surfaces: Vec<&str> = Vec::new();
 
 	for (i, msg) in messages.iter().enumerate() {
 		let at = format!("messages[{i}]");
@@ -221,20 +524,18 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 			continue;
 		};
 
-		if matches!(
-			kind,
-			"createSurface" | "updateComponents" | "updateDataModel" | "deleteSurface"
-		) && !body
-			.get("surfaceId")
-			.and_then(|s| s.as_str())
-			.is_some_and(|s| !s.is_empty())
-		{
-			problems.push(format!("{at}.{kind} needs a non-empty \"surfaceId\"."));
+		if SURFACE_KINDS.contains(&kind) {
+			match body.get("surfaceId").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+				Some(id) if !surfaces.contains(&id) => surfaces.push(id),
+				Some(_) => {}
+				None => problems.push(format!("{at}.{kind} needs a non-empty \"surfaceId\".")),
+			}
 		}
 
 		match kind {
 			"createSurface" => {
 				has_create_surface = true;
+				check_catalog_id(body, &format!("{at}.createSurface"), &mut problems);
 				if let Some(components) = body.get("components") {
 					check_components(
 						components,
@@ -286,11 +587,23 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 				}
 				if !body
 					.get("callFunction")
-					.and_then(|f| f.get("call"))
+					.and_then(|f| f.get("@call"))
 					.and_then(|c| c.as_str())
 					.is_some_and(|s| !s.is_empty())
 				{
-					problems.push(format!("{at}.callRendererFunction.callFunction needs a \"call\" name."));
+					problems.push(format!(
+						"{at}.callRendererFunction.callFunction needs a \"@call\" name."
+					));
+				}
+				// The spec makes the catalog explicit on a call; there is no default to fall back on.
+				let call = body.get("callFunction").and_then(Value::as_object);
+				if call.is_some_and(|f| !f.contains_key("catalogId")) {
+					problems.push(format!(
+						"{at}.callRendererFunction.callFunction needs a \"catalogId\" (use {BASIC_CATALOG_ID})."
+					));
+				}
+				if let Some(call) = call {
+					check_catalog_id(call, &format!("{at}.callRendererFunction.callFunction"), &mut problems);
 				}
 			}
 			"agentFunctionResponse" => {
@@ -333,8 +646,19 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 		}
 		// The surface is a tree: a component listed by two parents is drawn
 		// twice, e.g. a Button's label Text also in the Row beside the Button.
-		for (k, (from, id)) in referenced.iter().enumerate() {
-			let first = referenced.iter().position(|(_, target)| target == id);
+		// A template is stamped out per row, so two Lists may share one. A later
+		// definition of an id replaces the earlier one, so what that one listed
+		// is no longer a parent.
+		let is_parent = |from: &str| {
+			let replaced = declared.iter().enumerate().any(|(i, (at, id))| {
+				from.starts_with(&format!("{at}.")) && declared[i + 1..].iter().any(|(_, later)| later == id)
+			});
+			!replaced && !from.ends_with(".children.componentId")
+		};
+		for (k, (from, id)) in referenced.iter().enumerate().filter(|(_, (from, _))| is_parent(from)) {
+			let first = referenced
+				.iter()
+				.position(|(from, target)| target == id && is_parent(from));
 			if let Some(first) = first.filter(|&first| first < k) {
 				problems.push(format!(
 					"{from} lists \"{id}\", which {} already lists, so it would render twice. \
@@ -354,22 +678,214 @@ pub fn validate(messages: &[Value]) -> Vec<String> {
 				));
 			}
 		}
-		// A Modal's trigger is the one Button that needs no action: opening
-		// the Modal is its click.
-		for (at, id) in &actionless {
-			let is_trigger = referenced
-				.iter()
-				.any(|(from, target)| target == id && from.ends_with(".trigger"));
-			if !is_trigger {
-				problems.push(format!(
-					"{at} is a Button with no action, so a click on it goes nowhere. Give it \
-                     \"action\": {{\"event\": {{\"name\": \"…\"}}}} (or openUrl / functionCall)."
-				));
-			}
+		for (at, _) in &actionless {
+			problems.push(format!(
+				"{at}.action has no event name or function call, so a click on the Button goes nowhere. Give it \
+                 {{\"event\": {{\"name\": \"…\"}}}} or {{\"functionCall\": {{\"@call\": \"openUrl\", \"args\": {{\"url\": \"…\"}}}}}}."
+			));
 		}
 	}
 
+	if surfaces.len() > 1 {
+		problems.push(format!(
+			"This envelope touches {} surfaces ({}). Send one surface per render_ui call: one \
+             chat bubble and one blocked call map to one surface.",
+			surfaces.len(),
+			surfaces.join(", ")
+		));
+	}
+
 	problems
+}
+
+/// The basic catalog is the only one octoweb has, so any other `catalogId` names
+/// components or functions it cannot draw or run.
+fn check_catalog_id(owner: &serde_json::Map<String, Value>, at: &str, problems: &mut Vec<String>) {
+	if let Some(id) = owner
+		.get("catalogId")
+		.filter(|id| id.as_str() != Some(BASIC_CATALOG_ID))
+	{
+		problems.push(format!(
+			"{at}.catalogId is {id}, but the only catalog this renderer has is \"{BASIC_CATALOG_ID}\"."
+		));
+	}
+}
+
+/// The surface a message addresses, with the kind that names it.
+fn surface_message(msg: &Value) -> Option<(&'static str, &str)> {
+	SURFACE_KINDS.iter().find_map(|kind| {
+		let id = msg.get(*kind)?.get("surfaceId")?.as_str().filter(|id| !id.is_empty())?;
+		Some((*kind, id))
+	})
+}
+
+/// A renderer → agent `error` message (spec `error`).
+fn error_message(code: &str, surface_id: &str, path: &str, message: &str) -> Value {
+	json!({
+		"version": PROTOCOL_VERSION,
+		"error": {"code": code, "surfaceId": surface_id, "path": path, "message": message},
+	})
+}
+
+/// JSON Pointer to the leading `messages[i].kind[j]…` accessor chain of a
+/// `validate` problem, or "/" for a problem that is about the envelope as a whole.
+fn problem_pointer(problem: &str) -> String {
+	let Some(mut rest) = problem.strip_prefix("messages") else {
+		return "/".to_string();
+	};
+	let mut pointer = String::from("/messages");
+	loop {
+		if let Some(after) = rest.strip_prefix('[') {
+			let Some((index, tail)) = after.split_once(']') else {
+				break;
+			};
+			if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+				break;
+			}
+			pointer.push('/');
+			pointer.push_str(index);
+			rest = tail;
+		} else if let Some(after) = rest.strip_prefix('.') {
+			let end = after
+				.find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '@' | '-')))
+				.unwrap_or(after.len());
+			if end == 0 {
+				break;
+			}
+			pointer.push('/');
+			pointer.push_str(&after[..end].replace('~', "~0").replace('/', "~1"));
+			rest = &after[end..];
+		} else {
+			break;
+		}
+	}
+	pointer
+}
+
+/// The tool error for an envelope `validate` (or `unanswerable_wait`) turned
+/// down: the sentence the agents already know, then one spec `error` message
+/// per problem, one JSON object per line.
+pub fn rejection_text(problems: &[String], messages: &[Value]) -> String {
+	let surface_id = messages.iter().find_map(surface_message).map_or("", |(_, id)| id);
+	let lines: Vec<String> = problems
+		.iter()
+		.map(|problem| error_message("VALIDATION_FAILED", surface_id, &problem_pointer(problem), problem).to_string())
+		.collect();
+	format!("This A2UI envelope will not render:\n{}", lines.join("\n"))
+}
+
+/// The basic catalog declares no `allowedCallers`, which makes every function
+/// `rendererOnly`: an agent may not call any of them. Take every
+/// `callRendererFunction` out of the envelope and answer each with the
+/// `rendererFunctionResponse` the spec prescribes, without the renderer ever
+/// seeing the call.
+pub fn reject_renderer_calls(messages: &mut Vec<Value>) -> Vec<Value> {
+	let mut responses = Vec::new();
+	messages.retain(|msg| {
+		let Some(call) = msg.get("callRendererFunction") else {
+			return true;
+		};
+		let id = call["functionCallId"].as_str().unwrap_or_default();
+		let name = call["callFunction"]["@call"].as_str().unwrap_or_default();
+		responses.push(json!({
+			"version": PROTOCOL_VERSION,
+			"rendererFunctionResponse": {
+				"functionCallId": id,
+				"error": {
+					"code": "INVALID_FUNCTION_CALL",
+					"message": format!(
+						"\"{name}\" is rendererOnly in the basic catalog, so an agent cannot call it. \
+						 Put it in a component property or a Button action."
+					),
+				},
+			},
+		}));
+		false
+	});
+	responses
+}
+
+/// Surfaces that exist after `msg`, per the lifecycle rules: `createSurface`
+/// adds one and `deleteSurface` removes it.
+fn track_surface(live: &mut std::collections::HashSet<String>, msg: &Value) {
+	match surface_message(msg) {
+		Some(("createSurface", id)) => {
+			live.insert(id.to_string());
+		}
+		Some(("deleteSurface", id)) => {
+			live.remove(id);
+		}
+		_ => {}
+	}
+}
+
+/// Check `incoming` against the surfaces this session already has. `saved` is
+/// the session's stored A2UI bodies, oldest first; only their v1.0 messages
+/// count. Creating a live surface is an `INTEGRITY_ERROR`; updating or deleting
+/// one that is not live is `VALIDATION_FAILED`. Returns the spec `error`
+/// message as JSON text for the first violation.
+pub fn surface_lifecycle_error<'a>(saved: impl IntoIterator<Item = &'a Value>, incoming: &[Value]) -> Option<String> {
+	let mut live = std::collections::HashSet::new();
+	for body in saved {
+		let messages = body.get("messages").and_then(Value::as_array).into_iter().flatten();
+		for msg in messages.filter(|m| m.get("version").and_then(Value::as_str) == Some(PROTOCOL_VERSION)) {
+			track_surface(&mut live, msg);
+		}
+	}
+	for (i, msg) in incoming.iter().enumerate() {
+		let Some((kind, id)) = surface_message(msg) else {
+			continue;
+		};
+		let violation = match (kind, live.contains(id)) {
+			("createSurface", true) => Some((
+				"INTEGRITY_ERROR",
+				format!(
+					"Surface \"{id}\" already exists. Send updateComponents or updateDataModel to change it, \
+					 or deleteSurface first to recreate it."
+				),
+			)),
+			("createSurface", false) | (_, true) => None,
+			(_, false) => Some((
+				"VALIDATION_FAILED",
+				format!("Surface \"{id}\" does not exist. Send createSurface for it first."),
+			)),
+		};
+		if let Some((code, message)) = violation {
+			return Some(error_message(code, id, &format!("/messages/{i}/{kind}"), &message).to_string());
+		}
+		track_surface(&mut live, msg);
+	}
+	None
+}
+
+/// A click as it goes to the agent: the spec `action` message, plus the
+/// surface's data model under `metadata` when the surface sends it. The
+/// internal resolution (with `actor`) stays what the sidebar and saved state use.
+pub fn action_message(resolution: &Value) -> Value {
+	let mut action = serde_json::Map::new();
+	for key in [
+		"name",
+		"surfaceId",
+		"sourceComponentId",
+		"timestamp",
+		"context",
+		"userMessage",
+	] {
+		if let Some(value) = resolution.get(key).filter(|v| !v.is_null()) {
+			action.insert(key.to_string(), value.clone());
+		}
+	}
+	let mut message = json!({"version": PROTOCOL_VERSION, "action": action});
+	if let Some(model) = resolution.get("dataModel").filter(|m| !m.is_null()) {
+		let surface_id = resolution["surfaceId"].as_str().unwrap_or_default();
+		message["metadata"] = json!({
+			"a2uiRendererDataModel": {
+				"version": PROTOCOL_VERSION,
+				"surfaces": {surface_id: model},
+			},
+		});
+	}
+	message
 }
 
 fn check_components(
@@ -412,18 +928,25 @@ fn check_components(
 				continue;
 			}
 		};
+		check_catalog_id(obj, &at, problems);
 		if name == "Surface" {
 			problems.push(format!(
 				"{at} uses the reserved \"Surface\" component — the surface wraps your \"root\" \
                  component for you."
 			));
-		} else if !is_known_component(name) {
+		} else if let Some(spec) = COMPONENT_SPECS.iter().find(|spec| spec.name == name) {
+			check_component_props(obj, spec, &at, problems);
+		} else {
 			problems.push(format!(
 				"{at} uses unknown component \"{name}\". The catalog is: {}.",
-				CATALOG_COMPONENTS.join(", ")
+				COMPONENT_SPECS
+					.iter()
+					.map(|spec| spec.name)
+					.collect::<Vec<_>>()
+					.join(", ")
 			));
 		}
-		if name == "Button" && !has_button_action(obj) {
+		if name == "Button" && obj.contains_key("action") && !has_button_action(obj) {
 			if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
 				actionless.push((at.clone(), id.to_string()));
 			}
@@ -433,6 +956,9 @@ fn check_components(
 			if let Some(id) = obj.get(*prop).and_then(|v| v.as_str()) {
 				referenced.push((format!("{at}.{prop}"), id.to_string()));
 			}
+		}
+		for (prop, value) in obj.iter().filter(|(prop, _)| *prop != "children") {
+			check_dynamic_values(value, &format!("{at}.{prop}"), problems);
 		}
 		match obj.get("children") {
 			// Static child list.
@@ -466,8 +992,7 @@ fn check_components(
 		}
 		if let Some(tabs) = obj.get("tabs").and_then(|t| t.as_array()) {
 			for (j, tab) in tabs.iter().enumerate() {
-				// `content` was the v0.9 spelling; both resolve to a child id.
-				let child = tab.get("child").or_else(|| tab.get("content")).and_then(|v| v.as_str());
+				let child = tab.get("child").and_then(|v| v.as_str());
 				match child {
 					Some(id) => referenced.push((format!("{at}.tabs[{j}].child"), id.into())),
 					None => problems.push(format!("{at}.tabs[{j}] needs a \"child\" id.")),
@@ -475,6 +1000,73 @@ fn check_components(
 			}
 		}
 	}
+}
+
+/// Walks a prop value for the two ways a v1.0 DynamicValue goes wrong: an unescaped
+/// reserved `@` key, and a binding or call written without its `@` (which would render
+/// silently as literal data). `children` is skipped by the caller: its `path` is plain.
+fn check_dynamic_values(value: &Value, at: &str, problems: &mut Vec<String>) {
+	match value {
+		Value::Object(map) => {
+			if map.contains_key("@call") {
+				check_catalog_id(map, at, problems);
+				if let Some(name) = map
+					.get("@call")
+					.and_then(Value::as_str)
+					.filter(|name| !CATALOG_FUNCTIONS.contains(name))
+				{
+					problems.push(format!(
+						"{at}.@call \"{name}\" is not a catalog function. The catalog has: {}.",
+						CATALOG_FUNCTIONS.join(", ")
+					));
+				}
+			}
+			for key in map
+				.keys()
+				.filter(|k| is_reserved_key(k) && *k != "@path" && *k != "@call")
+			{
+				problems.push(format!(
+					"{at} uses reserved key \"{key}\"; escape a literal leading @ as @@."
+				));
+			}
+			let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+			keys.sort_unstable();
+			match keys.as_slice() {
+				["path"] => problems.push(format!(
+					"{at} is {{\"path\": ...}}, which is literal data. To bind, write {{\"@path\": ...}}."
+				)),
+				["call"] | ["args", "call"] => problems.push(format!(
+					"{at} is {{\"call\": ...}}, which is literal data. To call a function, write {{\"@call\": ...}}."
+				)),
+				_ => {}
+			}
+			for (key, inner) in map {
+				let inner_at = format!("{at}.{key}");
+				// An event's context keys are names the author chose, so only its
+				// values are DynamicValues.
+				if key == "context" && at.ends_with(".event") {
+					if let Some(context) = inner.as_object() {
+						for (name, value) in context {
+							check_dynamic_values(value, &format!("{inner_at}.{name}"), problems);
+						}
+						continue;
+					}
+				}
+				check_dynamic_values(inner, &inner_at, problems);
+			}
+		}
+		Value::Array(items) => {
+			for (i, inner) in items.iter().enumerate() {
+				check_dynamic_values(inner, &format!("{at}[{i}]"), problems);
+			}
+		}
+		_ => {}
+	}
+}
+
+/// `@` followed by anything but another `@` is reserved by the v1.0 wire format.
+fn is_reserved_key(key: &str) -> bool {
+	key.strip_prefix('@').is_some_and(|rest| !rest.starts_with('@'))
 }
 
 /// Button events of an elicitation surface. `elicitation_result` turns them into the MCP action.
@@ -541,7 +1133,7 @@ fn elicitation_field(id: &str, name: &str, property: &Value) -> Value {
 		None => title.to_string(),
 	};
 	// A property name may hold `/` or `~`, which are structure in a JSON Pointer.
-	let value = json!({"path": format!("/{}", name.replace('~', "~0").replace('/', "~1"))});
+	let value = json!({"@path": format!("/{}", name.replace('~', "~0").replace('/', "~1"))});
 	let kind = property["type"].as_str();
 	if kind == Some("boolean") {
 		return json!({"id": id, "component": "CheckBox", "label": label, "value": value});
@@ -622,10 +1214,35 @@ fn elicitation_value(property: &Value, raw: &Value) -> Option<Value> {
 mod tests {
 	use super::*;
 
+	#[test]
+	fn a_later_definition_replaces_the_children_the_earlier_one_listed() {
+		let messages = vec![
+			json!({"createSurface": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Column", "children": ["a"]},
+				{"id": "a", "component": "Text", "text": "a"}
+			]}}),
+			json!({"updateComponents": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Column", "children": ["a"]}
+			]}}),
+		];
+		assert_eq!(validate(&messages), Vec::<String>::new());
+	}
+
+	#[test]
+	fn two_lists_may_share_one_template() {
+		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Column", "children": ["first", "second"]},
+			{"id": "first", "component": "List", "children": {"componentId": "row", "path": "/a"}},
+			{"id": "second", "component": "List", "children": {"componentId": "row", "path": "/b"}},
+			{"id": "row", "component": "Text", "text": {"@path": "name"}}
+		]}})];
+		assert_eq!(validate(&messages), Vec::<String>::new());
+	}
+
 	/// One createSurface carrying a complete, valid tree.
 	fn good() -> Vec<Value> {
 		vec![json!({
-			"version": "v1.0",
+			"version": "1.0",
 			"createSurface": {
 				"surfaceId": "s1",
 				"components": [
@@ -678,10 +1295,53 @@ mod tests {
 	}
 
 	#[test]
-	fn normalize_keeps_an_explicit_catalog() {
-		let mut messages = vec![json!({"createSurface": {"surfaceId": "s1", "catalogId": "acme.com:custom"}})];
+	fn normalize_stamps_send_data_model_and_honours_an_explicit_false() {
+		let mut messages = vec![
+			json!({"createSurface": {"surfaceId": "s1"}}),
+			json!({"createSurface": {"surfaceId": "s2", "sendDataModel": false}}),
+		];
 		normalize(&mut messages);
-		assert_eq!(messages[0]["createSurface"]["catalogId"], "acme.com:custom");
+		assert_eq!(messages[0]["createSurface"]["sendDataModel"], true);
+		assert_eq!(messages[1]["createSurface"]["sendDataModel"], false);
+	}
+
+	#[test]
+	fn a_catalog_other_than_the_basic_one_is_reported() {
+		let surface = validate(&[json!({"createSurface": {"surfaceId": "s1", "catalogId": "acme.com:custom"}})]);
+		assert!(
+			surface.iter().any(|p| p.contains("createSurface.catalogId")),
+			"{surface:?}"
+		);
+
+		let component = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "a", "component": "Text", "text": "hi", "catalogId": "acme.com:custom"}
+		]}})]);
+		assert!(
+			component.iter().any(|p| p.contains("components[0].catalogId")),
+			"{component:?}"
+		);
+
+		let call = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "a", "component": "Text",
+			 "text": {"@call": "required", "catalogId": "acme.com:custom", "args": {}}}
+		]}})]);
+		assert!(
+			call.iter().any(|p| p.contains("components[0].text.catalogId")),
+			"{call:?}"
+		);
+
+		let renderer_call = validate(&[json!({"callRendererFunction": {"functionCallId": "c1",
+			"callFunction": {"@call": "required", "catalogId": "acme.com:custom"}}})]);
+		assert!(
+			renderer_call.iter().any(|p| p.contains("callFunction.catalogId")),
+			"{renderer_call:?}"
+		);
+
+		// The basic catalog named explicitly is fine, and normalize still fills a missing one.
+		let mut named = vec![json!({"createSurface": {"surfaceId": "s1", "catalogId": BASIC_CATALOG_ID}})];
+		assert_eq!(validate(&named), Vec::<String>::new());
+		normalize(&mut named);
+		assert_eq!(named[0]["createSurface"]["catalogId"], BASIC_CATALOG_ID);
 	}
 
 	#[test]
@@ -695,25 +1355,25 @@ mod tests {
 	#[test]
 	fn every_v1_message_kind_is_accepted() {
 		let messages = vec![
-			json!({"version": "v1.0", "createSurface": {"surfaceId": "s1"}}),
-			json!({"version": "v1.0", "updateComponents": {"surfaceId": "s1", "components": [
+			json!({"version": "1.0", "createSurface": {"surfaceId": "s1"}}),
+			json!({"version": "1.0", "updateComponents": {"surfaceId": "s1", "components": [
 				{"id": "root", "component": "Text", "text": "hi"}
 			]}}),
-			json!({"version": "v1.0", "updateDataModel": {"surfaceId": "s1", "path": "/a", "value": 1}}),
-			json!({"version": "v1.0", "callRendererFunction": {
+			json!({"version": "1.0", "updateDataModel": {"surfaceId": "s1", "path": "/a", "value": 1}}),
+			json!({"version": "1.0", "callRendererFunction": {
 				"functionCallId": "c1",
-				"callFunction": {"call": "openUrl", "catalogId": BASIC_CATALOG_ID,
+				"callFunction": {"@call": "openUrl", "catalogId": BASIC_CATALOG_ID,
 								 "args": {"url": "https://example.com"}}
 			}}),
-			json!({"version": "v1.0", "agentFunctionResponse": {"functionCallId": "c1", "value": 7}}),
-			json!({"version": "v1.0", "deleteSurface": {"surfaceId": "s1"}}),
+			json!({"version": "1.0", "agentFunctionResponse": {"functionCallId": "c1", "value": 7}}),
+			json!({"version": "1.0", "deleteSurface": {"surfaceId": "s1"}}),
 		];
 		assert_eq!(validate(&messages), Vec::<String>::new());
 	}
 
 	#[test]
 	fn a_message_must_carry_exactly_one_kind() {
-		let none = validate(&[json!({"version": "v1.0"})]);
+		let none = validate(&[json!({"version": "1.0"})]);
 		assert!(none[0].contains("no message kind"), "{none:?}");
 
 		let both = validate(&[json!({
@@ -773,11 +1433,115 @@ mod tests {
 	}
 
 	#[test]
-	fn legacy_render_ui_components_still_validate() {
-		let messages = vec![json!({"updateComponents": {"surfaceId": "s1", "components": [
-			{"id": "root", "component": "Heading", "text": "Hi", "level": 2}
-		]}})];
-		assert_eq!(validate(&messages), Vec::<String>::new());
+	fn components_outside_the_catalog_are_unknown() {
+		for name in ["Heading", "Markdown", "Spacer"] {
+			let messages = vec![json!({"updateComponents": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": name, "text": "Hi"}
+			]}})];
+			let problems = validate(&messages);
+			assert!(problems[0].contains("unknown component"), "{problems:?}");
+		}
+	}
+
+	#[test]
+	fn a_missing_required_prop_is_reported_by_path() {
+		let problems = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Slider", "value": 1}
+		]}})]);
+		assert_eq!(problems.len(), 1, "{problems:?}");
+		assert!(problems[0].contains("updateComponents.components[0]"), "{problems:?}");
+		assert!(problems[0].contains("missing required \"max\""), "{problems:?}");
+	}
+
+	#[test]
+	fn an_unknown_prop_names_the_ones_the_component_has() {
+		let problems = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Column", "children": [], "gap": 8}
+		]}})]);
+		assert_eq!(problems.len(), 1, "{problems:?}");
+		assert!(
+			problems[0].contains(".components[0].gap is not a Column prop"),
+			"{problems:?}"
+		);
+		assert!(
+			problems[0].contains("justify") && problems[0].contains("align"),
+			"{problems:?}"
+		);
+	}
+
+	#[test]
+	fn checks_are_allowed_only_on_checkable_components() {
+		let checks = json!([{"condition": true, "message": "m"}]);
+		let ok = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "CheckBox", "label": "l", "value": false, "checks": checks}
+		]}})]);
+		assert_eq!(ok, Vec::<String>::new());
+		let bad = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": "t", "checks": checks}
+		]}})]);
+		assert!(bad.iter().any(|p| p.contains(".checks is not a Text prop")), "{bad:?}");
+	}
+
+	#[test]
+	fn a_literal_outside_the_enum_is_reported_and_a_binding_is_not() {
+		let bad = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Button", "child": "x", "variant": "danger",
+			 "action": {"event": {"name": "go"}}}
+		]}})]);
+		assert_eq!(bad.len(), 1, "{bad:?}");
+		assert!(
+			bad[0].contains(".variant \"danger\" is not one of: default, primary, borderless"),
+			"{bad:?}"
+		);
+		let bound = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": "t", "variant": {"@path": "/v"}}
+		]}})]);
+		assert_eq!(bound, Vec::<String>::new());
+	}
+
+	#[test]
+	fn a_call_names_a_catalog_function_or_index() {
+		let bad = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": {"@call": "upper", "args": {}}}
+		]}})]);
+		assert!(
+			bad.iter().any(|p| p.contains("\"upper\" is not a catalog function")),
+			"{bad:?}"
+		);
+		let ok = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": {"@call": "@index"}}
+		]}})]);
+		assert_eq!(ok, Vec::<String>::new());
+	}
+
+	#[test]
+	fn the_content_spelling_of_a_tab_is_rejected() {
+		let problems = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Tabs", "tabs": [{"title": "One", "content": "p1"}]}
+		]}})]);
+		assert!(
+			problems.iter().any(|p| p.contains("tabs[0] needs a \"child\"")),
+			"{problems:?}"
+		);
+	}
+
+	#[test]
+	fn the_actions_and_open_url_button_spellings_are_rejected() {
+		for button in [
+			json!({"id": "root", "component": "Button", "child": "x", "actions": {"event": {"name": "n"}}}),
+			json!({"id": "root", "component": "Button", "child": "x", "action": {"openUrl": {"url": "https://x.test"}}}),
+		] {
+			let problems = validate(&[json!({"createSurface": {"surfaceId": "s1", "components": [
+				button,
+				{"id": "x", "component": "Text", "text": "Go"}
+			]}})]);
+			assert!(
+				problems
+					.iter()
+					.any(|p| p.contains("missing required \"action\"") || p.contains("no event name")),
+				"{problems:?}"
+			);
+		}
 	}
 
 	#[test]
@@ -827,7 +1591,7 @@ mod tests {
 	fn a_child_list_template_needs_a_component_id_and_path() {
 		let ok = validate(&[json!({"createSurface": {"surfaceId": "s1", "components": [
 			{"id": "root", "component": "List", "children": {"componentId": "row", "path": "/items"}},
-			{"id": "row", "component": "Text", "text": {"path": "name"}}
+			{"id": "row", "component": "Text", "text": {"@path": "name"}}
 		]}})]);
 		assert_eq!(ok, Vec::<String>::new());
 
@@ -839,16 +1603,59 @@ mod tests {
 	}
 
 	#[test]
-	fn tabs_children_are_resolved_in_either_spelling() {
+	fn tabs_children_are_resolved_through_child() {
 		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
 			{"id": "root", "component": "Tabs", "tabs": [
 				{"title": "One", "child": "p1"},
-				{"title": "Two", "content": "p2"}
+				{"title": "Two", "child": "p2"}
 			]},
 			{"id": "p1", "component": "Text", "text": "1"},
 			{"id": "p2", "component": "Text", "text": "2"}
 		]}})];
 		assert_eq!(validate(&messages), Vec::<String>::new());
+	}
+
+	#[test]
+	fn a_reserved_at_key_is_reported_and_double_at_is_not() {
+		let bad = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": {"nested": [{"@bogus": 1}]}}
+		]}})]);
+		assert!(
+			bad.iter()
+				.any(|p| p.contains("reserved key \"@bogus\"") && p.contains("@@")),
+			"{bad:?}"
+		);
+
+		let ok = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Text", "text": {"@@type": 1, "v": {"@path": "/a"}}}
+		]}})]);
+		assert_eq!(ok, Vec::<String>::new());
+	}
+
+	#[test]
+	fn a_binding_or_call_without_its_at_is_reported() {
+		let problems = validate(&[json!({"updateComponents": {"surfaceId": "s1", "components": [
+			{"id": "a", "component": "Text", "text": {"path": "/x"}},
+			{"id": "b", "component": "Text", "text": {"call": "required"}},
+			{"id": "c", "component": "Button", "child": "a",
+			 "action": {"functionCall": {"call": "openUrl", "args": {}}}}
+		]}})]);
+		assert!(
+			problems
+				.iter()
+				.any(|p| p.contains("[0].text") && p.contains("{\"@path\": ...}")),
+			"{problems:?}"
+		);
+		assert!(
+			problems
+				.iter()
+				.any(|p| p.contains("[1].text") && p.contains("{\"@call\": ...}")),
+			"{problems:?}"
+		);
+		assert!(
+			problems.iter().any(|p| p.contains("[2].action.functionCall")),
+			"{problems:?}"
+		);
 	}
 
 	#[test]
@@ -861,10 +1668,186 @@ mod tests {
 	}
 
 	#[test]
-	fn a_function_call_needs_an_id_and_a_name() {
+	fn a_function_call_needs_an_id_a_name_and_a_catalog() {
 		let problems = validate(&[json!({"callRendererFunction": {"callFunction": {}}})]);
 		assert!(problems.iter().any(|p| p.contains("functionCallId")), "{problems:?}");
-		assert!(problems.iter().any(|p| p.contains("\"call\"")), "{problems:?}");
+		assert!(problems.iter().any(|p| p.contains("\"@call\"")), "{problems:?}");
+		assert!(problems.iter().any(|p| p.contains("\"catalogId\"")), "{problems:?}");
+	}
+
+	#[test]
+	fn every_renderer_function_call_is_answered_with_invalid_function_call() {
+		let mut messages = vec![
+			json!({"version": "1.0", "callRendererFunction": {"functionCallId": "c1",
+				"callFunction": {"@call": "openUrl", "catalogId": BASIC_CATALOG_ID,
+					"args": {"url": "https://example.com"}}}}),
+			json!({"version": "1.0", "updateDataModel": {"surfaceId": "s1", "path": "/a", "value": 1}}),
+			json!({"version": "1.0", "callRendererFunction": {"functionCallId": "c2",
+				"callFunction": {"@call": "required", "catalogId": BASIC_CATALOG_ID}}}),
+		];
+		let responses = reject_renderer_calls(&mut messages);
+		assert_eq!(messages.len(), 1);
+		assert!(messages[0].get("updateDataModel").is_some());
+		assert_eq!(responses.len(), 2);
+		for (response, id) in responses.iter().zip(["c1", "c2"]) {
+			assert_eq!(response["version"], "1.0");
+			let body = &response["rendererFunctionResponse"];
+			assert_eq!(body["functionCallId"], id);
+			assert_eq!(body["error"]["code"], "INVALID_FUNCTION_CALL");
+			assert!(body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+		}
+
+		// An envelope of nothing but calls leaves nothing to paint.
+		let mut only_calls = vec![messages_call()];
+		assert_eq!(reject_renderer_calls(&mut only_calls).len(), 1);
+		assert!(only_calls.is_empty());
+	}
+
+	fn messages_call() -> Value {
+		json!({"version": "1.0", "callRendererFunction": {"functionCallId": "c9",
+			"callFunction": {"@call": "openUrl", "catalogId": BASIC_CATALOG_ID}}})
+	}
+
+	#[test]
+	fn a_wait_with_a_function_call_still_needs_a_button_that_sends_an_event() {
+		let awaited = vec!["pick".to_string()];
+		let messages = vec![
+			json!({"createSurface": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Text", "text": "hi"}
+			]}}),
+			messages_call(),
+		];
+		assert!(unanswerable_wait(&messages, &awaited).is_some());
+	}
+
+	#[test]
+	fn one_envelope_may_name_only_one_surface() {
+		let problems = validate(&[
+			json!({"createSurface": {"surfaceId": "a"}}),
+			json!({"updateDataModel": {"surfaceId": "b", "path": "/x", "value": 1}}),
+		]);
+		assert!(
+			problems.iter().any(|p| p.contains("one surface per render_ui call")),
+			"{problems:?}"
+		);
+		let same = validate(&[
+			json!({"createSurface": {"surfaceId": "a"}}),
+			json!({"updateDataModel": {"surfaceId": "a", "path": "/x", "value": 1}}),
+		]);
+		assert_eq!(same, Vec::<String>::new());
+	}
+
+	/// A saved render_ui body holding `messages`.
+	fn saved(messages: Vec<Value>) -> Value {
+		json!({"id": "u_1", "status": "resolved", "messages": messages})
+	}
+
+	fn create(id: &str) -> Value {
+		json!({"version": "1.0", "createSurface": {"surfaceId": id}})
+	}
+
+	fn delete(id: &str) -> Value {
+		json!({"version": "1.0", "deleteSurface": {"surfaceId": id}})
+	}
+
+	fn update_model(id: &str) -> Value {
+		json!({"version": "1.0", "updateDataModel": {"surfaceId": id, "path": "/a", "value": 1}})
+	}
+
+	fn error_of(text: &str) -> Value {
+		serde_json::from_str::<Value>(text).expect("error JSON")["error"].clone()
+	}
+
+	#[test]
+	fn creating_a_live_surface_is_an_integrity_error() {
+		let bodies = [saved(vec![create("s1")])];
+		let text = surface_lifecycle_error(&bodies, &[create("s1")]).expect("rejected");
+		let error = error_of(&text);
+		assert_eq!(error["code"], "INTEGRITY_ERROR");
+		assert_eq!(error["surfaceId"], "s1");
+		assert!(error["message"].as_str().unwrap().contains("deleteSurface"));
+		// Recreating after a delete, in the same envelope or an earlier call, is fine.
+		assert_eq!(surface_lifecycle_error(&bodies, &[delete("s1"), create("s1")]), None);
+		let deleted = [saved(vec![create("s1")]), saved(vec![delete("s1")])];
+		assert_eq!(surface_lifecycle_error(&deleted, &[create("s1")]), None);
+	}
+
+	#[test]
+	fn updating_or_deleting_a_surface_that_is_not_live_fails_validation() {
+		let none: [Value; 0] = [];
+		for msg in [update_model("s1"), delete("s1")] {
+			let text = surface_lifecycle_error(&none, &[msg]).expect("rejected");
+			let error = error_of(&text);
+			assert_eq!(error["code"], "VALIDATION_FAILED");
+			assert!(error["message"].as_str().unwrap().contains("createSurface"));
+		}
+		// A surface created earlier in the same envelope is live for what follows.
+		assert_eq!(
+			surface_lifecycle_error(&none, &[create("s1"), update_model("s1")]),
+			None
+		);
+		// ...and one deleted earlier in it is not.
+		let bodies = [saved(vec![create("s1")])];
+		assert!(surface_lifecycle_error(&bodies, &[delete("s1"), update_model("s1")]).is_some());
+	}
+
+	#[test]
+	fn only_v1_messages_in_saved_bodies_count_toward_live_surfaces() {
+		let legacy = json!({"createSurface": {"surfaceId": "s1"}});
+		let bodies = [saved(vec![legacy])];
+		assert!(surface_lifecycle_error(&bodies, &[update_model("s1")]).is_some());
+		assert_eq!(surface_lifecycle_error(&bodies, &[create("s1")]), None);
+	}
+
+	#[test]
+	fn validation_failures_become_spec_error_messages() {
+		let messages = vec![
+			json!({"version": "1.0", "updateComponents": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Nope"}
+			]}}),
+		];
+		let problems = validate(&messages);
+		let text = rejection_text(&problems, &messages);
+		let (head, lines) = text.split_once('\n').expect("head and error lines");
+		assert_eq!(head, "This A2UI envelope will not render:");
+		let error = error_of(lines.lines().next().unwrap());
+		assert_eq!(error["code"], "VALIDATION_FAILED");
+		assert_eq!(error["surfaceId"], "s1");
+		assert_eq!(error["path"], "/messages/0/updateComponents/components/0");
+		assert_eq!(error["message"], problems[0]);
+
+		// A problem about the envelope as a whole points at the root.
+		let whole = rejection_text(&["This envelope is odd.".to_string()], &[]);
+		let error = error_of(whole.lines().nth(1).unwrap());
+		assert_eq!(error["path"], "/");
+		assert_eq!(error["surfaceId"], "");
+	}
+
+	#[test]
+	fn a_click_goes_to_the_agent_as_a_spec_action_message() {
+		let resolution = json!({
+			"name": "approve", "surfaceId": "s1", "sourceComponentId": "ok",
+			"timestamp": "2026-01-01T00:00:00.000Z", "context": {"reason": "fine"},
+			"userMessage": "Approved", "dataModel": {"form": {"reason": "fine"}}, "actor": "human",
+		});
+		let message = action_message(&resolution);
+		assert_eq!(
+			message,
+			json!({
+				"version": "1.0",
+				"action": {"name": "approve", "surfaceId": "s1", "sourceComponentId": "ok",
+					"timestamp": "2026-01-01T00:00:00.000Z", "context": {"reason": "fine"},
+					"userMessage": "Approved"},
+				"metadata": {"a2uiRendererDataModel": {"version": "1.0",
+					"surfaces": {"s1": {"form": {"reason": "fine"}}}}},
+			})
+		);
+
+		let without_model = json!({"name": "go", "surfaceId": "s1", "context": {}, "actor": "human"});
+		let message = action_message(&without_model);
+		assert!(message.get("metadata").is_none());
+		assert!(message["action"].get("actor").is_none());
+		assert!(message["action"].get("userMessage").is_none());
 	}
 
 	/// The gallery envelopes shipped with the v1.0 basic catalog, verbatim
@@ -932,7 +1915,7 @@ mod tests {
 		]}})];
 		let problems = validate(&messages);
 		assert!(
-			problems.iter().any(|p| p.contains("Button with no action")),
+			problems.iter().any(|p| p.contains("missing required \"action\"")),
 			"{problems:?}"
 		);
 	}
@@ -940,29 +1923,29 @@ mod tests {
 	#[test]
 	fn every_button_action_the_renderer_accepts_validates() {
 		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
-			{"id": "root", "component": "Row", "children": ["a", "b", "c", "d"]},
+			{"id": "root", "component": "Row", "children": ["a", "b"]},
 			{"id": "a", "component": "Button", "child": "ta", "action": {"event": {"name": "ok"}}},
 			{"id": "b", "component": "Button", "child": "tb",
-			 "action": {"functionCall": {"call": "openUrl", "args": {"url": "https://x.test"}}}},
-			{"id": "c", "component": "Button", "child": "tc", "action": {"openUrl": {"url": "https://x.test"}}},
-			{"id": "d", "component": "Button", "child": "td", "actions": {"event": {"name": "no"}}},
+			 "action": {"functionCall": {"@call": "openUrl", "args": {"url": "https://x.test"}}}},
 			{"id": "ta", "component": "Text", "text": "Go"},
-			{"id": "tb", "component": "Text", "text": "Go"},
-			{"id": "tc", "component": "Text", "text": "Go"},
-			{"id": "td", "component": "Text", "text": "Go"}
+			{"id": "tb", "component": "Text", "text": "Go"}
 		]}})];
 		assert_eq!(validate(&messages), Vec::<String>::new());
 	}
 
 	#[test]
-	fn a_modal_trigger_needs_no_action() {
+	fn a_modal_trigger_button_needs_an_action_like_any_button() {
 		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
 			{"id": "root", "component": "Modal", "trigger": "open", "content": "body"},
 			{"id": "open", "component": "Button", "child": "label"},
 			{"id": "label", "component": "Text", "text": "Details"},
 			{"id": "body", "component": "Text", "text": "More"}
 		]}})];
-		assert_eq!(validate(&messages), Vec::<String>::new());
+		let problems = validate(&messages);
+		assert!(
+			problems.iter().any(|p| p.contains("missing required \"action\"")),
+			"{problems:?}"
+		);
 	}
 
 	#[test]
@@ -976,9 +1959,9 @@ mod tests {
 			{"id": "okLabel", "component": "Text", "text": "Post it"},
 			{"id": "ok", "component": "Button", "child": "okLabel",
 			 "action": {"event": {"name": "approve"}},
-			 "checks": [{"condition": {"path": "/form/ack"}, "message": "Tick it"}]},
+			 "checks": [{"condition": {"@path": "/form/ack"}, "message": "Tick it"}]},
 			{"id": "ack", "component": "CheckBox", "label": "I read it",
-			 "value": {"path": "/form/ack"}}
+			 "value": {"@path": "/form/ack"}}
 		]}})];
 		let problems = validate(&messages);
 		assert_eq!(problems.len(), 1, "{problems:?}");
@@ -1016,6 +1999,69 @@ mod tests {
 	}
 
 	#[test]
+	fn a_wait_on_a_deleted_surface_is_unanswerable() {
+		let awaited = vec!["pick".to_string()];
+		let delete = vec![json!({"deleteSurface": {"surfaceId": "s1"}})];
+		let reason = unanswerable_wait(&delete, &awaited);
+		assert!(reason.is_some_and(|r| r.contains("Drop await_events")));
+		let recreate = vec![json!({"deleteSurface": {"surfaceId": "s1"}}), good()[0].clone()];
+		assert_eq!(unanswerable_wait(&recreate, &awaited), None);
+	}
+
+	#[test]
+	fn a_modal_trigger_button_does_not_answer_a_wait() {
+		let awaited = vec!["pick".to_string()];
+		let components = |extra: Value| {
+			vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Modal", "trigger": "open", "content": "body"},
+				{"id": "openLabel", "component": "Text", "text": "Open"},
+				{"id": "open", "component": "Button", "child": "openLabel",
+				 "action": {"event": {"name": "pick"}}},
+				{"id": "body", "component": "Text", "text": "hi"},
+				extra
+			]}})]
+		};
+		let only_trigger = components(json!({"id": "x", "component": "Text", "text": "x"}));
+		assert!(unanswerable_wait(&only_trigger, &awaited).is_some());
+		let with_other = components(json!({"id": "go", "component": "Button", "child": "openLabel",
+			"action": {"event": {"name": "pick"}}}));
+		assert_eq!(unanswerable_wait(&with_other, &awaited), None);
+	}
+
+	#[test]
+	fn event_context_keys_are_names_not_bindings() {
+		let messages = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Button", "child": "l",
+			 "action": {"event": {"name": "save", "context": {"path": {"@path": "/f"}}}}},
+			{"id": "l", "component": "Text", "text": "Save"}
+		]}})];
+		assert_eq!(validate(&messages), Vec::<String>::new());
+		let stale = vec![json!({"createSurface": {"surfaceId": "s1", "components": [
+			{"id": "root", "component": "Button", "child": "l",
+			 "action": {"event": {"name": "save", "context": {"v": {"path": "/f"}}}}},
+			{"id": "l", "component": "Text", "text": "Save"}
+		]}})];
+		assert_eq!(validate(&stale).len(), 1);
+	}
+
+	#[test]
+	fn an_icon_name_outside_the_catalog_is_reported() {
+		let icon = |name: Value| {
+			validate(&[json!({"createSurface": {"surfaceId": "s1", "components": [
+				{"id": "root", "component": "Icon", "name": name}
+			]}})])
+		};
+		assert_eq!(icon(json!("warning")), Vec::<String>::new());
+		assert_eq!(icon(json!({"@path": "/icon"})), Vec::<String>::new());
+		let problems = icon(json!("rocket"));
+		assert_eq!(problems.len(), 1, "{problems:?}");
+		assert!(
+			problems[0].contains("rocket") && problems[0].contains("shoppingCart"),
+			"{problems:?}"
+		);
+	}
+
+	#[test]
 	fn an_elicitation_form_has_a_bound_field_per_property_and_validates() {
 		let params = json!({
 			"mode": "form",
@@ -1037,7 +2083,7 @@ mod tests {
 		assert_eq!(by_kind("ChoicePicker"), 1);
 		assert_eq!(by_kind("CheckBox"), 1);
 		assert_eq!(by_kind("Button"), 2);
-		let repo = components.iter().find(|c| c["value"]["path"] == "/repo").unwrap();
+		let repo = components.iter().find(|c| c["value"]["@path"] == "/repo").unwrap();
 		assert_eq!(repo["label"], "Repository — owner/name");
 		assert_eq!(surface["dataModel"], json!({"kind": ["b"], "private": false}));
 		assert_eq!(surface["sendDataModel"], true);
@@ -1073,8 +2119,8 @@ mod tests {
 		let messages = elicitation_surface("elicitation-call-3", "forms", &params);
 		let surface = &messages[0]["createSurface"];
 		let components = surface["components"].as_array().unwrap();
-		assert!(components.iter().any(|c| c["value"]["path"] == "/a~1b"));
-		assert!(components.iter().any(|c| c["value"]["path"] == "/c~0d"));
+		assert!(components.iter().any(|c| c["value"]["@path"] == "/a~1b"));
+		assert!(components.iter().any(|c| c["value"]["@path"] == "/c~0d"));
 		assert_eq!(surface["dataModel"], json!({"a/b": "x"}));
 		let result = elicitation_result(&json!({"properties": properties}), "accept", &json!({"a/b": "y"}));
 		assert_eq!(result, json!({"action": "accept", "content": {"a/b": "y"}}));

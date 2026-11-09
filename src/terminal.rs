@@ -539,7 +539,9 @@ fn login_shell_command(slave: OwnedFd, cwd: Option<&Path>) -> io::Result<Command
 		.current_dir(cwd.filter(|dir| dir.is_dir()).unwrap_or(&home))
 		.env("TERM", "xterm-256color")
 		.env("COLORTERM", "truecolor")
-		.env("TERM_PROGRAM", "octoweb")
+		// Programs enable synchronized output by terminal name and don't know
+		// ours. VS Code's terminal is xterm.js too, with the same capabilities.
+		.env("TERM_PROGRAM", "vscode")
 		.stdin(Stdio::from(slave.try_clone()?))
 		.stdout(Stdio::from(slave.try_clone()?))
 		.stderr(Stdio::from(slave));

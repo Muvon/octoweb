@@ -271,6 +271,8 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
 
   function openTab() {
     const tab = addTab(space);
+    // Before the pane exists, so it starts its shell at its on-screen size.
+    space.active = tab;
     focusPane(newPane(tab, tab.el, null));
     showTab(tab);
   }
@@ -302,6 +304,31 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
     return tab;
   }
 
+  // WebKit drops the oldest WebGL context past 16 per page, and a disposed one
+  // keeps its slot until garbage collection, so contexts can't be recycled
+  // between panes. The margin below 16 covers closed panes not yet collected.
+  const MAX_WEBGL_PANES = 12;
+
+  // A pane on screen keeps a context once it has one. The DOM renderer draws
+  // block/box glyphs from the font, which leaves seams between cells; WebGL
+  // synthesizes them (customGlyphs) so pixel art tiles. p.webgl is undefined
+  // until tried and null once lost, which leaves the pane on the DOM renderer.
+  function attachWebgl(p) {
+    if (p.webgl !== undefined) return;
+    if (Array.from(panes.values()).filter(function(q) { return q.webgl; }).length >= MAX_WEBGL_PANES) return;
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(function() {
+        webgl.dispose();
+        p.webgl = null;
+      });
+      p.term.loadAddon(webgl);
+      p.webgl = webgl;
+    } catch (_e) {
+      p.webgl = null;
+    }
+  }
+
   // A pane inserted into `parent` before `before`, on shell `id` when a kept
   // layout is rebuilt, else on a new shell in the directory of pane `from`'s.
   function newPane(tab, parent, before, id, from) {
@@ -331,18 +358,12 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
       ipc({ type: 'open_url', url: url });
     }));
     term.open(host);
-    // The DOM renderer draws block/box glyphs from the font, which leaves seams
-    // between cells. WebGL synthesizes them (customGlyphs) so pixel art tiles.
-    try {
-      const webgl = new WebglAddon.WebglAddon();
-      webgl.onContextLoss(function() { webgl.dispose(); });
-      term.loadAddon(webgl);
-    } catch (_e) {}
+    const p = { id: id, term: term, fit: fit, el: el, tab: tab, title: 'Terminal', shellTitle: '' };
+    panes.set(id, p);
+    if (tab === space.active) attachWebgl(p);
     // Default width tables are Unicode 6: emoji count as one cell and overflow.
     term.loadAddon(new Unicode11Addon.Unicode11Addon());
     term.unicode.activeVersion = '11';
-    const p = { id: id, term: term, fit: fit, el: el, tab: tab, title: 'Terminal', shellTitle: '' };
-    panes.set(id, p);
 
     el.addEventListener('focusin', function() { focusPane(p); });
     term.onTitleChange(function(title) {
@@ -392,6 +413,7 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
       t.tabEl.classList.toggle('active', t === tab);
       t.tabEl.setAttribute('aria-selected', String(t === tab));
     });
+    panes.forEach(function(p) { if (p.tab === tab) attachWebgl(p); });
     refit(tab);
     tab.focused.term.focus();
     saveLayout(s);

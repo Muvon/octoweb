@@ -60,7 +60,6 @@
 ///   { type: "sidebar_resize_end", width }                — apply and persist logical width
 ///   { type: "sidebar_resize_reset" }                     — restore the default width
 ///   { type: "a2ui_resolve",  file_id, sid, action }     — A2UI v1.0 action event → unblocks the waiting render_ui call
-///   { type: "a2ui_fn_response", file_id, sid, response } — result of an agent-issued callRendererFunction
 ///   { type: "a2ui_open_url", url }                       — A2UI openUrl → open in a browser tab
 ///   { type: "acp_signin", session_id }                   — start Octomind sign-in
 ///   { type: "acp_refresh_account", session_id }          — re-read /usage for the account card
@@ -1354,8 +1353,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .msg.ui.resolved .a2ui-tab,
   .msg.ui.resolved .a2ui-modal-close { opacity: 0.7; }
   .msg.ui.resolved .a2ui-field input,
-  .msg.ui.resolved .a2ui-field textarea,
-  .msg.ui.resolved .a2ui-field select { opacity: 0.85; }
+  .msg.ui.resolved .a2ui-field textarea { opacity: 0.85; }
   /* A surface that is holding the agent's turn open wears an accent edge; a
      surface that is only showing you something stays quiet. The edge is the
      whole status indicator, which is why there is no header strip. */
@@ -1392,15 +1390,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   }
   .a2ui-col { display: flex; flex-direction: column; gap: 8px; }
   .a2ui-row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .a2ui-spacer { display: block; min-height: 6px; }
-  .a2ui-divider { border: none; border-top: 1px solid var(--divider); margin: 4px 0; }
   .a2ui-text { font-size: 13px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; }
-  .a2ui-text.muted { color: var(--text-secondary); font-size: 12px; }
-  .a2ui-heading { font-weight: 600; line-height: 1.3; margin: 0; color: var(--text-primary); }
-  h1.a2ui-heading { font-size: 15px; }
-  h2.a2ui-heading { font-size: 14px; }
-  h3.a2ui-heading { font-size: 13px; }
-  h4.a2ui-heading { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .a2ui-loading { color: var(--text-secondary); font-size: 12px; }
   .a2ui-md { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
   .a2ui-md h1, .a2ui-md h2, .a2ui-md h3, .a2ui-md h4 {
     margin: 0 0 4px;
@@ -1471,8 +1462,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .a2ui-field input[type="date"],
   .a2ui-field input[type="datetime-local"],
   .a2ui-field input[type="time"],
-  .a2ui-field textarea,
-  .a2ui-field select {
+  .a2ui-field input[type="search"],
+  .a2ui-field textarea {
     padding: 6px 9px;
     border-radius: 7px;
     border: 1px solid var(--input-border);
@@ -1486,8 +1477,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   }
   .a2ui-field textarea { resize: vertical; min-height: 60px; }
   .a2ui-field input:focus,
-  .a2ui-field textarea:focus,
-  .a2ui-field select:focus {
+  .a2ui-field textarea:focus {
     border-color: var(--input-focus-border);
     box-shadow: 0 0 0 2.5px rgba(0,122,255,0.13);
   }
@@ -1523,12 +1513,15 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .a2ui-divider { background: var(--divider); margin: 4px 0; }
   .a2ui-divider-horizontal { height: 1px; width: 100%; }
   .a2ui-divider-vertical { width: 1px; align-self: stretch; min-height: 16px; margin: 0 4px; }
-  /* No icon font ships with the sidebar, so a named catalog icon renders as a
-     quiet placeholder chip rather than pretending to be a glyph. */
   .a2ui-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    vertical-align: middle;
+    color: inherit;
+  }
+  /* A name outside the catalog has no glyph, so its text shows as a quiet chip. */
+  .a2ui-icon.missing {
     min-width: 16px;
     padding: 0 5px;
     height: 16px;
@@ -1539,14 +1532,9 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     font-weight: 500;
     letter-spacing: 0.01em;
   }
-  .a2ui-video, .a2ui-audio audio { max-width: 100%; border-radius: 8px; display: block; }
+  .a2ui-video, .a2ui-audio audio { width: 100%; max-width: 100%; border-radius: 8px; display: block; }
   .a2ui-audio { display: flex; flex-direction: column; gap: 4px; }
-  /* Text variants (official v0.9: h1-h5, caption, body) */
-  .a2ui-text-h1 { font-size: 17px; font-weight: 600; line-height: 1.2; margin: 0; }
-  .a2ui-text-h2 { font-size: 15px; font-weight: 600; line-height: 1.25; margin: 0; }
-  .a2ui-text-h3 { font-size: 14px; font-weight: 600; line-height: 1.3; margin: 0; }
-  .a2ui-text-h4 { font-size: 13px; font-weight: 600; line-height: 1.3; margin: 0; }
-  .a2ui-text-h5 { font-size: 12px; font-weight: 600; line-height: 1.35; }
+  /* Text variants (catalog: caption, body) */
   .a2ui-text-caption { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
   .a2ui-text-body { font-size: 13px; line-height: 1.55; color: var(--text-primary); }
   /* Image variants */
@@ -1592,9 +1580,12 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     border-radius: 8px;
     background: var(--md-code-bg);
     border: 1px solid var(--md-code-border);
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
   .a2ui-tab {
-    flex: 1;
+    flex: 1 0 auto;
+    white-space: nowrap;
     padding: 5px 10px;
     border: none;
     background: transparent;
@@ -1621,7 +1612,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .a2ui-modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.10);
+    background: rgba(0,0,0,0.50);
     z-index: 9998;
     display: flex;
     align-items: center;
@@ -1671,8 +1662,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   .a2ui-btn:active:not(:disabled) { transform: translateY(0.5px); }
   .a2ui-btn .a2ui-text,
   .a2ui-btn .a2ui-md,
-  .a2ui-btn .a2ui-icon,
-  .a2ui-btn .a2ui-heading { color: inherit; background: none; font-size: inherit; font-weight: inherit; }
+  .a2ui-btn .a2ui-icon { color: inherit; background: none; font-size: inherit; font-weight: inherit; }
   .a2ui-btn .a2ui-md p { margin: 0; }
   .a2ui-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .a2ui-btn.primary { background: var(--accent); }
@@ -1680,11 +1670,11 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   /* The catalog's standard control: a real Tahoe fill, not the flat grey of a
      code block, so an ordinary button never reads as a disabled one. */
   .a2ui-btn.default {
-    background: var(--fill);
-    border-color: var(--hairline);
+    background: var(--fill-hover);
+    border-color: var(--input-border);
     color: var(--text-primary);
   }
-  .a2ui-btn.default:hover:not(:disabled) { background: var(--fill-hover); }
+  .a2ui-btn.default:hover:not(:disabled) { background: var(--fill-press); }
   .a2ui-btn.default:active:not(:disabled) { background: var(--fill-press); }
   .a2ui-btn.borderless {
     background: transparent;
@@ -1693,12 +1683,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     padding: 4px 6px;
   }
   .a2ui-btn.borderless:hover:not(:disabled) { text-decoration: underline; }
-  .a2ui-btn.success { background: var(--dot-ok); }
-  .a2ui-btn.warn    { background: var(--dot-wait); }
-  .a2ui-btn.danger  { background: var(--dot-err); }
-  .a2ui-btn.success:hover:not(:disabled),
-  .a2ui-btn.warn:hover:not(:disabled),
-  .a2ui-btn.danger:hover:not(:disabled) { filter: brightness(1.07); }
   .a2ui-check-msg {
     display: block;
     margin-top: 3px;
@@ -1711,7 +1695,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     font-family: inherit;
     font-size: 13px;
   }
-  .a2ui-icon-svg { display: inline-block; vertical-align: middle; color: var(--text-secondary); }
   /* Text renders Markdown per the v1.0 catalog, so it can't also pre-wrap. */
   .a2ui-text.a2ui-md { white-space: normal; }
   .a2ui-unknown {
@@ -6186,7 +6169,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       const out = [];
       const envelopes = (m.a2ui && Array.isArray(m.a2ui.messages)) ? m.a2ui.messages : [];
       for (const env of envelopes) {
-        const comps = env && env.updateComponents && env.updateComponents.components;
+        const body = env && (env.updateComponents || env.createSurface);
+        const comps = body && body.components;
         if (!Array.isArray(comps)) continue;
         for (const c of comps) {
           for (const k of ['text', 'label', 'placeholder', 'description']) {
@@ -6960,11 +6944,14 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     for (const msg of messages || []) {
       if (msg.createSurface) {
         const s = msg.createSurface;
+        // A later createSurface revives the surface: [deleteSurface, createSurface]
+        // in one envelope must leave it standing.
+        block.deleted = false;
         if (s.surfaceId != null) block.surfaceId = s.surfaceId;
         if (s.catalogId != null) block.catalogId = s.catalogId;
-        // v1.0 gates the data model behind `sendDataModel`. octoweb defaults
-        // it ON: a form whose values never reach the agent is the single most
-        // confusing way render_ui can misbehave. An explicit false opts out.
+        // v1.0 gates the data model behind `sendDataModel`, default false. The
+        // render_ui tool stamps true on surfaces that leave it out, so a
+        // missing flag here really means off.
         if (s.sendDataModel != null) block.sendDataModel = !!s.sendDataModel;
         // v1.0 lets createSurface carry the whole UI in one message.
         if (Array.isArray(s.components)) {
@@ -6997,42 +6984,9 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
           block.dataModel = {};
           block.deleted = true;
         }
-      } else if (msg.callRendererFunction) {
-        a2uiRunRendererFunction(block, msg.callRendererFunction);
       }
-      // agentFunctionResponse needs no handling: octoweb never issues
-      // callAgentFunction, so no renderer-side call is ever outstanding.
     }
     block.version++;
-  }
-
-  // v1.0 bidirectional functions: the agent can invoke a renderer function
-  // directly instead of hanging it off a button. The response travels the same
-  // channel a click does, so a blocked `render_ui` call gets its answer.
-  function a2uiRunRendererFunction(block, call) {
-    const fn = call && call.callFunction;
-    const id = call && call.functionCallId;
-    if (!fn || typeof fn.call !== 'string') return;
-    const scope = { root: block.dataModel, local: null };
-    let payload;
-    if (!A2UI_FN[fn.call]) {
-      payload = { functionCallId: id, error: { code: 'UNKNOWN_FUNCTION', message: 'No function "' + fn.call + '" in this catalog.' } };
-    } else {
-      try {
-        // The agent asking for it is the activation: this is an explicit
-        // request, not a side effect of painting a surface.
-        const value = a2uiWithActivation(() => a2uiResolveValue({ call: fn.call, args: fn.args || {} }, scope));
-        payload = { functionCallId: id, value: value === undefined ? null : value };
-      } catch (e) {
-        payload = { functionCallId: id, error: { code: 'EXECUTION_FAILED', message: String(e && e.message ? e.message : e) } };
-      }
-    }
-    window.ipc.postMessage(JSON.stringify({
-      type: 'a2ui_fn_response',
-      file_id: block.pollFileId || block.fileId,
-      sid: block.sid,
-      response: { version: 'v1.0', rendererFunctionResponse: payload },
-    }));
   }
 
   function a2uiToast(text) {
@@ -7065,11 +7019,11 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     }
   }
 
-  function a2uiFailureControl(block, detail) {
-    // A render_ui call blocked on this surface can't be answered through a
-    // broken control. Rust fails it with the reason so the agent repairs the
-    // surface now instead of waiting out the timeout; it ignores surfaces
-    // nothing waits on. Once per problem, since every re-render lands here.
+  // A render_ui call blocked on this surface can't be answered through a
+  // broken control. Rust fails it with the reason so the agent repairs the
+  // surface now instead of waiting out the timeout; it ignores surfaces
+  // nothing waits on. Once per problem, since every re-render lands here.
+  function a2uiReportFailure(block, detail) {
     block.failuresReported = block.failuresReported || new Set();
     if (!block.resolved && !block.failuresReported.has(detail)) {
       block.failuresReported.add(detail);
@@ -7079,6 +7033,21 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         detail: detail,
       }));
     }
+  }
+
+  // Evaluation errors the core collected while resolving this paint's values,
+  // as spec `error` messages.
+  function a2uiReportEvaluationErrors(block) {
+    for (const e of a2uiDrainErrors()) {
+      a2uiReportFailure(block, JSON.stringify({
+        version: '1.0',
+        error: { code: e.code, surfaceId: block.surfaceId || '', message: e.message },
+      }));
+    }
+  }
+
+  function a2uiFailureControl(block, detail) {
+    a2uiReportFailure(block, detail);
     const wrap = document.createElement('div');
     wrap.className = 'a2ui-unknown';
     const text = document.createElement('span');
@@ -7103,34 +7072,50 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     for (const el of body.querySelectorAll('*')) {
       if (typeof el.__a2uiRefresh === 'function') el.__a2uiRefresh();
     }
+    a2uiReportEvaluationErrors(block);
   }
+
+  // Catalog enums the renderer maps to class names or CSS.
+  const A2UI_IMAGE_VARIANTS = ['icon', 'avatar', 'smallFeature', 'mediumFeature', 'largeFeature', 'header'];
+  const A2UI_IMAGE_FIT = new Map([
+    ['contain', 'contain'], ['cover', 'cover'], ['fill', 'fill'], ['none', 'none'], ['scaleDown', 'scale-down'],
+  ]);
+  const A2UI_BUTTON_VARIANTS = ['default', 'primary', 'borderless'];
 
   // Tags every rendered element with the component id that produced it, so
   // `a2uiRerender` can put focus and the caret back after a rebuild. List rows
-  // reuse one template id, so the row index disambiguates them. `weight` and
-  // `accessibility` are catalog-wide props, applied here rather than in each
-  // component branch.
+  // reuse one template id, so the row's model path disambiguates them.
+  // `accessibility` is a catalog-wide prop, applied here rather than in each
+  // component branch. `weight` is applied by the parent Row or Column.
   function a2uiRenderNode(block, def, scope) {
     const el = a2uiRenderNodeInner(block, def, scope);
     if (!el || el.nodeType !== 1) return el;
-    if (def && typeof def.id === 'string') {
-      el.dataset.a2uiId = def.id + (scope && scope.rowKey != null ? '#' + scope.rowKey : '');
-    }
+    if (def && typeof def.id === 'string') el.dataset.a2uiId = a2uiInstanceKey(def, scope);
     el.__a2uiDef = def;
     el.__a2uiScope = scope;
-    if (def && def.weight != null && isFinite(Number(def.weight))) {
-      el.style.flexGrow = String(Number(def.weight));
-    }
     a2uiApplyAccessibility(el, def, scope);
     return el;
   }
 
-  // v1.0 `accessibility`: label / description / live / hidden, straight to ARIA.
+  // v1.0 `accessibility` as ARIA. A form control's name and description
+  // belong on the control itself, not on the <label> that wraps it. The
+  // description is a hidden node the control points at with aria-describedby.
+  let a2uiDescriptionSeq = 0;
   function a2uiApplyAccessibility(el, def, scope) {
     const a = def && def.accessibility;
     if (!a || typeof a !== 'object') return;
-    if (a.label != null) el.setAttribute('aria-label', a2uiToStr(a2uiResolveValue(a.label, scope)));
-    if (a.description != null) el.setAttribute('aria-description', a2uiToStr(a2uiResolveValue(a.description, scope)));
+    const target = el.matches('label.a2ui-field, label.a2ui-check')
+      ? el.querySelector('input, textarea') || el
+      : el;
+    if (a.label != null) target.setAttribute('aria-label', a2uiToStr(a2uiResolveValue(a.label, scope)));
+    if (a.description != null) {
+      const note = document.createElement('span');
+      note.hidden = true;
+      note.id = 'a2ui-description-' + (++a2uiDescriptionSeq);
+      note.textContent = a2uiToStr(a2uiResolveValue(a.description, scope));
+      el.appendChild(note);
+      target.setAttribute('aria-describedby', note.id);
+    }
     if (typeof a.live === 'string' && a.live !== 'off') el.setAttribute('aria-live', a.live);
     if (a.hidden != null && a2uiTruthy(a2uiResolveValue(a.hidden, scope))) el.setAttribute('aria-hidden', 'true');
   }
@@ -7142,7 +7127,6 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (!def) return document.createComment('missing');
     const type = typeof def.component === 'string' ? def.component : '';
     const r = v => a2uiResolveValue(v, scope);
-    const text = r(def.text);
     const label = r(def.label);
     const placeholder = r(def.placeholder);
     const valueRaw = r(def.value);
@@ -7152,11 +7136,11 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     // Returns [def, scope] pairs so template rows carry their own item scope.
     function childNodes() {
       const out = [];
-      if (typeof def.child === 'string') {
+      if (type === 'Card' && typeof def.child === 'string') {
         const c = block.componentsMap.get(def.child);
         if (c) out.push([c, scope]);
       }
-      const ch = def.children;
+      const ch = type === 'Card' ? null : def.children;
       if (Array.isArray(ch)) {
         for (const id of ch) {
           if (typeof id !== 'string') continue;
@@ -7165,8 +7149,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         }
       } else if (ch && typeof ch === 'object' && typeof ch.componentId === 'string') {
         const childPath = typeof ch.path === 'string' ? ch.path : '';
-        const items = r({ path: childPath });
-        const listModelPath = a2uiPathOf({ path: childPath }, scope);
+        const items = r({ '@path': childPath });
+        const listModelPath = a2uiPathOf({ '@path': childPath }, scope);
         const tpl = block.componentsMap.get(ch.componentId);
         if (Array.isArray(items) && tpl) {
           items.forEach((item, i) => {
@@ -7184,8 +7168,17 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       }
       return out;
     }
-    function appendKids(el) {
-      for (const pair of childNodes()) el.appendChild(a2uiRenderNode(block, pair[0], pair[1]));
+    // `weight` is only meaningful on a direct child of a Row or Column, so the
+    // parent applies it here rather than in a2uiRenderNode.
+    function appendKids(el, weighted) {
+      for (const pair of childNodes()) {
+        const node = a2uiRenderNode(block, pair[0], pair[1]);
+        const weight = Number(pair[0].weight);
+        if (weighted && node.nodeType === 1 && pair[0].weight != null && isFinite(weight)) {
+          node.style.flexGrow = String(weight);
+        }
+        el.appendChild(node);
+      }
     }
     function writeBinding(p, v) {
       if (!p) return;
@@ -7193,18 +7186,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       block.version++;
       a2uiRefreshBoundOutputs(block);
     }
-    // v1.0 CheckRule is {condition, message}; older surfaces put the function
-    // call at the top level ({call, args, message}). Both gate the same way,
-    // and a condition may resolve to a ValidationResult carrying its own text.
-    function failedCheck() {
+    // The first failing check as {message, severity}, or null. `blockingOnly`
+    // skips warnings and infos: they are shown but never stop an action.
+    function failedCheck(blockingOnly) {
       const checks = Array.isArray(def.checks) ? def.checks : [];
       for (const c of checks) {
-        if (!c || typeof c !== 'object') continue;
-        const condition = c.condition !== undefined ? c.condition : c;
-        const result = a2uiResolveValue(condition, scope);
-        if (a2uiTruthy(result)) continue;
-        const inline = result && typeof result === 'object' ? result.message : null;
-        return String(inline || c.message || 'validation failed');
+        const failure = a2uiCheckFailure(c, scope);
+        if (failure && (!blockingOnly || failure.severity === 'error')) return failure;
       }
       return null;
     }
@@ -7212,25 +7200,23 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     // the message belongs to the check, not to a separate Text component.
     // Held back while the field is still empty so an untouched form isn't a
     // wall of red before the user has typed anything.
-    function appendCheckMessage(wrap) {
+    function appendCheckMessage(wrap, always) {
       for (const child of Array.from(wrap.children)) {
         if (child.classList && child.classList.contains('a2ui-check-msg')) child.remove();
       }
-      const currentValue = r(def.value);
-      if (currentValue == null || currentValue === '') return;
-      const msg = failedCheck();
-      if (!msg) return;
+      if (!always) {
+        const currentValue = r(def.value);
+        if (currentValue == null || currentValue === '') return;
+      }
+      const failure = failedCheck(false);
+      if (!failure) return;
       const el = document.createElement('span');
       el.className = 'a2ui-check-msg';
-      el.textContent = msg;
+      // A live region, so a screen reader announces the message when it appears.
+      el.setAttribute('role', 'alert');
+      el.textContent = failure.message;
       wrap.appendChild(el);
     }
-    // CSS mapping for the catalog's align/justify enums.
-    const flexMap = {
-      start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch',
-      spaceAround: 'space-around', spaceBetween: 'space-between', spaceEvenly: 'space-evenly',
-    };
-
     if (type === 'Card') {
       const el = document.createElement('div');
       el.className = 'a2ui-card';
@@ -7240,131 +7226,89 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (type === 'Column' || type === 'Row') {
       const el = document.createElement('div');
       el.className = type === 'Row' ? 'a2ui-row' : 'a2ui-col';
-      // `gap` is not in the catalog but agents lean on it and it reads better
-      // than nothing; the catalog's own answer is margins on the leaves.
-      if (def.gap != null) el.style.gap = def.gap + 'px';
-      if (typeof def.align === 'string') el.style.alignItems = flexMap[def.align] || def.align;
-      if (typeof def.justify === 'string') el.style.justifyContent = flexMap[def.justify] || def.justify;
-      appendKids(el);
-      return el;
-    }
-    if (type === 'Spacer') {
-      // Legacy render_ui component — never part of the catalog.
-      const el = document.createElement('div');
-      el.className = 'a2ui-spacer';
-      if (def.size != null) el.style.minHeight = def.size + 'px';
+      el.style.alignItems = a2uiFlex(def.align, 'stretch');
+      el.style.justifyContent = a2uiFlex(def.justify, 'start');
+      appendKids(el, true);
       return el;
     }
     if (type === 'Divider') {
-      const axis = typeof def.axis === 'string' ? def.axis : 'horizontal';
       const el = document.createElement('div');
-      el.className = 'a2ui-divider a2ui-divider-' + axis;
+      el.className = 'a2ui-divider a2ui-divider-' + a2uiPick(def.axis, ['horizontal', 'vertical'], 'horizontal');
       return el;
     }
     if (type === 'Text') {
-      // v1.0 narrows `variant` to caption|body and asks renderers to treat the
-      // content as simple Markdown. v0.9's h1–h5 still map to heading tags so
-      // replayed surfaces keep their shape.
-      const variant = typeof def.variant === 'string' ? def.variant : 'body';
-      const asHeading = ['h1', 'h2', 'h3', 'h4', 'h5'].indexOf(variant) >= 0;
-      const el = document.createElement(asHeading ? variant : 'div');
-      el.className = 'a2ui-text a2ui-text-' + variant + (def.muted ? ' muted' : '');
-      const paint = () => {
-        const raw = a2uiToStr(r(def.text));
-        if (asHeading) el.textContent = raw;
-        else el.innerHTML = a2uiRenderMarkdown(raw);
-      };
-      if (!asHeading) el.classList.add('a2ui-md');
-      paint();
-      el.__a2uiRefresh = paint;
-      return el;
-    }
-    if (type === 'Heading') {
-      // Legacy render_ui component — the catalog uses Text with a variant.
-      const lvl = Math.min(Math.max(1, Number(def.level == null ? 2 : def.level)), 4);
-      const el = document.createElement('h' + lvl);
-      el.className = 'a2ui-heading';
-      const paint = () => { el.textContent = a2uiToStr(r(def.text)); };
-      paint();
-      el.__a2uiRefresh = paint;
-      return el;
-    }
-    if (type === 'Markdown') {
-      // Legacy render_ui component — the catalog puts Markdown in Text.
+      // v1.0: variant caption|body, content is simple Markdown.
       const el = document.createElement('div');
-      el.className = 'a2ui-md';
+      el.className = 'a2ui-text a2ui-md a2ui-text-' + a2uiPick(def.variant, ['caption', 'body'], 'body');
       const paint = () => { el.innerHTML = a2uiRenderMarkdown(a2uiToStr(r(def.text))); };
       paint();
       el.__a2uiRefresh = paint;
       return el;
     }
     if (type === 'Image') {
-      // v1.0: url, description, fit, variant. `src`/`alt` are the older
-      // render_ui spellings.
-      const fit = typeof def.fit === 'string' ? def.fit : null;
-      const variant = typeof def.variant === 'string' ? def.variant : null;
+      // v1.0: url, description, fit, variant (default mediumFeature).
       const img = document.createElement('img');
-      img.className = 'a2ui-img' + (variant ? ' a2ui-img-' + variant : '');
+      img.className = 'a2ui-img a2ui-img-' + a2uiPick(def.variant, A2UI_IMAGE_VARIANTS, 'mediumFeature');
       img.loading = 'lazy';
       const paint = () => {
-        const url = String((r(def.url) != null ? r(def.url) : r(def.src)) || '');
-        const desc = String((r(def.description) != null ? r(def.description) : r(def.alt)) || '');
-        if (/^https?:\/\//i.test(url)) img.src = url;
+        const url = a2uiMediaUrl(r(def.url));
+        if (url) img.src = url;
         else img.removeAttribute('src');
-        img.alt = desc;
+        img.alt = a2uiToStr(r(def.description));
       };
       paint();
       img.__a2uiRefresh = paint;
-      if (fit) {
-        const map = { contain: 'contain', cover: 'cover', fill: 'fill', none: 'none', scaleDown: 'scale-down' };
-        if (map[fit]) img.style.objectFit = map[fit];
-      }
-      if (def.width != null) img.style.width = def.width + 'px';
-      if (def.height != null) img.style.height = def.height + 'px';
+      const fit = A2UI_IMAGE_FIT.get(def.fit);
+      if (fit) img.style.objectFit = fit;
       return img;
     }
     if (type === 'Icon') {
-      // v1.0 `name` is either a catalog icon name or {svgPath}. We have no
-      // icon font, so a named icon renders as a small labelled badge; an
-      // svgPath renders for real.
+      // v1.0 `name` is a catalog icon name, a binding to one, or {svgPath}.
+      // A name outside the catalog has no glyph, so its text stands in.
       const nameRef = def.name;
-      if (nameRef && typeof nameRef === 'object' && nameRef.svgPath != null) {
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('class', 'a2ui-icon-svg');
-        svg.setAttribute('viewBox', '0 0 24 24');
-        svg.setAttribute('width', '18');
-        svg.setAttribute('height', '18');
-        const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-        p.setAttribute('d', a2uiToStr(r(nameRef.svgPath)));
-        p.setAttribute('fill', 'currentColor');
-        svg.appendChild(p);
-        return svg;
-      }
+      const svgPath = nameRef && typeof nameRef === 'object' ? nameRef.svgPath : null;
       const span = document.createElement('span');
       span.className = 'a2ui-icon';
       const paint = () => {
-        const iname = String((r(nameRef) != null ? r(nameRef) : '') || '');
-        span.textContent = iname;
-        span.setAttribute('aria-label', iname);
+        const iname = svgPath != null ? '' : a2uiToStr(r(nameRef));
+        const d = svgPath != null ? a2uiToStr(r(svgPath)) : a2uiIconPath(iname);
+        span.textContent = '';
+        span.classList.toggle('missing', d == null);
+        span.setAttribute('role', 'img');
+        if (iname) span.setAttribute('aria-label', iname);
+        else span.removeAttribute('aria-label');
+        if (d == null) {
+          span.textContent = iname;
+          return;
+        }
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '18');
+        svg.setAttribute('height', '18');
+        svg.setAttribute('aria-hidden', 'true');
+        const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        p.setAttribute('d', d);
+        p.setAttribute('fill', 'currentColor');
+        svg.appendChild(p);
+        span.appendChild(svg);
       };
       paint();
       span.__a2uiRefresh = paint;
       return span;
     }
     if (type === 'Video') {
-      const url = String((r(def.url) != null ? r(def.url) : '') || '');
-      const poster = String((r(def.posterUrl) != null ? r(def.posterUrl) : '') || '');
       const v = document.createElement('video');
       v.className = 'a2ui-video';
       v.controls = true;
       v.preload = 'metadata';
-      if (/^https?:\/\//i.test(url)) v.src = url;
-      if (/^https?:\/\//i.test(poster)) v.poster = poster;
+      const url = a2uiMediaUrl(r(def.url));
+      const poster = a2uiMediaUrl(r(def.posterUrl));
+      if (url) v.src = url;
+      if (poster) v.poster = poster;
       return v;
     }
     if (type === 'AudioPlayer') {
-      const url = String((r(def.url) != null ? r(def.url) : '') || '');
-      const desc = String((r(def.description) != null ? r(def.description) : '') || '');
+      const desc = a2uiToStr(r(def.description));
       const wrap = document.createElement('div');
       wrap.className = 'a2ui-audio';
       if (desc) {
@@ -7376,74 +7320,47 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       const a = document.createElement('audio');
       a.controls = true;
       a.preload = 'metadata';
-      if (/^https?:\/\//i.test(url)) a.src = url;
+      const url = a2uiMediaUrl(r(def.url));
+      if (url) a.src = url;
       wrap.appendChild(a);
       return wrap;
     }
     if (type === 'Button') {
       // v1.0: { child: ComponentId, variant: default|primary|borderless,
-      //         action, checks }. `text`/`label`/`kind` are the older
-      //         render_ui spellings and still render.
-      const kind = typeof def.kind === 'string' ? def.kind : null;
-      const variant = typeof def.variant === 'string' ? def.variant : null;
-      // `action` is the catalog spelling. Agents routinely emit `actions`;
-      // accept that legacy spelling but replace dead controls with a repair UI.
-      const action = def.action || def.actions || {};
-      const hasFunction = action.functionCall && typeof action.functionCall.call === 'string';
-      const hasOpenUrl = typeof action.openUrl === 'string'
-        || (action.openUrl && typeof action.openUrl.url === 'string');
+      //         action, checks }
+      const action = def.action || {};
+      const hasFunction = action.functionCall && typeof action.functionCall['@call'] === 'string';
       const hasEvent = action.event && typeof action.event.name === 'string' && action.event.name;
-      const modalTriggerOnly = !hasFunction && !hasOpenUrl && !hasEvent && scope && scope.modalTrigger;
-      if (!hasFunction && !hasOpenUrl && !hasEvent && !modalTriggerOnly) {
+      if (!hasFunction && !hasEvent) {
         return a2uiFailureControl(block, 'Button ' + (def.id || '(unnamed)') + ' has no supported action.');
       }
+      const inner = typeof def.child === 'string' ? block.componentsMap.get(def.child) : null;
+      if (!inner) return a2uiFailureControl(block, 'Button ' + (def.id || '(unnamed)') + ' references missing content.');
       const btn = document.createElement('button');
-      // The catalog's own default is the subtle style; `primary` is the
-      // surface author's way of naming the call to action.
-      btn.className = 'a2ui-btn ' + (kind || variant || 'default');
+      btn.type = 'button';
+      btn.className = 'a2ui-btn ' + a2uiPick(def.variant, A2UI_BUTTON_VARIANTS, 'default');
+      btn.appendChild(a2uiRenderNode(block, inner, scope));
+      // A failing error-severity check disables the Button; the first failing
+      // message is its tooltip. Repainted from a2uiRefreshBoundOutputs on every
+      // edit, so it follows the user's typing without rebuilding the inputs.
       const paint = () => {
-        btn.disabled = a2uiTruthy(r(def.disabled));
-        if (typeof def.child !== 'string') {
-          const currentText = r(def.text);
-          btn.textContent = a2uiToStr(currentText != null ? currentText : (r(def.label) != null ? r(def.label) : 'Button'));
-        }
+        const failure = failedCheck(true);
+        btn.disabled = !!failure;
+        if (failure) btn.title = failure.message;
+        else btn.removeAttribute('title');
       };
-      if (typeof def.child === 'string') {
-        const inner = block.componentsMap.get(def.child);
-        if (!inner) return a2uiFailureControl(block, 'Button ' + (def.id || '(unnamed)') + ' references missing content.');
-        btn.appendChild(a2uiRenderNode(block, inner, scope));
-      }
       paint();
       btn.__a2uiRefresh = paint;
       btn.addEventListener('click', () => {
-        if (modalTriggerOnly) return;
         if (block.resolved) return;
-        const failure = failedCheck();
-        if (failure) {
-          a2uiToast(failure);
-          return;
-        }
-        // A renderer-side action is `action.functionCall = {call, args}` — the
+        // A renderer-side action is `action.functionCall = {"@call", args}` — the
         // same shape a ValueRef uses, so resolving it runs the registry entry.
         // The click is the user activation openUrl requires.
-        if (action.functionCall && typeof action.functionCall.call === 'string') {
+        if (hasFunction) {
           a2uiWithActivation(() => r(action.functionCall));
           return;
         }
-        if (action.openUrl) {
-          // Shorthand some agents emit instead of functionCall: `{url: string}`
-          // (an object, not a bare string). Accept both shapes defensively.
-          const urlValue = typeof action.openUrl === 'string'
-            ? action.openUrl
-            : (action.openUrl && typeof action.openUrl.url === 'string' ? action.openUrl.url : '');
-          a2uiWithActivation(() => A2UI_FN.openUrl({ url: urlValue }));
-          return;
-        }
         const ev = action.event;
-        if (!ev || !ev.name) {
-          a2uiSendRepairPrompt(block, 'Button ' + (def.id || '(unnamed)') + ' has no event action.');
-          return;
-        }
         const context = {};
         for (const k in (ev.context || {})) context[k] = r(ev.context[k]);
         // The A2UI v1.0 renderer-to-agent `action` message.
@@ -7483,55 +7400,31 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       return btn;
     }
     if (type === 'TextField') {
-      // v1.0: { label, value, placeholder, variant: longText|number|shortText|obscured, checks }
-      // `type`/`multiline`/`rows` are the older render_ui spellings.
-      const variant = typeof def.variant === 'string' ? def.variant : null;
-      const isMultiline = def.multiline || variant === 'longText';
-      const isNumber = def.type === 'number' || variant === 'number';
-      const inputType = (() => {
-        if (variant === 'obscured') return 'password';
-        if (typeof def.type === 'string' && ['password', 'email', 'number', 'tel'].indexOf(def.type) >= 0) return def.type;
-        if (isNumber) return 'number';
-        return 'text';
-      })();
+      // v1.0: { label, value, placeholder, variant: shortText|longText|number|obscured, checks }.
+      // The catalog types `value` as a string, so a number field writes the
+      // text the user typed.
+      const variant = a2uiPick(def.variant, ['shortText', 'longText', 'number', 'obscured'], 'shortText');
       const wrap = document.createElement('label');
       wrap.className = 'a2ui-field';
-      if (label != null && label !== '') {
+      const labelText = label != null && label !== '' ? a2uiToStr(label) : '';
+      if (labelText) {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
-        lbl.textContent = a2uiToStr(label);
+        lbl.textContent = labelText;
         wrap.appendChild(lbl);
       }
-      if (isMultiline) {
-        const ta = document.createElement('textarea');
-        if (def.rows != null) ta.rows = Number(def.rows);
-        if (placeholder != null) ta.placeholder = a2uiToStr(placeholder);
-        ta.value = a2uiToStr(valueRaw);
-        ta.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
-        wrap.appendChild(ta);
-        wrap.__a2uiRefresh = () => {
-          const next = a2uiToStr(r(def.value));
-          if (document.activeElement !== ta && ta.value !== next) ta.value = next;
-          appendCheckMessage(wrap);
-        };
-      } else {
-        const inp = document.createElement('input');
-        inp.type = inputType;
-        if (placeholder != null) inp.placeholder = a2uiToStr(placeholder);
-        inp.value = a2uiToStr(valueRaw);
-        inp.addEventListener('input', e => {
-          if (!path) return;
-          const raw = e.currentTarget.value;
-          const v = isNumber ? (raw === '' ? null : Number(raw)) : raw;
-          writeBinding(path, v);
-        });
-        wrap.appendChild(inp);
-        wrap.__a2uiRefresh = () => {
-          const next = a2uiToStr(r(def.value));
-          if (document.activeElement !== inp && inp.value !== next) inp.value = next;
-          appendCheckMessage(wrap);
-        };
-      }
+      const field = document.createElement(variant === 'longText' ? 'textarea' : 'input');
+      if (variant !== 'longText') field.type = variant === 'obscured' ? 'password' : variant === 'number' ? 'number' : 'text';
+      if (labelText) field.setAttribute('aria-label', labelText);
+      if (placeholder != null) field.placeholder = a2uiToStr(placeholder);
+      field.value = a2uiToStr(valueRaw);
+      field.addEventListener('input', e => path && writeBinding(path, e.currentTarget.value));
+      wrap.appendChild(field);
+      wrap.__a2uiRefresh = () => {
+        const next = a2uiToStr(r(def.value));
+        if (document.activeElement !== field && field.value !== next) field.value = next;
+        appendCheckMessage(wrap);
+      };
       appendCheckMessage(wrap);
       return wrap;
     }
@@ -7541,7 +7434,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       const inp = document.createElement('input');
       inp.type = 'checkbox';
       inp.checked = a2uiTruthy(valueRaw);
-      inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.checked));
+      // An unticked box is the untouched state, so its check message waits for
+      // the first interaction like a text field's waits for the first input.
+      let touched = false;
+      inp.addEventListener('change', e => {
+        touched = true;
+        if (path) writeBinding(path, e.currentTarget.checked);
+      });
       const sp = document.createElement('span');
       sp.textContent = a2uiToStr(label);
       wrap.appendChild(inp);
@@ -7549,6 +7448,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       wrap.__a2uiRefresh = () => {
         inp.checked = a2uiTruthy(r(def.value));
         sp.textContent = a2uiToStr(r(def.label));
+        appendCheckMessage(wrap, touched);
       };
       return wrap;
     }
@@ -7569,10 +7469,10 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       const max = def.max != null ? Number(def.max) : 100;
       inp.min = String(min);
       inp.max = String(max);
-      // v1.0 `steps` is a count of divisions; `step` was the render_ui spelling
-      // for the increment itself.
+      // v1.0 `steps` is the number of discrete divisions of the range; without
+      // it the slider is continuous, so 0.0 to 1.0 ranges work.
       if (def.steps != null && Number(def.steps) > 0) inp.step = String((max - min) / Number(def.steps));
-      else if (def.step != null) inp.step = String(def.step);
+      else inp.step = 'any';
       inp.value = valueRaw != null ? String(valueRaw) : String(min);
       inp.addEventListener('input', e => path && writeBinding(path, Number(e.currentTarget.value)));
       const out = document.createElement('output');
@@ -7594,27 +7494,25 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       // v1.0: { label, options: [{label, value}], value: string[],
       //         variant: multipleSelection|mutuallyExclusive,
       //         displayStyle: checkbox|chips, filterable }
-      // `choices` and scalar options are the older render_ui spellings.
-      const optionsRaw = Array.isArray(def.options) ? def.options
-        : Array.isArray(def.choices) ? def.choices : [];
-      const variant = typeof def.variant === 'string' ? def.variant : 'mutuallyExclusive';
-      const isMulti = variant === 'multipleSelection';
-      const style = typeof def.displayStyle === 'string' ? def.displayStyle : null;
-      const useChips = style === 'chips';
-      const opts = optionsRaw.map(c => {
-        if (c != null && typeof c === 'object') return { label: r(c.label), value: r(c.value) };
-        return { label: String(c), value: String(c) };
-      });
+      // The default style is a list: checkboxes for multipleSelection, radio
+      // buttons for mutuallyExclusive.
+      const isMulti = def.variant === 'multipleSelection';
+      const useChips = def.displayStyle === 'chips';
+      const opts = (Array.isArray(def.options) ? def.options : [])
+        .filter(c => c != null && typeof c === 'object')
+        .map(c => ({ label: r(c.label), value: r(c.value) }));
+      const instanceKey = a2uiInstanceKey(def, scope);
       const wrap = document.createElement('div');
       wrap.className = 'a2ui-field a2ui-choice ' + (useChips ? 'as-chips' : 'as-list');
+      wrap.setAttribute('role', isMulti ? 'group' : 'radiogroup');
       if (label != null && label !== '') {
         const lbl = document.createElement('span');
         lbl.className = 'a2ui-label';
         lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
+        wrap.setAttribute('aria-label', lbl.textContent);
       }
-      // v1.0 binds selections to a string array in both variants; a bare
-      // scalar from an older surface still reads correctly.
+      // v1.0 binds selections to a string array in both variants.
       const currentSelection = () => {
         const current = r(def.value);
         return new Set(
@@ -7629,60 +7527,28 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       // `filterable` narrows a long list; the filter itself is view state, so
       // it lives on the block rather than in the agent's data model.
       block.filterState = block.filterState || {};
-      const filterKey = typeof def.id === 'string' ? def.id : 'choice';
-      const filter = String(block.filterState[filterKey] || '');
+      const filter = String(block.filterState[instanceKey] || '');
       const choiceRows = [];
       const applyFilter = value => {
         const needle = String(value || '').toLowerCase();
         for (const row of choiceRows) row.el.hidden = !!needle && row.search.indexOf(needle) < 0;
       };
-      if (def.filterable) {
+      if (def.filterable === true) {
         const f = document.createElement('input');
         f.type = 'search';
         f.className = 'a2ui-choice-filter';
         f.placeholder = 'Filter…';
+        f.setAttribute('aria-label', 'Filter options');
         f.value = filter;
         f.addEventListener('input', e => {
-          block.filterState[filterKey] = e.currentTarget.value;
+          block.filterState[instanceKey] = e.currentTarget.value;
           applyFilter(e.currentTarget.value);
         });
         wrap.appendChild(f);
       }
-      const visible = opts;
-      // Mutually exclusive, plain style: a native <select> reads best.
-      if (!isMulti && !useChips && style !== 'checkbox' && !def.filterable) {
-        const sel = document.createElement('select');
-        if (selected.size === 0) {
-          const placeholderOpt = document.createElement('option');
-          placeholderOpt.value = '';
-          placeholderOpt.textContent = 'Select an option';
-          placeholderOpt.disabled = true;
-          placeholderOpt.selected = true;
-          sel.appendChild(placeholderOpt);
-        }
-        for (const o of visible) {
-          const opt = document.createElement('option');
-          opt.value = a2uiToStr(o.value);
-          opt.textContent = a2uiToStr(o.label != null ? o.label : o.value);
-          if (selected.has(opt.value)) opt.selected = true;
-          sel.appendChild(opt);
-        }
-        sel.addEventListener('change', e => {
-          if (e.currentTarget.value !== '') writeSelection(new Set([e.currentTarget.value]));
-        });
-        wrap.appendChild(sel);
-        wrap.__a2uiRefresh = () => {
-          const current = currentSelection();
-          const value = current.size ? Array.from(current)[0] : '';
-          if (sel.value !== value) sel.value = value;
-          appendCheckMessage(wrap);
-        };
-        appendCheckMessage(wrap);
-        return wrap;
-      }
       const list = document.createElement('div');
       list.className = useChips ? 'a2ui-chip-row' : 'a2ui-check-list';
-      for (const o of visible) {
+      for (const o of opts) {
         const v = a2uiToStr(o.value);
         const lblTxt = a2uiToStr(o.label != null ? o.label : o.value);
         const isOn = selected.has(v);
@@ -7699,6 +7565,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className = 'a2ui-chip' + (isOn ? ' on' : '');
+          chip.setAttribute('aria-pressed', isOn ? 'true' : 'false');
           chip.textContent = lblTxt;
           chip.addEventListener('click', () => toggle(isMulti ? !currentSelection().has(v) : true));
           list.appendChild(chip);
@@ -7708,7 +7575,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
           item.className = 'a2ui-check';
           const inp = document.createElement('input');
           inp.type = isMulti ? 'checkbox' : 'radio';
-          if (!isMulti) inp.name = (def.id || 'choice') + '_' + (block.fileId || '');
+          if (!isMulti) inp.name = instanceKey + '_' + (block.fileId || '');
           inp.checked = isOn;
           inp.addEventListener('change', () => toggle(inp.checked));
           const sp = document.createElement('span');
@@ -7724,8 +7591,12 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         const current = currentSelection();
         for (const row of choiceRows) {
           const on = current.has(row.value);
-          if (row.control.tagName === 'BUTTON') row.control.classList.toggle('on', on);
-          else row.control.checked = on;
+          if (row.control.tagName === 'BUTTON') {
+            row.control.classList.toggle('on', on);
+            row.control.setAttribute('aria-pressed', on ? 'true' : 'false');
+          } else {
+            row.control.checked = on;
+          }
         }
         appendCheckMessage(wrap);
       };
@@ -7734,13 +7605,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       return wrap;
     }
     if (type === 'DateTimeInput') {
-      // v1.0: { enableDate, enableTime, min, max, label, value }
-      // `mode` is the older render_ui spelling.
-      const enableDate = def.enableDate != null ? !!def.enableDate : (def.mode === 'date' || def.mode === 'datetime' || def.mode == null);
-      const enableTime = def.enableTime != null ? !!def.enableTime : (def.mode === 'time' || def.mode === 'datetime');
-      const inputType = enableDate && enableTime ? 'datetime-local'
-        : enableTime ? 'time'
-          : 'date';
+      // v1.0: { enableDate, enableTime, min, max, label, value }. The model
+      // holds ISO 8601; the native input holds local wall time. With both flags
+      // off (the catalog default) there would be nothing to pick, so the field
+      // is a date picker.
+      const enableTime = def.enableTime === true;
+      const enableDate = def.enableDate === true || !enableTime;
+      const inputType = enableDate && enableTime ? 'datetime-local' : enableTime ? 'time' : 'date';
       const wrap = document.createElement('label');
       wrap.className = 'a2ui-field';
       if (label != null && label !== '') {
@@ -7749,18 +7620,22 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         lbl.textContent = a2uiToStr(label);
         wrap.appendChild(lbl);
       }
+      const toInput = v => a2uiIsoToInput(a2uiToStr(v), enableDate, enableTime);
       const inp = document.createElement('input');
       inp.type = inputType;
-      inp.value = a2uiToStr(valueRaw);
-      if (def.min != null) inp.min = a2uiToStr(r(def.min));
-      if (def.max != null) inp.max = a2uiToStr(r(def.max));
-      inp.addEventListener('change', e => path && writeBinding(path, e.currentTarget.value));
+      inp.value = toInput(valueRaw);
+      // min/max are ISO 8601 too, in whichever of date, time or date-time form.
+      const applyLimits = () => {
+        inp.min = def.min != null ? toInput(r(def.min)) : '';
+        inp.max = def.max != null ? toInput(r(def.max)) : '';
+      };
+      applyLimits();
+      inp.addEventListener('change', e => path && writeBinding(path, a2uiInputToIso(e.currentTarget.value, enableDate, enableTime)));
       wrap.appendChild(inp);
       wrap.__a2uiRefresh = () => {
-        const next = a2uiToStr(r(def.value));
+        const next = toInput(r(def.value));
         if (document.activeElement !== inp && inp.value !== next) inp.value = next;
-        inp.min = def.min != null ? a2uiToStr(r(def.min)) : '';
-        inp.max = def.max != null ? a2uiToStr(r(def.max)) : '';
+        applyLimits();
         appendCheckMessage(wrap);
       };
       appendCheckMessage(wrap);
@@ -7768,25 +7643,28 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     }
     if (type === 'List') {
       const el = document.createElement('div');
-      const dir = typeof def.direction === 'string' ? def.direction : 'vertical';
+      const dir = a2uiPick(def.direction, ['vertical', 'horizontal'], 'vertical');
       el.className = 'a2ui-list a2ui-list-' + dir;
-      if (typeof def.align === 'string') el.style.alignItems = flexMap[def.align] || def.align;
+      el.style.alignItems = a2uiFlex(def.align, 'stretch');
       appendKids(el);
       return el;
     }
     if (type === 'Tabs') {
-      // v1.0: { tabs: [{ title, child }] }. `content` was the render_ui name.
+      // v1.0: { tabs: [{ title, child }] }
       const tabs = Array.isArray(def.tabs) ? def.tabs : [];
       if (!tabs.length) return document.createComment('empty tabs');
       const wrap = document.createElement('div');
       wrap.className = 'a2ui-tabs';
       const bar = document.createElement('div');
       bar.className = 'a2ui-tabs-bar';
+      bar.setAttribute('role', 'tablist');
       const pane = document.createElement('div');
       pane.className = 'a2ui-tabs-pane';
-      // Active tab is tracked per def.id in the block — survives re-renders.
+      pane.setAttribute('role', 'tabpanel');
+      // The selected tab is view state kept on the block, so it survives
+      // re-renders. A template row reuses one id, hence the instance key.
       block.tabState = block.tabState || {};
-      const key = typeof def.id === 'string' ? def.id : 'tabs';
+      const key = a2uiInstanceKey(def, scope);
       let active = block.tabState[key] != null ? block.tabState[key] : 0;
       if (active >= tabs.length) active = 0;
       tabs.forEach((t, i) => {
@@ -7794,6 +7672,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'a2ui-tab' + (i === active ? ' active' : '');
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('aria-selected', i === active ? 'true' : 'false');
         btn.textContent = a2uiToStr(titleResolved != null ? titleResolved : ('Tab ' + (i + 1)));
         btn.addEventListener('click', () => {
           block.tabState[key] = i;
@@ -7802,30 +7682,33 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         bar.appendChild(btn);
       });
       const activeTab = tabs[active] || {};
-      const childId = typeof activeTab.child === 'string' ? activeTab.child
-        : typeof activeTab.content === 'string' ? activeTab.content : null;
-      const childDef = childId ? block.componentsMap.get(childId) : null;
+      const childDef = typeof activeTab.child === 'string' ? block.componentsMap.get(activeTab.child) : null;
       if (childDef) pane.appendChild(a2uiRenderNode(block, childDef, scope));
       wrap.appendChild(bar);
       wrap.appendChild(pane);
       return wrap;
     }
     if (type === 'Modal') {
-      // v1.0: { trigger: ComponentId, content: ComponentId }
-      // We render the trigger inline; clicking it shows `content` in an
-      // overlay. The visibility flag lives on the block so re-renders preserve it.
-      const triggerId = typeof def.trigger === 'string' ? def.trigger : null;
-      const contentId = typeof def.content === 'string' ? def.content : null;
+      // v1.0: { trigger: ComponentId, content: ComponentId }. The Modal is an
+      // entry point: only the trigger shows, a click on it opens `content` in
+      // an overlay, and the trigger's own action does not fire. The open flag
+      // lives on the block so re-renders preserve it.
+      const triggerDef = typeof def.trigger === 'string' ? block.componentsMap.get(def.trigger) : null;
+      const contentDef = typeof def.content === 'string' ? block.componentsMap.get(def.content) : null;
       const wrap = document.createElement('span');
       wrap.className = 'a2ui-modal-trigger-wrap';
       block.modalState = block.modalState || {};
       block.modalNeedsFocus = block.modalNeedsFocus || {};
-      const key = typeof def.id === 'string' ? def.id : 'modal';
-      const triggerDef = triggerId ? block.componentsMap.get(triggerId) : null;
+      const key = a2uiInstanceKey(def, scope);
       if (triggerDef) {
-        const triggerScope = Object.assign({}, scope, { modalTrigger: true });
-        const trig = a2uiRenderNode(block, triggerDef, triggerScope);
-        trig.addEventListener('click', (e) => {
+        const trig = a2uiRenderNode(block, triggerDef, scope);
+        // Capture on the wrapper runs before the trigger's handlers and stops
+        // them. The overlay is also inside the wrapper, so only clicks that
+        // land on the trigger are taken.
+        wrap.addEventListener('click', (e) => {
+          if (!trig.contains(e.target)) return;
+          const control = e.target.closest('button');
+          if (control && control.disabled) return;
           e.stopPropagation();
           block.modalState[key] = true;
           block.modalNeedsFocus[key] = true;
@@ -7833,10 +7716,9 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         }, true);
         wrap.appendChild(trig);
       } else {
-        wrap.appendChild(a2uiFailureControl(block, 'Modal ' + key + ' references a missing trigger.'));
+        wrap.appendChild(a2uiFailureControl(block, 'Modal ' + (def.id || '(unnamed)') + ' references a missing trigger.'));
       }
       if (block.modalState[key]) {
-        const contentDef = contentId ? block.componentsMap.get(contentId) : null;
         const overlay = document.createElement('div');
         overlay.className = 'a2ui-modal-overlay';
         const closeModal = () => {
@@ -7854,7 +7736,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         panel.className = 'a2ui-modal-panel';
         panel.setAttribute('role', 'dialog');
         panel.setAttribute('aria-modal', 'true');
-        panel.setAttribute('aria-label', a2uiToStr(label != null ? label : (r(def.title) || 'Assistant control')));
+        panel.setAttribute('aria-label', 'Dialog');
         panel.tabIndex = -1;
         panel.addEventListener('click', (e) => e.stopPropagation());
         const close = document.createElement('button');
@@ -7865,7 +7747,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         close.addEventListener('click', closeModal);
         panel.appendChild(close);
         if (contentDef) panel.appendChild(a2uiRenderNode(block, contentDef, scope));
-        else panel.appendChild(a2uiFailureControl(block, 'Modal ' + key + ' references missing content.'));
+        else panel.appendChild(a2uiFailureControl(block, 'Modal ' + (def.id || '(unnamed)') + ' references missing content.'));
         overlay.appendChild(panel);
         wrap.appendChild(overlay);
         if (block.modalNeedsFocus[key]) {
@@ -7959,12 +7841,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
         // if a later envelope wipes components without replacing them —
         // otherwise the surface looks "stuck" between updates.
         const empty = document.createElement('div');
-        empty.className = 'a2ui-text muted';
+        empty.className = 'a2ui-loading';
         empty.textContent = 'Loading…';
         body.appendChild(empty);
       }
       // else: keep last good render visible.
     }
+    a2uiReportEvaluationErrors(block);
     // No resolved-state DOM mutation: the surface is only transiently locked
     // ("Processing…" overlay via CSS, pointer-events suppressed). The next
     // envelope from the agent lifts the lock; deleteSurface tears it down.
@@ -7988,8 +7871,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
       catalogId: null,
       componentsMap: new Map(),
       dataModel: {},
-      // v1.0 `sendDataModel`, defaulted on — see a2uiApplyMessages.
-      sendDataModel: true,
+      // v1.0 `sendDataModel`, default false — see a2uiApplyMessages.
+      sendDataModel: false,
       awaitEvents: [],
       resolved: false,
       // The fileId of the envelope a render_ui call is waiting on, used as the
@@ -8031,6 +7914,26 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     return block;
   }
 
+  // First paint mounts only the last HISTORY_WINDOW records, and createSurface
+  // goes out once per surface. A new block built from an update-only record
+  // would miss sendDataModel, components and form values defined earlier, so
+  // fold the session log's older records for this surface into it first.
+  function a2uiFoldEarlierRecords(block, sid, fileId, surfaceId, payload) {
+    const sess = sessions.get(sid);
+    if (!sess || surfaceId == null) return;
+    const msgs = (payload && payload.messages) || [];
+    if (msgs.some(m => m && m.createSurface)) return;
+    block.surfaceId = surfaceId;
+    const own = sess.log.findIndex(r => r.role === 'ui' && r.text === fileId);
+    const earlier = own >= 0 ? sess.log.slice(0, own) : sess.log;
+    for (const rec of earlier) {
+      if (rec.role !== 'ui' || !rec.a2ui || !Array.isArray(rec.a2ui.messages)) continue;
+      const named = rec.a2ui.messages.filter(m => m && m.version === '1.0'
+        && a2uiSniffSurfaceId({ messages: [m] }) === surfaceId);
+      a2uiApplyMessages(block, named);
+    }
+  }
+
   window.__a2uiUpdate = function(sid, fileId, payload, live, ts) {
     // A2UI v0.9 surface lifecycle:
     //   - Each render_ui call writes a new envelope (new fileId) but may carry
@@ -8046,6 +7949,21 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     // clicks have nowhere to land. We render them anyway (history is useful)
     // but suppress clicks with a toast.
     const isLive = live === true;
+    // Saved cards from before the 1.0 wire format use bindings this renderer no
+    // longer reads. Show a note instead, and keep no block for the card, so a
+    // later pending-state push for the same call id finds nothing to revive.
+    if (Array.isArray(payload && payload.messages)
+        && payload.messages.some(m => m && m.version !== '1.0')) {
+      if (a2uiBubbleByFile.has(fileId)) return;
+      const stale = a2uiEnsureBlock(sid, fileId, ts);
+      if (!stale) return;
+      const note = document.createElement('div');
+      note.className = 'a2ui-text muted';
+      note.textContent = 'This card was made by an older version of Octoweb.';
+      a2uiBubbleByFile.get(fileId).querySelector('.a2ui-body').appendChild(note);
+      a2uiBlocks.delete(fileId);
+      return;
+    }
     const newSurfaceId = a2uiSniffSurfaceId(payload);
     // Guard: vacuous envelopes (no surfaceId, no messages, no live block for
     // this fileId) would create an orphan "Loading…" bubble. The agent emits
@@ -8089,6 +8007,7 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (!block) {
       block = a2uiEnsureBlock(sid, fileId, ts);
       if (!block) return;
+      a2uiFoldEarlierRecords(block, sid, fileId, newSurfaceId, payload);
     }
     if (Array.isArray(payload.await_events)) block.awaitEvents = payload.await_events;
     // `live` is sticky-on: once we've seen a live envelope for this block

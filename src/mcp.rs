@@ -274,9 +274,8 @@ pub enum McpCommand {
 		/// token. `None` (workspace-level token) targets that workspace's
 		/// foreground session.
 		session_id: Option<u64>,
-		/// Resolved with the A2UI `action` payload once the user clicks — or
-		/// with a `rendererFunctionResponse` when the envelope asked the
-		/// renderer to run a function instead.
+		/// Resolved with the A2UI `action` message once the user clicks. An `Err`
+		/// is a spec `error` message as JSON text (a surface-lifecycle violation).
 		response: oneshot::Sender<Result<serde_json::Value, String>>,
 	},
 }
@@ -721,12 +720,12 @@ pub struct NavigateRequest {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RenderUiRequest {
 	#[schemars(
-		description = "A2UI v1.0 envelope messages, applied in order. Each item carries \"version\":\"v1.0\" plus exactly one of: {\"createSurface\":{\"surfaceId\",\"catalogId\"?,\"components\"?,\"dataModel\"?,\"sendDataModel\"?}} | {\"updateComponents\":{\"surfaceId\",\"components\":[{\"id\",\"component\",...props}]}} | {\"updateDataModel\":{\"surfaceId\",\"path\"?,\"value\"}} | {\"deleteSurface\":{\"surfaceId\"}} | {\"callRendererFunction\":{\"functionCallId\",\"callFunction\":{\"call\",\"args\"}}}. Reuse a surfaceId to update a surface in place instead of stacking new ones."
+		description = "A2UI v1.0 envelope messages for one surface, applied in order. Each item carries \"version\":\"1.0\" plus exactly one of: {\"createSurface\":{\"surfaceId\",\"components\"?,\"dataModel\"?,\"sendDataModel\"?}} | {\"updateComponents\":{\"surfaceId\",\"components\":[{\"id\",\"component\",...props}]}} | {\"updateDataModel\":{\"surfaceId\",\"path\"?,\"value\"}} | {\"deleteSurface\":{\"surfaceId\"}}. createSurface works once per surfaceId; change an existing surface with updateComponents or updateDataModel."
 	)]
 	#[serde(deserialize_with = "messages_from_array_or_string")]
 	pub messages: Vec<serde_json::Value>,
 	#[schemars(
-		description = "Event names that complete this call. Each must match a Button's action.event.name. Omit or leave empty for a fire-and-forget update, which returns immediately."
+		description = "Event names that block this call until the user clicks a Button with an action.event; any event click completes the call. Omit or leave empty for a fire-and-forget update, which returns immediately."
 	)]
 	pub await_events: Option<Vec<String>>,
 }
@@ -2326,38 +2325,42 @@ impl McpServer {
 	#[tool(
 		description = "Render an interactive UI surface (A2UI v1.0) inline in this chat and optionally BLOCK until an awaited event fires. Use for forms, approval cards, wizards, confirms, dashboards, lists, pickers — anything better answered by clicking than by typing.\n\
         \n\
-        Returns the A2UI action payload {name,surfaceId,sourceComponentId,timestamp,context,dataModel,userMessage?} when an awaited event fires, or the matching rendererFunctionResponse when the envelope asked the renderer to run a function; returns immediately with {ok:true} when await_events is empty (fire-and-forget update).\n\
+        Returns {\"version\":\"1.0\",\"action\":{name,surfaceId,sourceComponentId,timestamp,context,userMessage?},\"metadata\":{\"a2uiRendererDataModel\":{\"version\":\"1.0\",\"surfaces\":{\"<surfaceId>\":<dataModel>}}}} when an awaited event fires; returns immediately with {ok:true} when await_events is empty (fire-and-forget update).\n\
         \n\
-        ENVELOPE: every message carries \"version\":\"v1.0\" and exactly one of createSurface | updateComponents | updateDataModel | deleteSurface | callRendererFunction. createSurface can carry the whole UI at once through its own \"components\" and \"dataModel\". A malformed envelope is rejected with the exact problem — read the error and resend, don't fall back to prose.\n\
+        ENVELOPE: every message carries \"version\":\"1.0\" and exactly one of createSurface | updateComponents | updateDataModel | deleteSurface, all for ONE surface per call. createSurface carries the whole UI at once through its own \"components\" and \"dataModel\". It works once per surfaceId: to change a surface send updateComponents/updateDataModel with its surfaceId, to replace it send deleteSurface first. A malformed envelope is rejected with one JSON error per problem — read them and resend, don't fall back to prose.\n\
         \n\
-        COMMON MISTAKES that render nothing: (1) the key is \"component\", NOT \"type\". (2) Components are a FLAT adjacency list — every component has a string \"id\" and parents reference children BY ID, never inline. (3) Exactly one component must have id \"root\". (4) Only catalog components render. (5) createSurface carries the whole UI — components and dataModel — in one message; add updateComponents/updateDataModel only to change a surface that already exists, and name the surfaceId on every message.\n\
+        COMMON MISTAKES that are rejected: (1) the key is \"component\", NOT \"type\". (2) Components are a FLAT adjacency list — every component has a string \"id\" and parents reference children BY ID, never inline. (3) Exactly one component must have id \"root\". (4) Only catalog components and the props listed below exist; there is no \"gap\", spacing is automatic. (5) Bindings and function calls are {\"@path\":...} and {\"@call\":...}; a plain \"path\" or \"call\" object is literal data. (6) Every component has exactly one parent. (7) A Text used as a Button's label is that Button's child and is listed nowhere else.\n\
         \n\
-        Catalog (values for \"component\"):\n\
-        Card{child}, Column{children,align?,justify?,gap?}, Row{children,align?,justify?,gap?},\n\
+        Catalog (values for \"component\"; ? marks optional):\n\
+        Card{child}, Column{children,align?,justify?}, Row{children,align?,justify?},\n\
         List{children,direction?:vertical|horizontal,align?}, Divider{axis?:horizontal|vertical},\n\
         Text{text,variant?:body|caption} — text is simple Markdown,\n\
         Image{url,description?,fit?:contain|cover|fill|none|scaleDown,variant?:icon|avatar|smallFeature|mediumFeature|largeFeature|header},\n\
         Icon{name}, Video{url,posterUrl?}, AudioPlayer{url,description?},\n\
-        Button{child,variant?:default|primary|borderless,checks?,action},\n\
-        TextField{label,value:{path},placeholder?,variant?:shortText|longText|number|obscured,checks?},\n\
-        CheckBox{label,value:{path}}, Slider{label?,value:{path},min?,max,steps?},\n\
-        ChoicePicker{label?,options:[{label,value}],value:{path} bound to a string ARRAY,variant?:mutuallyExclusive|multipleSelection,displayStyle?:checkbox|chips,filterable?},\n\
-        DateTimeInput{label?,value:{path},enableDate?,enableTime?,min?,max?},\n\
-        Tabs{tabs:[{title,child}]}, Modal{trigger,content}.\n\
-        Every component also takes weight (flex-grow inside a Row/Column) and accessibility{label?,description?,live?,hidden?}.\n\
+        Button{child,action,variant?:default|primary|borderless,checks?},\n\
+        TextField{label,value:{@path},placeholder?,variant?:shortText|longText|number|obscured,checks?},\n\
+        CheckBox{label,value:{@path},checks?}, Slider{label?,value:{@path},min?,max,steps?,checks?},\n\
+        ChoicePicker{label?,options:[{label,value}],value:{@path} bound to a string ARRAY,variant?:mutuallyExclusive|multipleSelection,displayStyle?:checkbox|chips,filterable?,checks?},\n\
+        DateTimeInput{value:{@path},label?,enableDate?,enableTime?,min?,max?,checks?},\n\
+        Tabs{tabs:[{title,child}]}, Modal{trigger,content} — trigger is a Button with an action; clicking it only opens the Modal.\n\
+        align: start|center|end|stretch. justify: start|center|end|spaceBetween|spaceAround|spaceEvenly|stretch.\n\
+        Every component also takes weight (flex-grow, inside a Row/Column only) and accessibility{label?,description?,live?:off|polite|assertive,hidden?}.\n\
+        Icon names: accountCircle add arrowBack arrowForward attachFile calendarToday call camera check close delete download edit event error fastForward favorite favoriteOff folder help home info locationOn lock lockOpen mail menu moreVert moreHoriz notificationsOff notifications pause payment person phone photo play print refresh rewind search send settings share shoppingCart skipNext skipPrevious star starHalf starOff stop upload visibility visibilityOff volumeDown volumeMute volumeOff volumeUp warning.\n\
         \n\
-        CHILDREN: an array of ids, or a template {\"componentId\":\"<row id>\",\"path\":\"/list\"} that repeats one component per list item. Inside a template, paths without a leading \"/\" resolve against the current item and @index() gives its 0-based position.\n\
+        ACTION: {\"event\":{\"name\",\"userMessage\"?,\"context\"?}} tells you about the click; {\"functionCall\":{\"@call\":\"openUrl\",\"args\":{\"url\":\"https://…\"}}} opens a tab.\n\
         \n\
-        VALUES: any prop takes a literal, {\"path\":\"/json/ptr\"} (RFC 6901 against dataModel), or {\"call\":\"<fn>\",\"args\":{...}}, resolved recursively. Functions: required{value}, email{value}, regex{value,pattern}, length{value,min?,max?}, numeric{value,min?,max?}, and{values}, or{values}, not{value}, formatString{value}, formatDate{value,format}, formatNumber{value,decimals?,grouping?}, formatCurrency{value,currency,decimals?}, pluralize{value,one?,other,...}, openUrl{url} (http/https, on click only), @index{offset?}.\n\
+        CHILDREN: an array of ids, or a template {\"componentId\":\"<row id>\",\"path\":\"/list\"} (plain \"path\" here) that repeats one component per list item. Inside a template, a path without a leading \"/\" resolves against the current item, {\"@path\":\"\"} is the item itself, and {\"@call\":\"@index\"} gives its 0-based position.\n\
         \n\
-        formatString fills ${...} holes: {\"call\":\"formatString\",\"args\":{\"value\":\"${/user/name} has ${formatNumber(value: /cart/n)} items, due ${formatDate(value: ${/due}, format: 'MMM d')}\"}}. A literal marker is escaped as \\${.\n\
+        VALUES: any prop takes a literal, {\"@path\":\"/json/ptr\"} (RFC 6901 against dataModel), or {\"@call\":\"<fn>\",\"args\":{...}}, resolved recursively. A literal object key that starts with @ is written with @@. Functions: required{value}, email{value}, regex{value,pattern}, length{value,min?,max?}, numeric{value,min?,max?}, and{values}, or{values}, not{value}, formatString{value}, formatDate{value,format}, formatNumber{value,decimals?,grouping?}, formatCurrency{value,currency,decimals?,grouping?}, pluralize{value,other,zero?,one?,two?,few?,many?}, openUrl{url} (http/https, on click only), @index{offset?}.\n\
         \n\
-        VALIDATION: gate a Button or an input with checks:[{\"condition\":<value>,\"message\":\"...\"}]. A Button whose check fails suppresses its action and toasts the message; an input shows the message beneath itself. Do NOT build separate Text components to display errors.\n\
+        formatString fills ${...} holes: {\"@call\":\"formatString\",\"args\":{\"value\":\"${/user/name} has ${formatNumber(value: /cart/n)} items, due ${formatDate(value: ${/due}, format: 'MMM d')}\"}}. A literal marker is escaped as \\${.\n\
         \n\
-        BINDING: inputs two-way bind to their {path}, and the whole dataModel rides along in the event payload unless createSurface sets \"sendDataModel\":false — so a form submit needs no extra plumbing. updateDataModel pre-fills fields before render; a null value deletes the key at \"path\".\n\
+        VALIDATION: gate a Button or an input with checks:[{\"condition\":<{@path} or {@call}>,\"message\":\"...\"}]. A failing check disables the Button and shows the message as its tooltip; an input shows the message beneath itself. Do NOT build separate Text components to display errors.\n\
+        \n\
+        BINDING: inputs two-way bind to their {@path}; a path that does not exist yet is created as the user types. A number TextField writes a string. The whole dataModel comes back in the result's metadata unless createSurface sets \"sendDataModel\":false, so a form submit needs no extra plumbing; event \"context\" names individual values. updateDataModel pre-fills fields; a null value deletes the key at \"path\".\n\
         \n\
         Working example (approval card that blocks on a click):\n\
-        {\"await_events\":[\"approve\",\"reject\"],\"messages\":[{\"version\":\"v1.0\",\"createSurface\":{\"surfaceId\":\"r1\",\"dataModel\":{\"form\":{\"reason\":\"\"}},\"components\":[{\"id\":\"root\",\"component\":\"Card\",\"child\":\"body\"},{\"id\":\"body\",\"component\":\"Column\",\"gap\":10,\"children\":[\"t\",\"f1\",\"actions\"]},{\"id\":\"t\",\"component\":\"Text\",\"text\":\"## Review change\"},{\"id\":\"f1\",\"component\":\"TextField\",\"label\":\"Reason\",\"value\":{\"path\":\"/form/reason\"},\"placeholder\":\"Why?\"},{\"id\":\"actions\",\"component\":\"Row\",\"gap\":8,\"children\":[\"ok\",\"no\"]},{\"id\":\"okLabel\",\"component\":\"Text\",\"text\":\"Approve\"},{\"id\":\"ok\",\"component\":\"Button\",\"child\":\"okLabel\",\"variant\":\"primary\",\"checks\":[{\"condition\":{\"call\":\"required\",\"args\":{\"value\":{\"path\":\"/form/reason\"}}},\"message\":\"Reason is required\"}],\"action\":{\"event\":{\"name\":\"approve\",\"userMessage\":\"Approved the change\",\"context\":{\"reason\":{\"path\":\"/form/reason\"}}}}},{\"id\":\"noLabel\",\"component\":\"Text\",\"text\":\"Reject\"},{\"id\":\"no\",\"component\":\"Button\",\"child\":\"noLabel\",\"action\":{\"event\":{\"name\":\"reject\"}}}]}}]}"
+        {\"await_events\":[\"approve\",\"reject\"],\"messages\":[{\"version\":\"1.0\",\"createSurface\":{\"surfaceId\":\"r1\",\"dataModel\":{\"form\":{\"reason\":\"\"}},\"components\":[{\"id\":\"root\",\"component\":\"Card\",\"child\":\"body\"},{\"id\":\"body\",\"component\":\"Column\",\"children\":[\"t\",\"f1\",\"actions\"]},{\"id\":\"t\",\"component\":\"Text\",\"text\":\"## Review change\"},{\"id\":\"f1\",\"component\":\"TextField\",\"label\":\"Reason\",\"value\":{\"@path\":\"/form/reason\"},\"placeholder\":\"Why?\"},{\"id\":\"actions\",\"component\":\"Row\",\"children\":[\"ok\",\"no\"]},{\"id\":\"okLabel\",\"component\":\"Text\",\"text\":\"Approve\"},{\"id\":\"ok\",\"component\":\"Button\",\"child\":\"okLabel\",\"variant\":\"primary\",\"checks\":[{\"condition\":{\"@call\":\"required\",\"args\":{\"value\":{\"@path\":\"/form/reason\"}}},\"message\":\"Reason is required\"}],\"action\":{\"event\":{\"name\":\"approve\",\"userMessage\":\"Approved the change\",\"context\":{\"reason\":{\"@path\":\"/form/reason\"}}}}},{\"id\":\"noLabel\",\"component\":\"Text\",\"text\":\"Reject\"},{\"id\":\"no\",\"component\":\"Button\",\"child\":\"noLabel\",\"action\":{\"event\":{\"name\":\"reject\"}}}]}}]}"
 	)]
 	async fn render_ui(&self, Parameters(req): Parameters<RenderUiRequest>) -> Result<CallToolResult, McpError> {
 		// An envelope with no messages targets no surface and would paint an
@@ -2378,10 +2381,18 @@ impl McpServer {
 		let mut problems = crate::a2ui::validate(&messages);
 		problems.extend(crate::a2ui::unanswerable_wait(&messages, &await_events));
 		if !problems.is_empty() {
-			return Ok(err_result(format!(
-				"This A2UI envelope will not render:\n- {}",
-				problems.join("\n- ")
-			)));
+			return Ok(err_result(crate::a2ui::rejection_text(&problems, &messages)));
+		}
+		// The basic catalog lets no agent call a renderer function; the answer
+		// is an error response, produced here without involving the renderer.
+		let call_responses = crate::a2ui::reject_renderer_calls(&mut messages);
+		if messages.is_empty() {
+			return Ok(CallToolResult::success(
+				call_responses
+					.iter()
+					.map(|response| ContentBlock::text(response.to_string()))
+					.collect(),
+			));
 		}
 		crate::a2ui::normalize(&mut messages);
 		let blocking = !await_events.is_empty();
@@ -2399,9 +2410,15 @@ impl McpServer {
 		} else {
 			browser_try!(self.send_command(build).await?)
 		};
-		Ok(CallToolResult::success(vec![ContentBlock::text(
+		let mut content = vec![ContentBlock::text(
 			serde_json::to_string(&outcome).unwrap_or_else(|_| "{\"ok\":true}".to_string()),
-		)]))
+		)];
+		content.extend(
+			call_responses
+				.iter()
+				.map(|response| ContentBlock::text(response.to_string())),
+		);
+		Ok(CallToolResult::success(content))
 	}
 }
 
