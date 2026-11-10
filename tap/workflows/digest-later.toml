@@ -14,7 +14,7 @@ description = "Read the save-for-later queue, pull each page's text from page me
 # ── 1. Digest ─────────────────────────────────────────────────────────────
 [[steps]]
 name    = "digest"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 600
 retries = 1
@@ -47,7 +47,7 @@ exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
 
   [[steps.run]]
   name    = "check"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   timeout = 180
   prompt  = """
 Unattended workflow step: no greeting, no questions, no render_ui.

@@ -12,7 +12,7 @@ description = "Snapshot the form on the user's current tab, fill it from memory 
 # ── 1. Fill — map fields to memory, one fill call, no submit ────────────────
 [[steps]]
 name    = "fill"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 300
 retries = 1
@@ -46,7 +46,7 @@ exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
 
   [[steps.run]]
   name    = "check"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   skills  = ["browser-tasks"]
   timeout = 180
   prompt  = """

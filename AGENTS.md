@@ -62,12 +62,12 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
 
 Every assistant runs as a session on ONE `octomind server` process, reached over its WebSocket protocol:
 
-1. **Sidebar chats** (`octoweb:assistant` or any tag) — resumable, one per sidebar tab, per workspace
+1. **Sidebar chats** (`octoweb:chief` or any tag) — resumable, one per sidebar tab, per workspace
 2. **Background learner** (`octoweb:learning`), **inline edit** (`octoweb:editor`), **mail jobs**
    (`octoweb:mail-reader` / `octoweb:mail-writer`) — one-shot sessions, unloaded when done
 
 **Server (`octomind_server.rs`):**
-- Started lazily by the first session: `octomind server octoweb:assistant --port 0 --sandbox`, cwd
+- Started lazily by the first session: `octomind server octoweb:chief --port 0 --sandbox`, cwd
   `~/.local/share/octoweb` (loads `.env` there); the bound address is read from its stdout
 - `OCTOMIND_SERVER_TOKEN` (per-run secret) authenticates every connection; `OCTOWEB_MCP_TOKEN` is the
   MCP agent-server token (see MCP below); `OCTOMIND_MEDIA_ROOT` holds pasted images

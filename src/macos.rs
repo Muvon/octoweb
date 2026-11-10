@@ -760,13 +760,17 @@ pub fn register_octomind_tap(tap_name: &str) {
 	}
 }
 
-/// Every agent tag octomind can resolve (`category:variant`) with its title,
-/// sorted alphabetically. Feeds the sidebar's new-session tag autocomplete.
+/// Every agent tag octomind can resolve with its title: full tags
+/// (`category:variant`) and bare domains (`category`). A domain is listed when
+/// the tap has `agents/<category>/chief.toml`, the agent `octomind run <category>`
+/// starts, and takes that manifest's title; domains sort first, then full tags,
+/// each alphabetically. Feeds the sidebar's new-session tag autocomplete.
 ///
 /// Scanned off disk because octomind has no "list agents" command. Resolution
 /// is first-tap-wins, so `taps.toml` order is honoured and later duplicates are
 /// dropped; the cloned-tap sweep at the end is what surfaces the always-active
-/// built-in tap, which never appears in `taps.toml`.
+/// built-in tap, which never appears in `taps.toml`. The same rule picks the
+/// first tap's chief for a domain.
 pub fn octomind_agents() -> Vec<(String, String)> {
 	let Some(home) = dirs::home_dir() else {
 		return Vec::new();
@@ -792,6 +796,11 @@ pub fn octomind_agents() -> Vec<(String, String)> {
 		tap_dirs.extend(read(user.path()).map(|repo| repo.path()));
 	}
 
+	scan_agents(&tap_dirs)
+}
+
+fn scan_agents(tap_dirs: &[std::path::PathBuf]) -> Vec<(String, String)> {
+	let read = |dir: std::path::PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
 	let mut seen = std::collections::HashSet::new();
 	let mut agents = Vec::new();
 	for tap in tap_dirs {
@@ -809,20 +818,21 @@ pub fn octomind_agents() -> Vec<(String, String)> {
 				if !seen.insert(tag.clone()) {
 					continue;
 				}
-				// Agent TOMLs carry their human title in a header comment.
-				let title = std::fs::read_to_string(&path)
-					.ok()
-					.and_then(|s| {
-						s.lines()
-							.take(8)
-							.find_map(|l| l.strip_prefix("# Title:").map(|t| t.trim().to_string()))
-					})
+				// Agent TOMLs carry their title in a header comment.
+				let text = std::fs::read_to_string(&path).unwrap_or_default();
+				let title = text
+					.lines()
+					.take(8)
+					.find_map(|l| l.strip_prefix("# Title:").map(|t| t.trim().to_string()))
 					.unwrap_or_default();
+				if variant == "chief" && seen.insert(name.clone()) {
+					agents.push((name.clone(), title.clone()));
+				}
 				agents.push((tag, title));
 			}
 		}
 	}
-	agents.sort();
+	agents.sort_by(|a, b| (a.0.contains(':'), &a.0).cmp(&(b.0.contains(':'), &b.0)));
 	agents
 }
 
@@ -948,5 +958,27 @@ mod tests {
 		std::fs::remove_dir_all(&dir).unwrap();
 		let mark = String::from_utf8_lossy(&mark.stdout);
 		assert!(mark.contains(";Octoweb;"), "{mark:?}");
+	}
+
+	#[test]
+	fn chief_manifests_add_domains_that_sort_first_and_first_tap_wins() {
+		let base = std::env::temp_dir().join(format!("octoweb-agents-{}", std::process::id()));
+		let manifest = |tap: &str, variant: &str, title: &str| {
+			let dir = base.join(tap).join("agents/developer");
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(dir.join(format!("{variant}.toml")), format!("# Title: {title}\n")).unwrap();
+		};
+		manifest("one", "chief", "Engineering Orchestrator");
+		manifest("one", "coder", "Coder");
+		manifest("two", "chief", "Other Chief");
+		manifest("two", "general", "General");
+		let agents = scan_agents(&[base.join("one"), base.join("two")]);
+		std::fs::remove_dir_all(&base).unwrap();
+		let tags: Vec<_> = agents.iter().map(|(t, _)| t.as_str()).collect();
+		assert_eq!(
+			tags,
+			["developer", "developer:chief", "developer:coder", "developer:general"]
+		);
+		assert_eq!(agents[0].1, "Engineering Orchestrator");
 	}
 }

@@ -13,7 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn workspace_dir(shared: &Path, workspace_id: &str, role: &str) -> PathBuf {
-	if role == "octoweb:assistant" && workspace_id != crate::workspace::DEFAULT_WORKSPACE_ID {
+	// A bare `octoweb` is the same agent: Octomind starts a domain's `chief` for it.
+	if matches!(role, "octoweb:chief" | "octoweb") && workspace_id != crate::workspace::DEFAULT_WORKSPACE_ID {
 		// Octomind keys lessons by cwd basename. Siblings keep the Default
 		// sandbox from containing other workspaces while preserving its scope.
 		shared
@@ -143,9 +144,10 @@ mod tests {
 	#[test]
 	fn assistant_directories_have_distinct_lesson_scopes() {
 		let shared = Path::new("/home/user/.local/share/octoweb");
-		assert_eq!(workspace_dir(shared, "default", "octoweb:assistant"), shared);
-		let first = workspace_dir(shared, "first", "octoweb:assistant");
-		let second = workspace_dir(shared, "second", "octoweb:assistant");
+		assert_eq!(workspace_dir(shared, "default", "octoweb:chief"), shared);
+		let first = workspace_dir(shared, "first", "octoweb:chief");
+		let second = workspace_dir(shared, "second", "octoweb:chief");
+		assert_eq!(workspace_dir(shared, "first", "octoweb"), first);
 		assert_eq!(first.file_name().unwrap(), "octoweb-first");
 		assert_eq!(second.file_name().unwrap(), "octoweb-second");
 		assert!(!first.starts_with(shared));
@@ -170,8 +172,8 @@ mod tests {
 		fs::write(shared.join(".env"), "TEST_KEY=value").unwrap();
 		fs::write(shared.join("AGENTS.md"), "Shared instructions").unwrap();
 
-		let first = prepare_in(&home, "first", "octoweb:assistant").unwrap();
-		let second = prepare_in(&home, "second", "octoweb:assistant").unwrap();
+		let first = prepare_in(&home, "first", "octoweb:chief").unwrap();
+		let second = prepare_in(&home, "second", "octoweb:chief").unwrap();
 		for workspace in [&first, &second] {
 			assert_eq!(
 				fs::read_to_string(workspace.join(".agents/tools/custom")).unwrap(),
@@ -193,19 +195,19 @@ mod tests {
 		assert_eq!(fs::read_to_string(first.join(".env")).unwrap(), "TEST_KEY=updated");
 		fs::remove_file(first.join("AGENTS.md")).unwrap();
 		fs::write(first.join("AGENTS.md"), "Workspace instructions").unwrap();
-		prepare_in(&home, "first", "octoweb:assistant").unwrap();
+		prepare_in(&home, "first", "octoweb:chief").unwrap();
 		assert_eq!(
 			fs::read_to_string(first.join("AGENTS.md")).unwrap(),
 			"Workspace instructions"
 		);
 		fs::remove_file(user_tools.join("custom")).unwrap();
-		prepare_in(&home, "first", "octoweb:assistant").unwrap();
+		prepare_in(&home, "first", "octoweb:chief").unwrap();
 		assert!(first.join(".agents/tools/custom").symlink_metadata().is_err());
 
 		let handles: Vec<_> = (0..4)
 			.map(|_| {
 				let home = home.clone();
-				std::thread::spawn(move || prepare_in(&home, "parallel", "octoweb:assistant").unwrap())
+				std::thread::spawn(move || prepare_in(&home, "parallel", "octoweb:chief").unwrap())
 			})
 			.collect();
 		for handle in handles {
@@ -213,7 +215,7 @@ mod tests {
 		}
 		fs::create_dir_all(home.join(".local/share/octoweb-workspaces")).unwrap();
 		fs::write(home.join(".local/share/octoweb-workspaces/octoweb-blocked"), "file").unwrap();
-		assert!(prepare_in(&home, "blocked", "octoweb:assistant")
+		assert!(prepare_in(&home, "blocked", "octoweb:chief")
 			.unwrap_err()
 			.to_string()
 			.contains("Could not prepare agent tools"));

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 /// The role the server starts under. Sessions name their own role on bind;
 /// this one only decides which tap the server resolves at startup.
-const SERVER_ROLE: &str = "octoweb:assistant";
+const SERVER_ROLE: &str = "octoweb:chief";
 
 /// Startup resolves the server role's tap (and may run its dependency
 /// scripts), so the first start after an install can take a while.
@@ -335,9 +335,9 @@ mod tests {
 	fn only_an_octomind_server_process_is_reaped() {
 		assert!(super::is_octomind_server("octomind-server"));
 		assert!(super::is_octomind_server(
-			"/usr/local/bin/octomind server octoweb:assistant --port 0"
+			"/usr/local/bin/octomind server octoweb:chief --port 0"
 		));
-		assert!(!super::is_octomind_server("octomind-acp octoweb:assistant"));
+		assert!(!super::is_octomind_server("octomind-acp octoweb:chief"));
 		assert!(!super::is_octomind_server("octomind-run developer:general"));
 		assert!(!super::is_octomind_server("/usr/sbin/httpd"));
 	}

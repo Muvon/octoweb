@@ -14,7 +14,7 @@ description = "Walk a service's cancel path through dark patterns (always the ca
 # ── 1. Act — STAGE (find the last button, don't click) or CONFIRM (click it) ─
 [[steps]]
 name    = "act"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 600
 retries = 1
@@ -73,7 +73,7 @@ exit_when      = { output = "check", matches = '(?m)^RESULT: (VERIFIED|BLOCKED)'
 
   [[steps.run]]
   name    = "check"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   skills  = ["browser-tasks"]
   timeout = 300
   prompt  = """

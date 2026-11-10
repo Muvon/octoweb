@@ -191,7 +191,7 @@ pub struct CommandInfo {
 
 /// What session a handle drives and where it runs.
 pub struct AgentSpec {
-	/// Agent tag (`octoweb:assistant`, `octoweb:mail-reader`, …). A resumed
+	/// Agent tag (`octoweb:chief`, `octoweb:mail-reader`, …). A resumed
 	/// session keeps the role it was created with.
 	pub role: String,
 	/// The octomind session to resume; `None` starts a new one.
@@ -1660,7 +1660,7 @@ mod tests {
 	}
 
 	fn chat_spec() -> AgentSpec {
-		AgentSpec::chat("octoweb:assistant", Some("sess-1".into()), "default", None)
+		AgentSpec::chat("octoweb:chief", Some("sess-1".into()), "default", None)
 	}
 
 	fn run_frame(seq: u64, event: serde_json::Value) -> serde_json::Value {
@@ -1698,7 +1698,7 @@ mod tests {
 		];
 		let mut incoming = futures::stream::iter(frames.into_iter().map(|frame| Ok(Message::text(frame.to_string()))));
 		session
-			.bind(&mut incoming, std::path::Path::new("/tmp"), "octoweb:assistant")
+			.bind(&mut incoming, std::path::Path::new("/tmp"), "octoweb:chief")
 			.await
 			.unwrap();
 		assert!(rx.try_recv().is_err(), "partial bind transcript escaped");
@@ -1946,7 +1946,7 @@ mod tests {
 		let endpoint = mock_server(|mut ws| async move {
             let bind = accept_session(&mut ws).await;
             assert_eq!(bind["session_id"], "sess-1");
-            assert_eq!(bind["role"], "octoweb:assistant");
+            assert_eq!(bind["role"], "octoweb:chief");
             assert_eq!(bind["cwd"], "/tmp");
 
             let msg = recv(&mut ws).await;
@@ -2355,7 +2355,7 @@ mod tests {
 		];
 		let mut incoming = futures::stream::iter(frames.into_iter().map(|frame| Ok(Message::text(frame.to_string()))));
 		let commands = session
-			.bind(&mut incoming, std::path::Path::new("/tmp"), "octoweb:assistant")
+			.bind(&mut incoming, std::path::Path::new("/tmp"), "octoweb:chief")
 			.await
 			.unwrap();
 		assert_eq!(commands.len(), 2);

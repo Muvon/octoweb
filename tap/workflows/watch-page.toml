@@ -13,7 +13,7 @@ description = "Open a URL in a background tab, extract the watched text, diff it
 # ── 1. Extract — background tab, watched text only ──────────────────────────
 [[steps]]
 name    = "extract"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 300
 retries = 1
@@ -42,7 +42,7 @@ LOAD FAILED: <URL> — <what you saw>
 # ── 2. Compare — diff against the memorized snapshot, store the new one ─────
 [[steps]]
 name    = "compare"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 timeout = 180
 retries = 1
 prompt  = """
@@ -80,7 +80,7 @@ exit_when      = { output = "confirm", matches = '(?m)^RESULT: VERIFIED' }
 
   [[steps.run]]
   name    = "confirm"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   timeout = 120
   prompt  = """
 Unattended workflow step: no greeting, no questions, no render_ui, no browser tools.

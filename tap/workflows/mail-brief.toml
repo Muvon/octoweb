@@ -13,7 +13,7 @@ description = "Group the user's inbox into Needs reply, Waiting on others, FYI a
 
 [[steps]]
 name    = "brief"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 timeout = 600
 retries = 1
 prompt  = """

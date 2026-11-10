@@ -4052,8 +4052,8 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
     if (sessions.size >= MAX_SESSIONS) return;
     scPanel.classList.add('visible');
     scTitle.value = '';
-    const preferred = agents.find(a => a.tag === 'octoweb:assistant')
-      || { tag: 'octoweb:assistant', title: 'Assistant' };
+    const preferred = agents.find(a => a.tag === 'octoweb:chief')
+      || { tag: 'octoweb:chief', title: 'Assistant' };
     scTag.value = preferred.title;
     scTag.dataset.agentTag = preferred.tag;
     scTagMeta.textContent = preferred.tag;
@@ -4113,13 +4113,13 @@ pub fn html(max_ai_prompt_history: usize, account_expanded: bool) -> String {
   };
 
   // ── Bootstrap default session (sid=1, matches main.rs) ──────────────────
-  // The main.rs spawns a default session (id=1, "Assistant", "octoweb:assistant")
+  // The main.rs spawns a default session (id=1, "Assistant", "octoweb:chief")
   // before the sidebar HTML loads. We register it here so events arriving with
   // sid=1 find a target. If Rust restored persisted sessions from disk, it
   // will push __addSession / __renameSession / __replayMessages on
   // `sidebar_ready` to override this default.
   (function initDefault() {
-    window.__addSession(1, 'Assistant', 'octoweb:assistant', 'connecting');
+    window.__addSession(1, 'Assistant', 'octoweb:chief', 'connecting');
     switchTo(1);
   })();
 

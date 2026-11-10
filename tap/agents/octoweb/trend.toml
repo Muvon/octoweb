@@ -223,7 +223,7 @@ For each angle (3–5):
 
 ## 8. Hand-off — OPT-IN ONLY
 - Writer: `content:social` with the platform named — the matching `social-<platform>` skill auto-activates and applies platform-native craft rules
-- Publisher: the browser concierge (`octoweb:assistant`) executes the publish step after the user approves the draft
+- Publisher: the browser concierge (`octoweb:chief`) executes the publish step after the user approves the draft
 - Memory committed: {{count}} entries
 ```
 

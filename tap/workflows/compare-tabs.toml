@@ -13,7 +13,7 @@ description = "Answer a question across open tabs: read each listed tab's conten
 # ── 1. Read — facts per tab, verbatim ───────────────────────────────────────
 [[steps]]
 name    = "read"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 600
 retries = 1
@@ -43,7 +43,7 @@ FACTS: LOAD FAILED — <what you saw>
 # ── 2. Table — one row per tab, Source column = URL ─────────────────────────
 [[steps]]
 name    = "table"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 timeout = 180
 prompt  = """
 Unattended workflow step: no greeting, no questions, no render_ui, no browser tools.
@@ -72,7 +72,7 @@ exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
 
   [[steps.run]]
   name    = "check"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   skills  = ["browser-tasks"]
   timeout = 600
   prompt  = """

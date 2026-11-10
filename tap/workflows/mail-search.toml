@@ -11,7 +11,7 @@ description = "Turn a plain-language question into mail_search queries (from:, t
 
 [[steps]]
 name    = "search"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 timeout = 300
 retries = 1
 prompt  = """

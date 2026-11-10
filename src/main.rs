@@ -593,7 +593,7 @@ pub(crate) struct AcpSession {
 	id: u64,
 	/// User-visible label shown in the header strip.
 	title: String,
-	/// Agent tag the session runs under (e.g. `octoweb:assistant`).
+	/// Agent tag the session runs under (e.g. `octoweb:chief`).
 	tag: String,
 	/// Live handle. `None` while reconnecting after an error.
 	handle: Option<agent::AgentHandle>,
@@ -2733,7 +2733,7 @@ fn main() {
 	// sidebar shows them as tabs in its header strip; switching toggles which
 	// DOM message log is visible (the others remain mounted as detached fragments).
 	//
-	// At least one session always exists (the default `octoweb:assistant` —
+	// At least one session always exists (the default `octoweb:chief` —
 	// matches pre-multi-session behavior on startup).
 	let acp_proxy = proxy.clone();
 	let make_wake = |proxy: tao::event_loop::EventLoopProxy<AppEvent>| {
@@ -2857,11 +2857,11 @@ fn main() {
 				let default_session = AcpSession {
 					id,
 					title: "Assistant".to_string(),
-					tag: "octoweb:assistant".to_string(),
+					tag: "octoweb:chief".to_string(),
 					handle: if is_startup_active_ws {
 						agent::AgentHandle::connect(
 							agent::AgentSpec::chat(
-								"octoweb:assistant",
+								"octoweb:chief",
 								None,
 								&ws.id,
 								mcp_handle.as_ref().map(|h| h.register_session(&ws.id, id)),
@@ -8362,7 +8362,7 @@ fn main() {
                 workspace_manager.active_mut().acp_sessions.push(AcpSession {
                     id: default_sid,
                     title: "Assistant".to_string(),
-                    tag: "octoweb:assistant".to_string(),
+                    tag: "octoweb:chief".to_string(),
                     handle: None,
                     retry_count: 0,
                     reconnect_gen: 0,
@@ -14698,7 +14698,7 @@ mod injected_turn_tests {
 		AcpSession {
 			id: 1,
 			title: "test".into(),
-			tag: "octoweb:assistant".into(),
+			tag: "octoweb:chief".into(),
 			handle: None,
 			retry_count: 0,
 			reconnect_gen: 0,
@@ -14800,7 +14800,7 @@ mod a2ui_tests {
 		AcpSession {
 			id: 1,
 			title: "test".into(),
-			tag: "octoweb:assistant".into(),
+			tag: "octoweb:chief".into(),
 			handle: None,
 			retry_count: 0,
 			reconnect_gen: 0,

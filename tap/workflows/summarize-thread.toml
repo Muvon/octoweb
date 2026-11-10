@@ -13,7 +13,7 @@ description = "Open a thread or long article in a background tab, read all of it
 # ── 1. Digest — read everything, keep the tab for verification ──────────────
 [[steps]]
 name    = "digest"
-role    = "octoweb:assistant"
+role    = "octoweb:chief"
 skills  = ["browser-tasks"]
 timeout = 900
 retries = 1
@@ -53,7 +53,7 @@ exit_when      = { output = "check", matches = '(?m)^RESULT: VERIFIED' }
 
   [[steps.run]]
   name    = "check"
-  role    = "octoweb:assistant"
+  role    = "octoweb:chief"
   skills  = ["browser-tasks"]
   timeout = 300
   prompt  = """

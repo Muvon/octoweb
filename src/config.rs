@@ -395,23 +395,34 @@ pub fn save_acp_history(history: &AcpHistory) {
 pub fn load_acp_history() -> Option<AcpHistory> {
 	let path = acp_history_path();
 	let raw = fs::read_to_string(&path).ok()?;
-	if let Ok(h) = serde_json::from_str::<AcpHistory>(&raw) {
-		return Some(h);
+	let mut history = match serde_json::from_str::<AcpHistory>(&raw) {
+		Ok(h) => h,
+		// Migration: old flat `{sessions, active_id}` shape has no `workspaces`
+		// key and fails the parse above — wrap it under the "default" workspace.
+		// Only migrates in memory; rewritten in the new shape on next save.
+		Err(_) => {
+			let legacy: LegacyAcpHistory = serde_json::from_str(&raw).ok()?;
+			let mut workspaces = std::collections::HashMap::new();
+			workspaces.insert(
+				"default".to_string(),
+				WorkspaceAcpHistory {
+					sessions: legacy.sessions,
+					active_id: legacy.active_id,
+					closed: Vec::new(),
+				},
+			);
+			AcpHistory { workspaces }
+		}
+	};
+	for workspace in history.workspaces.values_mut() {
+		for snapshot in workspace.sessions.iter_mut().chain(workspace.closed.iter_mut()) {
+			// The agent was renamed from octoweb:assistant to octoweb:chief.
+			if snapshot.tag == "octoweb:assistant" {
+				snapshot.tag = "octoweb:chief".to_string();
+			}
+		}
 	}
-	// Migration: old flat `{sessions, active_id}` shape has no `workspaces`
-	// key and fails the parse above — wrap it under the "default" workspace.
-	// Only migrates in memory; rewritten in the new shape on next save.
-	let legacy: LegacyAcpHistory = serde_json::from_str(&raw).ok()?;
-	let mut workspaces = std::collections::HashMap::new();
-	workspaces.insert(
-		"default".to_string(),
-		WorkspaceAcpHistory {
-			sessions: legacy.sessions,
-			active_id: legacy.active_id,
-			closed: Vec::new(),
-		},
-	);
-	Some(AcpHistory { workspaces })
+	Some(history)
 }
 
 fn acp_history_path() -> PathBuf {
