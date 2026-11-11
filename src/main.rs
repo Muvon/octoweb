@@ -2091,6 +2091,10 @@ fn main() {
 	let sidebar_wv = WebViewBuilder::new()
 		.with_html(sidebar_html::html(cfg.max_ai_prompt_history, cfg.account_expanded))
 		.with_transparent(true)
+		// chrome_win is rarely key while you work in a page; without this the
+		// first click on the sidebar only makes it key, so an A2UI button or a
+		// tab needed a second click.
+		.with_accept_first_mouse(true)
 		.with_custom_protocol("octoweb-lib".into(), |_wv_id, request| {
 			let path = request.uri().path().trim_start_matches('/');
 			let (data, mime): (&[u8], &str) = match path {
