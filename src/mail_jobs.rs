@@ -223,7 +223,8 @@ pub fn outcome(p: Progress) -> Outcome {
 	match (p.job, block) {
 		(Job::Draft { key }, Some((text, _))) => script(
 			"draftStream",
-			serde_json::json!({ "key": key, "text": text, "done": ended }),
+			// Only the finished reply is kept, so only it is turned into HTML.
+			serde_json::json!({ "key": key, "text": text, "html": if ended { mail::markdown_html(text) } else { String::new() }, "done": ended }),
 		),
 		(Job::Summary { item }, Some((text, _))) => script(
 			"summaryStream",

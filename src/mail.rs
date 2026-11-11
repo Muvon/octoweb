@@ -409,6 +409,7 @@ pub struct Draft {
 	pub bcc: String,
 	#[serde(default)]
 	pub subject: String,
+	/// HTML from the composer; `clean_body` cuts it down before it is stored or sent.
 	#[serde(default)]
 	pub body: String,
 	#[serde(default)]
@@ -1885,13 +1886,13 @@ async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: Page
 					|(id, account, at, thread)| serde_json::json!({"id": id, "account": account, "at": at, "thread": thread}),
 				)
 				.collect();
-			let drafts: Vec<serde_json::Value> = shared
+			let drafts: Vec<Draft> = shared
 				.store()
 				.drafts()
 				.into_iter()
 				.filter(|(key, _)| key.starts_with("new:"))
-				.filter_map(|(_, json)| serde_json::from_str::<serde_json::Value>(&json).ok())
-				.filter(|d| d["account"].as_str().is_some_and(|a| accounts.iter().any(|k| k == a)))
+				.filter_map(|(_, json)| stored_draft(&json))
+				.filter(|d| accounts.contains(&d.account))
 				.collect();
 			to_page(script(
 				"inbox",
@@ -2011,7 +2012,9 @@ async fn page(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: Page
 				text,
 			});
 		}
-		PageRequest::SaveDraft { draft } => {
+		PageRequest::SaveDraft { mut draft } => {
+			// Stored drafts go back into the page's editor as HTML.
+			draft.body = clean_body(&draft.body);
 			let json = serde_json::to_string(&draft).expect("draft");
 			shared.store().save_draft(&draft.key, &json, now());
 		}
@@ -2179,12 +2182,20 @@ async fn send_thread(shared: &Shared, ws: &str, account_key: &str, thread: &str,
 				"messages": messages,
 				"state": state,
 				"images": images,
-				"draft": draft.and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok()),
+				"draft": draft.and_then(|d| stored_draft(&d)),
 				"row": row,
 				"me": account.address,
 			}),
 		),
 	});
+}
+
+/// A stored draft for the page's editor, which shows its body as HTML. Drafts
+/// kept before the body was HTML, agents' among them, are cleaned like new ones.
+fn stored_draft(json: &str) -> Option<Draft> {
+	let mut draft: Draft = serde_json::from_str(json).ok()?;
+	draft.body = clean_body(&draft.body);
+	Some(draft)
 }
 
 /// Apply a triage verb locally now and queue what the server must do.
@@ -2576,11 +2587,11 @@ fn random_hex() -> String {
 	hex(&crate::workspace::random_bytes16())
 }
 
-/// Plain text and HTML bodies: the user's light markdown (WRT-2), the
-/// signature, then the quoted original for replies or the forwarded message.
+/// Plain text and HTML bodies: the composer's HTML (WRT-2), the signature,
+/// then the quoted original for replies or the forwarded message.
 pub fn compose_bodies(body: &str, signature: &str, original: Option<&MessageView>, mode: &str) -> (String, String) {
-	let mut text = body.trim_end().to_string();
-	let mut html = markdown_html(body.trim_end());
+	let mut html = clean_body(body).replace("<blockquote>", &format!("<blockquote style=\"{QUOTE_STYLE}\">"));
+	let mut text = body_text(&html);
 	if !signature.trim().is_empty() {
 		text.push_str("\n\n-- \n");
 		text.push_str(signature.trim_end());
@@ -2619,16 +2630,148 @@ pub fn compose_bodies(body: &str, signature: &str, original: Option<&MessageView
 			let quoted: String = their_text.lines().map(|l| format!("> {l}\n")).collect();
 			text.push_str(&format!("\n\n{intro}\n{quoted}"));
 			html.push_str(&format!(
-                "<br><br><div>{}</div><blockquote type=\"cite\" style=\"margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex\">{}</blockquote>",
-                escape(&intro),
-                m.html.clone().unwrap_or_else(|| escape(&their_text).replace('\n', "<br>"))
-            ));
+				"<br><br><div>{}</div><blockquote type=\"cite\" style=\"{QUOTE_STYLE}\">{}</blockquote>",
+				escape(&intro),
+				m.html
+					.clone()
+					.unwrap_or_else(|| escape(&their_text).replace('\n', "<br>"))
+			));
 		}
 	}
 	(
 		text,
 		format!("<div dir=\"auto\" style=\"font-family:-apple-system,Helvetica,sans-serif\">{html}</div>"),
 	)
+}
+
+/// How a quote shows in the recipient's client: a thin bar on its left.
+const QUOTE_STYLE: &str = "margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex";
+/// The formatting the composer offers; any other tag is dropped, its text kept.
+const BODY_TAGS: [&str; 15] = [
+	"b",
+	"strong",
+	"i",
+	"em",
+	"u",
+	"s",
+	"strike",
+	"a",
+	"ul",
+	"ol",
+	"li",
+	"blockquote",
+	"p",
+	"br",
+	"div",
+];
+
+/// The composer's HTML cut down to `BODY_TAGS`, with links only to web and
+/// mail addresses. Pasted styles, images and scripts are gone.
+pub fn clean_body(html: &str) -> String {
+	ammonia::Builder::empty()
+		.tags(HashSet::from(BODY_TAGS))
+		.clean_content_tags(HashSet::from(["script", "style"]))
+		.tag_attributes(HashMap::from([("a", HashSet::from(["href"]))]))
+		.url_schemes(HashSet::from(["http", "https", "mailto"]))
+		.url_relative(ammonia::UrlRelative::Deny)
+		.link_rel(None)
+		.clean(html)
+		.to_string()
+}
+
+/// The plain-text part of a cleaned body: its lines as the composer shows
+/// them, `- ` and `1. ` list items, `> ` quotes, links as `text (url)`.
+fn body_text(html: &str) -> String {
+	let mut out = String::new();
+	// Open lists, innermost last: `None` bulleted, `Some(n)` numbered, at item n.
+	let mut lists: Vec<Option<u32>> = Vec::new();
+	let mut quotes = 0;
+	let mut link: Option<(String, usize)> = None;
+	let mut rest = html;
+	while let Some(lt) = rest.find('<') {
+		// A `>` in a quoted attribute, such as a link's address, does not end the tag.
+		let mut quoted = false;
+		let Some(gt) = rest[lt..].find(|c| {
+			quoted ^= c == '"';
+			c == '>' && !quoted
+		}) else {
+			break;
+		};
+		push_body_text(&mut out, quotes, &rest[..lt]);
+		let tag = &rest[lt + 1..lt + gt];
+		rest = &rest[lt + gt + 1..];
+		let closing = tag.starts_with('/');
+		let name = tag.trim_start_matches('/').split(' ').next().unwrap_or_default();
+		if matches!(name, "div" | "p" | "ul" | "ol" | "li" | "blockquote") && !out.is_empty() && !out.ends_with('\n') {
+			out.push('\n');
+		}
+		match (name, closing) {
+			("br", _) => out.push('\n'),
+			// Paragraphs come from agents' markdown: a blank line between them.
+			("p", true) => out.push('\n'),
+			("blockquote", false) => quotes += 1,
+			("blockquote", true) => quotes = quotes.saturating_sub(1),
+			("ul", false) => lists.push(None),
+			("ol", false) => lists.push(Some(0)),
+			("ul" | "ol", true) => {
+				lists.pop();
+			}
+			("li", false) => {
+				out.push_str(&"> ".repeat(quotes));
+				out.push_str(&"  ".repeat(lists.len().saturating_sub(1)));
+				match lists.last_mut() {
+					Some(Some(n)) => {
+						*n += 1;
+						out.push_str(&format!("{n}. "));
+					}
+					_ => out.push_str("- "),
+				}
+			}
+			("a", false) => {
+				link = tag
+					.split_once("href=\"")
+					.and_then(|(_, v)| v.split_once('"'))
+					.map(|(href, _)| (decode_body_entities(href), out.len()));
+			}
+			("a", true) => {
+				if let Some((href, at)) = link.take() {
+					// A link opening a quoted line has the line's quote marks before it.
+					let label = out[at..].trim_start_matches(['>', ' ']).trim();
+					if label != href && label != href.trim_start_matches("mailto:") {
+						out.push_str(&format!(" ({href})"));
+					}
+				}
+			}
+			_ => {}
+		}
+	}
+	push_body_text(&mut out, quotes, rest);
+	out.trim_matches('\n').trim_end().to_string()
+}
+
+/// Text between tags; a line's first words carry its quote marks. Source
+/// whitespace at a line's start does not show in the composer, so it is dropped.
+fn push_body_text(out: &mut String, quotes: usize, raw: &str) {
+	let text = decode_body_entities(raw).replace('\n', " ");
+	if !out.is_empty() && !out.ends_with('\n') {
+		out.push_str(&text);
+		return;
+	}
+	let text = text.trim_start();
+	if !text.is_empty() {
+		out.push_str(&"> ".repeat(quotes));
+		out.push_str(text);
+	}
+}
+
+/// The entities a cleaned body's serializer writes; `&amp;` last, so `&amp;lt;` stays `&lt;`.
+/// Spaces the editor keeps as `&nbsp;` are plain spaces in the text part.
+fn decode_body_entities(s: &str) -> String {
+	s.replace("&nbsp;", " ")
+		.replace("&lt;", "<")
+		.replace("&gt;", ">")
+		.replace("&quot;", "\"")
+		.replace("&amp;", "&")
 }
 
 pub fn escape(s: &str) -> String {
@@ -3557,6 +3700,8 @@ async fn mcp(shared: &Arc<Shared>, ws: String, accounts: Vec<String>, req: McpRe
 				draft.mode = "new".into();
 				draft.key = format!("new:{}", random_hex());
 			}
+			// Agents write light markdown; the composer edits HTML.
+			draft.body = markdown_html(&draft.body);
 			let json = serde_json::to_string(&draft).expect("draft");
 			shared.store().save_draft(&draft.key, &json, now());
 			shared.emit(Event::OpenDraft { ws, draft });
@@ -4113,6 +4258,27 @@ mod tests {
 	}
 
 	#[test]
+	fn composer_html_keeps_only_its_formatting() {
+		let html = clean_body(
+			"<span style=\"color:red\">x</span><img src=\"y\" onerror=\"alert(1)\"><a href=\"javascript:alert(1)\">j</a>\
+			 <a href=\"https://ok.x\" onclick=\"z()\">ok</a><script>bad()</script><font>f</font><u>u</u>",
+		);
+		assert_eq!(html, "x<a>j</a><a href=\"https://ok.x\">ok</a>f<u>u</u>");
+	}
+
+	#[test]
+	fn composer_html_becomes_plain_text() {
+		assert_eq!(
+			body_text(
+				"Hi <b>Anna</b><div>see <a href=\"https://d.x\">doc</a> and <a href=\"https://e.x\">https://e.x</a></div>\
+				 <ol><li>one</li><li>two<ul><li>sub</li></ul></li></ol><blockquote>q<br>r</blockquote><p>a &amp;lt; b</p><p>c</p>\
+				 <blockquote><a href=\"https://q.x?a>b\">https://q.x?a>b</a></blockquote>x&nbsp;y"
+			),
+			"Hi Anna\nsee doc (https://d.x) and https://e.x\n1. one\n2. two\n  - sub\n> q\n> r\na &lt; b\n\nc\n\n> https://q.x?a>b\nx y"
+		);
+	}
+
+	#[test]
 	fn presets_fill_servers_and_logins() {
 		let mut a = MailAccount {
 			id: [1; 16],
@@ -4223,7 +4389,7 @@ mod tests {
 			mode: "reply".into(),
 			to: "Anna <anna@x.com>".into(),
 			subject: "Re: Lunch".into(),
-			body: "Yes **please**".into(),
+			body: "Yes <b>please</b><div><br></div><ul><li>one</li></ul><blockquote>said</blockquote>".into(),
 			..Default::default()
 		};
 		let built = build_message(&account, &draft, Some(&original), Vec::new()).unwrap();
@@ -4232,10 +4398,15 @@ mod tests {
 		assert_eq!(p.message_id, built.message_id);
 		assert_eq!(built.recipients, vec!["anna@x.com"]);
 		let text = p.text.unwrap().replace("\r\n", "\n");
-		assert!(text.starts_with("Yes **please**\n\n--"), "{text}");
+		assert!(text.starts_with("Yes please\n\n- one\n> said\n\n--"), "{text}");
 		assert!(text.contains("\nMe\nCEO\n"), "{text}");
 		assert!(text.contains("Anna <anna@x.com> wrote:\n> Tuesday?"), "{text}");
-		assert!(p.html.unwrap().contains("<b>please</b>"));
+		let html = p.html.unwrap();
+		assert!(html.contains("<b>please</b>"), "{html}");
+		assert!(
+			html.contains(&format!("<blockquote style=\"{QUOTE_STYLE}\">said")),
+			"{html}"
+		);
 		assert!(build_message(
 			&account,
 			&Draft {

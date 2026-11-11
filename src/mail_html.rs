@@ -296,11 +296,29 @@ pub fn html(keybindings_json: &str) -> String {
     background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='12' fill='none' stroke='%238e8e93' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 4.5L4 2l2.5 2.5M1.5 7.5L4 10l2.5-2.5'/%3E%3C/svg%3E") no-repeat right center;
   }
   .field .toggle-cc { color: var(--label-3); font-size: 12px; cursor: pointer; background: none; border: none; }
-  .composer textarea {
-    display: block; width: 100%; box-sizing: border-box; min-height: 160px; resize: none; overflow: hidden;
-    border: none; outline: none; background: transparent; color: var(--label);
-    font: 13px/1.55 var(--font-text); padding: 12px 14px;
+  /* WRT-2: the body is rich text, formatted from the bar above it or by the same keys as other mail apps. */
+  .fmt { display: flex; align-items: center; gap: 1px; padding: 3px 10px; box-shadow: 0 0.5px 0 var(--hairline); }
+  .fmt .icon-btn { width: 26px; height: 24px; border-radius: var(--r-ctl); }
+  .fmt .icon-btn svg { width: 14px; height: 14px; }
+  .fmt .glyph { font: 500 13.5px/1 var(--font-text); }
+  .fmt .glyph.b { font-weight: 700; }
+  .fmt .glyph.i { font-style: italic; }
+  .fmt .glyph.u { text-decoration: underline; }
+  .fmt .glyph.s { text-decoration: line-through; }
+  .fmt .sep { width: 0.5px; height: 14px; margin: 0 5px; background: var(--hairline); }
+  .fmt .link { display: none; flex: 1; min-width: 0; height: 24px; align-items: center; padding: 0 10px; border-radius: var(--r-capsule); background: var(--fill); }
+  .fmt .link input { flex: 1; min-width: 0; border: none; outline: none; background: none; font: inherit; font-size: 12.5px; color: var(--label); }
+  .fmt.linking .link { display: flex; }
+  .fmt.linking .icon-btn, .fmt.linking .sep { display: none; }
+  .c-body {
+    position: relative; min-height: 160px; padding: 12px 14px; outline: none; overflow-wrap: anywhere;
+    font: 13px/1.55 var(--font-text); color: var(--label);
   }
+  .c-body.empty::before { content: attr(data-placeholder); position: absolute; color: var(--label-3); pointer-events: none; }
+  .c-body ul, .c-body ol, .writer-draft ul, .writer-draft ol { margin: 0; padding-left: 22px; }
+  .c-body p, .writer-draft p { margin: 0 0 0.8em; }
+  .c-body blockquote { margin: 0; padding-left: 10px; border-left: 2px solid var(--label-3); color: var(--label-2); }
+  .c-body a, .writer-draft a { color: var(--accent); }
   .composer.dragging { box-shadow: 0 0 0 2px var(--accent); }
   .files { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 8px; }
   .files:empty { display: none; }
@@ -1213,6 +1231,11 @@ pub fn html(keybindings_json: &str) -> String {
     event: '<svg viewBox="0 0 14 14" fill="none"><rect x="2" y="3" width="10" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.1"/><path d="M2 5.8h10M4.8 1.8v2M9.2 1.8v2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M7 6.8l.6 1.5 1.5.6-1.5.6L7 11 6.4 9.5 4.9 8.9l1.5-.6z" fill="currentColor"/></svg>',
     clip: '<svg viewBox="0 0 14 14" fill="none"><path d="M11.2 6.6L7 10.8a2.6 2.6 0 01-3.7-3.7l4.6-4.6a1.7 1.7 0 012.4 2.4L5.8 9.4a.8.8 0 01-1.2-1.2l4-4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     trash: '<svg viewBox="0 0 14 14" fill="none"><path d="M2.5 4h9M5.5 4V2.8a.8.8 0 01.8-.8h1.4a.8.8 0 01.8.8V4M3.7 4l.6 7.3a1 1 0 001 .9h3.4a1 1 0 001-.9L10.3 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    link: '<svg viewBox="0 0 14 14" fill="none"><path d="M6 8.1a2.4 2.4 0 003.4 0l2-2a2.4 2.4 0 00-3.4-3.4l-.7.7M8 5.9a2.4 2.4 0 00-3.4 0l-2 2a2.4 2.4 0 003.4 3.4l.7-.7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    bullets: '<svg viewBox="0 0 14 14" fill="none"><circle cx="2.6" cy="3.5" r=".9" fill="currentColor"/><circle cx="2.6" cy="7" r=".9" fill="currentColor"/><circle cx="2.6" cy="10.5" r=".9" fill="currentColor"/><path d="M5.5 3.5h6.5M5.5 7h6.5M5.5 10.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+    numbers: '<svg viewBox="0 0 14 14" fill="none"><text x="1.4" y="5" font-size="4.2" font-weight="600" fill="currentColor">1</text><text x="1.4" y="8.6" font-size="4.2" font-weight="600" fill="currentColor">2</text><text x="1.4" y="12.2" font-size="4.2" font-weight="600" fill="currentColor">3</text><path d="M5.5 3.5h6.5M5.5 7h6.5M5.5 10.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+    quote: '<svg viewBox="0 0 14 14" fill="none"><path d="M2.5 2.5v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M5.5 4h6.5M5.5 7h6.5M5.5 10h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+    plain: '<svg viewBox="0 0 14 14" fill="none"><path d="M2 2.8h6.5M5.2 2.8v8.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M8.6 8.4l3 3M11.6 8.4l-3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
     read: '<svg viewBox="0 0 14 14" fill="none"><path d="M2 6.2L7 3l5 3.2V11a.8.8 0 01-.8.8H2.8A.8.8 0 012 11z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M2.4 6.5L7 9.3l4.6-2.8" stroke="currentColor" stroke-width="1.1"/></svg>',
     close: '<svg viewBox="0 0 14 14" fill="none"><path d="M4 4l6 6M10 4l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
   };
@@ -1858,10 +1881,11 @@ pub fn html(keybindings_json: &str) -> String {
       (showCc ? '<div class="field"><label>Cc</label><input id="c-cc" value="' + esc(d.cc) + '" autocomplete="off" spellcheck="false"></div>' +
         '<div class="field"><label>Bcc</label><input id="c-bcc" value="' + esc(d.bcc) + '" autocomplete="off" spellcheck="false"></div>' : '') +
       '<div class="field"><label>Subject</label><input id="c-subject" value="' + esc(d.subject) + '"></div>' +
-      (drafted ? '<div class="writer-draft' + (w.phase === 'writing' ? ' writing' : '') + '" id="w-draft">' + esc(w.text) +
-          (w.phase === 'writing' ? '<span class="caret"></span>' : '') + '</div>' :
-        '<textarea id="c-body" placeholder="' +
-          (canWrite(d) ? 'Write — or ⌘J to draft it with AI' : 'Write…  **bold**, *italic*, - lists, [links](https://…)') + '">' + esc(d.body) + '</textarea>') +
+      // While it streams the reply shows as text; ready, as it will be kept.
+      (drafted ? '<div class="writer-draft' + (w.phase === 'writing' ? ' writing' : '') + '" id="w-draft">' +
+          (w.phase === 'writing' ? esc(w.text) + '<span class="caret"></span>' : w.html) + '</div>' :
+        formatBar() + '<div class="c-body" id="c-body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="' +
+          (canWrite(d) ? 'Write — or ⌘J to draft it with AI' : 'Write…') + '">' + d.body + '</div>') +
       (w ? writerBar(d, w) : '') +
       '<div class="files" id="c-files">' + (d.attachments || []).map(function(f, i) {
         return '<span class="file">' + esc(f.name) + ' <span class="size">' + fmtSize(Math.floor(f.data.length * 3 / 4)) + '</span><button type="button" data-rm="' + i + '" aria-label="Remove">✕</button></span>';
@@ -1874,20 +1898,12 @@ pub fn html(keybindings_json: &str) -> String {
       '<span class="spacer"></span>' +
       '<button class="icon-btn" type="button" id="c-attach" title="Attach files" aria-label="Attach files">' + I.clip + '</button>' +
       '<button class="icon-btn" type="button" id="c-discard" title="Discard draft" aria-label="Discard draft">' + I.trash + '</button></div></div>';
-    const fields = ['to', 'cc', 'bcc', 'subject', 'body'];
-    fields.forEach(function(f) {
+    ['to', 'cc', 'bcc', 'subject'].forEach(function(f) {
       const el = $('c-' + f);
-      if (el) el.addEventListener('input', function() {
-        d[f] = el.value;
-        scheduleDraftSave();
-        if (f !== 'body') return;
-        grow(el);
-        const label = document.querySelector('#c-write .label');
-        if (label) label.textContent = writeLabel(d);
-      });
+      if (el) el.addEventListener('input', function() { d[f] = el.value; scheduleDraftSave(); });
     });
     const body = $('c-body');
-    if (body) grow(body);
+    if (body) wireBody(d, body);
     $('c-from').addEventListener('change', function() { d.account = $('c-from').value; scheduleDraftSave(); });
     const cc = $('c-show-cc');
     if (cc) cc.addEventListener('click', function() { d._cc = true; renderComposer(); $('c-cc').focus(); });
@@ -1930,8 +1946,180 @@ pub fn html(keybindings_json: &str) -> String {
     if (d.thread) box.scrollIntoView({ block: 'nearest', behavior: enter && !REDUCED.matches ? 'smooth' : 'auto' });
   }
 
-  // The body grows with its text; the thread scrolls, not the textarea.
-  function grow(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+  // ── Body formatting (WRT-2) ───────────────────────────────────────────────
+  // The formatting most mail apps share, on the keys Gmail and Apple Mail use.
+  // The app keeps only these tags when it saves or sends (mail::clean_body).
+  const FORMAT_GROUPS = [
+    [
+      { cmd: 'bold', label: 'Bold', keys: '⌘B', code: 'KeyB', icon: '<span class="glyph b">B</span>' },
+      { cmd: 'italic', label: 'Italic', keys: '⌘I', code: 'KeyI', icon: '<span class="glyph i">I</span>' },
+      { cmd: 'underline', label: 'Underline', keys: '⌘U', code: 'KeyU', icon: '<span class="glyph u">U</span>' },
+      { cmd: 'strikeThrough', label: 'Strikethrough', keys: '⇧⌘X', code: 'KeyX', shift: true, icon: '<span class="glyph s">S</span>' },
+    ],
+    [{ cmd: 'link', label: 'Link', keys: '⌘K', code: 'KeyK', icon: I.link }],
+    [
+      { cmd: 'insertUnorderedList', label: 'Bulleted list', keys: '⇧⌘8', code: 'Digit8', shift: true, icon: I.bullets },
+      { cmd: 'insertOrderedList', label: 'Numbered list', keys: '⇧⌘7', code: 'Digit7', shift: true, icon: I.numbers },
+      { cmd: 'quote', label: 'Quote', keys: '⇧⌘9', code: 'Digit9', shift: true, icon: I.quote },
+    ],
+    [{ cmd: 'clear', label: 'Clear formatting', keys: '⌘\\', code: 'Backslash', icon: I.plain }],
+  ];
+  const FORMATS = FORMAT_GROUPS.flat();
+  const SAFE_LINK = /^(https?:|mailto:)/i;
+  function formatBar() {
+    // Out of the Tab order: Tab goes from Subject to the text.
+    return '<div class="fmt" id="c-fmt">' + FORMAT_GROUPS.map(function(group) {
+      return group.map(function(f) {
+        return '<button class="icon-btn" type="button" tabindex="-1" data-fmt="' + f.cmd + '" title="' + esc(f.label + '  ' + f.keys) + '" aria-label="' + esc(f.label) + '">' + f.icon + '</button>';
+      }).join('');
+    }).join('<span class="sep"></span>') +
+      '<label class="link"><input id="c-link" autocomplete="off" spellcheck="false" placeholder="https://… or name@example.com  —  ↩ adds, empty ↩ removes"></label></div>';
+  }
+  function wireBody(d, body) {
+    // Empty, the draft keeps no stray <br> from the editor, so "Write with AI" stays.
+    const sync = function() {
+      const empty = !body.textContent.trim() && !body.querySelector('li, blockquote');
+      body.classList.toggle('empty', empty);
+      d.body = empty ? '' : body.innerHTML;
+    };
+    sync();
+    body.addEventListener('input', function() {
+      sync();
+      scheduleDraftSave();
+      const label = document.querySelector('#c-write .label');
+      if (label) label.textContent = writeLabel(d);
+    });
+    body.addEventListener('keydown', function(e) {
+      if (!e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      const f = FORMATS.find(function(x) { return x.code === e.code && !!x.shift === e.shiftKey; });
+      if (!f) return;
+      e.preventDefault(); e.stopPropagation();
+      format(f.cmd);
+    });
+    body.addEventListener('paste', function(e) {
+      const html = e.clipboardData.getData('text/html');
+      const text = e.clipboardData.getData('text/plain');
+      // Files and images are not pasted into the text; attach them instead.
+      e.preventDefault();
+      if (html) document.execCommand('insertHTML', false, pastedHtml(new DOMParser().parseFromString(html, 'text/html').body));
+      else if (text) document.execCommand('insertText', false, text);
+    });
+    const bar = $('c-fmt');
+    // The buttons leave the selection in the text they format.
+    bar.addEventListener('mousedown', function(e) { if (e.target.closest('button')) e.preventDefault(); });
+    bar.addEventListener('click', function(e) {
+      const b = e.target.closest('[data-fmt]');
+      if (b) format(b.dataset.fmt);
+    });
+    const link = $('c-link');
+    link.addEventListener('keydown', function(e) {
+      if (e.isComposing || (e.key !== 'Enter' && e.key !== 'Escape')) return;
+      // Esc here closes the link field, not the composer.
+      e.preventDefault(); e.stopPropagation();
+      closeLink(e.key === 'Enter' ? linkUrl(link.value) : null);
+    });
+    link.addEventListener('blur', function() { bar.classList.remove('linking'); });
+  }
+  function format(cmd) {
+    const body = $('c-body');
+    if (!body) return;
+    body.focus();
+    if (cmd === 'link') { openLink(); return; }
+    if (cmd === 'quote') toggleQuote();
+    else if (cmd === 'clear') { document.execCommand('removeFormat'); document.execCommand('unlink'); }
+    else document.execCommand(cmd);
+    showFormatState();
+  }
+  // Unquoting swaps the quote for its contents rather than relying on outdent,
+  // which is meant for indent's own quotes. One edit, so ⌘Z brings it back.
+  function toggleQuote() {
+    const quote = selectedIn('blockquote');
+    if (!quote) { document.execCommand('formatBlock', false, 'blockquote'); return; }
+    const whole = document.createRange();
+    whole.selectNode(quote);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(whole);
+    document.execCommand('insertHTML', false, quote.innerHTML);
+  }
+  // The element matching `selector` the caret is in, within the body.
+  function selectedIn(selector) {
+    const sel = getSelection();
+    const n = sel.rangeCount ? sel.anchorNode : null;
+    const el = n && (n.nodeType === 1 ? n : n.parentElement);
+    const hit = el && el.closest(selector);
+    const body = $('c-body');
+    return hit && body && body.contains(hit) ? hit : null;
+  }
+  function showFormatState() {
+    const body = $('c-body');
+    if (!body || document.activeElement !== body) return;
+    $('c-fmt').querySelectorAll('[data-fmt]').forEach(function(b) {
+      const cmd = b.dataset.fmt;
+      const on = cmd === 'link' ? !!selectedIn('a') : cmd === 'quote' ? !!selectedIn('blockquote') : cmd !== 'clear' && document.queryCommandState(cmd);
+      b.classList.toggle('active', on);
+    });
+  }
+  document.addEventListener('selectionchange', showFormatState);
+  // ⌘K: a field in the bar for the address; the text selected keeps its place.
+  let linkRange = null;
+  function openLink() {
+    const sel = getSelection();
+    if (!sel.rangeCount) return;
+    linkRange = sel.getRangeAt(0).cloneRange();
+    const a = selectedIn('a');
+    const said = sel.toString().trim();
+    const input = $('c-link');
+    input.value = a ? a.getAttribute('href') : /^(https?:\/\/|www\.)\S+$|^[^\s@]+@[^\s@]+\.\S+$/i.test(said) ? linkUrl(said) : '';
+    $('c-fmt').classList.add('linking');
+    input.focus();
+    input.select();
+  }
+  // `url` null cancels; empty removes the link the caret is in.
+  function closeLink(url) {
+    $('c-fmt').classList.remove('linking');
+    $('c-body').focus();
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(linkRange);
+    if (url === null) return;
+    const a = selectedIn('a');
+    if (a && sel.isCollapsed) {
+      const whole = document.createRange();
+      whole.selectNodeContents(a);
+      sel.removeAllRanges();
+      sel.addRange(whole);
+    }
+    if (!url) document.execCommand('unlink');
+    else if (sel.isCollapsed) document.execCommand('insertHTML', false, '<a href="' + esc(url) + '">' + esc(url.replace(/^mailto:/i, '')) + '</a>');
+    else document.execCommand('createLink', false, url);
+  }
+  // What was typed, as a web or mail link: a bare address gets its scheme.
+  function linkUrl(said) {
+    const s = said.trim();
+    if (!s || SAFE_LINK.test(s)) return s;
+    return (/^[^\s@/]+@[^\s@]+\.[^\s@]+$/.test(s) ? 'mailto:' : 'https://') + s;
+  }
+  // Pasted HTML keeps the formatting the bar offers and nothing else: no page
+  // colours, fonts or images.
+  const PASTE_TAGS = {
+    B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u', S: 's', STRIKE: 's', DEL: 's', UL: 'ul', OL: 'ol', LI: 'li', BLOCKQUOTE: 'blockquote',
+    P: 'div', DIV: 'div', H1: 'div', H2: 'div', H3: 'div', H4: 'div', H5: 'div', H6: 'div', TR: 'div', PRE: 'div',
+  };
+  function pastedHtml(node) {
+    let out = '';
+    node.childNodes.forEach(function(n) {
+      if (n.nodeType === Node.TEXT_NODE) { out += esc(n.nodeValue.replace(/\s+/g, ' ')); return; }
+      if (n.nodeType !== Node.ELEMENT_NODE || /^(SCRIPT|STYLE|TEMPLATE|IMG)$/.test(n.tagName)) return;
+      if (n.tagName === 'BR') { out += '<br>'; return; }
+      const inner = pastedHtml(n);
+      const href = n.tagName === 'A' ? n.getAttribute('href') || '' : '';
+      const tag = PASTE_TAGS[n.tagName];
+      if (SAFE_LINK.test(href)) out += '<a href="' + esc(href) + '">' + inner + '</a>';
+      else out += tag ? '<' + tag + '>' + inner + '</' + tag + '>' : inner;
+    });
+    return out;
+  }
 
   let draftTimer = 0, draftPending = null;
   function cleanDraft(d) {
@@ -2051,11 +2239,11 @@ pub fn html(keybindings_json: &str) -> String {
       const b = e.target.closest('[data-w], [data-tune]');
       if (!b) return;
       // Before any reply exists the tunes work on what the body holds.
-      if (b.dataset.tune) write(d, b.dataset.tune, w.phase === 'ask' ? d.body : w.text);
-      else if (b.dataset.w === 'improve') write(d, '', d.body);
+      if (b.dataset.tune) write(d, b.dataset.tune, w.phase === 'ask' ? bodyText() : w.text);
+      else if (b.dataset.w === 'improve') write(d, '', bodyText());
       else if (b.dataset.w === 'keep') keepWriting(d);
       else if (b.dataset.w === 'retry') write(d, w.request.instruction, w.request.text, w.request.times);
-      else if (b.dataset.w === 'times') write(d, TIMES_ASK, w.phase === 'ask' ? d.body : w.text, true);
+      else if (b.dataset.w === 'times') write(d, TIMES_ASK, w.phase === 'ask' ? bodyText() : w.text, true);
       else closeWriter(d);
     });
     const input = $('w-input');
@@ -2065,7 +2253,7 @@ pub fn html(keybindings_json: &str) -> String {
         if (e.key !== 'Enter' || e.isComposing) return;
         e.preventDefault();
         const said = input.value.trim();
-        if (w.phase === 'ask') write(d, said, d.body);
+        if (w.phase === 'ask') write(d, said, bodyText());
         else if (said) write(d, said, w.text);
         else keepWriting(d);
       });
@@ -2098,15 +2286,16 @@ pub fn html(keybindings_json: &str) -> String {
     const body = $('c-body');
     if (body) body.focus();
   }
+  // What the writer reads of the body: its words, as the reader sees them.
+  function bodyText() { const b = $('c-body'); return b ? b.innerText.trim() : ''; }
   function keepWriting(d) {
-    const text = S.writers.get(d.key).text;
+    const html = S.writers.get(d.key).html;
     S.writers.delete(d.key);
     renderComposer();
-    // One native edit: the field's own ⌘Z brings back what it held.
-    const body = $('c-body');
-    body.focus();
-    body.select();
-    document.execCommand('insertText', false, text);
+    // One native edit: the body's own ⌘Z brings back what it held.
+    $('c-body').focus();
+    document.execCommand('selectAll');
+    document.execCommand('insertHTML', false, html);
   }
   function stopWriter(k) {
     const w = S.writers.get(k);
@@ -2252,6 +2441,7 @@ pub fn html(keybindings_json: &str) -> String {
       ['f', 'Forward'], ['c', 'Compose'], ['/', 'Search'], ['x', 'Select'], ['⌘Z', 'Undo'], ['⌘↩', 'Send'],
       ['⌘R ⇧⌘R', 'Reply / all'], ['⇧⌘F', 'Forward'], ['⌘N', 'Compose'], ['⌃⌘A', 'Done'], ['⇧⌘U', 'Mark unread'], ['⇧⌘D', 'Send'],
     ];
+    FORMATS.forEach(function(f) { keys.push([f.keys, f.label]); });
     if (S.ai) keys.push(['s', 'Summarise (AI)'], ['⌘J', 'Write a reply with AI']);
     help.innerHTML = keys.map(function(k) { return '<div><kbd>' + esc(k[0]) + '</kbd>' + esc(k[1]) + '</div>'; }).join('');
   }
@@ -2485,6 +2675,7 @@ pub fn html(keybindings_json: &str) -> String {
       const w = S.writers.get(data.key);
       if (!w || w.phase !== 'writing') return;
       w.text = data.text;
+      w.html = data.html;
       // Off screen it only keeps the text, for when its thread opens again.
       const shown = S.composer && S.composer.key === w.key;
       if (data.done) { w.phase = 'review'; if (shown) renderComposer(); return; }
