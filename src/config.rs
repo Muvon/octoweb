@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTab {
@@ -42,6 +43,30 @@ struct LegacySessionData {
 	active_url: String,
 }
 
+/// Write `contents` to a unique temp file beside `path`, then rename it over `path`;
+/// the temp file is removed if either the write or the rename fails.
+/// Atomic rename: a crash or kill mid-save leaves either the old file or the new one,
+/// never a partial one.
+/// Not durable across power loss: the data is not fsynced before the rename.
+fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+	static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+	let pid = std::process::id();
+	let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+	let mut name = path
+		.file_name()
+		.ok_or_else(|| std::io::Error::other("path has no file name"))?
+		.to_os_string();
+	name.push(format!(".{pid}.{n}.tmp"));
+	let tmp = path.with_file_name(name);
+
+	if let Err(e) = fs::write(&tmp, contents).and_then(|()| fs::rename(&tmp, path)) {
+		// Unique tmp names are never reused, so remove it or it is orphaned.
+		let _ = fs::remove_file(&tmp);
+		return Err(e);
+	}
+	Ok(())
+}
+
 pub fn save_session(workspaces: &[WorkspaceSession], active_workspace_id: &str) {
 	let data = SessionData {
 		workspaces: workspaces.to_vec(),
@@ -53,7 +78,9 @@ pub fn save_session(workspaces: &[WorkspaceSession], active_workspace_id: &str) 
 	}
 	match serde_json::to_string(&data) {
 		Ok(s) => {
-			let _ = fs::write(&path, s);
+			if let Err(e) = write_atomic(&path, &s) {
+				tracing::warn!(error = %e, "Failed to save session");
+			}
 		}
 		Err(e) => tracing::warn!(error = %e, "Failed to serialize session"),
 	}
@@ -135,7 +162,9 @@ pub fn save_favicons(cache: &std::collections::HashMap<String, String>) {
 	}
 	match serde_json::to_string(cache) {
 		Ok(s) => {
-			let _ = fs::write(&path, s);
+			if let Err(e) = write_atomic(&path, &s) {
+				tracing::warn!(error = %e, "Failed to save favicon cache");
+			}
 		}
 		Err(e) => tracing::warn!(error = %e, "Failed to serialize favicon cache"),
 	}
@@ -1052,6 +1081,74 @@ mod tests {
 		write_terminals(&dir, &saved);
 		assert_eq!(read_terminals(&dir), saved);
 		assert!(!dir.join("7.log").exists());
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn write_atomic_creates_file_and_leaves_no_tmp_file() {
+		let dir = std::env::temp_dir().join(format!("octoweb-write-atomic-create-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let file_name = "data.json";
+		let path = dir.join(file_name);
+		let contents = r#"{"saved":1}"#;
+
+		write_atomic(&path, contents).unwrap();
+		let files: Vec<_> = fs::read_dir(&dir)
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name())
+			.collect();
+		assert_eq!(files, [file_name]);
+		assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn write_atomic_replaces_existing_contents() {
+		let dir = std::env::temp_dir().join(format!("octoweb-write-atomic-replace-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let file_name = "data.json";
+		let path = dir.join(file_name);
+		// First write
+		let first = r#"{"version":"0.1"}"#;
+		write_atomic(&path, first).unwrap();
+		assert_eq!(fs::read_to_string(&path).unwrap(), first);
+		// Second write
+		let second = r#"{"ver":"0.2"}"#;
+		write_atomic(&path, second).unwrap();
+		assert_eq!(fs::read_to_string(&path).unwrap(), second);
+		fs::remove_dir_all(&dir).unwrap();
+	}
+
+	#[test]
+	fn write_atomic_concurrent_writes() {
+		let dir = std::env::temp_dir().join(format!("octoweb-write-atomic-concurrent-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let file_name = "data.json";
+		let path = dir.join(file_name);
+		let one = "1".repeat(1 << 20);
+		let two = "2".repeat(1 << 20);
+		let barrier = std::sync::Barrier::new(2);
+		std::thread::scope(|s| {
+			s.spawn(|| {
+				barrier.wait();
+				write_atomic(&path, &one).unwrap();
+			});
+			s.spawn(|| {
+				barrier.wait();
+				write_atomic(&path, &two).unwrap();
+			});
+		});
+		let files: Vec<_> = fs::read_dir(&dir)
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name())
+			.collect();
+		// No temp files left by either writer
+		assert_eq!(files, [file_name]);
+		let content = fs::read_to_string(&path).unwrap();
+		assert!(content == one || content == two, "file holds a mix of both writes");
 		fs::remove_dir_all(&dir).unwrap();
 	}
 }
