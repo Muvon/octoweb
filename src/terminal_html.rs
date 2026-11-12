@@ -669,7 +669,17 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
     panes.forEach(function(p) { p.fit.fit(); });
   });
 
-  window.addEventListener('focus', reportFocus);
+  // WebKit can drop the GPU texture behind the shared glyph atlas while the
+  // panel is hidden or the Mac sleeps, without losing the WebGL context, so
+  // panes keep drawing from a half-empty atlas. Rebuilding it redraws every glyph.
+  function rebuildGlyphAtlas() {
+    panes.forEach(function(p) { if (p.webgl) p.term.clearTextureAtlas(); });
+  }
+
+  window.addEventListener('focus', function() {
+    rebuildGlyphAtlas();
+    reportFocus();
+  });
   window.addEventListener('blur', function() { ipc({ type: 'blur' }); });
 
   dark.addEventListener('change', applyTheme);
@@ -718,6 +728,7 @@ pub fn html(keybindings_json: &str, shell_theme_json: &str, option_as_meta: bool
     build(space);
     if (space.active) showTab(space.active);
     else openTab();
+    rebuildGlyphAtlas();
   };
 
   window.__termOpened = function(id, error) {
