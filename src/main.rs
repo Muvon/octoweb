@@ -1132,6 +1132,10 @@ fn main() {
                 .with_url(url)
                 .with_devtools(true)
                 .with_back_forward_navigation_gestures(true)
+                // After a click in the sidebar or a pane, chrome_win is key;
+                // without this the first click on the page only makes
+                // browser_win key again and is swallowed.
+                .with_accept_first_mouse(true)
                 .with_bounds(bounds)
                 .with_on_web_content_process_terminate_handler(move || {
                     let _ = p9.send_event(AppEvent::WebContentTerminated(tab_id));
@@ -2293,6 +2297,8 @@ fn main() {
 	let address_bar_wv = WebViewBuilder::new()
 		.with_html(address_bar_html::html())
 		.with_transparent(true)
+		// Same as the tab webviews: one click works after chrome_win was key.
+		.with_accept_first_mouse(true)
 		.with_bounds(wry::Rect {
 			position: tao::dpi::PhysicalPosition::new(0u32, 0u32).into(),
 			size: tao::dpi::PhysicalSize::new(sz0.width, address_bar_h).into(),
@@ -2670,6 +2676,8 @@ fn main() {
 	let footer_wv = WebViewBuilder::new()
 		.with_html(quickslots_html::html())
 		.with_transparent(true)
+		// Same as the tab webviews: one click works after chrome_win was key.
+		.with_accept_first_mouse(true)
 		.with_bounds(wry::Rect {
 			position: tao::dpi::PhysicalPosition::new(0u32, sz0.height.saturating_sub(footer_h)).into(),
 			size: tao::dpi::PhysicalSize::new(sz0.width, footer_h).into(),
