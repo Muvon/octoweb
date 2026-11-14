@@ -807,6 +807,11 @@ fn scan_agents(tap_dirs: &[std::path::PathBuf]) -> Vec<(String, String)> {
 		for category in read(tap.join("agents")) {
 			let name = category.file_name().to_string_lossy().into_owned();
 			for entry in read(category.path()) {
+				// A symlinked manifest is an alias (the name an agent had before a rename):
+				// octomind resolves it by name but never lists it.
+				if entry.file_type().is_ok_and(|file_type| file_type.is_symlink()) {
+					continue;
+				}
 				let path = entry.path();
 				if path.extension().and_then(|e| e.to_str()) != Some("toml") {
 					continue;
@@ -972,6 +977,7 @@ mod tests {
 		manifest("one", "coder", "Coder");
 		manifest("two", "chief", "Other Chief");
 		manifest("two", "general", "General");
+		std::os::unix::fs::symlink("chief.toml", base.join("one/agents/developer/cto.toml")).unwrap();
 		let agents = scan_agents(&[base.join("one"), base.join("two")]);
 		std::fs::remove_dir_all(&base).unwrap();
 		let tags: Vec<_> = agents.iter().map(|(t, _)| t.as_str()).collect();
