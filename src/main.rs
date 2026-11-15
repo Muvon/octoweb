@@ -27,6 +27,7 @@ mod extensions;
 mod find_bar_html;
 mod geolocation;
 mod hibernation;
+mod history_import;
 mod hold_reorder_js;
 mod http;
 mod icons;
@@ -178,76 +179,80 @@ enum AppEvent {
 	// An MCP action navigated tab `.0`: answer `.1` once the destination has
 	// settled, as `<.2 verb> → page navigated to …`.
 	McpSettleNav(usize, McpReply, String),
-	Reload(bool),                                    // (hard) ⌘R / ⌘⇧R — hard skips the HTTP cache
-	Back,                                            // ⌘[ — history back in the focused tab
-	Forward,                                         // ⌘] — history forward in the focused tab
-	NewTab,                                          // ⌘N — open the home page in a new foreground tab
-	ReopenTab,                                       // ⌘⇧T — reopen the last tab closed in this workspace
-	FollowLink,                                      // ⌘⇧F — toggle the keyboard link-hint overlay
-	StopLoad,                                        // ⌘. — stop the current load
-	MediaPlaying(usize, String, bool),               // (tab_id, frame, is_playing) — one frame's audio/video state changed
-	MediaReset(usize),                               // (tab_id) — top document replaced, no frame plays
-	PageInfo(usize, u64, u64), // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
-	RemoveHistory(String),     // URL to remove from history
-	QuickSlotOpen(usize),      // ⌘1–⌘0 — open saved URL in slot 0–9
-	QuickSlotSave(usize),      // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
+	Reload(bool),                                                // (hard) ⌘R / ⌘⇧R — hard skips the HTTP cache
+	Back,                                                        // ⌘[ — history back in the focused tab
+	Forward,                                                     // ⌘] — history forward in the focused tab
+	NewTab,                                                      // ⌘N — open the home page in a new foreground tab
+	ReopenTab,                                                   // ⌘⇧T — reopen the last tab closed in this workspace
+	FollowLink,                                                  // ⌘⇧F — toggle the keyboard link-hint overlay
+	StopLoad,                                                    // ⌘. — stop the current load
+	MediaPlaying(usize, String, bool), // (tab_id, frame, is_playing) — one frame's audio/video state changed
+	MediaReset(usize),                 // (tab_id) — top document replaced, no frame plays
+	PageInfo(usize, u64, u64),         // (tab_id, bytes, ms) — page load stats from PerformanceNavigationTiming
+	RemoveHistory(String),             // URL to remove from history
+	QuickSlotOpen(usize),              // ⌘1–⌘0 — open saved URL in slot 0–9
+	QuickSlotSave(usize),              // ⌘⇧1–⌘⇧0 — save current page to slot 0–9
 	QuickSlotSaveUrl(usize, usize, String), // origin tab, slot, raw URL from new-tab card
 	QuickSlotReorder(String, usize, usize), // workspace, source, destination
-	QuickSlotRemove(usize),    // remove slot (from footer bar ✕ or newtab page)
+	QuickSlotRemove(usize),            // remove slot (from footer bar ✕ or newtab page)
 	InternalPageIpc(usize, InternalPageAction), // restricted IPC from new-tab/error pages
-	TogglePin,                 // ⌘⇧N — pin/unpin current tab to quickslots
-	AcpWake,                   // lightweight wake — ACP thread pokes event loop
-	AcpReconnect(u64, u64),    // (session_id, gen) — scheduled reconnection attempt for given session
-	AcpSignIn(u64),            // sidebar "Sign in" button — start `/login` for the session
-	AcpRefreshAccount(u64),    // re-probe `/usage` (login poller tick, or manual refresh)
-	DownloadStarted(usize, String), // (tab_id, filename) — navigation became a download, close the tab
+	TogglePin,                         // ⌘⇧N — pin/unpin current tab to quickslots
+	AcpWake,                           // lightweight wake — ACP thread pokes event loop
+	AcpReconnect(u64, u64),            // (session_id, gen) — scheduled reconnection attempt for given session
+	AcpSignIn(u64),                    // sidebar "Sign in" button — start `/login` for the session
+	AcpRefreshAccount(u64),            // re-probe `/usage` (login poller tick, or manual refresh)
+	DownloadStarted(usize, String),    // (tab_id, filename) — navigation became a download, close the tab
 	DownloadCompleted(String, Option<String>, bool), // (filename, saved path, success) — show notification toast
-	DismissNotification,       // user clicked X on notification toast
-	ToggleSettings,            // ⌘, — toggle settings modal
-	HideSettings,              // JS Esc / backdrop click in settings modal
-	CheckForUpdates,           // settings "Check for Updates…" — Sparkle's window
-	UpdateConfig(String, String), // (key, value) — config field changed in settings UI
+	DismissNotification,               // user clicked X on notification toast
+	ToggleSettings,                    // ⌘, — toggle settings modal
+	HideSettings,                      // JS Esc / backdrop click in settings modal
+	CheckForUpdates,                   // settings "Check for Updates…" — Sparkle's window
+	UpdateConfig(String, String),      // (key, value) — config field changed in settings UI
+	ImportHistory(String),             // settings "Import" — id of the browser to read history from
+	HistoryImported(Result<Vec<browser::HistoryEntry>, String>), // that browser's pages, read off the event loop
+	OpenExternalLink(String),          // a link another app opened — may belong to a workspace (link routes)
+	ToggleAgentPause,                  // address bar's agent chip — pause or resume every MCP agent
 	ProxyStatus([u8; 16], ssh_tunnel::Status), // SSH tunnel proxy changed state
-	ToggleWorkspaces,          // ⌘⇧O — toggle workspace switcher popover
-	HideWorkspaces,            // JS Esc / backdrop click in workspace switcher
-	SwitchWorkspace(String),   // (workspace_id) — switch active workspace
-	SwitchWorkspaceByIndex(usize), // ⌘1–⌘0 while the popover is open
-	JumpToTab(usize),          // switcher "live" row — activate a tab in whichever workspace owns it
-	CreateWorkspace,           // "+ New Workspace" row
-	RenameWorkspace(String, String), // (workspace_id, name)
+	ToggleWorkspaces,                  // ⌘⇧O — toggle workspace switcher popover
+	HideWorkspaces,                    // JS Esc / backdrop click in workspace switcher
+	SwitchWorkspace(String),           // (workspace_id) — switch active workspace
+	SwitchWorkspaceByIndex(usize),     // ⌘1–⌘0 while the popover is open
+	JumpToTab(usize),                  // switcher "live" row — activate a tab in whichever workspace owns it
+	CreateWorkspace,                   // "+ New Workspace" row
+	RenameWorkspace(String, String),   // (workspace_id, name)
 	ReorderWorkspace(String, String, bool), // source id, target id, insert after
-	DeleteWorkspace(String),   // (workspace_id)
-	MoveTabPicker,             // ⌘⇧M — open the switcher in "move current tab" mode
-	MoveTabToWorkspace(String), // (workspace_id) — move the active tab there and reload it
-	ToggleShortcuts,           // ⌘/ — toggle keyboard shortcuts overlay
-	HideShortcuts,             // JS Esc / backdrop click in shortcuts overlay
-	ToggleFindBar,             // ⌘F — toggle find-in-page bar
-	HideFindBar,               // Esc / close button in find bar
-	SidebarFind,               // ⌘F while the sidebar has key — search the chats
-	FindInPage(String),        // search query from find bar input
-	FindNext,                  // next match (Enter in find bar)
-	FindPrev,                  // previous match (⇧Enter in find bar)
-	FindCount(usize, usize),   // (current, total) — match count from tab WebView
-	WebContentTerminated(usize), // (tab_id) — WebContent XPC process killed by OS
-	ScrollDown,                // ⌃D — scroll down one full screen
-	ScrollUp,                  // ⌃U — scroll up one full screen
-	ScrollTop,                 // ⌃T — scroll to top of page
-	ScrollBottom,              // ⌃B — scroll to bottom of page
-	Screenshot,                // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
-	ScreenshotFullPage,        // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
-	SnapshotCaptured(usize, String), // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
+	DeleteWorkspace(String),           // (workspace_id)
+	MoveTabPicker,                     // ⌘⇧M — open the switcher in "move current tab" mode
+	MoveTabToWorkspace(String),        // (workspace_id) — move the active tab there and reload it
+	ToggleShortcuts,                   // ⌘/ — toggle keyboard shortcuts overlay
+	HideShortcuts,                     // JS Esc / backdrop click in shortcuts overlay
+	ToggleFindBar,                     // ⌘F — toggle find-in-page bar
+	HideFindBar,                       // Esc / close button in find bar
+	SidebarFind,                       // ⌘F while the sidebar has key — search the chats
+	FindInPage(String),                // search query from find bar input
+	FindNext,                          // next match (Enter in find bar)
+	FindPrev,                          // previous match (⇧Enter in find bar)
+	FindCount(usize, usize),           // (current, total) — match count from tab WebView
+	WebContentTerminated(usize),       // (tab_id) — WebContent XPC process killed by OS
+	ScrollDown,                        // ⌃D — scroll down one full screen
+	ScrollUp,                          // ⌃U — scroll up one full screen
+	ScrollTop,                         // ⌃T — scroll to top of page
+	ScrollBottom,                      // ⌃B — scroll to bottom of page
+	Screenshot,                        // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
+	ScreenshotFullPage,                // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
+	SnapshotCaptured(usize, String),   // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
 	FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
-	InlineEditRequest,         // ⌘⇧E — capture selection, show modal
+	InlineEditRequest,                 // ⌘⇧E — capture selection, show modal
 	InlineEditReady(String, Option<(f64, f64)>), // (text, optional (x, y) — None = no anchor, host picks default)
-	InlineEditSubmit(String),  // user submitted prompt in modal
-	InlineEditClose,           // user closed modal (Esc / close btn)
-	InlineEditHide,            // hide modal but keep processing
-	InlineEditResize(f64),     // modal content height changed
-	ZoomIn,                    // ⌘= — increase page zoom
-	ZoomOut,                   // ⌘- — decrease page zoom
-	ZoomReset,                 // ⌘0 — reset page zoom to 100%
-	LearningWake,              // background learning agent pokes event loop
-	LearningReady(String),     // active tab content extracted — build prompt and send
+	InlineEditSubmit(String),          // user submitted prompt in modal
+	InlineEditClose,                   // user closed modal (Esc / close btn)
+	InlineEditHide,                    // hide modal but keep processing
+	InlineEditResize(f64),             // modal content height changed
+	ZoomIn,                            // ⌘= — increase page zoom
+	ZoomOut,                           // ⌘- — decrease page zoom
+	ZoomReset,                         // ⌘0 — reset page zoom to 100%
+	LearningWake,                      // background learning agent pokes event loop
+	LearningReady(String),             // active tab content extracted — build prompt and send
 	JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
 	/// The user clicked a button on an A2UI surface: (call_id, session_id,
 	/// action payload). Completes the `render_ui` call blocked on that
@@ -1884,6 +1889,11 @@ fn main() {
 							let _ = p.send_event(AppEvent::HideSettings);
 							let _ = p.send_event(AppEvent::CheckForUpdates);
 						}
+						Some("import_history") => {
+							if let Some(source) = v["source"].as_str() {
+								let _ = p.send_event(AppEvent::ImportHistory(source.to_string()));
+							}
+						}
 						Some("settings_update") => {
 							if let (Some(key), Some(val)) = (v["key"].as_str(), v["value"].as_str()) {
 								let _ = p.send_event(AppEvent::UpdateConfig(key.to_string(), val.to_string()));
@@ -2375,6 +2385,9 @@ fn main() {
 								}
 								Err(e) => tracing::warn!(error = %e, "bad site permission action"),
 							}
+						}
+						Some("agent_pause_toggle") => {
+							let _ = p.send_event(AppEvent::ToggleAgentPause);
 						}
 						Some("perm_popover") => {
 							let h = v["height"].as_f64().unwrap_or(0.0).clamp(0.0, 600.0) as u32;
@@ -3400,6 +3413,8 @@ fn main() {
 	let mut perm_popover_h: u32 = 0;
 	// Last permission state pushed to the address bar — only changes are sent.
 	let mut site_perm_pushed = String::new();
+	// Last agent-chip state sent to the address bar, to skip repeats.
+	let mut agent_chip_pushed = String::new();
 	let mut site_perm_check_at = std::time::Instant::now();
 	let mut overlay_focus_target = PanelFocusTarget::ActiveTab;
 	let mut settings_focus_target = PanelFocusTarget::ActiveTab;
@@ -4566,6 +4581,7 @@ fn main() {
 						&hib,
 						&rss,
 						&workspace_manager.active().later,
+						&driven_tabs.awake(std::time::Instant::now()),
 					)
 				};
 				let _ = overlay_wv.evaluate_script(&format!("window.__refreshItems && window.__refreshItems({json})"));
@@ -4586,6 +4602,23 @@ fn main() {
 			if json != site_perm_pushed {
 				let _ = address_bar_wv.evaluate_script(&format!("window.__perms && window.__perms({json})"));
 				site_perm_pushed = json;
+			}
+		}};
+	}
+
+	/// Tell the address bar how many tabs agents are working in and whether
+	/// the user paused them. Agents work in background tabs, so this chip is
+	/// the one place their activity shows without opening the palette.
+	macro_rules! push_agent_chip {
+		() => {{
+			let state = format!(
+				"{{paused:{},tabs:{}}}",
+				mcp::AGENTS_PAUSED.load(Ordering::Relaxed),
+				driven_tabs.awake(std::time::Instant::now()).len()
+			);
+			if state != agent_chip_pushed {
+				let _ = address_bar_wv.evaluate_script(&format!("window.__agent && window.__agent({state})"));
+				agent_chip_pushed = state;
 			}
 		}};
 	}
@@ -5222,7 +5255,7 @@ fn main() {
         // Checked every tick — macOS may deliver the URL after the run loop starts.
         for url in cold_open::take() {
             tracing::debug!(url = %url, "cold_open: draining URL");
-            let _ = proxy.send_event(AppEvent::NavigateTo(url, false));
+            let _ = proxy.send_event(AppEvent::OpenExternalLink(url));
         }
         if matches!(event, Event::MainEventsCleared) {
             extensions::sync(&workspace_manager);
@@ -5316,6 +5349,7 @@ fn main() {
             if now >= driven_sweep_next_at {
                 driven_sweep_next_at = now + std::time::Duration::from_secs(1);
                 let (awake, asleep) = driven_tabs.sweep(now);
+                push_agent_chip!();
                 for tid in awake {
                     if let Some(wv) = workspace_manager.webview_of_tab(tid) {
                         if tid == active_wv_id {
@@ -8083,6 +8117,7 @@ fn main() {
                         &hib,
                         &rss,
                         &workspace_manager.active().later,
+                        &driven_tabs.awake(std::time::Instant::now()),
                     )
                 };
                 let _ = address_bar_wv.evaluate_script(&format!(
@@ -8120,6 +8155,7 @@ fn main() {
                     }
                     let _ = settings_wv.evaluate_script(&extensions::settings_script(&workspace_manager));
                     let _ = settings_wv.evaluate_script(&updates::settings_script());
+                    let _ = settings_wv.evaluate_script(&history_import::settings_script());
                     settings_win.set_visible(true);
                     settings_win.set_focus();
                     settings_visible = true;
@@ -8279,12 +8315,15 @@ fn main() {
                     workspace_switcher_visible.store(false, Ordering::Relaxed);
                     return;
                 }
-                // Hide the outgoing workspace's currently-visible webview —
+                // Hide what the outgoing workspace has on screen —
                 // `commit_tab_visibility!` below only reaches webviews of
-                // whichever workspace is active, so it can't hide this one
-                // once we've switched.
-                if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
-                    let _ = wv.set_visible(false);
+                // whichever workspace is active, so it can't hide these
+                // once we've switched. Mid-swap that is two tabs: the old
+                // one still painted and the new one loading behind it.
+                for tid in [active_wv_id, visible_tab_id(active_wv_id, pending_swap)] {
+                    if let Some(wv) = workspace_manager.active().webviews.get(&tid) {
+                        let _ = wv.set_visible(false);
+                    }
                 }
                 teardown_acp_sessions_from_sidebar!(workspace_manager.active(), true);
                 reset_cross_workspace_ui_state!();
@@ -8675,6 +8714,66 @@ fn main() {
                 ));
             }
 
+            // ── Settings → Import history ───────────────────────────────────
+            Event::UserEvent(AppEvent::ImportHistory(source)) => {
+                // Copying and reading another browser's database takes a
+                // moment on a large history: keep it off the event loop.
+                let limit = cfg.max_history;
+                let p = proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = p.send_event(AppEvent::HistoryImported(history_import::read(&source, limit)));
+                });
+            }
+            Event::UserEvent(AppEvent::HistoryImported(result)) => {
+                let outcome = match result {
+                    Ok(entries) if entries.is_empty() => "That browser has no history to import.".to_string(),
+                    Ok(entries) => {
+                        // Every workspace, as at boot: history.json is one
+                        // file, seeded into each of them and saved from all.
+                        // They differ only by this run's visits, so the
+                        // count shown is the one for where the user is.
+                        let active = workspace_manager.active_index();
+                        let mut added = 0;
+                        for (i, ws) in workspace_manager.list().iter().enumerate() {
+                            let kept = ws.tabs.lock().unwrap().import_history(entries.clone());
+                            if i == active {
+                                added = kept;
+                            }
+                        }
+                        history_save_at = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(500),
+                        );
+                        match added {
+                            0 => "Nothing added: your history already has those pages, or has no room left under Max history.".to_string(),
+                            1 => "Added 1 page to your history.".to_string(),
+                            n => format!("Added {n} pages to your history."),
+                        }
+                    }
+                    Err(message) => message,
+                };
+                let _ = settings_wv.evaluate_script(&format!(
+                    "window.__importDone && window.__importDone({})",
+                    serde_json::Value::String(outcome)
+                ));
+            }
+
+            // ── A link another app opened: its site may belong to a workspace ──
+            Event::UserEvent(AppEvent::OpenExternalLink(raw)) => {
+                let routed = workspace::workspace_for_link(&cfg.link_routes, &raw)
+                    .filter(|id| workspace_manager.index_of(id).is_some())
+                    .map(str::to_string);
+                // Events run in order: the switch lands before the tab opens.
+                if let Some(id) = routed {
+                    let _ = proxy.send_event(AppEvent::SwitchWorkspace(id));
+                }
+                let _ = proxy.send_event(AppEvent::NavigateTo(raw, false));
+            }
+
+            // ── Address bar's agent chip: pause or resume every MCP agent ──
+            Event::UserEvent(AppEvent::ToggleAgentPause) => {
+                mcp::AGENTS_PAUSED.fetch_xor(true, Ordering::Relaxed);
+                push_agent_chip!();
+            }
             Event::UserEvent(AppEvent::UpdateConfig(key, val)) => {
                 match key.as_str() {
                     "home_page" => cfg.home_page = val,
@@ -8889,6 +8988,10 @@ fn main() {
                         }
                         Err(e) => tracing::warn!(error = %e, "ignoring malformed proxies from settings"),
                     },
+                    "link_routes" => match serde_json::from_str::<Vec<config::LinkRoute>>(&val) {
+                        Ok(routes) => cfg.link_routes = routes,
+                        Err(e) => tracing::warn!(error = %e, "ignoring malformed link routes from settings"),
+                    },
                     _ => {}
                 }
                 cfg.save();
@@ -9002,6 +9105,7 @@ fn main() {
                             &hib,
                             &rss,
                             &workspace_manager.active().later,
+                            &driven_tabs.awake(std::time::Instant::now()),
                         )
                     };
                     let se = webview_utils::escape_js_template(&search_engine);
@@ -13064,7 +13168,7 @@ fn main() {
                 for url in urls {
                     let raw = url.to_string();
                     tracing::debug!(url = %raw, "OS opened URL");
-                    let _ = proxy.send_event(AppEvent::NavigateTo(raw, false));
+                    let _ = proxy.send_event(AppEvent::OpenExternalLink(raw));
                 }
                 // Bring window to front when opened externally
                 browser_win.set_focus();

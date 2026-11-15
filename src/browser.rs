@@ -352,6 +352,30 @@ impl TabManager {
 		}
 	}
 
+	/// Add another browser's history in the room left under the cap. What is
+	/// already here stays: an import never pushes the user's own history out,
+	/// and a page both have keeps its record here. Of the pages that are new,
+	/// the most recently visited go in. Returns how many were added.
+	pub fn import_history(&mut self, entries: Vec<HistoryEntry>) -> usize {
+		let mut known: HashSet<String> = self
+			.history
+			.iter()
+			.map(|e| e.url.trim_end_matches('/').to_string())
+			.collect();
+		let mut fresh: Vec<HistoryEntry> = entries
+			.into_iter()
+			.filter(|e| known.insert(e.url.trim_end_matches('/').to_string()))
+			.collect();
+		fresh.sort_by_key(|e| std::cmp::Reverse(e.visited_at));
+		fresh.truncate(self.max_history.saturating_sub(self.history.len()));
+		let added = fresh.len();
+		let mut merged: Vec<HistoryEntry> = self.history.drain(..).chain(fresh).collect();
+		// Oldest first, as the deque is kept: front = oldest, back = newest.
+		merged.sort_by_key(|e| e.visited_at);
+		self.history.extend(merged);
+		added
+	}
+
 	/// Ensure history is contiguous in memory. Call before `history()` when
 	/// you also need other immutable borrows (e.g. `tabs()`).
 	pub fn ensure_contiguous(&mut self) {
@@ -412,5 +436,47 @@ mod tests {
 		);
 		assert!(!tm.update_title(id, "Secret Page".into()));
 		assert!(tm.history().is_empty());
+	}
+
+	fn visited(url: &str, visited_at: u64) -> HistoryEntry {
+		HistoryEntry {
+			title: String::new(),
+			url: url.into(),
+			visited_at,
+			visit_count: 1,
+		}
+	}
+
+	#[test]
+	fn imported_history_fills_the_free_room_and_never_replaces_own_records() {
+		let mut tm = TabManager::new(4);
+		tm.seed_history(vec![
+			visited("https://own.example/", 50),
+			visited("https://recent.example", 90),
+		]);
+		let kept = tm.import_history(vec![
+			visited("https://own.example", 99),
+			visited("https://imported-new.example", 70),
+			visited("https://imported-old.example", 10),
+			visited("https://imported-mid.example", 60),
+		]);
+		assert_eq!(kept, 2);
+		tm.ensure_contiguous();
+		let urls: Vec<&str> = tm.history().iter().map(|e| e.url.as_str()).collect();
+		// Two own pages leave room for two: the newest of the three new ones.
+		// own.example keeps its place and its visit time of 50, not 99.
+		assert_eq!(
+			urls,
+			[
+				"https://own.example/",
+				"https://imported-mid.example",
+				"https://imported-new.example",
+				"https://recent.example"
+			]
+		);
+		assert_eq!(tm.history()[0].visited_at, 50);
+		// A full history takes nothing more.
+		assert_eq!(tm.import_history(vec![visited("https://late.example", 95)]), 0);
+		assert_eq!(tm.history().len(), 4);
 	}
 }

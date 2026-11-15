@@ -39,6 +39,7 @@ main.rs                      ← App entry, event loop, WebView pool, keyboard (
    ├── quickslots.rs         ← Fast-access slot logic (⌘⇧1–0 save, ⌘1–0 open)
    ├── prompt_history_js.rs  ← Shared JS module: prompt history nav, Ctrl+R search, ghost text
    │
+   ├── history_import.rs     ← History from another browser (Chromium, Firefox, Safari SQLite files, read from a copy)
    ├── page_index.rs         ← Full-text index of visited page text (palette `/query`, MCP search tool)
    ├── later.rs              ← Save-for-later queue (⌘⇧L) — decays after later_days, per workspace
    ├── markdown_js.rs        ← Page → markdown walker for ⌥⌘C
@@ -115,6 +116,8 @@ Interactions run through an actionability harness (`dom_actions.rs`): resolve wi
 - Main loop drains commands synchronously (WebView is not thread-safe)
 - Responses via `oneshot` channels with 30s timeout
 - `send_command<T>()` helper eliminates boilerplate across all 20 handlers
+- Pause: `mcp::AGENTS_PAUSED` (toggled by the address bar's agent chip, `AppEvent::ToggleAgentPause`) makes
+  `call_tool` refuse every call; the chip and the palette's `Agent` pill come from `AgentTabs::awake`
 - Scoping: the `X-Octoweb-Workspace` header token names the caller's workspace (and chat). The shared octomind
   server sends one agent-server token for all its sessions; `call_tool` then reads the calling octomind session from
   `_meta["io.modelcontextprotocol/clientCapabilities"].experimental.session.session_id` and resolves it through
@@ -210,6 +213,9 @@ History stored per-context: `prompt_history.json` (editor), `ai_prompt_history.j
 | `calendar_hidden` | `Vec<String>` | `[]` | Calendar keys left out of the pane and alerts |
 | `calendar_default` | `String` | `""` | Calendar key new events go to |
 | `calendar_day_start` / `calendar_day_end` | `u32` | `540` / `1080` | Working hours (minutes) for shared availability |
+
+`link_routes`: sites whose links, opened by another app, go to a workspace (`workspace` id, `sites`); matched by
+`workspace::workspace_for_link` in the `AppEvent::OpenExternalLink` handler.
 
 Per mail account: `calendar` (bool, default true) and `caldav_url` (CalDAV server override).
 `calendar_feeds`: subscribed ICS feeds (`id`, `url`, `name`, `color`, `scope`), run as read-only sources keyed `feed<hex id>`.

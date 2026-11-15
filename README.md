@@ -51,6 +51,8 @@ Most browsers are built around the mouse. Octoweb is built around the keyboard �
 - **Fast-access slots** (`⌘1`–`⌘0`) — Pin up to 10 pages for instant access, one set per workspace. Footer bar shows all slots.
 - **Tab pinning** (`⌘⇧N`) — Pin the current tab to the fast-access bar with one keystroke.
 - **Workspaces** (`⌘⇧O`) — Isolated browser profiles: each workspace has its own tabs, history, AI sessions, and a dedicated WebKit data store, so cookies, localStorage, and cache never leak between them. Switch with `⌘1`–`⌘0` while the popover is open.
+- **Link routing** — A link another app opens goes to the workspace that lists its site (Settings → General → Links from other apps): Octoweb switches there and opens it in a new tab. Unlisted sites open in the workspace you are in.
+- **History import** — Settings → General → Import reads the most recent pages of Arc, Chrome, Brave, Edge, Vivaldi, Firefox or Safari (Safari needs Full Disk Access) into the room left under `max_history`, from a copy of that browser's file. Your own history is never pushed out. History only: no bookmarks, passwords, cookies or tabs.
 - **Configurable keybindings** — Remap any shortcut in Settings (`⌘,`). Changes apply on the next keystroke, no restart.
 - **AI sidebar** (`⌘⇧A`) — Chat with a local AI agent about the current page. Streaming responses, code blocks with copy.
 - **Inline AI edit** (`⌘⇧E`) — Select text on any page, transform it with AI. Rewrite, summarize, translate.
@@ -225,6 +227,8 @@ Claude Desktop / octomind / any MCP client
 **Workspace routing:** one server serves every workspace. A request's `X-Octoweb-Workspace` token says which workspace it acts on; callers that send no token fall through to the first workspace. The sidebar's agent sessions carry their token automatically, so an agent driving tabs in a background workspace never disturbs the one you're looking at.
 
 Point Claude Desktop at `http://localhost:3434/mcp` and it can browse, read, fill forms, and navigate — all while you watch.
+
+**Seeing and pausing agents.** While an agent works in a tab, the address bar shows a chip (`Agent in 2 tabs`) until two minutes after its last call, and those tabs carry an `Agent` pill in the command palette. Clicking the chip pauses every agent: each tool call is refused with a message telling the agent not to retry, until you click the chip again. The pause is not kept across a restart.
 
 **Safety.** The endpoint validates the `Origin` header, so a page you happen to be visiting cannot `fetch()` it and drive your logged-in browser; command-line clients, which send no `Origin`, are unaffected. Read tools carry `readOnlyHint` so a host can auto-approve them instead of prompting on every page read. Everything a page authored — `browser_get_page_content`, `browser_snapshot`, `browser_console_messages`, `browser_network_requests` — comes back inside an `<untrusted>` fence, because an agent that can click and type should know which bytes are the page's. Set `OCTOWEB_MCP_PORT` / `OCTOWEB_CONFIG_DIR` to run an isolated second instance (e.g. for the e2e suite: `python3 test_mcp.py --mcp-url http://127.0.0.1:3435/mcp`).
 

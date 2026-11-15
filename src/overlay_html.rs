@@ -211,6 +211,12 @@ pub fn html() -> String {
     border-radius: var(--r-capsule);
     padding: 2px 7px;
   }
+  /* A tab an MCP agent is working in right now. */
+  .kind-pill.agent {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    box-shadow: none;
+  }
 
   .close-btn {
     width: 22px;
@@ -815,7 +821,8 @@ pub fn html() -> String {
   function renderItem(item, idx) {
     const hostname = cleanHost(item.url || '');
     const rawTitle = (item.title && item.title !== item.url) ? item.title : hostname;
-    const kindLabel = esc(item.pill || (item.incognito ? 'Private' : kindLabelFor(item)));
+    const ownKind = item.incognito ? 'Private' : kindLabelFor(item);
+    const kindLabel = esc(item.pill || (item.agent ? (item.incognito ? 'Private · Agent' : 'Agent') : ownKind));
     const selected = idx === sel ? ' selected' : '';
     const isJumpable = item.kind === 'tab' || item.kind === 'history' || item.kind === 'later';
     const shortcutNum = isJumpable ? (idx >= 1 && idx <= 9 ? String(idx) : idx === 10 ? '0' : '') : '';
@@ -843,7 +850,7 @@ pub fn html() -> String {
       '<div class="item-meta">' +
         shortcutHtml +
         (item.rss_mb ? '<span class="shortcut-badge" title="WebContent memory">' + item.rss_mb + ' MB</span>' : '') +
-        '<span class="kind-pill">' + kindLabel + '</span>' +
+        '<span class="kind-pill' + (item.agent ? ' agent' : '') + '">' + kindLabel + '</span>' +
         closeHtml +
       '</div>' +
     '</div>';

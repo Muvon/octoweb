@@ -1071,6 +1071,16 @@ fn err_result(msg: String) -> CallToolResult {
 	CallToolResult::error(vec![ContentBlock::text(msg)])
 }
 
+/// The user paused agent control from the address bar's agent chip: every
+/// tool call is refused until they resume it.
+pub static AGENTS_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a paused agent reads. It says what to do next, because a model that
+/// only sees "failed" retries.
+const PAUSED_MESSAGE: &str = "The user paused all agent tools in Octoweb, so this tool did not run and \
+	nothing changed. Do not retry. Tell the user that agents are paused and that the agent chip in Octoweb's \
+	address bar lets them continue.";
+
 /// Unwrap a browser-domain `Result` inside a tool body: `Ok(v)` yields `v`,
 /// `Err(msg)` returns a model-visible tool error from the enclosing tool fn.
 macro_rules! browser_try {
@@ -2454,6 +2464,9 @@ impl ServerHandler for McpServer {
 		request: rmcp::model::CallToolRequestParams,
 		context: rmcp::service::RequestContext<rmcp::RoleServer>,
 	) -> Result<CallToolResponse, McpError> {
+		if AGENTS_PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
+			return Ok(err_result(PAUSED_MESSAGE.to_string()).into());
+		}
 		let header = context
 			.extensions
 			.get::<axum::http::request::Parts>()

@@ -489,6 +489,33 @@ pub fn html() -> String {
     animation: live-pulse 1.4s ease-in-out infinite;
   }
   @keyframes live-pulse { 50% { opacity: 0.3; } }
+  /* Agents are working in tabs through MCP, usually ones in the background.
+     Like the permission chip it stays at every width: it says who is acting. */
+  #agent-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: var(--ctl-min);
+    padding: 0 9px;
+    margin-left: 8px;
+    border: none;
+    border-radius: var(--r-capsule);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease),
+                transform var(--t-fast) var(--ease);
+  }
+  #agent-chip.hidden { display: none; }
+  #agent-chip:hover  { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  #agent-chip:active { transform: scale(0.95); }
+  /* Paused: nothing is running, so nothing pulses and the tint goes. */
+  #agent-chip.paused { background: var(--fill); color: var(--label-2); }
+  #agent-chip.paused:hover { background: var(--fill-hover); color: var(--label); }
+  #agent-chip.paused .live-dot { animation: none; opacity: 0.5; }
 
   #perm-pop {
     position: absolute;
@@ -731,6 +758,7 @@ pub fn html() -> String {
     </div>
   </div>
   <button id="perm-chip" class="hidden" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="perm-pop"></button>
+  <button id="agent-chip" class="hidden" type="button" aria-pressed="false"><span class="live-dot" aria-hidden="true"></span><span id="agent-chip-label"></span></button>
   <div id="stats-chip" class="hidden" aria-label="Page and system diagnostics">
     <span class="stat hidden" id="size-chip" title="Page transfer size"><span class="sys-icon">@@ICON_DOWNLOAD@@</span><span class="stat-val" id="size"></span></span>
     <span class="stat hidden" id="time-chip" title="Page load time"><span class="sys-icon">@@ICON_CLOCK@@</span><span class="stat-val" id="time"></span></span>
@@ -1718,6 +1746,27 @@ pub fn html() -> String {
     togglePermPop(permChip);
   });
 
+  // ── Agent control ──────────────────────────────────────────────────────────
+  // Rust pushes {paused, tabs} via __agent: how many tabs MCP agents are
+  // working in, and whether the user paused them. One click pauses every
+  // agent, the next lets them continue.
+  var agentChip = document.getElementById('agent-chip');
+  var agentChipLabel = document.getElementById('agent-chip-label');
+  window.__agent = function(s) {
+    var tabs = s.tabs === 1 ? '1 tab' : s.tabs + ' tabs';
+    agentChip.classList.toggle('hidden', !s.paused && !s.tabs);
+    agentChip.classList.toggle('paused', s.paused);
+    agentChip.setAttribute('aria-pressed', s.paused ? 'true' : 'false');
+    agentChipLabel.textContent = s.paused ? 'Agents paused' : 'Agent in ' + tabs;
+    agentChip.title = s.paused
+      ? 'Agents cannot use this browser. Click to let them continue.'
+      : 'An agent is working in ' + tabs + '. Click to pause all agents.';
+  };
+  agentChip.addEventListener('click', function(e) {
+    e.stopPropagation();
+    window.ipc.postMessage(JSON.stringify({ type: 'agent_pause_toggle' }));
+  });
+
   // The lock sits inside the address row, whose click starts URL editing.
   lockEl.addEventListener('click', function(e) {
     e.stopPropagation();
@@ -1872,7 +1921,7 @@ pub fn html() -> String {
   // don't move the window on the slightest mouse jitter.
   document.getElementById('bar').addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
-    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest, #perm-chip, #perm-pop, #meet-chip')) return;
+    if (e.target.closest('#ai-btn, .bar-btn, #title-row, #url-row, #url-input, #url-suggest, #perm-chip, #perm-pop, #agent-chip, #meet-chip')) return;
     if (editing) return;
     window.ipc.postMessage(JSON.stringify({ type: 'begin_window_drag' }));
   });

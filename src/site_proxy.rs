@@ -236,7 +236,7 @@ fn find<'a>(rules: &'a [ProxyRule], url: &str) -> Option<&'a ProxyRule> {
 }
 
 /// Lowercased host of an http(s) URL; `None` for about:, data:, etc.
-fn url_host(url: &str) -> Option<String> {
+pub(crate) fn url_host(url: &str) -> Option<String> {
 	let (scheme, rest) = url.split_once("://")?;
 	(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then(|| bare_host(rest))
 }
@@ -254,7 +254,7 @@ fn bare_host(s: &str) -> String {
 
 /// Sites are loose on purpose: `example.com`, `www.example.com` and a pasted
 /// `https://www.example.com/path` all mean example.com plus its subdomains.
-fn site_matches(host: &str, site: &str) -> bool {
+pub(crate) fn site_matches(host: &str, site: &str) -> bool {
 	let site = site.trim();
 	let site = bare_host(site.split_once("://").map_or(site, |(_, rest)| rest));
 	let site = site.strip_prefix("www.").unwrap_or(&site);

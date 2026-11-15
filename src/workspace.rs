@@ -272,6 +272,21 @@ impl WorkspaceManager {
 	}
 }
 
+/// The workspace a link opened by another app belongs in: the first route
+/// with a site that covers `url`.
+pub fn workspace_for_link<'a>(routes: &'a [crate::config::LinkRoute], url: &str) -> Option<&'a str> {
+	let host = crate::site_proxy::url_host(url)?;
+	routes
+		.iter()
+		.find(|route| {
+			route
+				.sites
+				.iter()
+				.any(|site| crate::site_proxy::site_matches(&host, site))
+		})
+		.map(|route| route.workspace.as_str())
+}
+
 /// 16 random bytes read straight from `/dev/urandom` — always present on
 /// macOS. No UUID/rand crate: this is the one primitive both the workspace
 /// id (formatted as a UUIDv4 string below) and the WKWebsiteDataStore
@@ -303,6 +318,32 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn links_go_to_the_workspace_that_lists_their_site() {
+		let routes = [
+			crate::config::LinkRoute {
+				workspace: "work".into(),
+				sites: vec!["github.com".into(), "https://www.linear.app/team".into()],
+			},
+			crate::config::LinkRoute {
+				workspace: "home".into(),
+				sites: vec!["youtube.com".into()],
+			},
+		];
+		assert_eq!(
+			workspace_for_link(&routes, "https://github.com/muvon/octoweb"),
+			Some("work")
+		);
+		assert_eq!(workspace_for_link(&routes, "https://gist.github.com/x"), Some("work"));
+		assert_eq!(workspace_for_link(&routes, "https://linear.app/issue/1"), Some("work"));
+		assert_eq!(
+			workspace_for_link(&routes, "https://www.youtube.com/watch?v=1"),
+			Some("home")
+		);
+		assert_eq!(workspace_for_link(&routes, "https://notgithub.com/"), None);
+		assert_eq!(workspace_for_link(&routes, "mailto:someone@github.com"), None);
+	}
 
 	#[test]
 	fn reorder_preserves_active_workspace_and_owned_state() {

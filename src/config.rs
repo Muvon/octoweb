@@ -678,10 +678,23 @@ pub struct Config {
 	/// arrays of tables, which must follow every plain value.
 	#[serde(default)]
 	pub mail_accounts: Vec<MailAccount>,
+	/// Sites whose links, opened from another app, go to a set workspace
+	/// (Settings → General → Links from other apps).
+	#[serde(default)]
+	pub link_routes: Vec<LinkRoute>,
 	/// Per-site proxies (Settings → Proxies). Kept last: TOML emits it as
 	/// `[[proxies]]` tables, which must follow every plain value.
 	#[serde(default)]
 	pub proxies: Vec<ProxyRule>,
+}
+
+/// The sites whose links open in one workspace when another app opens them.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct LinkRoute {
+	/// `Workspace::id`.
+	pub workspace: String,
+	/// Domains or pasted URLs; each also covers its subdomains.
+	pub sites: Vec<String>,
 }
 
 /// One proxy and the sites whose tabs go through it. See `site_proxy`.
@@ -967,6 +980,7 @@ impl Default for Config {
 			calendar_day_end: default_calendar_day_end(),
 			calendar_feeds: Vec::new(),
 			mail_accounts: Vec::new(),
+			link_routes: Vec::new(),
 			proxies: Vec::new(),
 		}
 	}

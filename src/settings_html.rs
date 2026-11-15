@@ -629,6 +629,22 @@ pub fn html() -> String {
     </div>
 
     <div class="section">
+      <div class="section-title">Import</div>
+      <div class="row with-hint">
+        <div class="row-label-stack">
+          <label class="row-label" for="import-source">History from another browser</label>
+          <span class="row-hint" id="import-hint" aria-live="polite">Adds that browser's most recent pages to your history, so the command palette finds them. Nothing is changed in the other browser.</span>
+        </div>
+        <select id="import-source" aria-label="Browser to import from"></select>
+        <button class="kb-reset-all" id="import-run">Import</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Links from other apps</div>
+      <div id="link-routes"></div>
+    </div>
+    <div class="section">
       <div class="section-title">Updates</div>
       <div class="row with-hint updates-on">
         <div class="row-label-stack">
@@ -878,6 +894,8 @@ pub fn html() -> String {
     }
     proxies = cfg.proxies;
     renderProxies();
+    linkRoutes = cfg.link_routes || [];
+    renderLinkRoutes();
     mailAccounts = cfg.mail_accounts || [];
     renderMail();
     var hm = function(m) { return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); };
@@ -960,6 +978,60 @@ pub fn html() -> String {
   };
   document.getElementById('update-check').addEventListener('click', function() {
     ipc({ type: 'check_updates' });
+  });
+
+  // ── Import history ───────────────────────────────────────────────────────
+  var importSource = document.getElementById('import-source');
+  var importRun = document.getElementById('import-run');
+  var importHint = document.getElementById('import-hint');
+  var importHintText = importHint.textContent;
+  // Sent each time settings opens: the browsers with history on this Mac.
+  window.__setImportSources = function(sources) {
+    importSource.innerHTML = sources.map(function(s) {
+      return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>';
+    }).join('');
+    importRun.disabled = false;
+    importHint.textContent = importHintText;
+  };
+  importRun.addEventListener('click', function() {
+    importRun.disabled = true;
+    importHint.textContent = 'Reading ' + importSource.options[importSource.selectedIndex].text + '’s history…';
+    ipc({ type: 'import_history', source: importSource.value });
+  });
+  window.__importDone = function(outcome) {
+    importRun.disabled = false;
+    importHint.textContent = outcome;
+  };
+
+  // ── Links from other apps ────────────────────────────────────────────────
+  // One sites box per workspace: [{workspace, sites}] for those with any.
+  // The workspaces arrive with the extensions (`extWorkspaces`), the routes
+  // with the config, in either order.
+  var linkRoutes = [];
+  var linkRoutesBox = document.getElementById('link-routes');
+  function renderLinkRoutes() {
+    if (extWorkspaces.length < 2) {
+      linkRoutesBox.innerHTML = '<div class="row"><span class="row-hint">A link you click in another app opens in the workspace you are in. Once you have a second workspace, you can send a site’s links to one of them here.</span></div>';
+      return;
+    }
+    linkRoutesBox.innerHTML = extWorkspaces.map(function(w, i) {
+      var route = linkRoutes.find(function(r) { return r.workspace === w.id; });
+      var id = 'link-route-' + i;
+      return proxyRow(esc(w.name), id,
+        '<textarea id="' + id + '" data-workspace="' + esc(w.id) + '" rows="2" placeholder="example.com" spellcheck="false">' +
+          esc(route ? route.sites.join('\n') : '') + '</textarea>',
+        'Sites whose links open in this workspace. One per line, a domain or a full URL. Subdomains match too.');
+    }).join('');
+  }
+  linkRoutesBox.addEventListener('change', function(e) {
+    if (!e.target.dataset.workspace) return;
+    linkRoutes = Array.prototype.map.call(linkRoutesBox.querySelectorAll('textarea'), function(el) {
+      return {
+        workspace: el.dataset.workspace,
+        sites: el.value.split('\n').map(function(s) { return s.trim(); }).filter(Boolean)
+      };
+    }).filter(function(r) { return r.sites.length; });
+    ipc({ type: 'settings_update', key: 'link_routes', value: JSON.stringify(linkRoutes) });
   });
 
   // ── Appearance ────────────────────────────────────────────────────────
@@ -1339,6 +1411,7 @@ pub fn html() -> String {
     extRemoveArmed = null;
     extWorkspaces = data.workspaces;
     extActive = data.active;
+    renderLinkRoutes();
     renderMail();
     extItems = {};
     data.items.forEach(function(x) { extItems[x.id] = x; });

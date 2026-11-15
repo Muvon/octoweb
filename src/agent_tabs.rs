@@ -73,6 +73,15 @@ impl AgentTabs {
 			.is_some_and(|&at| now.duration_since(at) < AWAKE)
 	}
 
+	/// Tabs an agent is working in right now.
+	pub fn awake(&self, now: Instant) -> HashSet<usize> {
+		self.last_call
+			.keys()
+			.copied()
+			.filter(|&id| self.is_awake(id, now))
+			.collect()
+	}
+
 	/// Tabs hibernation must leave alone.
 	pub fn protected(&self, now: Instant) -> HashSet<usize> {
 		self.last_call
@@ -107,10 +116,12 @@ mod tests {
 		let mut tabs = AgentTabs::default();
 		tabs.touch(7, t0);
 		assert!(tabs.is_awake(7, t0));
+		assert_eq!(tabs.awake(t0), HashSet::from([7]));
 		assert!(tabs.protected(t0).contains(&7));
 
 		let later = t0 + AWAKE + Duration::from_secs(1);
 		assert!(!tabs.is_awake(7, later));
+		assert!(tabs.awake(later).is_empty());
 		assert!(tabs.protected(later).contains(&7));
 		assert_eq!(tabs.sweep(later), (vec![], vec![7]));
 

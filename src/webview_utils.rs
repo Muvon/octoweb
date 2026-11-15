@@ -995,6 +995,7 @@ pub fn build_items_json(
 	hibernated: &std::collections::HashSet<usize>,
 	rss_mb: &HashMap<usize, u64>,
 	later: &[crate::later::LaterItem],
+	agent_driven: &std::collections::HashSet<usize>,
 ) -> String {
 	let mut items: Vec<serde_json::Value> = Vec::new();
 
@@ -1030,6 +1031,7 @@ pub fn build_items_json(
 			"visited_at": 0u64,  // tabs are live — recency handled in JS as "now"
 			"hibernated": hibernated.contains(&tab.id),
 			"incognito": tab.incognito,
+			"agent": agent_driven.contains(&tab.id),
 			"rss_mb": rss_mb.get(&tab.id).copied(),
 		}));
 	}
