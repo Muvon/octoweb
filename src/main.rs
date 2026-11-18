@@ -240,20 +240,20 @@ enum AppEvent {
 	ScrollBottom,                      // ⌃B — scroll to bottom of page
 	Screenshot,                        // ⌘S — screenshot visible viewport → NSSavePanel + clipboard
 	ScreenshotFullPage,                // ⌘⇧S — full page screenshot → NSSavePanel + clipboard
-	SnapshotCaptured(usize, String),   // (tab_id, base64_data_uri) — frozen tab snapshot for instant restore
+	SnapshotCaptured(usize, String, String), // (tab_id, page_url, base64_data_uri) — frozen tab snapshot for instant restore
 	FaviconCacheLoaded(HashMap<String, String>), // background-loaded favicon cache from disk
-	InlineEditRequest,                 // ⌘⇧E — capture selection, show modal
+	InlineEditRequest,                       // ⌘⇧E — capture selection, show modal
 	InlineEditReady(String, Option<(f64, f64)>), // (text, optional (x, y) — None = no anchor, host picks default)
-	InlineEditSubmit(String),          // user submitted prompt in modal
-	InlineEditClose,                   // user closed modal (Esc / close btn)
-	InlineEditHide,                    // hide modal but keep processing
-	InlineEditResize(f64),             // modal content height changed
-	ZoomIn,                            // ⌘= — increase page zoom
-	ZoomOut,                           // ⌘- — decrease page zoom
-	ZoomReset,                         // ⌘0 — reset page zoom to 100%
-	LearningWake,                      // background learning agent pokes event loop
-	LearningReady(String),             // active tab content extracted — build prompt and send
-	JsDialog(dialog_patch::DialogInfo), // JS alert/confirm/prompt captured
+	InlineEditSubmit(String),                // user submitted prompt in modal
+	InlineEditClose,                         // user closed modal (Esc / close btn)
+	InlineEditHide,                          // hide modal but keep processing
+	InlineEditResize(f64),                   // modal content height changed
+	ZoomIn,                                  // ⌘= — increase page zoom
+	ZoomOut,                                 // ⌘- — decrease page zoom
+	ZoomReset,                               // ⌘0 — reset page zoom to 100%
+	LearningWake,                            // background learning agent pokes event loop
+	LearningReady(String),                   // active tab content extracted — build prompt and send
+	JsDialog(dialog_patch::DialogInfo),      // JS alert/confirm/prompt captured
 	/// The user clicked a button on an A2UI surface: (call_id, session_id,
 	/// action payload). Completes the `render_ui` call blocked on that
 	/// surface, or — when nothing is waiting — reaches the agent as a prompt.
@@ -1563,9 +1563,10 @@ fn main() {
 		});
 	}
 
-	// Frozen tab snapshots: tab_id → base64 PNG data-URI captured on tab hide.
+	// Frozen tab snapshots: tab_id → (URL of the page pictured, base64 PNG
+	// data-URI), captured on tab hide.
 	// Used for instant visual restore when switching to a hibernated tab.
-	let mut tab_snapshots: HashMap<usize, String> = HashMap::new();
+	let mut tab_snapshots: HashMap<usize, (String, String)> = HashMap::new();
 	// Deferred navigation: tab_id → real URL.  Set when a hibernated tab is
 	// restored with a snapshot — the snapshot HTML loads first, then on
 	// PageLoadFinished we navigate to the real URL.
@@ -3665,11 +3666,19 @@ fn main() {
             let target = $target;
             if !workspace_manager.at(ws_i).webviews.contains_key(&target) {
                 if let Some(url) = pending_tabs.remove(&target) {
-                    let has_snapshot = tab_snapshots.contains_key(&target);
-                    let load_url = if has_snapshot { "about:blank" } else { url.as_str() };
+                    // A snapshot pictures the page the tab was on when it was
+                    // captured. Only switching away captures one, so a tab that
+                    // navigated afterwards and was then left by opening a new tab
+                    // still holds the old page's picture — shown under the new
+                    // URL it reads as the wrong page.
+                    let snapshot = tab_snapshots
+                        .remove(&target)
+                        .filter(|(page_url, _)| *page_url == url)
+                        .map(|(_, image)| image);
+                    let load_url = if snapshot.is_some() { "about:blank" } else { url.as_str() };
                     let incognito = is_isolated_tab(&workspace_manager, target);
                     let wv = make_webview(target, load_url, &workspace_manager.at(ws_i).id, workspace_manager.at(ws_i).data_store_id, incognito, site_proxy::rule_for(&url));
-                    if !has_snapshot && url == "about:blank" {
+                    if snapshot.is_none() && url == "about:blank" {
                         let html =
                             newtab_html::html(&quickslots::to_json(&workspace_manager.at(ws_i).quick_slots), &later::to_json(&workspace_manager.at(ws_i).later));
                         let _ = wv.load_html(&html);
@@ -3689,7 +3698,7 @@ fn main() {
                     });
                     // If a snapshot exists, show it immediately — deferred navigation to
                     // the real URL happens on PageLoadFinished once the snapshot renders.
-                    if let Some(snap) = tab_snapshots.remove(&target) {
+                    if let Some(snap) = snapshot {
                         let html = format!(
                             "<html><head><style>*{{margin:0;padding:0}}body{{overflow:hidden}}img{{display:block;width:100vw;height:100vh;object-fit:cover;object-position:top left}}</style></head><body><img src=\"{}\"></body></html>",
                             snap
@@ -4502,7 +4511,8 @@ fn main() {
 			if active_wv_id != target {
 				if let Some(wv) = workspace_manager.active().webviews.get(&active_wv_id) {
 					let wv_ptr = objc2::rc::Retained::as_ptr(&wv.webview()) as usize;
-					capture_tab_snapshot(wv_ptr, active_wv_id, proxy.clone());
+					let page_url = tab_url(&workspace_manager.active().tabs, active_wv_id);
+					capture_tab_snapshot(wv_ptr, active_wv_id, page_url, proxy.clone());
 				}
 			}
 			// Lazy load: create WebView if this tab was pending (hibernated or session-restored).
@@ -5349,10 +5359,14 @@ fn main() {
             if now >= driven_sweep_next_at {
                 driven_sweep_next_at = now + std::time::Duration::from_secs(1);
                 let (awake, asleep) = driven_tabs.sweep(now);
+                // Mid-swap the page on screen is the old tab, not the selected
+                // one: parking or hiding it leaves the window empty until the
+                // new tab's first bytes arrive.
+                let on_screen = visible_tab_id(active_wv_id, pending_swap);
                 push_agent_chip!();
                 for tid in awake {
                     if let Some(wv) = workspace_manager.webview_of_tab(tid) {
-                        if tid == active_wv_id {
+                        if tid == active_wv_id || tid == on_screen {
                             agent_tabs::keep_rendering(wv, true);
                         } else {
                             park_tab!(wv);
@@ -5362,7 +5376,7 @@ fn main() {
                 for tid in asleep {
                     if let Some(wv) = workspace_manager.webview_of_tab(tid) {
                         agent_tabs::keep_rendering(wv, false);
-                        if tid != active_wv_id {
+                        if tid != active_wv_id && tid != on_screen {
                             let _ = wv.set_visible(false);
                         }
                     }
@@ -6682,7 +6696,8 @@ fn main() {
                 if let Some(id) = page_tab {
                     driven_tabs.touch(id, std::time::Instant::now());
                     if let Some(wv) = workspace_manager.at(ws_idx).webviews.get(&id) {
-                        if id == active_wv_id {
+                        // Mid-swap the old tab is still the page on screen.
+                        if id == active_wv_id || id == visible_tab_id(active_wv_id, pending_swap) {
                             agent_tabs::keep_rendering(wv, true);
                         } else {
                             park_tab!(wv);
@@ -13101,13 +13116,13 @@ fn main() {
             }
 
             // ── Frozen tab snapshot captured (async callback) ──────────────────
-            Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, data_uri))
+            Event::UserEvent(AppEvent::SnapshotCaptured(tab_id, page_url, data_uri))
                 // Discard suspiciously small snapshots (likely blank/hidden WebView).
                 // Threshold tracks SNAPSHOT_WIDTH — at 640pt a real page is still
                 // tens of KB as base64 PNG, but a blank one is only a couple.
                 if data_uri.len() > 2_000 =>
             {
-                tab_snapshots.insert(tab_id, data_uri);
+                tab_snapshots.insert(tab_id, (page_url, data_uri));
             }
 
             // ── Favicon cache loaded from disk (background thread) ──────────────
@@ -13343,8 +13358,15 @@ fn main() {
 // ── Frozen tab snapshot ───────────────────────────────────────────────────
 /// Capture a viewport snapshot of the given WKWebView and send it back as a
 /// base64 PNG data-URI via `AppEvent::SnapshotCaptured`. Used to show instant
-/// frozen content when switching to a hibernated tab.
-fn capture_tab_snapshot(wv_ptr: usize, tab_id: usize, proxy: tao::event_loop::EventLoopProxy<AppEvent>) {
+/// frozen content when switching to a hibernated tab. `page_url` is the URL
+/// the tab is on now; it travels with the image so the restore path can drop
+/// a picture of a page the tab has since left.
+fn capture_tab_snapshot(
+	wv_ptr: usize,
+	tab_id: usize,
+	page_url: String,
+	proxy: tao::event_loop::EventLoopProxy<AppEvent>,
+) {
 	let handler = block2::RcBlock::new(
 		move |image: *mut objc2::runtime::AnyObject, _error: *mut objc2::runtime::AnyObject| {
 			if image.is_null() {
@@ -13359,6 +13381,7 @@ fn capture_tab_snapshot(wv_ptr: usize, tab_id: usize, proxy: tao::event_loop::Ev
 			};
 			let img_ptr = objc2::rc::Retained::into_raw(img) as usize;
 			let proxy = proxy.clone();
+			let page_url = page_url.clone();
 			std::thread::spawn(move || {
 				let image = img_ptr as *mut objc2::runtime::AnyObject;
 				// Reclaim ownership — dropping at thread end releases the image.
@@ -13380,7 +13403,7 @@ fn capture_tab_snapshot(wv_ptr: usize, tab_id: usize, proxy: tao::event_loop::Ev
 					let cstr = std::ffi::CStr::from_ptr(utf8 as *const std::ffi::c_char);
 					let b64 = cstr.to_string_lossy();
 					let data_uri = format!("data:image/png;base64,{b64}");
-					let _ = proxy.send_event(AppEvent::SnapshotCaptured(tab_id, data_uri));
+					let _ = proxy.send_event(AppEvent::SnapshotCaptured(tab_id, page_url, data_uri));
 				});
 			});
 		},
