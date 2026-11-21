@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.22.0] - 2026-11-21
+
+### 📋 Release Summary
+
+The default agent role is now octoweb:chief, and A2UI support switches to the 1.0 protocol and rendering. New features add history import, link routing, agent pausing, and rich-text email composition. Fixes address URL routing, tab visibility and snapshots, agent scanning and work routing, first-click handling, and WebGL glyph atlas refresh on focus.
+
+### 🚨 Breaking Changes
+
+- **agent**: switch default role to octoweb:chief `f342a673`
+- **a2ui**: support A2UI 1.0 protocol and rendering `4ffd3cb4`
+
+### ✨ New Features & Enhancements
+
+- support history import, link routing, agent pause `bfa96737`
+- **mail**: support rich-text email composition `48b1a0a4`
+
+### 🔧 Improvements & Optimizations
+
+- **xterm**: refresh bundled xterm libraries `c646fa71`
+
+### 🐛 Bug Fixes & Stability
+
+- **url**: route spaced scheme-like input to search `5ec122d2`
+- **tabs**: preserve tab visibility and snapshot validity `9f51f970`
+- **agents**: skip symlinked agent aliases when scanning `b2c5e226`
+- **webview**: accept the first mouse click `ee81ffc1`
+- **terminal**: refresh WebGL glyph atlas on focus `1654f155`
+- **sidebar**: accept the first mouse click `43c2f202`
+- **octoweb**: route expert work through domain leads `291f54de`
+
 ## [0.21.0] - 2026-11-07
 
 ### 📋 Release Summary
