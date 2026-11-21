@@ -1,6 +1,7 @@
 //! URL resolution: turn user input into a navigable URL.
 //!
-//! - Already has a scheme → pass through
+//! - Already has a scheme → pass through (an app scheme followed by spaces is a
+//!   search: `site:example.com rust` uses a search operator, it names no app)
 //! - Looks like localhost → prepend `http://` (local dev servers rarely speak TLS)
 //! - Looks like an IP / domain → prepend `https://`
 //! - Otherwise → search using the configured engine
@@ -30,15 +31,41 @@ pub fn resolve_url(input: &str, search_engine: &str) -> String {
 	search_engine.replace("{}", &encode_uri(s))
 }
 
-fn has_url_scheme(s: &str) -> bool {
-	let Some((scheme, rest)) = s.split_once(':') else {
-		return false;
-	};
-	!scheme.is_empty()
+/// Schemes the browser loads itself; any other scheme belongs to an external app.
+const NATIVE_SCHEMES: &[&str] = &[
+	"http",
+	"https",
+	"about",
+	"data",
+	"blob",
+	"javascript",
+	"file",
+	"webkit-extension",
+];
+
+/// The text before the first colon when it is a valid scheme, not a host and port.
+fn scheme(s: &str) -> Option<&str> {
+	let (scheme, rest) = s.split_once(':')?;
+	let valid = !scheme.is_empty()
 		&& scheme
 			.chars()
-			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-		&& !is_host_port(scheme, rest)
+			.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'));
+	(valid && !is_host_port(scheme, rest)).then_some(scheme)
+}
+
+fn is_native_scheme(scheme: &str) -> bool {
+	NATIVE_SCHEMES.contains(&scheme.to_ascii_lowercase().as_str())
+}
+
+/// An app link never holds a raw space, a search often does: `site:x.com rust`
+/// reads as scheme `site` by the URL grammar, but it is a query. Native schemes
+/// keep spaces because `javascript:` and `data:` URLs carry them.
+fn is_app_link(s: &str, scheme: &str) -> bool {
+	!is_native_scheme(scheme) && !s.contains(char::is_whitespace)
+}
+
+fn has_url_scheme(s: &str) -> bool {
+	scheme(s).is_some_and(|scheme| is_native_scheme(scheme) || is_app_link(s, scheme))
 }
 
 /// `localhost:5173/app` and `example.com:8080` parse as a scheme by the URL
@@ -100,28 +127,8 @@ fn looks_like_domain(input: &str) -> bool {
 ///
 /// We whitelist the schemes the browser handles natively; everything else is external.
 pub fn is_external_scheme(url: &str) -> bool {
-	let Some(idx) = url.find(':') else {
-		return false;
-	};
-	let scheme = &url[..idx];
-	if scheme.is_empty() {
-		return false;
-	}
-	// Must be a valid scheme (ASCII alphanumeric + '+' / '-' / '.')
-	if !scheme
-		.chars()
-		.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-	{
-		return false;
-	}
-	if is_host_port(scheme, &url[idx + 1..]) {
-		return false;
-	}
-	// Schemes the browser handles natively — everything else is external.
-	!matches!(
-		scheme.to_ascii_lowercase().as_str(),
-		"http" | "https" | "about" | "data" | "blob" | "javascript" | "file" | "webkit-extension"
-	)
+	let url = url.trim();
+	scheme(url).is_some_and(|scheme| is_app_link(url, scheme))
 }
 
 /// Schemes an agent must never be able to navigate to.
@@ -261,6 +268,16 @@ mod tests {
 		assert_eq!(
 			resolve_url("rust ownership", SEARCH),
 			"https://search.test/?q=rust%20ownership"
+		);
+	}
+
+	#[test]
+	fn search_operators_with_terms_are_searches() {
+		let query = "site:developers.openai.com temperature top_p";
+		assert!(!is_external_scheme(query));
+		assert_eq!(
+			resolve_url(query, SEARCH),
+			"https://search.test/?q=site%3Adevelopers.openai.com%20temperature%20top_p"
 		);
 	}
 }
